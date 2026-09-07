@@ -46,6 +46,12 @@ func _start() -> void:
 	RenderingServer.global_shader_parameter_set("globe_debug_mode", int(_arg("debug", "0")))
 	world.stream_now()
 	player._update_camera()
+	if _arg("flow", "0") != "0":
+		var fl = world.get_node("FlowLines")
+		fl.enabled = true
+		fl.visible = true
+		fl.rebuild()
+		print("flow lines: drainage=%s edges=%d" % [str(world.drainage != null), world.drainage.call("edge_count") if world.drainage else 0])
 	print("screenshot: %d tiles, camera at %s" % [world.tiles.size(), str(player.global_position)])
 	var r := world.tile_at(player.sphere_pos)
 	if not r.is_empty():

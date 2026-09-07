@@ -84,20 +84,24 @@ void vertex() {
 }
 
 vec3 biome_color(int code) {
-	// codes: see bake/globe/derive/biomes.py (docs/DEVELOPING.md); 0 = ocean
-	if (code == 0) return vec3(0.16, 0.30, 0.45);
-	if (code == 1) return vec3(0.62, 0.64, 0.55);   // tundra
-	if (code == 2) return vec3(0.22, 0.38, 0.24);   // taiga
-	if (code == 3) return vec3(0.28, 0.48, 0.22);   // temperate forest
-	if (code == 4) return vec3(0.55, 0.62, 0.30);   // grassland
-	if (code == 5) return vec3(0.80, 0.70, 0.45);   // desert
-	if (code == 6) return vec3(0.66, 0.62, 0.32);   // savanna
-	if (code == 7) return vec3(0.16, 0.42, 0.18);   // tropical forest
-	if (code == 8) return vec3(0.70, 0.70, 0.68);   // alpine
-	if (code == 9) return vec3(0.45, 0.42, 0.40);   // cliff / rock
-	if (code == 10) return vec3(0.30, 0.55, 0.30);  // riparian
-	if (code == 11) return vec3(0.35, 0.50, 0.40);  // wetland
-	if (code == 12) return vec3(0.92, 0.94, 0.97);  // ice
+	// codes and colours mirror bake/globe/derive/biomes.py BIOMES (docs/DEVELOPING.md)
+	if (code == 0) return vec3(0.08, 0.20, 0.43);    // ocean
+	if (code == 1) return vec3(0.94, 0.96, 1.00);    // ice
+	if (code == 2) return vec3(0.67, 0.75, 0.63);    // tundra
+	if (code == 3) return vec3(0.16, 0.35, 0.24);    // boreal forest
+	if (code == 4) return vec3(0.67, 0.75, 0.35);    // temperate grassland
+	if (code == 5) return vec3(0.24, 0.51, 0.24);    // temperate forest
+	if (code == 6) return vec3(0.08, 0.39, 0.27);    // temperate rainforest
+	if (code == 7) return vec3(0.90, 0.82, 0.55);    // desert
+	if (code == 8) return vec3(0.63, 0.59, 0.31);    // shrubland
+	if (code == 9) return vec3(0.78, 0.71, 0.31);    // savanna
+	if (code == 10) return vec3(0.31, 0.59, 0.20);   // tropical seasonal forest
+	if (code == 11) return vec3(0.04, 0.43, 0.16);   // tropical rainforest
+	if (code == 12) return vec3(0.59, 0.55, 0.51);   // alpine
+	if (code == 13) return vec3(0.43, 0.39, 0.37);   // cliff
+	if (code == 14) return vec3(0.20, 0.55, 0.35);   // riparian
+	if (code == 15) return vec3(0.35, 0.55, 0.47);   // wetland
+	if (code == 16) return vec3(0.27, 0.51, 0.90);   // lake
 	return vec3(0.5, 0.5, 0.5);
 }
 
