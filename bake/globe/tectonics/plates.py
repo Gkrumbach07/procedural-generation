@@ -1,0 +1,252 @@
+"""Plates: clustering, rigid rotation about Euler poles, convection forces
+(PLAN.md section 6.1 / 6.2 steps 2-3).
+
+A plate is a rigid body on the unit sphere described by its angular
+velocity ``omega`` (3-vector, radians per unit simulation time; the axis is
+the Euler pole).  Per step the plate rotates by the angle ``|omega| * dt``.
+
+Units and force model
+---------------------
+* ``heat`` is dimensionless in [0, 1] on the tect grid.
+* :func:`heat_gradient_3d` returns ∇heat at segment positions as a tangent
+  3-vector in **heat units per radian** of great-circle arc (resolution and
+  planet-radius independent).  It converts the contravariant cell
+  components of ``FaceField.gradient()`` (whose basis is ``E_i = R_planet
+  * J_u / N`` metres per cell) with the EAC Jacobian:
+  ``∇f [per radian] = (a * J_u + b * J_v) * R_planet**2 / N``.
+* Force per segment ``f_i = convection * force_scale * area_i * ∇heat_i``
+  (``area_i`` in steradians, so the total force scales with plate area;
+  the ★ ``convection = 10`` keeps its published value and ``force_scale``
+  absorbs the pixel -> radian unit change).
+* Torque about the planet centre ``τ = Σ pos_i × f_i``; scalar inertia
+  ``I = Σ area_i * mass_i``; update ``omega = (1 - damping) * omega + dt *
+  τ / I``.  Terminal angular speed under a unit gradient is therefore
+  ``dt * convection * force_scale / (mass * damping)`` per unit time.
+"""
+from __future__ import annotations
+
+import numpy as np
+from numba import njit
+
+from ..cubesphere import from_sphere_v, jacobian_v
+from ..field import FaceField
+from .segments import Segments, random_unit_vectors
+
+
+# --------------------------------------------------------------------------
+# state
+# --------------------------------------------------------------------------
+class Plates:
+    """Per-plate arrays (P plates).  ``alive`` is False once a plate has no
+    segments left; its ``omega`` is frozen at zero."""
+
+    def __init__(self, P: int):
+        self.P = int(P)
+        self.omega = np.zeros((P, 3), dtype=np.float64)
+        self.com = np.zeros((P, 3), dtype=np.float64)
+        self.inertia = np.zeros(P, dtype=np.float64)
+        self.mass = np.zeros(P, dtype=np.float64)
+        self.area = np.zeros(P, dtype=np.float64)
+        self.count = np.zeros(P, dtype=np.int64)
+        self.alive = np.ones(P, dtype=bool)
+
+    def update_stats(self, seg: Segments) -> None:
+        """Recompute centre of mass, inertia, mass, area and segment counts."""
+        P = self.P
+        pid = seg.plate_id
+        self.count = np.bincount(pid, minlength=P)[:P]
+        self.mass = np.bincount(pid, weights=seg.mass, minlength=P)[:P]
+        self.area = np.bincount(pid, weights=seg.area, minlength=P)[:P]
+        self.inertia = np.bincount(pid, weights=seg.area * seg.mass, minlength=P)[:P]
+        com = np.stack([np.bincount(pid, weights=seg.pos[:, k] * seg.area, minlength=P)[:P] for k in range(3)], axis=1)
+        n = np.linalg.norm(com, axis=1, keepdims=True)
+        self.com = np.where(n > 1e-12, com / np.maximum(n, 1e-12), 0.0)
+        self.alive = self.count > 0
+        self.omega[~self.alive] = 0.0
+
+    def n_alive(self) -> int:
+        return int(self.alive.sum())
+
+    def speeds(self) -> np.ndarray:
+        return np.linalg.norm(self.omega, axis=1)
+
+
+# --------------------------------------------------------------------------
+# initial clustering
+# --------------------------------------------------------------------------
+def _value_noise_points(p: np.ndarray, rng: np.random.Generator, octaves: int = 3, base_freq: float = 3.0) -> np.ndarray:
+    """Smooth value noise evaluated at unit vectors ``p`` (M, 3) — the same
+    lattice construction as ``globe.stubs.fbm_noise`` but at arbitrary
+    points.  Roughly in [-1, 1]."""
+    out = np.zeros(p.shape[0], dtype=np.float64)
+    amp, total = 1.0, 0.0
+    for o in range(octaves):
+        f = base_freq * (2**o)
+        n = int(np.ceil(f)) + 2
+        lattice = rng.random((n + 1, n + 1, n + 1))
+        q = (p + 1.0) * 0.5 * f
+        i0 = np.floor(q).astype(np.int64)
+        t = q - i0
+        t = t * t * (3 - 2 * t)
+        i0 = np.clip(i0, 0, n - 1)
+        acc = np.zeros_like(out)
+        for dx in (0, 1):
+            for dy in (0, 1):
+                for dz in (0, 1):
+                    w = (t[:, 0] if dx else 1 - t[:, 0]) * (t[:, 1] if dy else 1 - t[:, 1]) * (t[:, 2] if dz else 1 - t[:, 2])
+                    acc += w * lattice[i0[:, 0] + dx, i0[:, 1] + dy, i0[:, 2] + dz]
+        out += amp * (acc * 2 - 1)
+        total += amp
+        amp *= 0.5
+    return out / total
+
+
+def cluster_plates(pos: np.ndarray, n_plates: int, rng: np.random.Generator, iterations: int = 12, size_jitter: float = 0.35, boundary_noise: float = 0.25) -> np.ndarray:
+    """Initial plate assignment (PLAN 6.1): spherical k-means from
+    farthest-point seeds, then a final assignment with per-plate distance
+    weights (unequal plate sizes) and low-frequency noise on the distances
+    (irregular, non-polygonal boundaries).  Returns plate ids (M,) int32
+    in ``0..n_plates-1``; every plate gets at least one segment when
+    ``M >= n_plates``."""
+    M = pos.shape[0]
+    P = int(max(1, min(n_plates, M)))
+    # farthest-point seeds from a random start
+    seeds = np.empty((P, 3), dtype=np.float64)
+    seeds[0] = pos[int(rng.integers(M))]
+    dmin = np.full(M, np.inf)
+    for k in range(1, P):
+        dmin = np.minimum(dmin, np.linalg.norm(pos - seeds[k - 1], axis=1))
+        seeds[k] = pos[int(np.argmax(dmin))]
+    centres = seeds
+    for _ in range(int(iterations)):
+        d = 2.0 - 2.0 * pos @ centres.T  # squared chord distance
+        lab = np.argmin(d, axis=1)
+        for k in range(P):
+            sel = lab == k
+            if sel.any():
+                c = pos[sel].mean(axis=0)
+                n = np.linalg.norm(c)
+                if n > 1e-12:
+                    centres[k] = c / n
+    w = 1.0 + size_jitter * (2.0 * rng.random(P) - 1.0)
+    d = np.sqrt(np.maximum(2.0 - 2.0 * pos @ centres.T, 0.0)) * w[None, :]
+    if boundary_noise > 0:
+        for k in range(P):
+            d[:, k] *= 1.0 + boundary_noise * _value_noise_points(pos, rng)
+    lab = np.argmin(d, axis=1).astype(np.int32)
+    # guarantee every plate owns at least one segment (its k-means centre's nearest point)
+    for k in range(P):
+        if not (lab == k).any():
+            lab[int(np.argmin(np.linalg.norm(pos - centres[k], axis=1)))] = k
+    return lab
+
+
+def random_initial_omega(plates: Plates, rng: np.random.Generator, speed: float) -> None:
+    """Give every plate a random Euler pole with angular speed ``speed``
+    (radians per unit time)."""
+    plates.omega[:] = random_unit_vectors(rng, (plates.P,)) * float(speed)
+    plates.omega[~plates.alive] = 0.0
+
+
+# --------------------------------------------------------------------------
+# forces
+# --------------------------------------------------------------------------
+def heat_gradient_3d(heat: FaceField, pos: np.ndarray) -> np.ndarray:
+    """∇heat at unit vectors ``pos`` (M, 3) as tangent 3-vectors in heat
+    units per radian (see module docstring).  ``heat`` must have exchanged
+    halos."""
+    grad = heat.gradient()
+    face, u, v = from_sphere_v(pos)
+    ab = grad.sample_bilinear(face, u, v).astype(np.float64)  # (M, 2) owner-face cell components
+    ju, jv = jacobian_v(face, u, v)
+    g = heat.grid
+    scale = g.R_planet**2 / g.N
+    return (ab[:, :1] * ju + ab[:, 1:] * jv) * scale
+
+
+def plate_torques(seg: Segments, grad3: np.ndarray, P: int, convection: float, force_scale: float) -> np.ndarray:
+    """Torque (P, 3) about the planet centre from the per-segment forces
+    ``f_i = convection * force_scale * area_i * grad3_i``."""
+    f = grad3 * (seg.area * (convection * force_scale))[:, None]
+    tau = np.cross(seg.pos, f)
+    return np.stack([np.bincount(seg.plate_id, weights=tau[:, k], minlength=P)[:P] for k in range(3)], axis=1)
+
+
+def update_omega(plates: Plates, torque: np.ndarray, dt: float, damping: float, max_speed: float = 0.0) -> None:
+    """``omega = (1 - damping) * omega + dt * τ / I`` for live plates,
+    optionally capped at ``max_speed`` (radians per unit time)."""
+    inertia = np.maximum(plates.inertia, 1e-12)
+    om = (1.0 - damping) * plates.omega + dt * torque / inertia[:, None]
+    if max_speed > 0:
+        s = np.linalg.norm(om, axis=1, keepdims=True)
+        om = np.where(s > max_speed, om * (max_speed / np.maximum(s, 1e-30)), om)
+    om[~plates.alive] = 0.0
+    plates.omega = om
+
+
+# --------------------------------------------------------------------------
+# motion
+# --------------------------------------------------------------------------
+@njit(cache=True)
+def _rotate_kernel(pos, plate_id, omega, dt):
+    P = omega.shape[0]
+    axis = np.zeros((P, 3), dtype=np.float64)
+    cs = np.ones(P, dtype=np.float64)
+    sn = np.zeros(P, dtype=np.float64)
+    for p in range(P):
+        w = np.sqrt(omega[p, 0] ** 2 + omega[p, 1] ** 2 + omega[p, 2] ** 2)
+        if w > 0.0:
+            axis[p, 0] = omega[p, 0] / w
+            axis[p, 1] = omega[p, 1] / w
+            axis[p, 2] = omega[p, 2] / w
+            cs[p] = np.cos(w * dt)
+            sn[p] = np.sin(w * dt)
+    for i in range(pos.shape[0]):
+        p = plate_id[i]
+        if sn[p] == 0.0 and cs[p] == 1.0:
+            continue
+        kx, ky, kz = axis[p, 0], axis[p, 1], axis[p, 2]
+        x, y, z = pos[i, 0], pos[i, 1], pos[i, 2]
+        c, s = cs[p], sn[p]
+        kd = kx * x + ky * y + kz * z
+        # Rodrigues: p cosθ + (k × p) sinθ + k (k·p)(1 − cosθ)
+        rx = x * c + (ky * z - kz * y) * s + kx * kd * (1.0 - c)
+        ry = y * c + (kz * x - kx * z) * s + ky * kd * (1.0 - c)
+        rz = z * c + (kx * y - ky * x) * s + kz * kd * (1.0 - c)
+        inv = 1.0 / np.sqrt(rx * rx + ry * ry + rz * rz)
+        pos[i, 0] = rx * inv
+        pos[i, 1] = ry * inv
+        pos[i, 2] = rz * inv
+
+
+def rotate_segments(seg: Segments, plates: Plates, dt: float) -> None:
+    """Rigidly rotate every segment about its plate's Euler pole by
+    ``|omega| * dt`` (Rodrigues' formula, renormalised).  In place."""
+    _rotate_kernel(seg.pos, seg.plate_id, plates.omega, float(dt))
+
+
+def segment_velocities(seg: Segments, plates: Plates, dt: float) -> np.ndarray:
+    """Displacement per step ``(omega_plate * dt) × pos`` as tangent
+    3-vectors (M, 3), radians per step."""
+    return np.cross(plates.omega[seg.plate_id] * dt, seg.pos)
+
+
+def tangent_to_cell_components(grid, face, u, v, v3: np.ndarray) -> np.ndarray:
+    """Express tangent 3-vectors ``v3`` (..., 3) (unit-sphere units per
+    step) at ``(face, u, v)`` as contravariant *cell* components (cells per
+    step) of that face — the least-squares 2x2 solve used by
+    ``cubesphere.transfer_vector`` and ``field.rotation_field``."""
+    ju, jv = jacobian_v(face, u, v)
+    guu = np.sum(ju * ju, -1)
+    guv = np.sum(ju * jv, -1)
+    gvv = np.sum(jv * jv, -1)
+    wu = np.sum(v3 * ju, -1)
+    wv = np.sum(v3 * jv, -1)
+    det = guu * gvv - guv * guv
+    out = np.empty(v3.shape[:-1] + (2,), dtype=np.float64)
+    out[..., 0] = (gvv * wu - guv * wv) / det * grid.N
+    out[..., 1] = (guu * wv - guv * wu) / det * grid.N
+    return out
+
+
+__all__ = ["Plates", "cluster_plates", "random_initial_omega", "heat_gradient_3d", "plate_torques", "update_omega", "rotate_segments", "segment_velocities", "tangent_to_cell_components"]

@@ -86,15 +86,27 @@ class TectonicsParams:
     cascade_threshold: float = 0.05  # in bedrock units before scaling
     cascade_passes: int = 3
     uplift_scale: float = 1.0
-    uplift_window: int = 100  # k steps for (bedrock_now - bedrock_k_ago)/k
+    uplift_window: int = 100  # k steps: uplift = uplift_scale * (bedrock_now - bedrock_k_ago) / erosion.iterations
     uplift_baseline: float = 0.02  # small positive baseline, fraction of max uplift
-    heat_diffusion: float = 0.5
+    heat_diffusion: float = 2e-4  # rad² per unit time (× dt per step; sub-stepped for stability)
     heat_noise_octaves: int = 3
     dt: float = 0.02
     damping: float = 0.05
     density_base: float = 0.5  # d_b in growth term
     height_scale_m: float = 4000.0  # maps bedrock units to metres
     smooth_sigma: float = 1.0  # final Gaussian (coarse cells)
+    # -- sphere-specific knobs (see globe/tectonics/plates.py for units) --
+    force_scale: float = 5e-3  # angular acceleration per unit convection*∇heat (heat/rad); pixel -> radian unit change
+    max_speed: float = 0.5  # cap on |omega| (rad per unit time; 0 = none)
+    initial_speed: float = 0.05  # |omega| of the random initial plate rotations (rad per unit time)
+    initial_thickness: float = 0.2  # crust thickness at t = 0
+    new_thickness: float = 0.05  # thickness of crust spawned at divergent boundaries
+    gap_cooling: float = 0.02  # heat removed per gap cell when new crust forms
+    subduction_heating: float = 0.02  # peak heat added (Gaussian blob, 1 spacing wide) per subducted segment
+    spawn_spacing_factor: float = 0.85  # min spacing of new segments, × mean segment spacing
+    boundary_width_factor: float = 3.0  # hardness: boundary_proximity falls to 0 at this × spacing from a foreign plate
+    collision_zone_factor: float = 2.0  # uplift clamped >= 0 within this × spacing of a subduction of the uplift window
+    label_every: int = 1  # rebuild the label map every n steps (1 = every step)
 
 
 @dataclass
@@ -124,7 +136,7 @@ class ErosionParams:
     particles_per_cell: float = 0.25
     dt: float = 1.2  # ★
     density: float = 1.0  # ★
-    friction: float = 0.05  # ★
+    friction: float = 0.25  # ★ 0.05 in McDonald 2020 with sub-cell steps; 0.25 (SimpleHydrology) with unit steps, see erosion/particle.py
     deposition_rate: float = 0.1  # ★
     # ★ McDonald evapRate; per-step particle decay is
     # volume *= 1 - dt*evap_rate*evap[cell], evap = climate multiplier (~1)
@@ -139,9 +151,15 @@ class ErosionParams:
     max_steps: int = 0  # 0 -> 2 * N
     checkpoint_every: int = 50
     quicklook_every: int = 50
-    slope_gain: float = 1.0  # multiplies the (dimensionless) slope in the particle force
-    height_unit_m: float = 1.0  # kernel heights are height_m / height_unit_m
-    chunk: int = 4096  # particles per parallel chunk (change-list capacity = chunk*max_steps)
+    slope_gain: float = 2.0  # multiplies the gravity force (tangential surface normal) in the particle direction update
+    erodibility: float = 0.2  # c_eq = erodibility * dh * (1 + k_disc * erf(q / disc_saturation)); 1.0 = McDonald 2022
+    height_unit_m: float = 0.0  # kernel heights are height_m / height_unit_m; 0 or 1 -> use cell_size_m (cell units)
+    disc_saturation: float = 32.0  # discharge (volume units ~ upstream cells) at which erf(q/disc_saturation) saturates the entrainment term
+    max_erode: float = 0.25  # cap on terrain removed per particle-step (cell units); safety against blow-ups
+    flood_every: int = 10  # recompute the particle routing surface (epsilon priority flood, erosion/route.py) every k iterations; 0 = steer on the raw terrain
+    route_eps: float = 1e-3  # minimum drop per cell (cell units) of the routing surface across lakes
+    pit_steps: int = 16  # kill a particle after this many consecutive uphill steps (stuck in a pit)
+    chunk: int = 512  # particles per parallel chunk (change-list capacity = chunk*(max_steps+1) entries of 24 B); terrain is frozen within a chunk
     backend: str = "cpu"
 
 
