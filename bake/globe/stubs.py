@@ -140,9 +140,13 @@ def stub_refine(store: WorldStore, params: WorldParams, log=print) -> dict:
     ws = store.load_field("water_surface", grid)
     fine_dir = store.root / "fine"
     fine_dir.mkdir(exist_ok=True)
-    for name, f in (("height", h), ("sediment", sed), ("water_surface", ws)):
+    q = store.load_field("discharge", grid)
+    hard = store.load_field("hardness", grid)
+    bid = store.load_field("basin_id", grid)
+    for name, f in (("height", h), ("sediment", sed), ("water_surface", ws), ("discharge", q), ("hardness", hard), ("basin_id", bid)):
         a = f.interior
-        up = np.repeat(np.repeat(a, R, axis=1), R, axis=2).astype(np.float32)
+        up = np.repeat(np.repeat(a, R, axis=1), R, axis=2)
+        up = up.astype(np.int32) if name == "basin_id" else up.astype(np.float32)
         for k in range(6):
             np.save(fine_dir / f"{name}.f{k}.npy", up[k])
     return {"stub": True}
