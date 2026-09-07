@@ -7,7 +7,6 @@ worlds/
 !bake/tests/data/
 game/data/worlds/*
 !game/data/worlds/.gitkeep
-gdextension/godot-cpp/
 gdextension/bin/
 gdextension/.sconsign.dblite
 gdextension/src/*.o

@@ -110,14 +110,15 @@ inline void gnomonic_local(const Vec3 &Q, const Vec3 &A, const Vec3 &e1, const V
 }
 
 // Orthonormal tangent frame at A: e1 ⊥ A (built from the world axis least
-// aligned with A), e2 = A × e1.
+// aligned with A), e2 = e1 × A, so that (x = e1, y = A, z = e2) is a
+// right-handed Godot local frame (x × y = z).
 inline void tangent_frame(const Vec3 &A, Vec3 &e1, Vec3 &e2) {
     Vec3 ax = std::fabs(A.x) < 0.9 ? Vec3{1.0, 0.0, 0.0} : Vec3{0.0, 1.0, 0.0};
     const double d = ax.x * A.x + ax.y * A.y + ax.z * A.z;
     e1 = {ax.x - A.x * d, ax.y - A.y * d, ax.z - A.z * d};
     const double inv = 1.0 / std::sqrt(e1.x * e1.x + e1.y * e1.y + e1.z * e1.z);
     e1 = {e1.x * inv, e1.y * inv, e1.z * inv};
-    e2 = {A.y * e1.z - A.z * e1.y, A.z * e1.x - A.x * e1.z, A.x * e1.y - A.y * e1.x};
+    e2 = {e1.y * A.z - e1.z * A.y, e1.z * A.x - e1.x * A.z, e1.x * A.y - e1.y * A.x};
 }
 
 }  // namespace globe

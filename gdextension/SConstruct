@@ -1,0 +1,26 @@
+#!/usr/bin/env python
+"""Build the globe GDExtension.
+
+    git submodule update --init            # godot-cpp (godot-4.4-stable)
+    scons platform=linux target=template_debug   # or template_release, windows, macos
+
+The library is written to game/addons/globe/bin/ and picked up by
+game/addons/globe/globe.gdextension.
+"""
+import os
+
+env = SConscript("godot-cpp/SConstruct")
+env.Append(CPPPATH=["src/"])
+sources = Glob("src/*.cpp")
+
+if env["platform"] == "macos":
+    library = env.SharedLibrary(
+        "../game/addons/globe/bin/libglobe.{}.{}.framework/libglobe.{}.{}".format(env["platform"], env["target"], env["platform"], env["target"]),
+        source=sources,
+    )
+else:
+    library = env.SharedLibrary(
+        "../game/addons/globe/bin/libglobe{}{}".format(env["suffix"], env["SHLIBSUFFIX"]),
+        source=sources,
+    )
+Default(library)
