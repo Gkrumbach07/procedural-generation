@@ -74,6 +74,12 @@ Every stage writes `worlds/<name>/quicklook/<stage>.png` (an unfolded cube net);
   Particle transitions use the exact `transfer_vector` rotation rather than
   PLAN 2.6's approximate re-expression.  PLAN 2.5's upwind gradient is
   deferred to the erosion stage.
+* Collision uses a `ConcavePolygonShape3D` built from the tile's own
+  projected vertices instead of PLAN 12.3's `HeightMapShape3D`: a
+  gnomonically projected tile is a skewed quadrilateral and physics shapes
+  cannot be skewed (the error was ~100 m on the small test planet).  Only
+  LOD-0 tiles within `physics_radius_m` get a body; they are rebuilt on
+  re-anchor.
 * Content hashes ignore runtime-only knobs (`refine.workers`,
   `erosion.checkpoint_every/quicklook_every`, `render.*`), and every stage
   records the hash of its own parameter group so a resume detects upstream

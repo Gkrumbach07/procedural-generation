@@ -94,10 +94,12 @@ func water_surface_at(fi: float, fj: float) -> float:
 	return water[j0 * size + i0]
 
 
-## (Re)build the collision shape in the current anchor frame (PLAN 12.3:
-## HeightMapShape3D only for LOD-0 tiles near the player).  The gnomonic
-## tile is very slightly non-square; we place the shape with the tile's
-## projected axes (error ~ (d / R)^2, negligible within physics_radius).
+## (Re)build the collision shape in the current anchor frame (only LOD-0
+## tiles near the player, PLAN 12.3).  PLAN suggests HeightMapShape3D, but a
+## gnomonically projected tile is a (slightly) skewed quadrilateral and
+## physics shapes cannot be skewed, so we build an exact triangle mesh from
+## the same projected vertices the shader uses (ConcavePolygonShape3D;
+## 2*(T)^2 triangles, ~10 ms per tile, rebuilt on re-anchor).
 func update_collision(world: Node, enabled: bool) -> void:
 	if not enabled:
 		if body:
@@ -107,21 +109,27 @@ func update_collision(world: Node, enabled: bool) -> void:
 	if body:
 		body.queue_free()
 	body = StaticBody3D.new()
-	var shape := HeightMapShape3D.new()
-	shape.map_width = size
-	shape.map_depth = size
-	# HeightMapShape3D data is indexed [z * width + x]; our height is [j * size + i]
-	shape.map_data = height
+	var pts := PackedVector3Array()
+	pts.resize(size * size)
+	for j in range(size):
+		for i in range(size):
+			pts[j * size + i] = world.tile_local_pos(face, lod, tx, ty, float(i), float(j), height[j * size + i])
+	var faces := PackedVector3Array()
+	faces.resize((size - 1) * (size - 1) * 6)
+	var k := 0
+	for j in range(size - 1):
+		for i in range(size - 1):
+			var v00 := pts[j * size + i]
+			var v10 := pts[j * size + i + 1]
+			var v01 := pts[(j + 1) * size + i]
+			var v11 := pts[(j + 1) * size + i + 1]
+			faces[k] = v00; faces[k + 1] = v01; faces[k + 2] = v10
+			faces[k + 3] = v10; faces[k + 4] = v01; faces[k + 5] = v11
+			k += 6
+	var shape := ConcavePolygonShape3D.new()
+	shape.backface_collision = true
+	shape.set_faces(faces)
 	var cs := CollisionShape3D.new()
 	cs.shape = shape
-	var p00: Vector3 = world.tile_local_pos(face, lod, tx, ty, 0.0, 0.0, 0.0)
-	var p10: Vector3 = world.tile_local_pos(face, lod, tx, ty, float(size - 1), 0.0, 0.0)
-	var p01: Vector3 = world.tile_local_pos(face, lod, tx, ty, 0.0, float(size - 1), 0.0)
-	var ax := (p10 - p00) / float(size - 1)
-	var az := (p01 - p00) / float(size - 1)
-	var basis := Basis(ax, Vector3(0, 1, 0), az)
-	# HeightMapShape3D is centred: shift by half extents in local shape space
-	var center := p00 + ax * float(size - 1) * 0.5 + az * float(size - 1) * 0.5
-	cs.transform = Transform3D(basis, center)
 	body.add_child(cs)
 	add_child(body)

@@ -86,5 +86,33 @@ func _run() -> void:
 	# gnomonic sanity: anchor maps to origin
 	var o := world.to_local_pos(world.anchor, 0.0)
 	check(o.length() < 1e-3, "anchor at local origin")
+	# collision: HeightMapShape3D bodies near the player must agree with sample_height
+	player.place_on_sphere(p)
+	world.set_anchor(p)
+	world.stream_now()
+	await physics_frame
+	await physics_frame
+	var space := world.get_world_3d().direct_space_state
+	var n_bodies := 0
+	for t in world.tiles.values():
+		if t.body:
+			n_bodies += 1
+	check(n_bodies > 0, "collision bodies exist near the player (%d)" % n_bodies)
+	var worst := 0.0
+	var hits := 0
+	for k in range(12):
+		var ang := k * PI / 6.0
+		var q := (p + (frame.x * cos(ang) + frame.z * sin(ang)) * (120.0 / world.R_planet)).normalized()
+		var h := world.sample_height(q)
+		var lp := world.to_local_pos(q, h)
+		var query := PhysicsRayQueryParameters3D.create(lp + Vector3(0, 2000, 0), lp - Vector3(0, 2000, 0))
+		var hit := space.intersect_ray(query)
+		if hit.is_empty():
+			continue
+		hits += 1
+		worst = maxf(worst, absf(hit.position.y - h))
+	print("collision: %d bodies, %d/12 ray hits, worst |ray - sample_height| = %.2f m" % [n_bodies, hits, worst])
+	check(hits >= 10, "rays hit the collision heightmap")
+	check(worst < 8.0, "collision surface matches rendered heights (worst %.2f m)" % worst)
 	print("test_stream: %d failure(s)" % failures)
 	quit(1 if failures > 0 else 0)
