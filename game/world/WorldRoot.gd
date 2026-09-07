@@ -16,6 +16,8 @@ signal streaming_settled
 @export var stream_interval: float = 0.15
 @export var sync_loads: bool = false        ## decode on the main thread (tests / debugging)
 @export var render_water: bool = true       ## lake meshes (water.png)
+@export var use_skirts: bool = true         ## skirt ring on tiles to hide LOD cracks
+@export var skirt_drop_scale: float = 1.0
 
 var manifest := {}
 var index := {}
@@ -71,7 +73,7 @@ func load_world() -> bool:
 	R_planet = float(manifest.get("R_planet", GlobeMath.planet_radius(N_c, float(manifest.get("cell_size_m", 50.0)))))
 	if N_fine <= 0 or T <= 0:
 		return false
-	grid_mesh = TileSource.build_grid_mesh(T + 1, true)
+	grid_mesh = TileSource.build_grid_mesh(T + 1, use_skirts)
 	water_mesh = TileSource.build_grid_mesh(T + 1, false)
 	RenderingServer.global_shader_parameter_set("globe_r_planet", R_planet)
 	if ClassDB.class_exists("DrainageGraph"):

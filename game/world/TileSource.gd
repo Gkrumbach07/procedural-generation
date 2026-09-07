@@ -170,8 +170,9 @@ static func build_grid_mesh(size: int, skirt: bool) -> ArrayMesh:
 			var v10 := (a + 1) * ext_n + b
 			var v01 := a * ext_n + b + 1
 			var v11 := (a + 1) * ext_n + b + 1
-			idx[k] = v00; idx[k + 1] = v01; idx[k + 2] = v10
-			idx[k + 3] = v10; idx[k + 4] = v01; idx[k + 5] = v11
+			# Godot front faces are clockwise (seen from +y here)
+			idx[k] = v00; idx[k + 1] = v10; idx[k + 2] = v01
+			idx[k + 3] = v10; idx[k + 4] = v11; idx[k + 5] = v01
 			k += 6
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)

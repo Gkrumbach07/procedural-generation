@@ -27,6 +27,8 @@ func _start() -> void:
 	world.world_dir = world_dir
 	world.sync_loads = true
 	world.render_water = _arg("water", "1") != "0"
+	world.use_skirts = _arg("skirt", "1") != "0"
+	world.skirt_drop_scale = float(_arg("skirt_scale", "1"))
 	var player: GlobePlayer = world.get_node("Player")
 	var face := int(_arg("face", "4"))
 	var u := float(_arg("u", "0.999"))
@@ -45,6 +47,18 @@ func _start() -> void:
 	world.stream_now()
 	player._update_camera()
 	print("screenshot: %d tiles, camera at %s" % [world.tiles.size(), str(player.global_position)])
+	var r := world.tile_at(player.sphere_pos)
+	if not r.is_empty():
+		var t: TerrainTile = r[0]
+		print("tile under camera: %s size %d fi %.1f fj %.1f h %.1f  height range %s" % [t.key, t.size, r[1], r[2], t.sample_height(r[1], r[2]), str([Array(t.height).min(), Array(t.height).max()])])
+		var mat: ShaderMaterial = t.mesh_instance.material_override
+		print("  shader params: face %s tx %s ty %s lod %s n_fine %s T %s tex %s" % [str(mat.get_shader_parameter("face")), str(mat.get_shader_parameter("tile_x")), str(mat.get_shader_parameter("tile_y")), str(mat.get_shader_parameter("lod")), str(mat.get_shader_parameter("n_fine")), str(mat.get_shader_parameter("tile_size")), str(mat.get_shader_parameter("height_tex"))])
+		var img: Image = t.height_tex.get_image()
+		print("  height_tex: %s format %d px(32,32)=%.1f data h[32*size+32]=%.1f" % [str(img.get_size()), img.get_format(), img.get_pixel(32, 32).r, t.height[32 * t.size + 32]])
+	var lods := {}
+	for t in world.tiles.values():
+		lods[t.lod] = lods.get(t.lod, 0) + 1
+	print("tiles per lod: " + str(lods))
 	process_frame.connect(_tick)
 
 

@@ -25,6 +25,7 @@ global uniform int globe_debug_mode;
 varying vec2 v_uv;
 varying float v_h;
 varying float v_slope;
+varying float v_skirt;
 
 const float HALF_PI = 1.5707963267948966;
 
@@ -79,6 +80,7 @@ void vertex() {
 	v_uv = (vec2(i, j) + 0.5) / float(tile_size + 1);
 	v_h = h;
 	v_slope = 1.0 - nrm.y;
+	v_skirt = skirt ? 1.0 : 0.0;
 }
 
 vec3 biome_color(int code) {
@@ -120,9 +122,13 @@ void fragment() {
 		col = mix(col, hash_color(flow.g * 255.0 + tile_seed), 0.65);
 	} else if (globe_debug_mode == 2) {
 		col = mix(col, vec3(0.1, 0.3, 1.0), clamp(flow.r * 1.5, 0.0, 1.0));
+	} else if (globe_debug_mode == 4) {
+		float t = clamp(v_h / 500.0, -1.0, 1.0);
+		col = t >= 0.0 ? vec3(t, 1.0 - t, 0.0) : vec3(0.0, 0.0, -t);
 	} else if (globe_debug_mode == 3) {
 		col = mix(col, hash_color(float(tile_x * 131 + tile_y * 17 + lod * 977 + face * 3001)), 0.5);
-		if (v_uv.x < 0.01 || v_uv.y < 0.01 || v_uv.x > 0.99 || v_uv.y > 0.99) col = vec3(1.0, 0.2, 0.2);
+		if (v_uv.x < 0.004 || v_uv.y < 0.004 || v_uv.x > 0.996 || v_uv.y > 0.996) col = vec3(1.0, 0.2, 0.2);
+		if (v_skirt > 0.5) col = vec3(1.0, 0.0, 1.0);
 	}
 	ALBEDO = col;
 	ROUGHNESS = 0.95;

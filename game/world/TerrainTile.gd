@@ -48,7 +48,7 @@ func setup(data: Dictionary, world: Node, terrain_shader: Shader, water_shader: 
 	mat.set_shader_parameter("lod", lod)
 	mat.set_shader_parameter("n_fine", world.N_fine)
 	mat.set_shader_parameter("tile_size", world.T)
-	mat.set_shader_parameter("skirt_drop", maxf(20.0, world.tile_edge_m(lod) * 0.05))
+	mat.set_shader_parameter("skirt_drop", maxf(20.0, world.tile_edge_m(lod) * 0.05) * world.skirt_drop_scale)
 	mat.set_shader_parameter("tile_seed", float((face * 7919 + tx * 131 + ty) % 1000))
 	mesh_instance = MeshInstance3D.new()
 	mesh_instance.mesh = grid_mesh

@@ -122,8 +122,8 @@ Ref<Image> TileLoader::height_to_image(const PackedFloat32Array &height, int siz
 // Vertices at (i, 0, j) for i, j in 0..size-1, UV = (i, j)/(size-1).  With a
 // skirt, an extra ring of vertices is added around the grid with UV clamped
 // to the edge and the y set to -1 (the shader drops skirt vertices by a
-// fixed amount).  Index layout: two triangles per cell, counter-clockwise
-// seen from +y.
+// fixed amount).  Index layout: two triangles per cell, clockwise seen from
+// +y (Godot's front-face convention).
 Array TileLoader::build_mesh_arrays(int size, bool skirt) {
     PackedVector3Array verts;
     PackedVector2Array uvs;
@@ -146,8 +146,9 @@ Array TileLoader::build_mesh_arrays(int size, bool skirt) {
     for (int a = 0; a < ext - 1; ++a) {
         for (int b = 0; b < ext - 1; ++b) {
             int v00 = a * ext + b, v10 = (a + 1) * ext + b, v01 = a * ext + b + 1, v11 = (a + 1) * ext + b + 1;
-            idx[k++] = v00; idx[k++] = v01; idx[k++] = v10;
-            idx[k++] = v10; idx[k++] = v01; idx[k++] = v11;
+            // Godot front faces are clockwise (seen from +y here)
+            idx[k++] = v00; idx[k++] = v10; idx[k++] = v01;
+            idx[k++] = v10; idx[k++] = v11; idx[k++] = v01;
         }
     }
     Array arrays;
