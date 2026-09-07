@@ -73,5 +73,5 @@ func _update_camera() -> void:
 	var eye: float = h + (altitude if fly else eye_height)
 	var pos := world.to_local_pos(sphere_pos, eye)
 	var dir := world.local_dir(sphere_pos, forward)
-	var look := dir.rotated(dir.cross(Vector3.UP).normalized(), -pitch)
+	var look := dir.rotated(dir.cross(Vector3.UP).normalized(), pitch)
 	global_transform = Transform3D(Basis.looking_at(look, Vector3.UP), pos)

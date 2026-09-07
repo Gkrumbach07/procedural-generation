@@ -31,6 +31,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		mode = (mode + 1) % 4
 		RenderingServer.global_shader_parameter_set("globe_debug_mode", mode)
 		visible = mode > 0
+		var fl := world.get_node_or_null("FlowLines")
+		if fl:
+			fl.enabled = mode > 0
 
 
 func _process(_dt: float) -> void:

@@ -58,7 +58,7 @@ func setup(data: Dictionary, world: Node, terrain_shader: Shader, water_shader: 
 	mesh_instance.custom_aabb = AABB(Vector3(-1e6, -1e5, -1e6), Vector3(2e6, 2e5, 2e6))
 	add_child(mesh_instance)
 	has_water = bool(meta.get("has_water", false))
-	if has_water and water.size() == height.size():
+	if has_water and water.size() == height.size() and world.render_water:
 		var wimg := Image.create_from_data(size, size, false, Image.FORMAT_RF, water.to_byte_array())
 		var wmat := ShaderMaterial.new()
 		wmat.shader = water_shader

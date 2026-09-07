@@ -57,6 +57,26 @@ static func tile_of(u: float, v: float, lod: int, n_fine: int, t_size: int) -> V
 	return Vector2i(clampi(int(floor(u * tiles)), 0, tiles - 1), clampi(int(floor(v * tiles)), 0, tiles - 1))
 
 
+## Jacobian of to_sphere: Basis(x = dp/du, y = dp/dv, z = p).  x and y span
+## the tangent plane (not orthogonal away from the face axes).
+static func jacobian(face: int, u: float, v: float) -> Basis:
+	var a := (u - 0.5) * HALF_PI
+	var bb := (v - 0.5) * HALF_PI
+	var s := tan(a)
+	var t := tan(bb)
+	var dsdu := HALF_PI * (1.0 + s * s)
+	var dtdv := HALF_PI * (1.0 + t * t)
+	var b: Array = BASES[face]
+	var q: Vector3 = b[2] + s * b[0] + t * b[1]
+	var ql := q.length()
+	var p := q / ql
+	var du: Vector3 = b[0] * dsdu
+	var dv: Vector3 = b[1] * dtdv
+	var ju := (du - p * p.dot(du)) / ql
+	var jv := (dv - p * p.dot(dv)) / ql
+	return Basis(ju, jv, p)
+
+
 ## Right-handed tangent frame at a unit vector: Basis(x = e1, y = anchor, z = e2)
 static func tangent_frame(anchor: Vector3) -> Basis:
 	var a := anchor.normalized()

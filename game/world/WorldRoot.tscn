@@ -1,8 +1,9 @@
-[gd_scene load_steps=6 format=3]
+[gd_scene load_steps=7 format=3]
 
 [ext_resource type="Script" path="res://world/WorldRoot.gd" id="1"]
 [ext_resource type="Script" path="res://player/Player.gd" id="2"]
 [ext_resource type="Script" path="res://world/DebugOverlay.gd" id="3"]
+[ext_resource type="Script" path="res://world/FlowLines.gd" id="4"]
 
 [sub_resource type="ProceduralSkyMaterial" id="sky"]
 sky_top_color = Color(0.35, 0.5, 0.8, 1)
@@ -19,7 +20,8 @@ ambient_light_source = 3
 ambient_light_energy = 0.6
 fog_enabled = true
 fog_light_color = Color(0.75, 0.8, 0.88, 1)
-fog_density = 0.00012
+fog_density = 0.00002
+fog_sky_affect = 0.25
 
 [node name="WorldRoot" type="Node3D"]
 script = ExtResource("1")
@@ -42,3 +44,6 @@ environment = SubResource("env")
 
 [node name="DebugOverlay" type="CanvasLayer" parent="."]
 script = ExtResource("3")
+
+[node name="FlowLines" type="MeshInstance3D" parent="."]
+script = ExtResource("4")

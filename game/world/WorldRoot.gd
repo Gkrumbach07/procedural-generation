@@ -15,6 +15,7 @@ signal streaming_settled
 @export var physics_radius_m: float = 500.0
 @export var stream_interval: float = 0.15
 @export var sync_loads: bool = false        ## decode on the main thread (tests / debugging)
+@export var render_water: bool = true       ## lake meshes (water.png)
 
 var manifest := {}
 var index := {}

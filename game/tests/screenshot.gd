@@ -1,4 +1,5 @@
 ## Render a few frames of the world from a given spot and save a screenshot.
+## --along=u|-u|v|-v sets the heading along a face axis (e.g. to look across an edge).
 ##   xvfb-run godot --rendering-driver opengl3 --path game -s tests/screenshot.gd -- --world=/abs/world --out=/abs/shot.png [--face=4 --u=0.999 --v=0.5 --alt=300 --pitch=-0.5 --debug=0]
 extends SceneTree
 
@@ -25,8 +26,17 @@ func _start() -> void:
 	world = scene.instantiate()
 	world.world_dir = world_dir
 	world.sync_loads = true
+	world.render_water = _arg("water", "1") != "0"
 	var player: GlobePlayer = world.get_node("Player")
-	player.place_on_sphere(GlobeMath.to_sphere(int(_arg("face", "4")), float(_arg("u", "0.999")), float(_arg("v", "0.5"))))
+	var face := int(_arg("face", "4"))
+	var u := float(_arg("u", "0.999"))
+	var v := float(_arg("v", "0.5"))
+	var heading := Vector3.ZERO
+	var along := _arg("along", "")
+	if along != "":
+		var jac := GlobeMath.jacobian(face, u, v)
+		heading = jac.x if along == "u" else (-jac.x if along == "-u" else (jac.y if along == "v" else -jac.y))
+	player.place_on_sphere(GlobeMath.to_sphere(face, u, v), heading)
 	player.altitude = float(_arg("alt", "300"))
 	player.pitch = float(_arg("pitch", "-0.5"))
 	root.add_child(world)
