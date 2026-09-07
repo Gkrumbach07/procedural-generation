@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "globe-terrain-bake"
+version = "0.1.0"
+description = "Deterministic offline bake tool: tectonics, climate, particle erosion, hydrology and tiles on a cube-sphere"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "numba>=0.59",
+  "scipy>=1.11",
+  "pillow>=10",
+  "pyyaml>=6",
+  "tqdm>=4",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+globe-bake = "globe.cli:main"
+globe-inspect = "globe.cli:inspect_main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["globe*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
