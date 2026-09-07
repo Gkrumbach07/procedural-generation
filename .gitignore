@@ -16,3 +16,4 @@ game/.godot/
 *.import
 build/
 dist/
+gdextension/tests/test_cubesphere
