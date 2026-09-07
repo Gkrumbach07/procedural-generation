@@ -78,3 +78,31 @@ Every stage writes `worlds/<name>/quicklook/<stage>.png` (an unfolded cube net);
   `erosion.checkpoint_every/quicklook_every`, `render.*`), and every stage
   records the hash of its own parameter group so a resume detects upstream
   parameter drift.
+
+## Godot runtime (`game/`, `gdextension/`)
+
+```sh
+# 1. bake a world and make it visible to the project
+python bake/scripts/bake.py --world demo --preset small
+ln -s "$PWD/bake/worlds/demo" game/data/worlds/demo      # or copy; also set globe/world_dir in project.godot
+
+# 2. (optional but recommended) build the GDExtension for fast tile decode
+git submodule update --init                              # godot-cpp (godot-4.4-stable)
+cd gdextension && scons platform=linux target=template_debug   # -> game/addons/globe/bin
+
+# 3. run
+godot --path game                                        # WASD/QE move, Shift sprint, Esc mouse, F fly/walk, F3 debug
+
+# headless tests
+godot --headless --path game -s tests/test_stream.gd -- --world=/abs/path/to/world
+make -C gdextension/tests test                           # C++ cube-sphere vs Python vector file
+```
+
+Without the compiled extension the project still runs: `TileSource` falls
+back to a pure-GDScript 16-bit PNG decoder (slower loads, same output).
+
+Rendering model (PLAN 12): tiles are flat `(T+1)²` grids; the vertex shader
+maps `(i, j)` → face `(u, v)` → unit sphere (EAC) → gnomonic projection into
+the anchor's tangent frame (`globe_e1/n/e2` shader globals), so wrap-around
+and cube-edge crossing need no special cases.  `WorldRoot` re-anchors when
+the player is more than one tile from the anchor.
