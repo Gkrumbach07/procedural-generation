@@ -31,7 +31,10 @@ def test_net_edges_are_continuous():
 
 def seam_discontinuity(field: FaceField) -> float:
     """Max |gradient jump| across face edges relative to the interior
-    gradient scale (PLAN 15 seam test helper)."""
+    gradient scale (PLAN 15 seam test helper).  Vector fields are compared
+    via their physical norm (cell components are basis-dependent)."""
+    if field.is_vector:
+        field = field.vec_norm()
     f = field.copy()
     f.exchange_halos()
     d = f.data.astype(np.float64)
@@ -53,6 +56,31 @@ def test_seam_metric_on_smooth_function():
     g = Grid(64, 4)
     f = FaceField.from_function(g, lambda p: np.sin(3 * p[..., 0]) * p[..., 1] + p[..., 2] ** 2, dtype=np.float32, name="s")
     assert seam_discontinuity(f) < 3.0
+
+
+def test_seam_metric_detects_seams():
+    """Negative tests: the PLAN 15 metric rises above 3 on real seams."""
+    from globe.field import rotation_field
+    from globe.stubs import fbm_noise
+
+    g = Grid(64, 4)
+    fn = lambda p: np.sin(3 * p[..., 0]) * p[..., 1] + p[..., 2] ** 2 + 0.3 * p[..., 0] * p[..., 2] ** 3
+    f = FaceField.from_function(g, fn, dtype=np.float32, name="s")
+    assert seam_discontinuity(f) < 1.5
+    s = f.copy()
+    s.data += (np.arange(6)[:, None, None] * 0.05 * np.ptp(f.interior)).astype(np.float32)
+    assert seam_discontinuity(s) > 3.0  # per-face offset
+    m = f.copy()
+    m.data[0] = m.data[0].T.copy()
+    assert seam_discontinuity(m) > 3.0  # one face mis-oriented
+    n = f.copy()
+    for k in range(6):
+        n.data[k] = fbm_noise(g, np.random.default_rng(k), 5)[k]
+    assert seam_discontinuity(n) > 3.0  # per-face noise, forgot the sphere
+    c = FaceField.zeros(g, 2, np.float32, is_vector=True, name="c")
+    c.data[..., 0] = 1.0
+    assert seam_discontinuity(c) > 3.0  # constant cell components are not a continuous tangent field
+    assert seam_discontinuity(rotation_field(g, (0.3, -0.5, 0.8), "w")) < 3.0  # a rigid rotation is
 
 
 def test_quicklook_writes(tmp_path):

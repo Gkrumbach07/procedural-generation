@@ -8,7 +8,8 @@ Vector fields (``is_vector=True``, C == 2) hold contravariant cell
 components (see package docstring).  Their halo exchange applies the exact
 per-cell rotation from :class:`~globe.cubesphere.HaloMap`.
 
-Integer fields exchange halos by nearest neighbour instead of bilinear.
+Float fields exchange halos by cubic interpolation (``exchange_halos(linear=True)``
+for bilinear, monotone); integer and bool fields use the nearest source cell.
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from pathlib import Path
 import numpy as np
 from numba import njit, prange
 
-from .cubesphere import Grid, from_sphere_v, get_grid
+from .cubesphere import Grid, from_sphere_v, get_grid, jacobian_v
 
 
 class FaceField:
@@ -214,6 +215,70 @@ class FaceField:
         face, u, v = from_sphere_v(p)
         return self.sample_bilinear(face, u, v)
 
+    def sample_cubic(self, face, u, v) -> np.ndarray:
+        """4x4 cubic Lagrange sample at face-local (u, v) (arrays).  The
+        stencil is clamped to the extended array, so points up to ~H-2
+        cells outside the face are still interpolated (not extrapolated)."""
+        from .cubesphere import lagrange4_weights
+
+        face = np.asarray(face, dtype=np.int64)
+        fi, fj = self.grid.uv_cell(u, v)
+        NE = self.grid.NE
+        i0 = np.clip(np.floor(fi).astype(np.int64), 1, NE - 3)
+        j0 = np.clip(np.floor(fj).astype(np.int64), 1, NE - 3)
+        wi = lagrange4_weights(fi - i0)  # (..., 4)
+        wj = lagrange4_weights(fj - j0)
+        d = self.data
+        out = None
+        for a in range(4):
+            row = None
+            for b in range(4):
+                val = d[face, i0 + a - 1, j0 + b - 1]
+                w = wj[..., b]
+                if d.ndim == 4:
+                    w = w[..., None]
+                row = val * w if row is None else row + val * w
+            wa = wi[..., a]
+            if d.ndim == 4:
+                wa = wa[..., None]
+            out = row * wa if out is None else out + row * wa
+        return out
+
+    def sample_window(self, face: int, i0: int, i1: int, j0: int, j1: int, R: int = 1, order: int = 1) -> np.ndarray:
+        """Sample the field on a window of the face's *coarse* cell range
+        ``[i0, i1) × [j0, j1)`` (interior indices, no halo offset; may extend
+        beyond the face, even beyond the halo) at refinement factor ``R``:
+        fine cell centres at ``u = (i + (k + 0.5) / R) / N``.  Returns an
+        array of shape ``((i1-i0)*R, (j1-j0)*R[, C])`` indexed ``[fi, fj]``.
+
+        Points outside the face are looked up on the face that owns them
+        (via ``from_sphere``); vector fields are rotated into ``face``'s
+        components.  ``order`` 1 = bilinear, 3 = cubic (use 3 for height)."""
+        from .cubesphere import from_sphere_v, to_sphere_v, transfer_vector_v
+
+        N = self.grid.N
+        ui = (np.arange(i0 * R, i1 * R) + 0.5) / (N * R)
+        vj = (np.arange(j0 * R, j1 * R) + 0.5) / (N * R)
+        U, V = np.meshgrid(ui, vj, indexing="ij")
+        inside = (U >= 0) & (U < 1) & (V >= 0) & (V < 1)
+        faces = np.full(U.shape, face, dtype=np.int64)
+        su, sv = U.copy(), V.copy()
+        if not inside.all():
+            p = to_sphere_v(faces[~inside], U[~inside], V[~inside])
+            f2, u2, v2 = from_sphere_v(p)
+            faces[~inside] = f2
+            su[~inside] = u2
+            sv[~inside] = v2
+        if np.issubdtype(self.data.dtype, np.integer) or self.data.dtype == np.bool_:
+            return self.sample_nearest(faces, su, sv)
+        vals = self.sample_cubic(faces, su, sv) if order == 3 else self.sample_bilinear(faces, su, sv)
+        if self.is_vector:
+            other = faces != face
+            if other.any():
+                vals = np.array(vals, dtype=np.float64)
+                vals[other] = transfer_vector_v(faces[other], su[other], sv[other], vals[other], np.full(int(other.sum()), face), U[other], V[other])
+        return vals.astype(self.data.dtype)
+
     def sample_nearest(self, face, u, v) -> np.ndarray:
         face = np.asarray(face, dtype=np.int64)
         fi, fj = self.grid.uv_cell(u, v)
@@ -251,9 +316,13 @@ class FaceField:
         return paths
 
     @classmethod
-    def load(cls, directory: str | Path, name: str, grid: Grid, is_vector: bool | None = None, mmap: bool = False) -> "FaceField":
+    def load(cls, directory: str | Path, name: str, grid: Grid, is_vector: bool | None = None) -> "FaceField":
+        """Load ``<dir>/<name>.f{0..5}.npy`` and exchange halos.  Faces are
+        copied into a fresh halo array; the on-disk .npy files are
+        memory-mappable directly with ``np.load(mmap_mode="r")`` when only a
+        single interior face is needed."""
         directory = Path(directory)
-        faces = [np.load(directory / f"{name}.f{k}.npy", mmap_mode="r" if mmap else None) for k in range(6)]
+        faces = [np.load(directory / f"{name}.f{k}.npy") for k in range(6)]
         arr = np.stack(faces, axis=0)
         if is_vector is None:
             is_vector = arr.ndim == 4 and arr.shape[3] == 2 and name in VECTOR_FIELD_NAMES
@@ -272,6 +341,25 @@ class FaceField:
 VECTOR_FIELD_NAMES = frozenset({"wind", "momentum", "plate_vel", "momentum_track"})
 
 
+def rotation_field(grid: Grid, omega, name: str = "", dtype=np.float32) -> FaceField:
+    """``v = omega x p`` (rigid rotation about the axis ``omega``, |omega| in
+    radians per step) as contravariant cell components on every extended
+    cell — a smooth, seamless tangent field (PLAN section 6 plate motion).
+    Halos are analytic, no exchange needed."""
+    U, V = grid._uv_grid
+    om = np.asarray(omega, dtype=np.float64)
+    out = np.empty((6, grid.NE, grid.NE, 2), dtype=np.float64)
+    for f in range(6):
+        ju, jv = jacobian_v(np.full(U.shape, f), U, V)
+        w = np.cross(om[None, None, :], grid.centers[f])
+        guu, guv, gvv = (ju * ju).sum(-1), (ju * jv).sum(-1), (jv * jv).sum(-1)
+        wu, wv = (w * ju).sum(-1), (w * jv).sum(-1)
+        det = guu * gvv - guv * guv
+        out[f, ..., 0] = (gvv * wu - guv * wv) / det * grid.N  # per-u -> per-cell
+        out[f, ..., 1] = (guu * wv - guv * wu) / det * grid.N
+    return FaceField(grid, out.astype(dtype), is_vector=True, name=name)
+
+
 @njit(cache=True, parallel=True)
 def _laplacian_kernel(d, ginv, sq):
     F, NE, _ = d.shape
@@ -281,7 +369,7 @@ def _laplacian_kernel(d, ginv, sq):
             for j in range(1, NE - 1):
                 # d f / d j at (i, j), (i+1, j), (i-1, j) ; d f / d i at (i, j±1)
                 fj_c = 0.5 * (d[f, i, j + 1] - d[f, i, j - 1])
-                fj_p = 0.5 * (d[f, i + 1, j + 1] - d[f, i + 1, j - 1]) if i + 1 < NE - 0 and j + 1 < NE and j - 1 >= 0 else fj_c
+                fj_p = 0.5 * (d[f, i + 1, j + 1] - d[f, i + 1, j - 1])
                 fj_m = 0.5 * (d[f, i - 1, j + 1] - d[f, i - 1, j - 1])
                 fi_c = 0.5 * (d[f, i + 1, j] - d[f, i - 1, j])
                 fi_p = 0.5 * (d[f, i + 1, j + 1] - d[f, i - 1, j + 1])
@@ -348,4 +436,4 @@ def zeros(grid: Grid, ncomp: int = 1, dtype=np.float32, is_vector: bool = False,
     return FaceField.zeros(grid, ncomp, dtype, is_vector, name)
 
 
-__all__ = ["FaceField", "VECTOR_FIELD_NAMES", "bilinear_ext", "zeros", "get_grid"]
+__all__ = ["FaceField", "VECTOR_FIELD_NAMES", "bilinear_ext", "rotation_field", "zeros", "get_grid"]

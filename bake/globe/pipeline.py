@@ -59,12 +59,18 @@ def bake(
     * A fresh world directory is created if needed.
     * If the directory exists with a different ``params_hash``, refuse
       unless ``force`` (then stages are rerun from ``from_stage``).
-    * Stages before ``from_stage`` must be marked done in the manifest.
+    * Stages before ``from_stage`` must be marked done in the manifest
+      *with the same output-relevant parameters* (``STAGE_PARAM_GROUPS``).
     * With ``resume`` (default) stages already done inside the range and
       *not* explicitly requested by ``from_stage`` are skipped; pass
       ``force`` to rerun them.
+    * Before a stage runs, it and every downstream stage are un-marked and
+      the stage's ``OUTPUTS`` are deleted, so a crash mid-stage can never
+      leave a 'done' marker over partial outputs, and stale files never
+      leak into the new content hash.
     """
     logger = logger or (lambda msg: log.info(msg))
+    params.validate()  # presets and --set mutate params after construction
     store = WorldStore(world_dir, create=True)
     grid = params.coarse_grid()
     stages = stage_range(from_stage, to_stage)
@@ -83,29 +89,32 @@ def bake(
 
     first = STAGES.index(stages[0])
     for s in STAGES[:first]:
-        if not store.stage_done(s):
-            raise RuntimeError(f"cannot start from {stages[0]!r}: upstream stage {s!r} not done in {store.manifest_path}")
+        if not store.stage_done(s, params):
+            raise RuntimeError(
+                f"cannot start from {stages[0]!r}: upstream stage {s!r} not done or baked with different params "
+                f"in {store.manifest_path}"
+            )
 
     for i, s in enumerate(stages):
-        if resume and not force and store.stage_done(s) and not (i == 0 and from_stage is not None):
+        if resume and not force and store.stage_done(s, params) and not (i == 0 and from_stage is not None):
             logger(f"[{s}] already done (hash {store.stage_info(s)['hash']}), skipping")
             continue
         mod = stage_module(s)
+        outputs = list(getattr(mod, "OUTPUTS", []))
+        # un-mark this stage and everything downstream, and clear the stage's
+        # outputs, *before* running so a crash cannot leave a stale 'done'
+        store.invalidate_from(s, STAGES)
+        store.clear_outputs(outputs)
         logger(f"[{s}] start")
         t0 = time.time()
         info = mod.run(store, params, logger) or {}
         dt = time.time() - t0
-        outputs = list(getattr(mod, "OUTPUTS", []))
         try:
             write_stage_quicklook(mod, s, store, params, logger)
         except Exception as e:  # quicklooks must never break a bake
             logger(f"[{s}] quicklook failed: {e!r}")
-        store.mark_stage(s, outputs, info, dt)
+        store.mark_stage(s, outputs, info, dt, params=params)
         logger(f"[{s}] done in {dt:.1f}s (hash {store.stage_info(s)['hash']})")
-        # a rerun invalidates everything downstream
-        for t in STAGES[STAGES.index(s) + 1 :]:
-            store.manifest.get("stages", {}).pop(t, None)
-        store.save_manifest()
     return store
 
 

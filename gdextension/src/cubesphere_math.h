@@ -2,10 +2,15 @@
 // Header-only, no Godot dependency, so it can be unit-tested standalone
 // (gdextension/tests/test_cubesphere.cpp) and used from the GDExtension.
 //
-// The arithmetic mirrors the Python implementation operation for operation so
-// results agree to ~1e-15 (the test file tests/data/cubesphere_vectors.bin is
-// checked at 1e-12; exact bit equality across libm implementations is not
-// guaranteed for tan/atan).
+// The arithmetic mirrors the *scalar* numba functions (to_sphere, face_of,
+// from_sphere, project_to_face) operation for operation, so results are
+// bit-identical on bake/tests/data/cubesphere_vectors.bin when compiled
+// without FP contraction (-ffp-contract=off; see gdextension/tests/Makefile)
+// against a libm whose tan/atan agree with the generating glibc.  The same
+// flag is required for the GDExtension build of this header if bit-parity
+// with the bake is relied upon at runtime (the runtime itself only needs
+// PLAN 2.2's 1e-6).  `test_cubesphere --tolerant` relaxes the check to 1e-12
+// for other libms.
 #pragma once
 #include <cmath>
 #include <cstdint>
@@ -68,7 +73,10 @@ inline void project_to_face(int face, double x, double y, double z, double &u, d
     v = std::atan(t) * TWO_OVER_PI + 0.5;
 }
 
-// Unit vector -> (face, u, v), u, v in [0, 1].
+// Unit vector -> (face, u, v), u, v in the closed interval [0, 1]: a point
+// exactly on a cube edge/corner goes to the higher-priority face (X > Y > Z)
+// with u or v exactly 1.0, so callers computing a cell index must clamp,
+// min(floor(u*N), N-1) (tile_of below does).
 inline int from_sphere(double x, double y, double z, double &u, double &v) {
     const int face = face_of(x, y, z);
     project_to_face(face, x, y, z, u, v);

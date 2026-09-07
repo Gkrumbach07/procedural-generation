@@ -7,7 +7,7 @@ from __future__ import annotations
 import numpy as np
 
 from .config import WorldParams
-from .field import FaceField
+from .field import FaceField, rotation_field
 from .io.world_store import WorldStore
 
 
@@ -58,10 +58,8 @@ def stub_tectonics(store: WorldStore, params: WorldParams, log=print) -> dict:
     store.save_field(hard)
     pid = _noise_field(grid, rng, "plate_id", 6.0, 6.0, 2)
     store.save_field(FaceField(grid, pid.data.astype(np.int16), name="plate_id"))
-    pv = FaceField.zeros(grid, 2, np.float32, is_vector=True, name="plate_vel")
-    pv.data[..., 0] = 0.01
-    pv.exchange_halos()
-    store.save_field(pv)
+    # a rigid rotation is a seamless tangent field (magnitude arbitrary)
+    store.save_field(rotation_field(grid, (0.0, 0.0, 0.01), "plate_vel"))
     return {"stub": True}
 
 
@@ -72,10 +70,7 @@ def stub_climate(store: WorldStore, params: WorldParams, log=print) -> dict:
     h = store.load_field("bedrock", grid)
     T = FaceField(grid, (params.climate.T_eq - params.climate.k_lat * np.abs(lat) ** 1.5 - params.climate.lapse * np.maximum(h.data, 0) / 1000.0).astype(np.float32), name="temperature")
     store.save_field(T)
-    wind = FaceField.zeros(grid, 2, np.float32, is_vector=True, name="wind")
-    wind.data[..., 0] = 1.0
-    wind.exchange_halos()
-    store.save_field(wind)
+    store.save_field(rotation_field(grid, (0.0, 1.0, 0.0), "wind"))
     pr = _noise_field(grid, rng, "precip", 0.5, 1.0, 4)
     pr.data[...] = np.maximum(pr.data, 0.05) * grid.cell_area / grid.cell_size_m**2
     store.save_field(pr)
@@ -95,10 +90,7 @@ def stub_erosion(store: WorldStore, params: WorldParams, log=print) -> dict:
     q = _noise_field(grid, rng, "discharge", 1.0, 1.0, 5)
     q.data[...] = np.exp(3 * q.data)
     store.save_field(q)
-    mom = FaceField.zeros(grid, 2, np.float32, is_vector=True, name="momentum")
-    mom.data[..., 1] = 0.5
-    mom.exchange_halos()
-    store.save_field(mom)
+    store.save_field(rotation_field(grid, (0.5, 0.0, 0.0), "momentum"))
     return {"stub": True}
 
 
@@ -167,37 +159,50 @@ def stub_derive(store: WorldStore, params: WorldParams, log=print) -> dict:
     return {"stub": True}
 
 
+def fine_vertex_field(fine_grid, faces: np.ndarray, name: str = "") -> np.ndarray:
+    """Fine cell-centre faces (6, N, N) -> vertex samples (6, N+1, N+1) on
+    fine-cell corners (the tile sample convention, ``globe.io.tiles``):
+    2x2 average of the surrounding cells, using cross-face halo data at
+    face edges so the edge column agrees with the neighbouring face."""
+    H, N = fine_grid.H, fine_grid.N
+    ff = FaceField.from_interior(fine_grid, np.asarray(faces, dtype=np.float32), name=name, exchange=True)
+    E = ff.data[:, H - 1 : H + N + 1, H - 1 : H + N + 1]
+    return 0.25 * (E[:, :-1, :-1] + E[:, 1:, :-1] + E[:, :-1, 1:] + E[:, 1:, 1:])
+
+
 def stub_tiles(store: WorldStore, params: WorldParams, log=print) -> dict:
+    """Stub tiles: (T+1)^2 vertex samples per tile (see ``globe.io.tiles``),
+    sample (k, l) of tile (lod, f, x, y) at fine-cell corner
+    ((x*T + k) << lod, (y*T + l) << lod).  The real Phase 6 writer does the
+    same on memmapped fine fields."""
     from .io.tiles import Tile, tiles_per_face, write_tile
 
-    grid = params.coarse_grid()
+    fine = params.fine_grid()
     T = params.world.T
     Nf = params.N_fine
     fine_dir = store.root / "fine"
-    biome = store.load_field("biome", grid)
-    hard = store.load_field("hardness", grid)
+    verts = {}
+    for name in ("height", "sediment", "water_surface"):
+        faces = np.stack([np.load(fine_dir / f"{name}.f{k}.npy") for k in range(6)])
+        verts[name] = fine_vertex_field(fine, faces, name)
     n_written = 0
     for lod in range(params.max_lod + 1):
         npf = tiles_per_face(Nf, T, lod)
         step = 1 << lod
         for f in range(6):
-            H = np.load(fine_dir / f"height.f{f}.npy")[::step, ::step]
-            S = np.load(fine_dir / f"sediment.f{f}.npy")[::step, ::step]
-            W = np.load(fine_dir / f"water_surface.f{f}.npy")[::step, ::step]
-            Hp = np.pad(H, ((0, 1), (0, 1)), mode="edge")
-            Sp = np.pad(S, ((0, 1), (0, 1)), mode="edge")
-            Wp = np.pad(W, ((0, 1), (0, 1)), mode="edge")
             for x in range(npf):
                 for y in range(npf):
-                    sl = (slice(x * T, x * T + T + 1), slice(y * T, y * T + T + 1))
-                    h = Hp[sl]
+                    sl = (slice(x * T * step, (x * T + T) * step + 1, step), slice(y * T * step, (y * T + T) * step + 1, step))
+                    h = verts["height"][f][sl]
+                    S = verts["sediment"][f][sl]
+                    W = verts["water_surface"][f][sl]
                     layers = np.zeros(h.shape + (4,), np.uint8)
-                    layers[..., 0] = np.clip(Sp[sl] * 10, 0, 255)
+                    layers[..., 0] = np.clip(S * 10, 0, 255)
                     layers[..., 1] = 128
                     layers[..., 2] = 1
                     layers[..., 3] = 100
                     flow = np.zeros(h.shape + (3,), np.uint8)
-                    water = np.where(Wp[sl] > h + 0.05, Wp[sl], 0).astype(np.float32)
+                    water = np.where(W > h + 0.05, W, 0).astype(np.float32)
                     write_tile(store.root, Tile(lod, f, x, y, h.astype(np.float32), water, layers, flow, {"basins": []}))
                     n_written += 1
     return {"stub": True, "tiles": n_written}

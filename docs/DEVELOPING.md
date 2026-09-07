@@ -26,7 +26,7 @@ All `Grid`s share `R_planet` (derived from the coarse grid).
 | climate | `temperature` | f32 | °C |
 | | `wind` | f32 (2) | contravariant coarse cells per advection step (vector field) |
 | | `precip` | f32 | *volume* per cell per erosion iteration: rain × `cell_area/cell_size_m²`; mean over land = `precip_mean` (nondimensional particle-volume units) |
-| | `evap` | f32 | per-iteration volume decay rate for particles (`k_evap·max(T,0)`) |
+| | `evap` | f32 | dimensionless evaporation multiplier `k_evap·max(T,0)` (~1 at `T_eq`, 0 where `T ≤ 0`); erosion decays particles by `volume *= 1 − dt·erosion.evap_rate·evap` |
 | erosion | `height` | f32 | bedrock surface after erosion, metres, sea level 0 |
 | | `sediment` | f32 | metres of loose sediment on top of `height`; the terrain surface is `height + sediment` |
 | | `discharge` | f32 | EMA of particle volume passing through the cell per iteration |
@@ -97,6 +97,34 @@ arrays shaped `(F, NE, NE[, 2])` plus `N, H`, `metric_inv`, `mask`
 (uint8: 0 outside, 1 active, 2 active-but-frozen divide), and a flag
 `spherical`.  Heights inside the kernel are in **cell units**
 (`metres / cell_size_m`) so the ★ parameters apply as published.
+
+Evaporation: the climate field `evap` is a dimensionless multiplier
+(`k_evap·max(T,0)`, ~1 at `T_eq`, 0 where `T ≤ 0`); the kernel decays a
+particle by `volume *= 1 − dt·erosion.evap_rate·evap[cell]`.  PLAN 8.2's
+`evap_at_pos` reads as `evap_rate·evap(pos)`, so the ★ `evap_rate` keeps
+its published meaning.
+
+## Tiles (`tiles/L{lod}/f{face}/{x}_{y}/`, see `globe/io/tiles.py`)
+
+* A tile holds `(T+1)×(T+1)` **vertex** samples.  Sample `(k, l)` of tile
+  `(lod, face, x, y)` sits at face-local
+  `u = (x·T + k)·2^lod / N_fine`, `v = (y·T + l)·2^lod / N_fine`,
+  `k, l = 0..T` — on fine-cell corners.  The `k = T` column is the next
+  tile's `k = 0` column; on the last tile of a face it lies exactly on the
+  cube edge (`u = 1`), where the neighbouring face's tile places its own
+  edge column, so meshes share vertices across face edges too.
+* Values are the 2×2 average of the surrounding fine cell-centre values,
+  computed with cross-face halo data at face edges (shared columns agree
+  to interpolation + 16-bit quantisation tolerance; skirts still hide
+  LOD cracks).
+* Arrays are `[i, j]` (`i` along `u`); images are row = `j`/`v`,
+  column = `i`/`u` (the transpose).
+* Ocean is implicit: `water.png` is 0 wherever `water_surface ≤ 0`; render
+  sea level 0 where height < 0 and use `water.png` for lakes only.
+* Deviations from PLAN §3: `flow.png` is RGB8 (R = log discharge,
+  G = basin-local id, B = river mask); `flow_dir` is `uint8`; `meta.json`
+  carries no `neighbors` entry (derive neighbours from `(lod, face, x, y)`
+  via cubesphere).
 
 ## Quicklooks
 

@@ -117,7 +117,7 @@ The planet radius `R_planet` is derived from `N_c` and the target coarse cell si
 ### 2.4 Halo exchange
 Every `FaceField` stores each face as an `(N + 2H) × (N + 2H)` array with a halo of width `H` (default 4). `exchange_halos()` fills the halo cells from neighboring faces.
 Neighbor faces are rotated relative to each other, so do not hand-code the eight edge cases. Instead, at init, for every halo cell compute its 3D position via `to_sphere` (extrapolating `u`/`v` outside `[0,1)`), call `from_sphere`, and store `(src_face, src_u, src_v)`. `exchange_halos()` then bilinearly samples. Precompute the index/weight tables once per resolution (`HaloMap`), so exchange is a gather with fixed indices.
-Corner halo cells (the 8 cube corners have only 3 faces meeting) are undefined by this scheme; fill them by averaging the two valid neighbors. They only affect stencils at 8 cells on the planet.
+Corner halo cells (the 8 cube corners have only 3 faces meeting) are undefined by this scheme; fill them by averaging the two valid neighbors. They only affect stencils at 8 cells on the planet. (Implementation note: edge halos use cubic 4×4 interpolation and corner blocks a local least-squares quadratic fit; see `cubesphere.HaloMap`.)
 ### 2.5 Stencils
 Provide on `FaceField`, all halo-aware and metric-aware:
 - `gradient()` → `(∂/∂x, ∂/∂y)` in m/m, central differences; **upwind** variant for use inside the erosion step.
@@ -147,12 +147,13 @@ worlds/<name>/
 │   ├── temperature.f*.npy   # °C
 │   ├── wind.f*.npy          # (2,) tangent
 │   ├── precip.f*.npy        # m/step (already area-weighted)
+│   ├── evap.f*.npy          # dimensionless evaporation multiplier k_evap·max(T,0) (~1 at T_eq)
 │   ├── height.f*.npy        # post-erosion, m, sea level = 0
 │   ├── sediment.f*.npy      # m of loose sediment on top of bedrock
 │   ├── discharge.f*.npy
 │   ├── momentum.f*.npy      # (2,)
 │   ├── water_surface.f*.npy # priority-flood surface; > height where lake
-│   ├── flow_dir.f*.npy      # int8, D8 code 0..7, 255 = sink/ocean (cross-face aware)
+│   ├── flow_dir.f*.npy      # uint8, D8 code 0..7, 255 = sink/ocean (cross-face aware)
 │   ├── flow_acc.f*.npy      # accumulated precip volume
 │   ├── basin_id.f*.npy      # int32, -1 = ocean
 │   └── biome.f*.npy         # uint8
@@ -165,10 +166,10 @@ worlds/<name>/
         ├── height.png       # 16-bit PNG, normalized by tile min/max in meta
         ├── water.png        # 16-bit, water surface height (0 where none)
         ├── layers.png       # RGBA8: R=sediment depth, G=hardness, B=biome id, A=vegetation density
-        ├── flow.png         # RG8: discharge (log-scaled), basin-local id
-        └── meta.json        # min/max height, min/max water, basin ids present, neighbors
+        ├── flow.png         # RGB8: discharge (log-scaled), basin-local id, river mask
+        └── meta.json        # min/max height, min/max water, basin ids present (neighbors: planned)
 ```
-Tile addressing: `(lod, face, x, y)`, LOD 0 = finest, `T` cells per tile. Tiles include a 1-cell overlap on the +x/+y edges so meshes share vertices with neighbors and don't crack.
+Tile addressing: `(lod, face, x, y)`, LOD 0 = finest, `T` cells per tile. Tiles hold `(T+1)²` vertex samples on fine-cell corners (a 1-sample overlap on the +x/+y edges, exactly on the cube edge for the last tile of a face) so meshes share vertices with neighbors — including across face edges — and don't crack.
 `manifest.json` records a content hash per stage so `bake.py --from erosion` can resume from cached upstream stages.
 ---
 ## 4. Phase 0 — Scaffold, config, viewer

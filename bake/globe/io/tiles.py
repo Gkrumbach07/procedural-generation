@@ -8,10 +8,28 @@
 * ``layers.png``  RGBA8: R = sediment depth (m, clamped to
   ``LAYER_SEDIMENT_MAX``), G = hardness [0,1], B = biome id, A = vegetation
 * ``flow.png``    RGB8: R = log-scaled discharge, G = basin-local id, B = river mask
-* ``meta.json``
+  (PLAN section 3 says RG8; section 11 requires the river-mask channel)
+* ``meta.json``   writer keys below plus any extra writer-supplied keys
 
-Tiles are ``(T + 1) × (T + 1)`` cells: one-cell overlap on the +x/+y edges
-so neighbouring meshes share vertices.  Image row = j (v), column = i (u).
+Sample positions.  Tiles are ``(T + 1) × (T + 1)`` *vertex* samples.
+Sample ``(k, l)`` of tile ``(lod, face, x, y)`` sits at face-local
+``u = (x*T + k) * 2**lod / N_fine``, ``v = (y*T + l) * 2**lod / N_fine``,
+``k, l = 0..T``, i.e. on fine-cell corners, so the ``k = T`` column is the
+next tile's ``k = 0`` column and, on the last tile of a face, lies exactly
+on the cube edge (``u = 1``) where the neighbouring face's tile places its
+own edge column (cubesphere maps the edge exactly; cell-centre samples
+would be offset by up to 0.5 cells along the edge).  Values are bilinear
+interpolations of the fine cell-centre fields (2x2 average), evaluated
+with cross-face halo data at face edges.  Shared columns agree to
+interpolation and 16-bit quantisation tolerance; skirts (PLAN 12.3) still
+hide LOD/quantisation cracks.
+
+Ocean is implicit: ``water.png`` is 0 wherever ``water_surface <= 0``
+(docs/DEVELOPING.md: ocean ``water_surface = 0``, ocean = surface < 0);
+Godot renders sea level 0 where height < 0 and uses ``water.png`` only for
+lakes.
+
+Arrays are indexed ``[i, j]``; image row = j (v), column = i (u).
 """
 from __future__ import annotations
 

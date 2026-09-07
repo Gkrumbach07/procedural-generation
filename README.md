@@ -39,9 +39,42 @@ Every stage writes `worlds/<name>/quicklook/<stage>.png` (an unfolded cube net);
   `vec_norm()` gives |∇f|, `vec_dot()` the metric dot product,
   `directional_derivative(vec)` the change per unit step along `vec`.
 * Particles use `cubesphere.transfer_velocity` when they leave `[0, 1)²`.
+* `from_sphere` returns `(u, v)` in the *closed* interval `[0, 1]`: a point
+  exactly on a cube edge goes to the higher-priority face (X > Y > Z) with
+  `u` or `v == 1.0`, so every cell index computed from it is
+  `min(floor(u·N), N − 1)` (`FaceField.sample_*`, `Grid.halo` and the C++
+  `tile_of` already clamp).
 * D8 / neighbour lookups use `grid.owner` to map halo cells to their real
   owner cell on the neighbouring face.
 * RNG: only `params.rng(stage, *keys)`; same seed + params ⇒ identical output.
 
-Deviation from PLAN.md: `scripts/inspect.py` is named `scripts/inspect_world.py`
-because a script called `inspect.py` shadows the standard-library module.
+## Deviations from PLAN.md
+
+* `scripts/inspect.py` is named `scripts/inspect_world.py` because a script
+  called `inspect.py` shadows the standard-library module.
+* PLAN 2.1's half-open `[0, 1)` is the storage/cell convention;
+  `from_sphere` returns the closed interval and consumers clamp (above).
+* `flow_dir` is `uint8` (PLAN says `int8`; the 255 sentinel does not fit).
+* `tiles/.../flow.png` is RGB8: R = log discharge, G = basin-local id,
+  B = river mask (PLAN: RG8).
+* `tiles/.../meta.json` currently has no `neighbors` entry (tile neighbours
+  are derived from `(lod, face, x, y)` via cubesphere); add it later if the
+  Godot loader needs it.  Tiles are `(T+1)²` *vertex* samples on fine-cell
+  corners (see `globe/io/tiles.py`, docs/DEVELOPING.md).
+* Climate writes an extra coarse field `evap`: the dimensionless
+  evaporation multiplier `k_evap·max(T,0)` (~1 at `T_eq`) that erosion
+  applies to `erosion.evap_rate`.
+* The stub refine stage writes an intermediate `fine/<name>.f{0..5}.npy`
+  per-face layout that the stub tiles stage reads; the real refine stage
+  will replace this with per-basin output (see `stubs.stub_refine`).
+* Halo exchange: edge halos use 4×4 cubic Lagrange interpolation by default
+  (`exchange_halos(linear=True)` gives bilinear); corner halos use a local
+  least-squares quadratic fit (`linear=True`: convex inverse-distance
+  weights) rather than PLAN 2.4's "average of the two neighbours".
+  Particle transitions use the exact `transfer_vector` rotation rather than
+  PLAN 2.6's approximate re-expression.  PLAN 2.5's upwind gradient is
+  deferred to the erosion stage.
+* Content hashes ignore runtime-only knobs (`refine.workers`,
+  `erosion.checkpoint_every/quicklook_every`, `render.*`), and every stage
+  records the hash of its own parameter group so a resume detects upstream
+  parameter drift.

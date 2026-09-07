@@ -95,7 +95,13 @@ def face_of(x, y, z):
 
 @njit(cache=True)
 def from_sphere(x, y, z):
-    """Unit vector -> (face, u, v) with u, v in [0, 1]."""
+    """Unit vector -> (face, u, v) with u, v in the *closed* interval [0, 1].
+
+    A point lying exactly on a cube edge/corner is assigned to the
+    higher-priority face by :func:`face_of` (X > Y > Z) and then has u or v
+    exactly 1.0.  Callers computing a cell index must use
+    ``min(floor(u*N), N-1)`` (or clamp the extended index as
+    ``FaceField.sample_*`` and ``Grid.halo`` already do)."""
     face = face_of(x, y, z)
     r, up, n = _face_axes(face)
     d = x * n[0] + y * n[1] + z * n[2]
@@ -109,7 +115,9 @@ def from_sphere(x, y, z):
 @njit(cache=True)
 def project_to_face(face, x, y, z):
     """Project a unit vector onto a *given* face's parametrisation (may fall
-    outside [0, 1) — used for extrapolated windows).  Returns (u, v)."""
+    outside [0, 1) — used for extrapolated windows).  Returns (u, v).
+    A point exactly on the face's edge gives u or v exactly 0.0 or 1.0;
+    clamp ``floor(u*N)`` to ``N-1`` when indexing."""
     r, up, n = _face_axes(face)
     d = x * n[0] + y * n[1] + z * n[2]
     s = (x * r[0] + y * r[1] + z * r[2]) / d
@@ -253,7 +261,11 @@ def face_of_v(p):
 
 
 def from_sphere_v(p):
-    """Vectorised from_sphere: (..., 3) -> (face, u, v) arrays."""
+    """Vectorised from_sphere: (..., 3) -> (face, u, v) arrays.  As for the
+    scalar version u, v lie in the closed interval [0, 1]: a point exactly
+    on a cube edge/corner goes to the higher-priority face (X > Y > Z) with
+    u or v exactly 1.0, so index computations must use
+    ``min(floor(u*N), N-1)``."""
     p = np.asarray(p, dtype=np.float64)
     face = face_of_v(p)
     return face, *project_to_face_v(face, p)
@@ -337,7 +349,14 @@ class HaloMap:
     stencils see no seam) with a bilinear alternative (``w_lin``; no
     overshoot).  Corner blocks (beyond two edges, where three faces meet)
     use a local least-squares quadratic fit over the nearest interior
-    cells, exact for quadratic functions (both weight sets identical).
+    cells for ``w`` (exact for quadratic functions; weights may be
+    negative) and convex inverse-distance-squared weights over the 4
+    nearest interior cells for ``w_lin`` (non-negative, O(h²); monotone).
+
+    The weight and rotation tables are float64 so the stated accuracy holds
+    for float64 fields (``FaceField.exchange_halos`` casts them to the
+    field dtype, so float32 fields pay nothing extra).  Table memory at
+    N = 1024, H = 4 is ~76 MB (w + w_lin + rot).
     """
 
     dst: np.ndarray
@@ -527,9 +546,9 @@ class Grid:
         K1 = ei.size
         dst_e = np.empty(6 * K1, dtype=np.int64)
         src_e = np.zeros((6 * K1, S), dtype=np.int64)
-        w_e = np.zeros((6 * K1, S), dtype=np.float32)
-        wl_e = np.zeros((6 * K1, S), dtype=np.float32)
-        rot_e = np.zeros((6 * K1, S, 2, 2), dtype=np.float32)
+        w_e = np.zeros((6 * K1, S), dtype=np.float64)
+        wl_e = np.zeros((6 * K1, S), dtype=np.float64)
+        rot_e = np.zeros((6 * K1, S, 2, 2), dtype=np.float64)
         near_e = np.empty(6 * K1, dtype=np.int64)
         offs = np.array([-1, 0, 1, 2])
         for f in range(6):
@@ -560,7 +579,7 @@ class Grid:
             near_e[sl] = srcs[np.arange(K1), np.argmax(wl, axis=1)]
             e1 = transfer_vector_v(sf, su, sv, np.tile([[1.0, 0.0]], (K1, 1)), faces, u, v)
             e2 = transfer_vector_v(sf, su, sv, np.tile([[0.0, 1.0]], (K1, 1)), faces, u, v)
-            R = np.empty((K1, 2, 2), dtype=np.float32)
+            R = np.empty((K1, 2, 2), dtype=np.float64)
             R[:, :, 0] = e1
             R[:, :, 1] = e2
             rot_e[sl] = R[:, None, :, :]
@@ -588,8 +607,9 @@ class Grid:
         tree = cKDTree(cand_pos)
         dst_c = np.empty(6 * K2, dtype=np.int64)
         src_c = np.empty((6 * K2, S), dtype=np.int64)
-        w_c = np.empty((6 * K2, S), dtype=np.float32)
-        rot_c = np.empty((6 * K2, S, 2, 2), dtype=np.float32)
+        w_c = np.empty((6 * K2, S), dtype=np.float64)
+        wl_c = np.zeros((6 * K2, S), dtype=np.float64)
+        rot_c = np.empty((6 * K2, S, 2, 2), dtype=np.float64)
         near_c = np.empty(6 * K2, dtype=np.int64)
         for f in range(6):
             faces = np.full(K2, f)
@@ -604,7 +624,14 @@ class Grid:
             e1 = ax - p * np.sum(ax * p, axis=1, keepdims=True)
             e1 /= np.linalg.norm(e1, axis=1, keepdims=True)
             e2 = np.cross(p, e1)
-            q = cand_pos[idx]  # (K2, S, 3)
+            q = cand_pos[idx]  # (K2, S, 3), nearest first
+            # monotone alternative (w_lin): normalised inverse-distance-squared
+            # weights over the 4 nearest sources (chord distance; never 0
+            # because halo centres differ from interior centres)
+            dist = np.linalg.norm(q[:, :4] - p[:, None, :], axis=2)  # (K2, 4)
+            wl = 1.0 / (dist * dist)
+            wl /= wl.sum(axis=1, keepdims=True)
+            wl_c[sl, :4] = wl
             # gnomonic projection of neighbours onto the tangent plane at p
             dq = q / np.sum(q * p[:, None, :], axis=2, keepdims=True) - p[:, None, :]
             x = np.sum(dq * e1[:, None, :], axis=2)
@@ -629,7 +656,7 @@ class Grid:
             dst=np.concatenate([dst_e, dst_c]),
             src=np.concatenate([src_e, src_c]),
             w=np.concatenate([w_e, w_c]),
-            w_lin=np.concatenate([wl_e, w_c]),
+            w_lin=np.concatenate([wl_e, wl_c]),
             rot=np.concatenate([rot_e, rot_c]),
             nearest=np.concatenate([near_e, near_c]),
         )

@@ -32,6 +32,32 @@ STAGE_SEED_OFFSETS = {
     "stub": 9000,
 }
 
+#: Parameter groups whose values determine a stage's output (own group +
+#: world).  ``WorldStore.mark_stage`` records ``group_hash(*groups)`` per
+#: stage and ``stage_done(stage, params)`` compares against it, so a resume
+#: notices upstream parameter drift without hashing any files.
+STAGE_PARAM_GROUPS = {
+    "tectonics": ("world", "tectonics"),
+    "climate": ("world", "climate"),
+    "erosion": ("world", "erosion"),
+    "hydro": ("world", "hydro"),
+    "watersheds": ("world", "watersheds"),
+    "refine": ("world", "refine"),
+    "derive": ("world", "derive"),
+    "tiles": ("world", "refine"),
+}
+
+#: Knobs that change *how* a bake runs but not its output; excluded from
+#: ``content_hash`` / ``group_hash`` so changing them never refuses a resume.
+#: ``erosion.chunk`` / ``erosion.backend`` stay in the hash (per-batch
+#: change-list application and CUDA float atomics can change the output).
+ALL = object()
+RUNTIME_KNOBS: dict[str, Any] = {
+    "refine": {"workers"},
+    "erosion": {"checkpoint_every", "quicklook_every"},
+    "render": ALL,
+}
+
 
 @dataclass
 class WorldGroup:
@@ -81,7 +107,9 @@ class ClimateParams:
     k_oro: float = 0.5
     n_advect: int = 200
     precip_mean: float = 1.0
-    k_evap: float = 0.001
+    # evap = k_evap*max(T,0) is a dimensionless spatial multiplier on
+    # erosion.evap_rate: ~1 at a warm sea-level cell (T_eq), 0 where T <= 0.
+    k_evap: float = 1.0 / 28.0
     wind_speed: float = 1.0  # cells per advection step
     wind_deflection: float = 0.3
     itcz_width_deg: float = 10.0
@@ -98,7 +126,9 @@ class ErosionParams:
     density: float = 1.0  # ★
     friction: float = 0.05  # ★
     deposition_rate: float = 0.1  # ★
-    evap_rate: float = 0.001  # ★
+    # ★ McDonald evapRate; per-step particle decay is
+    # volume *= 1 - dt*evap_rate*evap[cell], evap = climate multiplier (~1)
+    evap_rate: float = 0.001
     k_mom: float = 1.0  # ★ momentumTransfer
     k_disc: float = 1.0
     ema: float = 0.1  # ★ map lerp
@@ -166,6 +196,35 @@ class WorldParams:
     derive: DeriveParams = field(default_factory=DeriveParams)
     render: RenderParams = field(default_factory=RenderParams)
 
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        """Raise ``ValueError`` unless the world/tile geometry is consistent.
+
+        PLAN section 3: the 2x LOD pyramid must reach exactly one tile per
+        face, so ``N_fine = N_c*R`` must be a multiple of ``T`` and
+        ``N_fine / T`` a power of two.  Halo / N_tect limits are checked by
+        ``Grid`` (N >= 2H); ``N_c % N_tect`` is not required (PLAN 6.3
+        resamples).  Called on construction and again by ``bake()`` because
+        presets and ``--set`` mutate params after construction."""
+        w = self.world
+        if w.N_c < 1 or w.R < 1 or w.T < 1:
+            raise ValueError(f"world.N_c, world.R and world.T must be >= 1 (got N_c={w.N_c}, R={w.R}, T={w.T})")
+        n_fine = self.N_fine
+        if n_fine % w.T != 0:
+            raise ValueError(
+                f"N_fine = N_c*R = {w.N_c}*{w.R} = {n_fine} is not a multiple of the tile edge T={w.T}; "
+                "PLAN section 3 requires an exact tiling so the LOD pyramid reaches 1 tile per face"
+            )
+        n = n_fine // w.T
+        if n & (n - 1) != 0:
+            raise ValueError(
+                f"tiles per face at LOD 0 = N_fine/T = {n_fine}/{w.T} = {n} is not a power of two; "
+                "PLAN section 3 requires the 2x LOD pyramid to reach exactly 1 tile per face "
+                f"(got N_c={w.N_c}, R={w.R}, T={w.T})"
+            )
+
     # -- convenience accessors ------------------------------------------
     @property
     def seed(self) -> int:
@@ -219,11 +278,18 @@ class WorldParams:
         return lod
 
     def rng(self, stage: str, *extra: int) -> np.random.Generator:
-        """Deterministic generator for a stage (and optional sub-keys such
-        as a basin id or iteration index)."""
+        """Deterministic generator for a stage and optional sub-keys (basin id,
+        iteration index, ...).  Keys of different length never collide
+        (``rng(s) != rng(s, 0)``) and negative ids (ocean = -1) are allowed.
+
+        The first entropy word is PLAN section 4's ``seed + stage_offset``;
+        the ``len(extra)`` word defeats SeedSequence's zero-padding and the
+        two's-complement mask makes negative keys valid and deterministic."""
         if stage not in STAGE_SEED_OFFSETS:
             raise KeyError(f"unknown stage {stage!r}")
-        return np.random.default_rng([int(self.world.seed) + STAGE_SEED_OFFSETS[stage], *[int(e) for e in extra]])
+        mask = (1 << 64) - 1
+        key = [(int(self.world.seed) + STAGE_SEED_OFFSETS[stage]) & mask, len(extra), *[int(e) & mask for e in extra]]
+        return np.random.default_rng(key)
 
     def workers(self) -> int:
         return self.refine.workers or (os.cpu_count() or 1)
@@ -260,13 +326,29 @@ class WorldParams:
         with open(path, "w") as fh:
             yaml.safe_dump(self.to_dict(), fh, sort_keys=False)
 
+    def hashed_dict(self, groups: tuple[str, ...] | None = None) -> dict:
+        """``to_dict()`` restricted to ``groups`` (all if None) with the
+        ``RUNTIME_KNOBS`` removed — the part of the params that determines
+        the baked output."""
+        d = self.to_dict()
+        out = {}
+        for g, sub in d.items():
+            if groups is not None and g not in groups:
+                continue
+            knobs = RUNTIME_KNOBS.get(g)
+            if knobs is ALL:
+                continue
+            out[g] = {k: v for k, v in sub.items() if not (knobs and k in knobs)}
+        return out
+
     def content_hash(self) -> str:
-        s = json.dumps(self.to_dict(), sort_keys=True, default=_json_default)
+        """Hash of every output-relevant parameter (runtime knobs excluded)."""
+        s = json.dumps(self.hashed_dict(), sort_keys=True, default=_json_default)
         return hashlib.sha256(s.encode()).hexdigest()[:16]
 
     def group_hash(self, *groups: str) -> str:
-        d = {g: getattr(self, g) for g in groups}
-        s = json.dumps({k: dataclasses.asdict(v) for k, v in d.items()}, sort_keys=True, default=_json_default)
+        """Hash of the named parameter groups (runtime knobs excluded)."""
+        s = json.dumps(self.hashed_dict(tuple(groups)), sort_keys=True, default=_json_default)
         return hashlib.sha256(s.encode()).hexdigest()[:16]
 
     def with_overrides(self, **groups: dict) -> "WorldParams":
