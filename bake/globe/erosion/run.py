@@ -3,11 +3,20 @@ grid with checkpoints, resume and periodic quicklooks.
 
 Inputs (coarse fields): ``bedrock``, ``uplift``, ``hardness`` (tectonics),
 ``precip``, ``evap`` (climate).  Outputs: ``height``, ``sediment``,
-``discharge``, ``momentum`` (docs/DEVELOPING.md).
+``discharge``, ``momentum`` (docs/DEVELOPING.md).  Sediment that found no
+room below sea level by the end of the run (``ErosionState.pending``) is
+not part of the outputs; its total is reported as ``pending_total_m`` in
+the stage info (and ``land_fraction`` next to ``land_fraction_bedrock``:
+the particle pass never turns sea into land or land into sea, so any
+drift is tectonic uplift / subsidence).
 
 Checkpoints: ``checkpoints/erosion_iterNNNN.npz`` (extended state arrays in
 cell units) + ``checkpoints/erosion_iterNNNN.json`` (iteration, parameter
-hash); ``run`` resumes from the newest checkpoint whose hash matches.
+hash); ``run`` resumes from the newest checkpoint whose hash (parameters,
+upstream output hashes, kernel version) matches unless ``erosion.resume``
+is False.  ``bake.py --force`` clears the outputs but not ``checkpoints/``:
+with an unchanged hash the final checkpoint is reused (that is what it is
+for); a kernel change bumps ``KERNEL_VERSION`` and invalidates it.
 """
 from __future__ import annotations
 
@@ -22,14 +31,26 @@ from ..config import WorldParams
 from ..field import FaceField
 from ..io.world_store import WorldStore
 from .maps import ErosionState, step
+from .particle import KERNEL_VERSION
 
 OUTPUTS = ["height", "sediment", "discharge", "momentum"]
 
 _CKPT_RE = re.compile(r"erosion_iter(\d+)\.npz$")
 
 
-def _ckpt_hash(params: WorldParams) -> str:
-    return params.group_hash("world", "erosion") + ":" + params.group_hash("tectonics", "climate")
+def _ckpt_hash(params: WorldParams, store: WorldStore | None = None) -> str:
+    """Parameters *and* upstream outputs a checkpoint depends on: the world
+    and erosion groups, the kernel version (``particle.KERNEL_VERSION``: a
+    code change never resumes stale results) and the manifest hashes of the
+    tectonics and climate outputs (so a re-baked upstream stage — even with
+    the same parameters, e.g. a stub replaced by the real stage —
+    invalidates it)."""
+    up = f":k{KERNEL_VERSION}"
+    if store is not None:
+        for s in ("tectonics", "climate"):
+            info = store.stage_info(s) or {}
+            up += ":" + str(info.get("hash", ""))
+    return params.group_hash("world", "erosion") + ":" + params.group_hash("tectonics", "climate") + up
 
 
 def save_checkpoint(store: WorldStore, state: ErosionState, params: WorldParams) -> Path:
@@ -38,10 +59,13 @@ def save_checkpoint(store: WorldStore, state: ErosionState, params: WorldParams)
     it = state.iteration
     p = d / f"erosion_iter{it:04d}.npz"
     tmp = p.with_suffix(".npz.tmp")
+    arrays = dict(height=state.height, sediment=state.sediment, discharge=state.discharge, momentum=state.momentum, pending=state.pending)
+    if state.route is not None:  # the routing surface is refreshed every flood_every iterations: part of the state
+        arrays["route"] = state.route
     with open(tmp, "wb") as fh:
-        np.savez(fh, height=state.height, sediment=state.sediment, discharge=state.discharge, momentum=state.momentum)
+        np.savez(fh, **arrays)
     tmp.replace(p)
-    meta = {"iteration": it, "params_hash": _ckpt_hash(params), "height_unit_m": state.height_unit_m, "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    meta = {"iteration": it, "params_hash": _ckpt_hash(params, store), "height_unit_m": state.height_unit_m, "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
     with open(p.with_suffix(".json"), "w") as fh:
         json.dump(meta, fh, indent=1)
     return p
@@ -52,7 +76,7 @@ def find_checkpoint(store: WorldStore, params: WorldParams, max_iteration: int |
     d = store.checkpoint_dir
     if not d.exists():
         return None
-    want = _ckpt_hash(params)
+    want = _ckpt_hash(params, store)
     best = None
     for p in d.glob("erosion_iter*.npz"):
         m = _CKPT_RE.search(p.name)
@@ -81,6 +105,8 @@ def load_checkpoint(state: ErosionState, path: Path, meta: dict) -> None:
         state.sediment[...] = z["sediment"]
         state.discharge[...] = z["discharge"]
         state.momentum[...] = z["momentum"]
+        state.pending[...] = z["pending"] if "pending" in z.files else 0.0
+        state.route = np.ascontiguousarray(z["route"]) if "route" in z.files else None
     state.iteration = int(meta["iteration"])
 
 
@@ -104,21 +130,26 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     grid = params.coarse_grid()
     state = build_state(store, params)
     n_iter = int(ep.iterations)
-    ck = find_checkpoint(store, params, max_iteration=n_iter)
+    land0 = float(np.mean((state.height + state.sediment)[state.interior] >= 0))
+    ck = find_checkpoint(store, params, max_iteration=n_iter) if ep.resume else None
     if ck is not None:
         load_checkpoint(state, *ck)
         log(f"[erosion] resumed from {ck[0].name} (iteration {state.iteration})")
     log(f"[erosion] {grid.describe()}; heights in units of {state.height_unit_m:.1f} m; {n_iter} iterations, {ep.particles_per_cell} particles/cell")
     times = []
+    clamped = 0
     while state.iteration < n_iter:
         it = state.iteration
         t0 = time.time()
         st = step(state, params, it)
         dt = time.time() - t0
         times.append(dt)
+        clamped += int(st.get("clamped", 0))
+        d = st.get("deaths", {})
         log(
             f"[erosion] iter {it + 1}/{n_iter}: {st['particles']} particles, mean {st['steps_mean']:.0f} steps, "
-            f"{st['seconds_particles']:.2f}s particles, {dt:.2f}s total"
+            f"deaths ocean {d.get('ocean', 0)} pit {d.get('pit', 0)} age {d.get('age', 0)}, clamped {st.get('clamped', 0)}, "
+            f"pending {st.get('pending_total', 0.0):.1f}, {st['seconds_particles']:.2f}s particles, {dt:.2f}s total"
         )
         done = state.iteration
         if ep.checkpoint_every > 0 and (done % ep.checkpoint_every == 0 or done == n_iter):
@@ -137,8 +168,12 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         "height_unit_m": state.height_unit_m,
         "seconds_per_iteration": float(np.mean(times)) if times else 0.0,
         "land_fraction": float(np.mean(surf >= 0)),
+        "land_fraction_bedrock": land0,
         "max_discharge": float(state.discharge[state.interior].max()),
         "sediment_mean_m": float(state.sediment[state.interior].mean() * state.height_unit_m),
+        "sediment_p99_m": float(np.percentile(state.sediment[state.interior], 99) * state.height_unit_m),
+        "pending_total_m": float(state.pending[state.interior].sum() * state.height_unit_m),
+        "clamped_entries": clamped,
     }
     return info
 

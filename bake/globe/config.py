@@ -72,41 +72,60 @@ class WorldGroup:
 
 @dataclass
 class TectonicsParams:
+    """PLAN section 6 knobs.  Lengths on the sphere are chord/arc lengths in
+    radians; "spacing" is the mean segment spacing ``sqrt(4*pi/M)`` (radians)
+    so every *_factor knob is resolution independent.  Time is measured in
+    tectonic steps (age, diffusion, speeds); there is no separate dt."""
+
     N_tect: int = 512
     segments: int = 20000
     initial_plates: int = 16
     steps: int = 1500
     convection: float = 10.0  # ★
-    growth: float = 0.05  # ★ k_G
+    growth: float = 0.05  # ★ k_G (thickness units per step)
     dissolution_factor: float = 0.05  # ★
     deposit_density: float = 0.5  # k_D
-    collision_radius_factor: float = 1.5  # × mean segment spacing
-    gap_radius_factor: float = 1.5  # × mean segment spacing
+    collision_radius_factor: float = 1.0  # × spacing: segments of different plates closer than this collide
+    gap_radius_factor: float = 1.0  # × spacing: cells farther than this from every segment are divergent gaps
+    overlap_fraction: float = 0.5  # segments of different plates closer than this × collision radius collide even when not approaching (no interleaving along transform boundaries)
+    splat_sigma_factor: float = 0.5  # sigma (× spacing) of the Gaussian blend of the nearest segments when splatting segment values to the tect grid
+    splat_knn: int = 12
     cascade_rate: float = 0.3  # ★
-    cascade_threshold: float = 0.05  # in bedrock units before scaling
+    cascade_threshold: float = 0.05  # bedrock units (thickness·(1−density)) per cell of neighbour distance on the tect grid
     cascade_passes: int = 3
     uplift_scale: float = 1.0
-    uplift_window: int = 100  # k steps: uplift = uplift_scale * (bedrock_now - bedrock_k_ago) / erosion.iterations
-    uplift_baseline: float = 0.02  # small positive baseline, fraction of max uplift
-    heat_diffusion: float = 2e-4  # rad² per unit time (× dt per step; sub-stepped for stability)
+    uplift_window: int = 100  # k steps: uplift = uplift_scale * (h_now - h_k_ago) [per segment, metres] / erosion.iterations
+    uplift_baseline: float = 0.02  # positive baseline outside collision zones, fraction of the 99th-percentile uplift
+    heat_diffusion: float = 2e-5  # rad² per step (explicit, sub-stepped for stability)
+    heat_grid_divisor: int = 4  # the heat field lives on an N_tect / divisor grid (low-frequency driver; cheap diffusion)
+    heat_relax: float = 0.002  # per-step relaxation of heat towards the initial background field (keeps the sources from saturating)
     heat_noise_octaves: int = 3
-    dt: float = 0.02
-    damping: float = 0.05
-    density_base: float = 0.5  # d_b in growth term
-    height_scale_m: float = 4000.0  # maps bedrock units to metres
-    smooth_sigma: float = 1.0  # final Gaussian (coarse cells)
-    # -- sphere-specific knobs (see globe/tectonics/plates.py for units) --
-    force_scale: float = 5e-3  # angular acceleration per unit convection*∇heat (heat/rad); pixel -> radian unit change
-    max_speed: float = 0.5  # cap on |omega| (rad per unit time; 0 = none)
-    initial_speed: float = 0.05  # |omega| of the random initial plate rotations (rad per unit time)
-    initial_thickness: float = 0.2  # crust thickness at t = 0
+    heat_noise_freq: float = 1.5  # base lattice frequency of the initial heat noise (features ~ 1/freq of the diameter)
+    damping: float = 0.05  # omega *= (1 - damping) per step
+    density_base: float = 0.5  # d_b in the growth term
+    height_scale_m: float = 4000.0  # metres per bedrock unit when relief_m == 0
+    relief_m: float = 5000.0  # if > 0: scale bedrock so the 99.9th percentile of land sits at this height (overrides height_scale_m)
+    smooth_sigma: float = 1.0  # final Gaussian on the tect grid (tect cells); resampling to the coarse grid is cubic
+    # -- sphere-specific knobs (see globe/tectonics/plates.py for the force model) --
+    force_scale: float = 3e-4  # plate angular acceleration in spacings/step² per unit (convection × |∇heat| [heat per radian] / mass per area)
+    max_speed: float = 0.3  # cap on plate speed, spacings per step (0 = none); keep < collision_radius_factor / 2
+    initial_speed: float = 0.1  # speed of the random initial plate rotations, spacings per step
+    initial_thickness: float = 0.4  # crust thickness at t = 0
+    max_thickness: float = 1.0  # crystallisation growth is faded by exp(-thickness / max_thickness)
+    ridge_height: float = 0.15  # thermal buoyancy of new crust, bedrock units (ridges at rifts; decays with age)
+    ridge_age: float = 150.0  # e-folding age (steps) of the buoyancy
     new_thickness: float = 0.05  # thickness of crust spawned at divergent boundaries
-    gap_cooling: float = 0.02  # heat removed per gap cell when new crust forms
-    subduction_heating: float = 0.02  # peak heat added (Gaussian blob, 1 spacing wide) per subducted segment
-    spawn_spacing_factor: float = 0.85  # min spacing of new segments, × mean segment spacing
+    gap_cooling: float = 0.05  # peak heat removed (Gaussian blob, 1 spacing wide) per segment of new crust spawned at a rift
+    subduction_heating: float = 0.01  # peak heat added (Gaussian blob, 1 spacing wide) per subducted segment
+    spawn_spacing_factor: float = 0.85  # min spacing of new segments, × spacing
+    relax_rate: float = 0.1  # per-step segment height cascade rate (0 = off); moves rate*(Δh-thr)/2/knn to each lower neighbour
+    relax_threshold: float = 0.15  # maximum stable slope, bedrock units per spacing
+    relax_knn: int = 8
+    belt_width_factor: float = 1.0  # sigma (× spacing) of the Gaussian that shares subducted mass among the survivor's same-plate neighbours (mountain belt width)
     boundary_width_factor: float = 3.0  # hardness: boundary_proximity falls to 0 at this × spacing from a foreign plate
     collision_zone_factor: float = 2.0  # uplift clamped >= 0 within this × spacing of a subduction of the uplift window
-    label_every: int = 1  # rebuild the label map every n steps (1 = every step)
+    area_blend: float = 0.05  # rolling blend of the measured Voronoi area per step (PLAN: 0.99 rolling == 0.01)
+    label_every: int = 1  # rebuild the label map (gaps, areas) every n steps; collisions and forces run every step
 
 
 @dataclass
@@ -115,19 +134,39 @@ class ClimateParams:
     k_lat: float = 45.0
     lapse: float = 6.5  # °C per km
     m_ocean: float = 1.0
-    k_base: float = 0.02
-    k_oro: float = 0.5
-    n_advect: int = 200
+    # Moisture rain-out is parameterised in physical length (climate/precipitation.py), so the
+    # picture is the same at any N_c / cell size:
+    #   frac = min(1, 1 - exp(-step_m/L_base) + k_oro*(1 - exp(-rise_m/oro_height_m)))
+    # step_m = |wind|*dt*cell_size_m per sweep; L_base = moisture_reach_m or moisture_reach_frac*R_planet.
+    # (PLAN 7's per-step k_base is 1 - exp(-step_m/L_base): 0.02 at 50 m cells needs L_base = 2.5 km.)
+    moisture_reach_frac: float = 0.5  # background rain-out e-folding fetch as a fraction of R_planet (continents scale with the planet)
+    moisture_reach_m: float = 0.0  # ... or an explicit fetch in metres (> 0 overrides the fraction)
+    k_oro: float = 1.0  # max orographic rain-out fraction per sweep; 1 = pure exp(-climb/oro_height_m) moisture loss
+    oro_height_m: float = 2000.0  # orographic scale height: an air parcel keeps exp(-dh/oro_height_m) of its moisture after climbing dh
+    calm_floor: float = 0.25  # the background rain-out uses a step length of at least calm_floor*wind_speed cells (still air still rains out; no zero-rain lines in the calm belts)
+    n_advect: int = 0  # advection sweeps; 0 = sweep until the moisture field is stationary (see advect_tol / n_advect_max_factor)
+    advect_tol: float = 1e-3  # auto mode stops when the max moisture change over land per sweep < advect_tol*m_ocean
+    n_advect_max_factor: float = 4.0  # auto-mode cap: n_advect_max_factor*N/(wind_speed*dt) sweeps
     precip_mean: float = 1.0
     # evap = k_evap*max(T,0) is a dimensionless spatial multiplier on
     # erosion.evap_rate: ~1 at a warm sea-level cell (T_eq), 0 where T <= 0.
     k_evap: float = 1.0 / 28.0
-    wind_speed: float = 1.0  # cells per advection step
-    wind_deflection: float = 0.3
-    itcz_width_deg: float = 10.0
-    dry_band_deg: float = 25.0
-    dry_band_strength: float = 0.5
-    dt: float = 1.0
+    wind_speed: float = 1.0  # cells per advection step (keep < halo - 1 so the semi-Lagrangian departure point stays in the halo)
+    wind_deflection: float = 0.3  # k: steering around terrain, t = k*slope/(1+k*slope) (see climate/wind.py)
+    itcz_width_deg: float = 10.0  # sigma of the ITCZ wet band (Gaussian in latitude)
+    dry_band_deg: float = 25.0  # centre latitude of the subtropical dry bands
+    dry_band_strength: float = 0.5  # precip multiplier at the dry-band centre is 1 - strength
+    dt: float = 1.0  # advection step (departure = pos - wind*dt)
+    # -- additions (climate/*.py) ------------------------------------------
+    wind_meridional: float = 0.4  # meridional / zonal speed ratio of the surface branches of the three cells
+    band_blend_deg: float = 6.0  # width of the smooth zonal-sign transitions at 30 and 60 degrees (calm belts)
+    pole_taper_deg: float = 3.0  # wind speed tapers smoothly to 0 within this angle of a pole
+    deflection_smooth: int = 2  # 3x3 binomial passes on the surface before the deflection gradient
+    rise_smooth: int = 1  # 3x3 binomial passes on the surface before the windward-rise gradient
+    precip_floor: float = 0.1  # background rain added on land (fraction of the land mean of the advected rain) before the latitude prior
+    precip_smooth: int = 1  # 3x3 binomial passes on the rain (spillover: orographic rain drifts a few cells) before the prior / normalisation
+    itcz_strength: float = 1.0  # precip multiplier at the equator is 1 + strength
+    dry_band_width_deg: float = 8.0  # sigma of the dry bands
 
 
 @dataclass
@@ -136,7 +175,7 @@ class ErosionParams:
     particles_per_cell: float = 0.25
     dt: float = 1.2  # ★
     density: float = 1.0  # ★
-    friction: float = 0.25  # ★ 0.05 in McDonald 2020 with sub-cell steps; 0.25 (SimpleHydrology) with unit steps, see erosion/particle.py
+    friction: float = 0.25  # ★ inertia: the previous (unit) direction enters the direction update with weight 1 - dt*friction before gravity / momentum are added (the step is always one cell, so friction cannot limit a terminal speed); 1/dt = no inertia, see erosion/particle.py
     deposition_rate: float = 0.1  # ★
     # ★ McDonald evapRate; per-step particle decay is
     # volume *= 1 - dt*evap_rate*evap[cell], evap = climate multiplier (~1)
@@ -145,21 +184,29 @@ class ErosionParams:
     k_disc: float = 1.0
     ema: float = 0.1  # ★ map lerp
     thermal_rate: float = 0.5
+    thermal_max: float = 1.0  # cap on the material a cell sheds per thermal pass (cell units): a tectonic cliff relaxes at a bounded rate instead of collapsing in one iteration
     talus_slope_soft: float = 0.6  # rise/run
     talus_slope_hard: float = 1.2
     min_volume: float = 0.01  # ★
     max_steps: int = 0  # 0 -> 2 * N
     checkpoint_every: int = 50
     quicklook_every: int = 50
-    slope_gain: float = 2.0  # multiplies the gravity force (tangential surface normal) in the particle direction update
+    slope_gain: float = 2.0  # multiplies the gravity force in the particle direction update
+    slope_saturation: float = 0.0  # > 0: gravity = slope_gain * s / sqrt(s^2 + slope_saturation^2) along the downhill direction (terminal-velocity flow; gentle slopes still steer); 0 = tangential surface normal (McDonald)
     erodibility: float = 0.2  # c_eq = erodibility * dh * (1 + k_disc * erf(q / disc_saturation)); 1.0 = McDonald 2022
-    height_unit_m: float = 0.0  # kernel heights are height_m / height_unit_m; 0 or 1 -> use cell_size_m (cell units)
+    height_unit_m: float = 0.0  # kernel heights are in cell units (height_m / cell_size_m): every cap, talus slope and gravity term is defined in them; 0 or 1 (= cell_size_m) are the only accepted values, anything else raises
     disc_saturation: float = 32.0  # discharge (volume units ~ upstream cells) at which erf(q/disc_saturation) saturates the entrainment term
-    max_erode: float = 0.25  # cap on terrain removed per particle-step (cell units); safety against blow-ups
+    max_erode: float = 0.25  # cap on terrain removed per particle-step (cell units) at trace time (against the chunk-start terrain)
+    iter_erode: float = 0.5  # net erosion a cell may receive per iteration (cell units), enforced against the live terrain in apply order; the shortfall cancels the particle's later deposits (erosion/particle.py apply_changes)
+    iter_deposit: float = 1.0  # net deposition a cell may receive per iteration (cell units); the excess moves back up the particle's path, the remainder waits in the per-cell `pending` stockpile (released at this rate)
+    ocean_deposition_rate: float = 0.3  # a particle that reaches the sea keeps walking downslope on the seafloor, deposit-only, dropping this fraction of its load per step (submarine fan); no erosion, no discharge track below sea level
+    ocean_steps: int = 64  # at most this many seafloor steps (then the rest waits in the cell's pending stockpile, re-injected next iteration)
+    fan_slope: float = 0.05  # a submarine fan descends at least this much per cell away from its source (cell units per cell): the deposit ceiling of a seafloor step is the previous path cell minus this, and never above -DEP_FLOOR
+    resume: bool = True  # resume from checkpoints/ whose parameter + upstream + kernel-version hash matches; False recomputes from bedrock
     flood_every: int = 10  # recompute the particle routing surface (epsilon priority flood, erosion/route.py) every k iterations; 0 = steer on the raw terrain
     route_eps: float = 1e-3  # minimum drop per cell (cell units) of the routing surface across lakes
     pit_steps: int = 16  # kill a particle after this many consecutive uphill steps (stuck in a pit)
-    chunk: int = 512  # particles per parallel chunk (change-list capacity = chunk*(max_steps+1) entries of 24 B); terrain is frozen within a chunk
+    chunk: int = 512  # particles per parallel chunk (change-list capacity = chunk*(max_steps+8) entries of 24 B, ~25 MB at N_c=1024); terrain is frozen within a chunk
     backend: str = "cpu"
 
 
@@ -188,11 +235,38 @@ class RefineParams:
 
 @dataclass
 class DeriveParams:
-    river_width_a: float = 2.0
+    """PLAN section 11 knobs (globe/derive).  Rivers come from the *fine*
+    discharge: cells above a discharge threshold chosen so that a given
+    fraction of the land is river (density matched to the coarse channel
+    network by default), thinned to centrelines."""
+
+    river_width_a: float = 2.0  # w = a * (Q / Q_thr)^b fine cells (Q_thr = the river discharge threshold)
     river_width_b: float = 0.5
-    riparian_cells: int = 3
-    wetland_cells: int = 3
-    min_river_order: int = 1
+    riparian_cells: int = 3  # coarse cells from a channel / river mask cell (x R at fine resolution)
+    wetland_cells: int = 3  # coarse cells from a lake cell
+    min_river_order: int = 1  # rivers of lower Strahler order are dropped from rivers.json / the mask
+    # -- river extraction (derive/rivers.py) --------------------------------
+    river_mask_fraction: float = 0.0  # fraction of fine land cells above the discharge threshold; 0 = auto: river_fraction_scale x the coarse channel fraction of land
+    river_fraction_scale: float = 1.5  # auto mode: a thresholded discharge blob is wider than a 1-cell D8 channel
+    river_hysteresis: float = 2.5  # connectivity threshold = the discharge of river_fraction x this fraction of land; low-threshold blobs survive only if they contain a high-threshold cell (1 = off)
+    river_fallback_fraction: float = 0.03  # auto mode when the coarse graph has no channels (stub hydro)
+    discharge_smooth_cells: float = 1.0  # Gaussian sigma (fine cells) applied to the discharge before thresholding; 0 = off
+    min_river_cells: float = 8.0  # x R^2: smaller discharge blobs are dropped, smaller holes are filled before thinning
+    spur_cells: float = 3.0  # x R: skeleton spurs (endpoint -> junction) shorter than this are pruned
+    max_width_cells: float = 24.0  # cap on the river width (fine cells)
+    river_point_step: float = 2.0  # polyline vertex spacing (fine cells) after Catmull-Rom smoothing
+    graph_match_cells: int = 2  # a polyline takes order / edge_id from a coarse drainage edge within this many coarse cells
+    # -- biomes (derive/biomes.py) ------------------------------------------
+    precip_scale_cm: float = 100.0  # annual precipitation (cm) at the land *mean* rain rate (wetness = 1; climate.precip_mean by contract)
+    precip_gamma: float = 0.5  # P_cm = precip_scale_cm * wetness^gamma: compresses the skewed rain rate (coasts 10-30x the mean, interiors 0.05x) into the Whittaker range
+    precip_max_cm: float = 400.0  # cap on P_cm (the Whittaker bins end at 220 cm); 0 = none
+    alpine_min_m: float = 800.0  # alpine override: surface above this AND temperature below alpine_T
+    alpine_T: float = 0.0  # degC
+    cliff_slope: float = 1.6  # rise/run above which a cell is bare cliff (and vegetation is 0)
+    cliff_max_fraction: float = 0.03  # cliffs cover at most this fraction of the land: the effective threshold is max(cliff_slope, that land quantile of the coarse slope)
+    slope_stencil: int = 0  # half-width (fine cells) of the fine slope stencil; 0 = R (coarse-scale slope on the fine grid)
+    soil_full_depth_m: float = 1.0  # sediment depth at which the soil factor of the vegetation reaches 1 (derive/soil.py)
+    lake_min_cells: float = 1.0  # x R^2: smaller fine lake pieces are ignored
 
 
 @dataclass
@@ -382,7 +456,7 @@ class WorldParams:
         p = cls()
         p.world = WorldGroup(seed=seed, N_c=128, cell_size_m=50.0, R=2, T=64, land_fraction=0.3)
         p.tectonics = dataclasses.replace(p.tectonics, N_tect=64, segments=1500, initial_plates=8, steps=300)
-        p.climate = dataclasses.replace(p.climate, n_advect=60)
+        p.climate = dataclasses.replace(p.climate, n_advect=0)  # auto: sweep until stationary (cap 4*N)
         p.erosion = dataclasses.replace(p.erosion, iterations=60, checkpoint_every=30, quicklook_every=30)
         p.watersheds = WatershedParams(basin_max_cells=48 * 48, basin_min_cells=8 * 8)
         p.refine = dataclasses.replace(p.refine, refine_iterations=20, halo_cells=4)
@@ -394,7 +468,7 @@ class WorldParams:
         p = cls.small_world(seed)
         p.world = WorldGroup(seed=seed, N_c=32, cell_size_m=50.0, R=2, T=16, land_fraction=0.3)
         p.tectonics = dataclasses.replace(p.tectonics, N_tect=32, segments=300, initial_plates=5, steps=60)
-        p.climate = dataclasses.replace(p.climate, n_advect=20)
+        p.climate = dataclasses.replace(p.climate, n_advect=0)
         p.erosion = dataclasses.replace(p.erosion, iterations=10, checkpoint_every=5, quicklook_every=5)
         p.watersheds = WatershedParams(basin_max_cells=12 * 12, basin_min_cells=3 * 3)
         p.refine = dataclasses.replace(p.refine, refine_iterations=5, halo_cells=2)

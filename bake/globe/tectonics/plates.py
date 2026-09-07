@@ -2,8 +2,8 @@
 (PLAN.md section 6.1 / 6.2 steps 2-3).
 
 A plate is a rigid body on the unit sphere described by its angular
-velocity ``omega`` (3-vector, radians per unit simulation time; the axis is
-the Euler pole).  Per step the plate rotates by the angle ``|omega| * dt``.
+velocity ``omega`` (3-vector, **radians per tectonic step**; the axis is
+the Euler pole).  Per step the plate rotates by the angle ``|omega|``.
 
 Units and force model
 ---------------------
@@ -14,14 +14,18 @@ Units and force model
   components of ``FaceField.gradient()`` (whose basis is ``E_i = R_planet
   * J_u / N`` metres per cell) with the EAC Jacobian:
   ``∇f [per radian] = (a * J_u + b * J_v) * R_planet**2 / N``.
-* Force per segment ``f_i = convection * force_scale * area_i * ∇heat_i``
-  (``area_i`` in steradians, so the total force scales with plate area;
-  the ★ ``convection = 10`` keeps its published value and ``force_scale``
-  absorbs the pixel -> radian unit change).
+* Force per segment ``f_i = area_i * ∇heat_i`` (``area_i`` in steradians,
+  so the total force scales with plate area); plates are pushed *towards*
+  hot regions (PLAN 6.2.2, ``f = convection * ∇heat``).  Subduction warms
+  and new crust cools the heat field, so convergent boundaries attract and
+  rifts repel — the feedback that keeps plates moving coherently.
 * Torque about the planet centre ``τ = Σ pos_i × f_i``; scalar inertia
-  ``I = Σ area_i * mass_i``; update ``omega = (1 - damping) * omega + dt *
-  τ / I``.  Terminal angular speed under a unit gradient is therefore
-  ``dt * convection * force_scale / (mass * damping)`` per unit time.
+  ``I = Σ area_i * mass_i``; :func:`update_omega` does
+  ``omega = (1 - damping) * omega + gain * τ / I`` with
+  ``gain = convection * force_scale * spacing`` (run.py), so the angular
+  acceleration in *spacings per step²* is ``convection * force_scale *
+  |∇heat| / (mass per area)`` and the terminal speed under a unit gradient
+  is ``convection * force_scale / (mass * damping)`` spacings per step.
 """
 from __future__ import annotations
 
@@ -143,7 +147,7 @@ def cluster_plates(pos: np.ndarray, n_plates: int, rng: np.random.Generator, ite
 
 def random_initial_omega(plates: Plates, rng: np.random.Generator, speed: float) -> None:
     """Give every plate a random Euler pole with angular speed ``speed``
-    (radians per unit time)."""
+    (radians per step)."""
     plates.omega[:] = random_unit_vectors(rng, (plates.P,)) * float(speed)
     plates.omega[~plates.alive] = 0.0
 
@@ -164,19 +168,20 @@ def heat_gradient_3d(heat: FaceField, pos: np.ndarray) -> np.ndarray:
     return (ab[:, :1] * ju + ab[:, 1:] * jv) * scale
 
 
-def plate_torques(seg: Segments, grad3: np.ndarray, P: int, convection: float, force_scale: float) -> np.ndarray:
+def plate_torques(seg: Segments, grad3: np.ndarray, P: int) -> np.ndarray:
     """Torque (P, 3) about the planet centre from the per-segment forces
-    ``f_i = convection * force_scale * area_i * grad3_i``."""
-    f = grad3 * (seg.area * (convection * force_scale))[:, None]
+    ``f_i = area_i * grad3_i`` (steradian × heat per radian)."""
+    f = grad3 * seg.area[:, None]
     tau = np.cross(seg.pos, f)
     return np.stack([np.bincount(seg.plate_id, weights=tau[:, k], minlength=P)[:P] for k in range(3)], axis=1)
 
 
-def update_omega(plates: Plates, torque: np.ndarray, dt: float, damping: float, max_speed: float = 0.0) -> None:
-    """``omega = (1 - damping) * omega + dt * τ / I`` for live plates,
-    optionally capped at ``max_speed`` (radians per unit time)."""
+def update_omega(plates: Plates, torque: np.ndarray, gain: float, damping: float, max_speed: float = 0.0) -> None:
+    """``omega = (1 - damping) * omega + gain * τ / I`` for live plates
+    (radians per step), optionally capped at ``max_speed`` (radians per
+    step, i.e. the speed of a segment on the rotation equator)."""
     inertia = np.maximum(plates.inertia, 1e-12)
-    om = (1.0 - damping) * plates.omega + dt * torque / inertia[:, None]
+    om = (1.0 - damping) * plates.omega + gain * torque / inertia[:, None]
     if max_speed > 0:
         s = np.linalg.norm(om, axis=1, keepdims=True)
         om = np.where(s > max_speed, om * (max_speed / np.maximum(s, 1e-30)), om)
@@ -219,13 +224,14 @@ def _rotate_kernel(pos, plate_id, omega, dt):
         pos[i, 2] = rz * inv
 
 
-def rotate_segments(seg: Segments, plates: Plates, dt: float) -> None:
+def rotate_segments(seg: Segments, plates: Plates, dt: float = 1.0) -> None:
     """Rigidly rotate every segment about its plate's Euler pole by
-    ``|omega| * dt`` (Rodrigues' formula, renormalised).  In place."""
+    ``|omega| * dt`` (Rodrigues' formula, renormalised; ``dt`` = 1 step by
+    default).  In place."""
     _rotate_kernel(seg.pos, seg.plate_id, plates.omega, float(dt))
 
 
-def segment_velocities(seg: Segments, plates: Plates, dt: float) -> np.ndarray:
+def segment_velocities(seg: Segments, plates: Plates, dt: float = 1.0) -> np.ndarray:
     """Displacement per step ``(omega_plate * dt) × pos`` as tangent
     3-vectors (M, 3), radians per step."""
     return np.cross(plates.omega[seg.plate_id] * dt, seg.pos)

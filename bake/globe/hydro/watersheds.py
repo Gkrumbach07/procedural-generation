@@ -27,7 +27,9 @@ Hierarchy: ``parent`` is the basin a basin drains into (``downstream_basin``;
 basins do not exist after priority flood (every lake spills), so every
 root drains to the ocean.
 
-Outputs: ``basin_id`` (i32, -1 ocean), ``graph/basins.json``.
+Outputs: ``basin_id`` (i32, -1 ocean), ``graph/basins.json`` (DEVELOPING.md
+schema plus ``outlet_downstream``, ``exits``, ``exit_kinds``,
+``undersized_reason``, ``basin_max_cells`` / ``basin_min_cells``).
 """
 from __future__ import annotations
 
@@ -38,7 +40,7 @@ import numpy as np
 from numba import njit
 
 from ..field import FaceField
-from .d8 import OCEAN, cid_fij, downstream_table
+from .d8 import OCEAN, cid_fij, downstream_table, neighbor_cid
 from .routing import channel_network, topological_order
 from .run import river_threshold_volume
 
@@ -129,6 +131,28 @@ def _boundary_pairs(label3):
                         w[n] = wt
                         n += 1
     return a[:n], b[:n], w[:n]
+
+
+@njit(cache=True)
+def _cross_face_land_contact(bid, owner, N, H, nb):
+    """out[b] = True if basin b has a cell whose D8 neighbour across a
+    cube-face edge is land (basin id >= 0).  Only face-border cells can."""
+    out = np.zeros(nb, dtype=np.bool_)
+    NN = N * N
+    for f in range(6):
+        for i in range(N):
+            for j in range(N):
+                if i != 0 and i != N - 1 and j != 0 and j != N - 1:
+                    continue
+                x = bid[(f * N + i) * N + j]
+                if x < 0:
+                    continue
+                for k in range(8):
+                    q = neighbor_cid(owner, N, H, f, i, j, k)
+                    if q // NN != f and bid[q] >= 0:
+                        out[x] = True
+                        break
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -319,6 +343,13 @@ def partition(flow_dir, grid, basin_max_cells: int, basin_min_cells: int, lake=N
     order_cells = np.argsort(b_of, kind="stable")
     bounds = np.searchsorted(b_of[order_cells], np.arange(nb_final + 1))
     co = np.zeros(M, dtype=np.int16) if cell_order is None else np.ascontiguousarray(cell_order, dtype=np.int16).reshape(-1)
+    # exit cells: downstream is ocean, another face or another basin
+    d_l = down[land_idx]
+    d_ok = np.maximum(d_l, 0)
+    is_exit = (d_l < 0) | (bid[d_ok] != b_of)
+    exit_kind = np.where((d_l < 0) | (bid[d_ok] < 0), 0, np.where(d_ok // NN != ff, 1, 2))  # ocean / face / basin
+    KINDS = ("ocean", "face", "basin")
+    edge_contact = _cross_face_land_contact(bid, grid.owner, N, H, nb_final)
     basins = []
     N_fine = N * R
     for b in range(nb_final):
@@ -357,11 +388,23 @@ def partition(flow_dir, grid, basin_max_cells: int, basin_min_cells: int, lake=N
             "order": int(co[oc]),
             "tiles": sorted(list(t) for t in tiles),
         }
+        ex = sel[is_exit[sel]]  # cell-id order = (f, i, j) order
+        ex_c = land_idx[ex]
+        o_pos = np.nonzero(ex_c == oc)[0]
+        assert o_pos.size == 1, "outlet is not an exit of its basin"
+        ex = np.concatenate([ex[o_pos], np.delete(ex, o_pos[0])])
+        rec["exits"] = [[int(ff[e]), int(ii[e]), int(jj[e])] for e in ex]
+        rec["exit_kinds"] = [KINDS[int(exit_kind[e])] for e in ex]
         if sel.size < basin_min_cells:
-            rec["undersized_reason"] = reason.get(int(r), "max")
+            why = reason.get(int(r), "max")
+            if why == "island" and edge_contact[b]:
+                why = "edge"
+            rec["undersized_reason"] = why
         basins.append(rec)
     info["n_basins"] = nb_final
     info["n_undersized"] = sum(1 for b in basins if "undersized_reason" in b)
+    info["undersized_reasons"] = {k: sum(1 for b in basins if b.get("undersized_reason") == k) for k in ("island", "edge", "max")}
+    info["n_multi_exit"] = sum(1 for b in basins if len(b["exits"]) > 1)
     info["max_area"] = max((b["area_cells"] for b in basins), default=0)
     return Partition(basin_id.reshape(6, N, N), basins, info)
 
@@ -396,7 +439,8 @@ def run(store, params, log=print) -> dict:
     info["t_total_s"] = time.time() - t0
     log(
         f"[watersheds] {info['n_basins']} basins from {info['n_initial']} outlets "
-        f"({info['n_splits']} splits, {info['n_merges']} merges, {info['n_undersized']} undersized, max {info['max_area']} cells) in {info['t_total_s']:.1f}s"
+        f"({info['n_splits']} splits, {info['n_merges']} merges, {info['n_undersized']} undersized {info['undersized_reasons']}, "
+        f"{info['n_multi_exit']} multi-exit, max {info['max_area']} cells) in {info['t_total_s']:.1f}s"
     )
     return info
 

@@ -52,12 +52,20 @@ def priority_flood_eps(surface, mask, owner, H, N, eps):
     visited = np.zeros(total, dtype=np.uint8)
     heap = [(0.0, 0)]
     heap.pop()
+    # Never expand into mask-0 cells or past the array border: in window
+    # mode ``owner`` is the identity, so a flooded halo cell would otherwise
+    # look at neighbours outside the array (no bounds checks under numba).
+    for f in range(F):
+        for ei in range(NE):
+            for ej in range(NE):
+                c = (f * NE + ei) * NE + ej
+                if mflat[c] == MASK_OUTSIDE or ei == 0 or ej == 0 or ei == NE - 1 or ej == NE - 1:
+                    visited[c] = 1
     for f in range(F):
         for ei in range(H, H + N):
             for ej in range(H, H + N):
                 c = (f * NE + ei) * NE + ej
-                if mflat[c] == MASK_OUTSIDE:
-                    visited[c] = 1
+                if visited[c]:
                     continue
                 seed = sflat[c] < 0.0
                 if not seed:

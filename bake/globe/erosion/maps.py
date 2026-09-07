@@ -64,6 +64,10 @@ class ErosionState:
     route: np.ndarray | None = None  # (F, NE, NE) float64 routing surface (see route.py); None = steer on the terrain
     disch_track: np.ndarray = field(default=None, repr=False)
     mom_track: np.ndarray = field(default=None, repr=False)
+    samp: np.ndarray = field(default=None, repr=False)  # packed float32 samples (F, NE, NE, NS), rebuilt every iteration
+    acc: np.ndarray = field(default=None, repr=False)  # float64 net terrain change of the current iteration (cell units), zero between iterations
+    pending: np.ndarray = field(default=None, repr=False)  # float64 sediment stockpile per cell (cell units) that found no room this iteration (particle.apply_changes); re-injected as a loaded particle next iteration; part of the mass balance
+    _owner: np.ndarray = field(default=None, repr=False)
     iteration: int = 0
     deposit_on_exit: bool = False  # window mode: deposit the load at the last active cell when leaving
 
@@ -73,6 +77,12 @@ class ErosionState:
             self.disch_track = np.zeros((F, NE, NE), dtype=np.float64)
         if self.mom_track is None:
             self.mom_track = np.zeros((F, NE, NE, 2), dtype=np.float64)
+        if self.samp is None:
+            self.samp = np.zeros((F, NE, NE, pk.NS), dtype=np.float32)
+        if self.acc is None:
+            self.acc = np.zeros((F, NE, NE), dtype=np.float64)
+        if self.pending is None:
+            self.pending = np.zeros((F, NE, NE), dtype=np.float64)
         assert NE == self.N + 2 * self.H, "array width must be N + 2H"
         for a, shape in (
             (self.sediment, (F, NE, NE)),
@@ -196,6 +206,11 @@ class ErosionState:
     def surface(self) -> np.ndarray:
         return self.height + self.sediment
 
+    def pack(self) -> None:
+        """Refresh the packed float32 sample array from the state arrays."""
+        use_route = self.route is not None
+        pk.pack_samples(self.samp, self.height, self.sediment, self.route if use_route else self.height, use_route, self.discharge, self.momentum, self.evap, self.hardness, self.metric, self.metric_inv)
+
     def height_m(self) -> np.ndarray:
         return self.height * self.height_unit_m
 
@@ -203,9 +218,10 @@ class ErosionState:
         return self.sediment * self.height_unit_m
 
     def total_mass(self) -> float:
-        """Σ (height + sediment) over active interior cells (cell units)."""
+        """Σ (height + sediment + pending) over active interior cells (cell
+        units) — the quantity the particle pass conserves exactly."""
         act = self.mask[self.interior] == pk.MASK_ACTIVE
-        return float(np.sum((self.height + self.sediment)[self.interior][act]))
+        return float(np.sum((self.height + self.sediment + self.pending)[self.interior][act]))
 
     # -- halos ---------------------------------------------------------------
     def exchange_halos(self) -> None:
@@ -221,13 +237,21 @@ class ErosionState:
         if self.route is not None:
             FaceField(self.grid, self.route).exchange_halos(linear=True)
 
+    def owner_table(self) -> np.ndarray:
+        """Flat index of the interior cell owning every extended cell
+        (``grid.owner`` in spherical mode, identity for a window)."""
+        if self._owner is None:
+            from .route import window_owner
+
+            self._owner = np.ascontiguousarray(self.grid.owner if self.spherical else window_owner(self.F, self.NE), dtype=np.int64)
+        return self._owner
+
     def refresh_route(self, eps: float) -> None:
         """Recompute the epsilon-filled routing surface from the current
         terrain (:mod:`globe.erosion.route`)."""
-        from .route import priority_flood_eps, window_owner
+        from .route import priority_flood_eps
 
-        owner = self.grid.owner if self.spherical else window_owner(self.F, self.NE)
-        self.route = priority_flood_eps(self.surface(), self.mask, np.ascontiguousarray(owner, dtype=np.int64), self.H, self.N, float(eps))
+        self.route = priority_flood_eps(self.surface(), self.mask, self.owner_table(), self.H, self.N, float(eps))
         if self.spherical:
             FaceField(self.grid, self.route).exchange_halos(linear=True)
 
@@ -249,9 +273,14 @@ class ErosionState:
 
 
 def height_unit(grid: Grid, eparams: ErosionParams | None) -> float:
-    """``height_unit_m`` semantics: 0 or 1 → use the grid's cell size."""
+    """Kernel height unit: the grid's cell size.  ``erosion.height_unit_m``
+    accepts only 0, 1 (both = cell size) or the cell size itself — every
+    cap, talus slope and the gravity term are defined in cell units, so a
+    different unit would silently rescale the model."""
     u = float(eparams.height_unit_m) if eparams is not None else 0.0
-    return grid.cell_size_m if u in (0.0, 1.0) else u
+    if u in (0.0, 1.0) or u == grid.cell_size_m:
+        return grid.cell_size_m
+    raise ValueError(f"erosion.height_unit_m={u} is not supported: the kernel works in cell units ({grid.cell_size_m} m); set 0")
 
 
 def _eparams(params) -> ErosionParams:
@@ -275,12 +304,12 @@ def chunk_size(ep: ErosionParams, n_particles: int) -> int:
 # spawning
 # --------------------------------------------------------------------------
 def spawn_weights(state: ErosionState) -> tuple[np.ndarray, np.ndarray]:
-    """Flat indices of spawnable interior cells (land, active, precip > 0)
-    and their weights (precip)."""
+    """Flat indices of spawnable interior cells (land, mask 1 — frozen
+    divides never spawn — precip > 0) and their weights (precip)."""
     F, NE, H, N = state.F, state.NE, state.H, state.N
     inter = np.zeros((F, NE, NE), dtype=bool)
     inter[state.interior] = True
-    ok = inter & (state.mask != pk.MASK_OUTSIDE) & (state.height + state.sediment >= 0.0) & (state.precip > 0)
+    ok = inter & (state.mask == pk.MASK_ACTIVE) & (state.height + state.sediment >= 0.0) & (state.precip > 0)
     idx = np.flatnonzero(ok)
     w = state.precip.reshape(-1)[idx].astype(np.float64)
     return idx, w
@@ -325,12 +354,15 @@ def run_iteration(
     rng_stage: str = "erosion",
     log=None,
 ) -> dict:
-    """PLAN 8.2, particle part: spawn, trace in chunks, apply change lists,
-    then EMA-update ``discharge``/``momentum``.  ``iteration_key`` is an int
-    or a tuple of ints mixed into ``params.rng(rng_stage, *key)``.
-    ``params`` may be a ``WorldParams`` or an ``ErosionParams`` (then
-    ``rng`` must be reachable: pass a WorldParams for real runs).
-    Does *not* do thermal erosion, uplift or halos — see :func:`step`."""
+    """PLAN 8.2, particle part: spawn (rain + re-injected stockpiles),
+    trace in chunks, apply each change list serially on the live terrain
+    (:func:`particle.apply_changes`), fold the iteration's net change into
+    height/sediment, then EMA-update ``discharge``/``momentum``.
+    ``iteration_key`` is an int or a tuple of ints mixed into
+    ``params.rng(rng_stage, *key)``.  ``params`` may be a ``WorldParams`` or
+    an ``ErosionParams`` (then ``rng`` must be reachable: pass a WorldParams
+    for real runs).  Does *not* do thermal erosion, uplift or halos — see
+    :func:`step`."""
     ep = _eparams(params)
     key = iteration_key if isinstance(iteration_key, (tuple, list)) else (int(iteration_key),)
     rng = params.rng(rng_stage, *key)
@@ -344,8 +376,30 @@ def run_iteration(
     if sp is None:
         return stats
     sp_face, sp_x, sp_y, volume0 = sp
+    sp_sed = np.zeros(sp_face.shape[0], dtype=np.float64)
+    sp_dir = np.zeros(sp_face.shape[0], dtype=np.float64)
+    # re-inject the pending stockpiles as particles that start with that
+    # load (appended after the rain, in cell order: deterministic)
+    pend_cells = np.flatnonzero(state.pending.reshape(-1) > 0.0)
+    released = 0.0
+    if pend_cells.size:
+        NE = state.NE
+        pf = pend_cells // (NE * NE)
+        rem = pend_cells - pf * NE * NE
+        pei = rem // NE
+        pej = rem - pei * NE
+        loads = state.pending.reshape(-1)[pend_cells]
+        released = float(loads.sum())
+        sp_face = np.concatenate([sp_face, pf.astype(np.int64)])
+        sp_x = np.concatenate([sp_x, (pei - state.H) + 0.5])
+        sp_y = np.concatenate([sp_y, (pej - state.H) + 0.5])
+        sp_sed = np.concatenate([sp_sed, loads])
+        sp_dir = np.concatenate([sp_dir, rng.random(pend_cells.size) * (2.0 * np.pi)])
+        state.pending.reshape(-1)[pend_cells] = 0.0
+    state.pack()
+    state.acc[...] = 0.0
     max_steps = max_steps_of(ep, state.N)
-    cap = max_steps + pk.SPREAD
+    cap = max_steps + 2 * pk.SPREAD
     P = sp_face.shape[0]
     chunk = chunk_size(ep, P)
     # change list buffers (reused for every chunk)
@@ -354,28 +408,31 @@ def run_iteration(
     cl_vol = np.empty(chunk * cap, dtype=np.float32)
     cl_mom = np.empty((chunk * cap, 2), dtype=np.float32)
     cl_count = np.zeros(chunk, dtype=np.int64)
-    nthreads = get_num_threads()
+    cl_lo = np.zeros(chunk, dtype=np.int64)
+    cl_hi = np.zeros(chunk, dtype=np.int64)
+    sp_death = np.zeros(chunk, dtype=np.int8)
+    deaths = np.zeros(len(pk.DEATH_NAMES), dtype=np.int64)
     entries = 0
+    n_clamp = 0
+    to_pending = 0.0
+    lost = 0.0
+    t_trace = 0.0
+    t_apply = 0.0
     for c0 in range(0, P, chunk):
         c1 = min(P, c0 + chunk)
         m = c1 - c0
+        t1 = time.time()
         with parallel_chunksize(4):  # dynamic scheduling: particle lifetimes vary a lot
             pk.trace_particles(
                 sp_face[c0:c1],
                 sp_x[c0:c1],
                 sp_y[c0:c1],
+                sp_sed[c0:c1],
+                sp_dir[c0:c1],
                 float(volume0),
-                state.height,
-                state.sediment,
-                state.height if state.route is None else state.route,
+                state.samp,
                 state.route is not None,
-                state.discharge,
-                state.momentum,
-                state.hardness,
-                state.evap,
                 state.mask,
-                state.metric,
-                state.metric_inv,
                 int(state.N),
                 int(state.H),
                 bool(state.spherical),
@@ -388,6 +445,7 @@ def run_iteration(
                 float(ep.k_disc),
                 float(ep.disc_saturation),
                 float(ep.slope_gain),
+                float(ep.slope_saturation),
                 float(ep.erodibility),
                 float(ep.min_volume),
                 int(max_steps),
@@ -395,34 +453,63 @@ def run_iteration(
                 float(chunk / (volume0 * P)),
                 int(ep.pit_steps),
                 bool(state.deposit_on_exit),
+                float(ep.ocean_deposition_rate),
+                int(ep.ocean_steps),
                 cl_cell,
                 cl_delta,
                 cl_vol,
                 cl_mom,
                 cl_count[:m],
+                cl_lo[:m],
+                cl_hi[:m],
+                sp_death[:m],
             )
-        pk.apply_changes(cl_cell, cl_delta, cl_vol, cl_mom, cl_count[:m], cap, state.height, state.sediment, state.disch_track, state.mom_track, state.mask, nthreads)
+        t2 = time.time()
+        nc, tp, lo = pk.apply_changes(
+            cl_cell, cl_delta, cl_vol, cl_mom, cl_count[:m], cap,
+            state.height, state.sediment, state.acc, state.pending, state.samp, state.disch_track, state.mom_track, state.mask,
+            float(ep.iter_erode), float(ep.iter_deposit), float(ep.fan_slope),
+        )
+        n_clamp += int(nc)
+        to_pending += tp
+        lost += lo
+        t_trace += t2 - t1
+        t_apply += time.time() - t2
         entries += int(cl_count[:m].sum())
+        deaths += np.bincount(sp_death[:m], minlength=deaths.size)
+    pk.fold_changes(state.height, state.sediment, state.acc, state.mask)
     pk.ema_update(state.discharge, state.momentum, state.disch_track, state.mom_track, state.mask, float(ep.ema))
     stats.update({"particles": int(P), "entries": entries, "steps_mean": entries / max(P, 1), "volume": float(volume0), "seconds": time.time() - t0})
+    stats["deaths"] = {n: int(c) for n, c in zip(pk.DEATH_NAMES, deaths)}
+    stats["clamped"] = n_clamp
+    stats["to_pending"] = to_pending
+    stats["released"] = float(released)
+    stats["pending_total"] = float(state.pending[state.interior].sum())
+    stats["deficit_out"] = lost
+    stats["seconds_trace"] = t_trace
+    stats["seconds_apply"] = t_apply
+    stats["chunk"] = int(chunk)
     if log is not None:
-        log(f"  particles {P} volume {volume0:.3f} mean steps {stats['steps_mean']:.1f} ({stats['seconds']:.2f}s)")
+        log(f"  particles {P} volume {volume0:.3f} mean steps {stats['steps_mean']:.1f} deaths {stats['deaths']} clamped {n_clamp} pending {stats['pending_total']:.1f} ({stats['seconds']:.2f}s)")
     return stats
 
 
 def thermal_erosion(state: ErosionState, params) -> None:
     """One pass of talus-limited mass wasting (PLAN 8.2): material above the
     talus slope ``soft + (hard - soft) * hardness`` (rise/run, cell units)
-    moves to lower neighbours, sediment first; conservative between active
-    cells."""
+    moves to lower neighbours, sediment first, at most ``thermal_max`` per
+    cell and pass, and never above ``-DEP_FLOOR`` into a submerged cell;
+    conservative between active cells."""
     ep = _eparams(params)
     talus = (ep.talus_slope_soft + (ep.talus_slope_hard - ep.talus_slope_soft) * state.hardness).astype(np.float64)
     out_total = np.zeros_like(state.height)
     scale = np.zeros_like(state.height)
-    pk.thermal_pass_a(state.height, state.sediment, state.metric, talus, state.mask, float(ep.thermal_rate), out_total, scale)
+    pk.thermal_pass_a(state.height, state.sediment, state.metric, talus, state.mask, float(ep.thermal_rate), float(ep.thermal_max), out_total, scale)
+    rscale = np.ones_like(state.height)
+    pk.thermal_pass_r(state.height, state.sediment, state.metric, talus, state.mask, float(ep.thermal_rate), scale, rscale)
     new_h = state.height.copy()
     new_s = state.sediment.copy()
-    pk.thermal_pass_b(state.height, state.sediment, state.metric, talus, state.mask, float(ep.thermal_rate), out_total, scale, new_h, new_s)
+    pk.thermal_pass_b(state.height, state.sediment, state.metric, talus, state.mask, float(ep.thermal_rate), out_total, scale, rscale, new_h, new_s)
     state.height[...] = new_h
     state.sediment[...] = new_s
 

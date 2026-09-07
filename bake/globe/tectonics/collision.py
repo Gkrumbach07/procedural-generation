@@ -15,12 +15,26 @@ from scipy.spatial import cKDTree
 
 from ..cubesphere import Grid, from_sphere_v
 from ..field import FaceField
-from .segments import Segments, greedy_accept
+from .segments import Segments, _hash_insert, _voxel_coord, _voxel_resolution, greedy_accept
 
 
 # --------------------------------------------------------------------------
 # label map
 # --------------------------------------------------------------------------
+_CENTERS_CACHE: dict = {}
+
+
+def interior_centers_flat(grid: Grid) -> np.ndarray:
+    """Contiguous (6*N*N, 3) copy of ``grid.interior_centers`` (cached per
+    grid: the reshape of the strided halo view costs ~30 ms at N = 512)."""
+    key = (id(grid), grid.N, grid.H)
+    c = _CENTERS_CACHE.get(key)
+    if c is None:
+        c = np.ascontiguousarray(grid.interior_centers.reshape(-1, 3))
+        _CENTERS_CACHE[key] = c
+    return c
+
+
 def build_tree(seg: Segments) -> cKDTree:
     """KD-tree on the current segment positions (one per step; reuse it for
     every query of that step)."""
@@ -28,13 +42,87 @@ def build_tree(seg: Segments) -> cKDTree:
 
 
 def label_map(tree: cKDTree, grid: Grid):
-    """Nearest segment of every interior cell.  Returns ``(idx, dist)``:
-    ``idx`` (6, N, N) int32 segment index, ``dist`` (6, N, N) float64 chord
-    distance.  Every cell gets a label (there are no holes by construction)."""
-    c = grid.interior_centers.reshape(-1, 3)
+    """Nearest segment of every interior cell (exact KD-tree query).
+    Returns ``(idx, dist)``: ``idx`` (6, N, N) int32 segment index, ``dist``
+    (6, N, N) float64 chord distance.  Every cell gets a label (there are
+    no holes by construction)."""
+    c = interior_centers_flat(grid)
     dist, idx = tree.query(c, k=1, workers=-1)
     N = grid.N
     return idx.reshape(6, N, N).astype(np.int32), dist.reshape(6, N, N)
+
+
+@njit(cache=True)
+def _build_hash(pts, G):
+    head = np.full(G * G * G, -1, dtype=np.int32)
+    nxt = np.empty(pts.shape[0], dtype=np.int32)
+    for i in range(pts.shape[0]):
+        _hash_insert(head, nxt, pts, i, G)
+    return head, nxt
+
+
+@njit(cache=True, parallel=True)
+def _nearest_kernel(q, pts, head, nxt, G, cap2):
+    """Nearest hashed point of every query (exact whenever the distance² is
+    < cap2; otherwise idx = -1).  Ties resolve to the lowest index, so the
+    parallel loop is deterministic."""
+    n = q.shape[0]
+    idx = np.full(n, -1, dtype=np.int32)
+    d2o = np.full(n, cap2, dtype=np.float64)
+    for a in prange(n):
+        qx, qy, qz = q[a, 0], q[a, 1], q[a, 2]
+        ix = _voxel_coord(qx, G)
+        iy = _voxel_coord(qy, G)
+        iz = _voxel_coord(qz, G)
+        best = cap2
+        bi = -1
+        for dx in range(-1, 2):
+            jx = ix + dx
+            if jx < 0 or jx >= G:
+                continue
+            for dy in range(-1, 2):
+                jy = iy + dy
+                if jy < 0 or jy >= G:
+                    continue
+                for dz in range(-1, 2):
+                    jz = iz + dz
+                    if jz < 0 or jz >= G:
+                        continue
+                    k = head[(jx * G + jy) * G + jz]
+                    while k >= 0:
+                        ex = pts[k, 0] - qx
+                        ey = pts[k, 1] - qy
+                        ez = pts[k, 2] - qz
+                        d2 = ex * ex + ey * ey + ez * ez
+                        if d2 < best or (d2 == best and k < bi):
+                            best = d2
+                            bi = k
+                        k = nxt[k]
+        idx[a] = bi
+        d2o[a] = best
+    return idx, d2o
+
+
+def label_map_fast(seg: Segments, grid: Grid, cap_radius: float, tree: cKDTree | None = None):
+    """Same result as :func:`label_map` (nearest segment per interior cell,
+    lowest index on exact ties) but ~3x faster: a numba voxel hash resolves
+    every cell whose nearest segment is closer than ``cap_radius``; the few
+    remaining cells (gaps) are resolved with the KD-tree (built here if
+    ``tree`` is None).  ``cap_radius`` must be >= the gap radius so gap
+    detection stays exact."""
+    c = interior_centers_flat(grid)
+    G = _voxel_resolution(cap_radius)
+    head, nxt = _build_hash(seg.pos, G)
+    idx, d2 = _nearest_kernel(c, seg.pos, head, nxt, G, float(cap_radius) ** 2)
+    dist = np.sqrt(d2)
+    miss = idx < 0
+    if miss.any():
+        tree = build_tree(seg) if tree is None else tree
+        dm, im = tree.query(c[miss], k=1, workers=-1)
+        idx[miss] = im
+        dist[miss] = dm
+    N = grid.N
+    return idx.reshape(6, N, N), dist.reshape(6, N, N)
 
 
 def cell_area_steradians(grid: Grid) -> np.ndarray:
@@ -57,6 +145,29 @@ def splat(values: np.ndarray, idx: np.ndarray) -> np.ndarray:
     return np.asarray(values)[idx]
 
 
+class SmoothSplat:
+    """Gaussian-weighted blend of the ``knn`` nearest segments for every
+    interior cell: ``v(cell) = Σ w_k v_k / Σ w_k``, ``w_k = exp(-d_k² /
+    2σ²)``.  Replaces the step function of the nearest-segment splat by a
+    surface that is smooth at the segment-spacing scale while keeping
+    features one spacing wide (belts).  Query once, splat many fields."""
+
+    def __init__(self, tree: cKDTree, grid: Grid, sigma: float, knn: int = 12):
+        c = interior_centers_flat(grid)
+        kk = min(int(knn), tree.n)
+        d, nb = tree.query(c, k=kk, workers=-1)
+        d = np.atleast_2d(d).reshape(c.shape[0], kk)
+        self.nb = np.atleast_2d(nb).reshape(c.shape[0], kk)
+        w = np.exp(-(d * d) / (2.0 * float(sigma) ** 2))
+        w[:, 0] = np.maximum(w[:, 0], 1e-300)  # the nearest always counts
+        self.w = w / w.sum(axis=1, keepdims=True)
+        self.shape = (6, grid.N, grid.N)
+
+    def __call__(self, values: np.ndarray) -> np.ndarray:
+        v = np.asarray(values, dtype=np.float64)[self.nb]
+        return (v * self.w).sum(axis=1).reshape(self.shape)
+
+
 # --------------------------------------------------------------------------
 # crystallisation (PLAN 6.2.6)
 # --------------------------------------------------------------------------
@@ -66,15 +177,21 @@ def deposit_density(T: np.ndarray, k_D: float) -> np.ndarray:
     return x / np.maximum(1.0 - x, 1e-6)
 
 
-def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float, k_D: float, dissolution_factor: float, dt: float, min_thickness: float = 1e-3) -> None:
-    """Growth ``G = k_G (1 - T)(1 - T - d_b)``: positive -> deposit thickness
-    ``G`` at density ``D(T)``; negative -> dissolve ``dissolution_factor *
-    |G|`` at the segment's own density (never more than half its thickness).
-    Mass changes only here (and in :func:`spawn_segments`); ``age += dt``."""
+def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float, k_D: float, dissolution_factor: float, max_thickness: float = 0.0, min_thickness: float = 1e-3) -> None:
+    """PLAN 6.2.6, one step.  Growth ``G = k_G (1 - T)(1 - T - d_b)``:
+    positive -> deposit thickness ``G`` at density ``D(T)`` (faded by
+    ``exp(-thickness / max_thickness)`` if > 0, so cratons thicken
+    logarithmically with age instead of linearly forever); negative -> dissolve
+    ``dissolution_factor * |G|`` at the segment's own density (never more
+    than half its thickness).  Mass changes only here (and in
+    :func:`spawn_segments`); ``age += 1`` (steps)."""
     T = np.clip(np.asarray(T, dtype=np.float64), 0.0, 1.0)
     G = growth * (1.0 - T) * (1.0 - T - density_base)
     D = deposit_density(T, k_D)
     grow = G > 0
+    if max_thickness > 0:
+        fade = np.exp(-seg.thickness / max_thickness)  # asymptotic: old crust keeps (slowly) getting thicker
+        G = np.where(grow, G * fade, G)
     dth = np.where(grow, G, dissolution_factor * G)
     dth = np.maximum(dth, -0.5 * seg.thickness)
     dth = np.maximum(dth, min_thickness - seg.thickness)
@@ -83,28 +200,39 @@ def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float
     seg.thickness += dth
     seg.density = np.clip(seg.mass / np.maximum(seg.thickness, 1e-12), 0.0, 1.0)
     seg.mass = seg.thickness * seg.density
-    seg.age += dt
+    seg.age += 1.0
 
 
 # --------------------------------------------------------------------------
 # gaps -> new crust (PLAN 6.2.4)
 # --------------------------------------------------------------------------
-def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, k_D: float, jitter_cells: float = 0.5) -> tuple[Segments, np.ndarray]:
+def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, k_D: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None) -> tuple[Segments, np.ndarray]:
     """Cells farther than ``gap_radius`` from every segment are divergent
-    boundaries.  Their (jittered) centres are candidate positions, walked
-    in a random order and accepted greedily with minimum spacing ``r_min``
-    (also against the existing segments).  New segments are thin
-    (``new_thickness``), have age 0, the deposit density of the local heat
-    and the plate of the nearest existing segment.
+    boundaries — provided the nearest segment is moving *away* from the
+    cell (``omega`` (P, 3) rad/step given; holes left by subduction at a
+    convergent boundary are closed by the incoming plate instead of being
+    filled with new crust).  Their (jittered) centres are candidate
+    positions, walked in a random order and accepted greedily with minimum
+    spacing ``r_min`` (also against the existing segments).  New segments
+    are thin (``new_thickness``), have age 0, the deposit density of the
+    local heat and the plate of the nearest existing segment.
 
     Returns ``(new_segments, gap_mask)``; the caller appends the segments
     and cools the heat field under ``gap_mask``."""
     gap = dist > gap_radius
+    if omega is not None and gap.any():
+        cells = np.nonzero(gap.ravel())[0]
+        near = idx.ravel()[cells]
+        ps = seg.pos[near]
+        v = np.cross(omega[seg.plate_id[near]], ps)
+        away = ps - interior_centers_flat(grid)[cells]
+        div = np.sum(v * away, axis=1) > 0.0
+        gap.ravel()[cells[~div]] = False
     n = int(gap.sum())
     if n == 0:
         return Segments(np.zeros((0, 3)), 0.0, 0.0, 0.0, 0, 0.0), gap
     cells = np.nonzero(gap.ravel())[0]
-    cands = grid.interior_centers.reshape(-1, 3)[cells]
+    cands = interior_centers_flat(grid)[cells]
     order = rng.permutation(n)
     cells = cells[order]
     cands = cands[order]
@@ -126,7 +254,7 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
 # collisions (PLAN 6.2.5)
 # --------------------------------------------------------------------------
 @njit(cache=True)
-def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, alive):
+def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, alive, overlap2):
     n = pairs.shape[0]
     losers = np.empty(n, dtype=np.int64)
     survivors = np.empty(n, dtype=np.int64)
@@ -151,7 +279,9 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
         dy = pos[j, 1] - pos[i, 1]
         dz = pos[j, 2] - pos[i, 2]
         if (vix - vjx) * dx + (viy - vjy) * dy + (viz - vjz) * dz <= 0.0:
-            continue
+            # receding / sliding past: only collide once they overlap deeply
+            if dx * dx + dy * dy + dz * dz > overlap2:
+                continue
         if density[i] > density[j]:
             lo, su = i, j
         elif density[j] > density[i]:
@@ -170,20 +300,79 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
     return losers[:k], survivors[:k]
 
 
-def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, alive: np.ndarray):
-    """Subduction: for every pair of *approaching* segments of different
-    plates within chord ``radius`` (KD-tree pair query, applied in sorted
-    order) the denser one subducts: its mass and thickness go to the
+def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, alive: np.ndarray, overlap_fraction: float = 0.5):
+    """Subduction: for every pair of segments of different plates within
+    chord ``radius`` (KD-tree pair query, applied in sorted order) that are
+    *approaching* — or closer than ``overlap_fraction * radius`` whatever
+    their relative motion, so plates sliding past each other cannot
+    interleave — the denser one subducts: its mass and thickness go to the
     survivor (density = combined mass / thickness, age = max), it is
-    flagged dead in ``alive`` (in place).  Total mass is conserved.
-    Returns ``(losers, survivors)`` index arrays (into the current arrays;
-    a survivor may appear several times)."""
+    flagged dead in ``alive`` (in place).  The loser's own arrays keep the
+    transferred amounts until ``seg.compress(alive)``; the total mass of
+    live segments is conserved.  Returns ``(losers, survivors)`` index
+    arrays (into the current arrays; a survivor may appear several times)."""
     pairs = tree.query_pairs(radius, output_type="ndarray")
     if pairs.shape[0] == 0:
         return np.zeros(0, np.int64), np.zeros(0, np.int64)
     pairs = np.sort(pairs, axis=1)
     pairs = pairs[np.lexsort((pairs[:, 1], pairs[:, 0]))]
-    return _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, alive)
+    return _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, alive, (float(overlap_fraction) * float(radius)) ** 2)
+
+
+@njit(cache=True)
+def _spread_kernel(losers, survivors, nbrs, pos, plate_id, mass, thickness, density, alive, inv2s2):
+    K = nbrs.shape[1]
+    w = np.empty(K, dtype=np.float64)
+    for e in range(losers.shape[0]):
+        su = survivors[e]
+        lo = losers[e]
+        if not alive[su]:
+            continue  # the survivor was subducted later in this step; its mass already moved on
+        m = mass[lo]
+        th = thickness[lo]
+        tot = 0.0
+        for q in range(K):
+            n = nbrs[e, q]
+            w[q] = 0.0
+            if n < 0 or not alive[n] or plate_id[n] != plate_id[su]:
+                continue
+            dx = pos[n, 0] - pos[su, 0]
+            dy = pos[n, 1] - pos[su, 1]
+            dz = pos[n, 2] - pos[su, 2]
+            w[q] = np.exp(-(dx * dx + dy * dy + dz * dz) * inv2s2)
+            tot += w[q]
+        if tot <= 0.0:
+            continue
+        # the survivor already holds (m, th); hand the neighbours their share
+        for q in range(K):
+            if w[q] <= 0.0:
+                continue
+            n = nbrs[e, q]
+            if n == su:
+                continue
+            f = w[q] / tot
+            mass[su] -= f * m
+            thickness[su] -= f * th
+            mass[n] += f * m
+            thickness[n] += f * th
+            density[n] = mass[n] / thickness[n]
+        density[su] = mass[su] / thickness[su]
+
+
+def spread_collisions(seg: Segments, tree: cKDTree, losers: np.ndarray, survivors: np.ndarray, alive: np.ndarray, sigma: float, knn: int = 12) -> None:
+    """Belt formation: the mass and thickness a survivor just received from
+    a subducted segment are shared, with Gaussian weights ``exp(-d²/2σ²)``,
+    among the survivor and its ``knn`` nearest *live, same-plate* segments
+    (the survivor itself is among them with weight 1), so repeated
+    collisions along a boundary build a belt ~2σ wide instead of isolated
+    peaks.  Mass conserving.  Must run before ``seg.compress`` (the dead
+    losers' arrays still hold the transferred amounts)."""
+    if losers.size == 0:
+        return
+    kk = min(int(knn), tree.n)
+    _, nb = tree.query(seg.pos[survivors], k=kk, workers=-1)
+    nb = np.atleast_2d(nb).reshape(survivors.size, kk).astype(np.int64)
+    _spread_kernel(np.ascontiguousarray(losers), np.ascontiguousarray(survivors), np.ascontiguousarray(nb), seg.pos, seg.plate_id, seg.mass, seg.thickness, seg.density, alive, 1.0 / (2.0 * float(sigma) ** 2))
 
 
 @njit(cache=True)
@@ -224,6 +413,54 @@ def segment_cascade(seg: Segments, tree: cKDTree, survivors: np.ndarray, alive: 
     _, nb = tree.query(seg.pos[order], k=min(knn + 1, tree.n), workers=-1)
     nb = np.atleast_2d(nb).astype(np.int64)
     _segment_cascade(order, np.ascontiguousarray(nb), seg.thickness, seg.mass, seg.density, alive, float(rate), float(threshold))
+
+
+@njit(cache=True)
+def _relax_kernel(nbrs, pos, thickness, mass, density, rate, thr_per_rad):
+    M, K = nbrs.shape
+    for s in range(M):
+        for q in range(K):
+            n = nbrs[s, q]
+            if n == s or n < 0:
+                continue
+            ds = density[s]
+            if ds >= 0.999:
+                continue
+            hs = thickness[s] * (1.0 - ds)
+            hn = thickness[n] * (1.0 - density[n])
+            dx = pos[n, 0] - pos[s, 0]
+            dy = pos[n, 1] - pos[s, 1]
+            dz = pos[n, 2] - pos[s, 2]
+            thr = thr_per_rad * np.sqrt(dx * dx + dy * dy + dz * dz)
+            delta = hs - hn
+            if delta <= thr:
+                continue
+            dh = rate * (delta - thr) * 0.5 / K
+            dth = dh / (1.0 - ds)
+            if dth > 0.5 * thickness[s]:
+                dth = 0.5 * thickness[s]
+            thickness[s] -= dth
+            mass[s] -= dth * ds
+            thickness[n] += dth
+            mass[n] += dth * ds
+            density[s] = mass[s] / thickness[s]
+            density[n] = mass[n] / thickness[n]
+
+
+def relax_segments(seg: Segments, tree: cKDTree, rate: float, threshold_per_spacing: float, spacing: float, knn: int = 8) -> None:
+    """PLAN 6.4 cascade applied to the segment cloud every step: for every
+    segment (index order) and each of its ``knn`` nearest neighbours whose
+    bedrock height is lower by more than ``threshold_per_spacing`` × their
+    distance (in spacings), move ``rate * (Δh - thr) / 2 / knn`` of height
+    downhill as thickness at the giver's density (mass conserving).  Turns
+    stacked collision peaks into belts with foothills; the threshold is
+    the maximum stable slope in bedrock units per spacing."""
+    if seg.M < 2:
+        return
+    kk = min(int(knn) + 1, tree.n)
+    _, nb = tree.query(seg.pos, k=kk, workers=-1)
+    nb = np.atleast_2d(nb).reshape(seg.M, kk).astype(np.int64)
+    _relax_kernel(np.ascontiguousarray(nb), seg.pos, seg.thickness, seg.mass, seg.density, float(rate), float(threshold_per_spacing) / float(spacing))
 
 
 # --------------------------------------------------------------------------
@@ -360,7 +597,7 @@ def boundary_distance(tree: cKDTree, seg: Segments, grid: Grid, idx: np.ndarray,
     """Chord distance from every interior cell to the nearest segment of a
     plate *different* from the cell's own (6, N, N); cells with no foreign
     segment among the ``k`` nearest get the distance of the k-th."""
-    c = grid.interior_centers.reshape(-1, 3)
+    c = interior_centers_flat(grid)
     kk = min(k, tree.n)
     dist, nb = tree.query(c, k=kk, workers=-1)
     dist = np.atleast_2d(dist).reshape(c.shape[0], kk)
@@ -391,7 +628,7 @@ def weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> floa
 
 
 __all__ = [
-    "build_tree", "label_map", "cell_area_steradians", "accumulate_area", "splat",
-    "deposit_density", "crystallise", "spawn_segments", "collide", "segment_cascade",
+    "build_tree", "label_map", "label_map_fast", "cell_area_steradians", "accumulate_area", "splat",
+    "SmoothSplat", "deposit_density", "crystallise", "spawn_segments", "collide", "spread_collisions", "segment_cascade", "relax_segments",
     "CellTree", "grid_cascade", "gaussian_smooth", "boundary_distance", "resample_to", "weighted_quantile",
 ]

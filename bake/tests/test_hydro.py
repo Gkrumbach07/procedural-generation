@@ -11,7 +11,7 @@ from globe.config import WorldParams
 from globe.cubesphere import Grid, get_grid, to_sphere_v
 from globe.hydro import run as hydro_run
 from globe.hydro.d8 import D8_OFFSETS, OCEAN, cid_fij, downstream_flat, downstream_table, neighbor_cid, neighbor_fij, neighbor_table
-from globe.hydro.lakes import trace_rings
+from globe.hydro.lakes import extract_lakes, ring_area, trace_rings
 from globe.hydro.priority_flood import heap_pop, heap_push, priority_flood_flat, priority_flood_sphere
 from globe.hydro.routing import flow_directions, topological_order, walk_to_sink
 from globe.hydro.run import requantile_height
@@ -258,6 +258,37 @@ def test_trace_rings_square_and_hole():
     m[4, 5] = False  # hole -> second (shorter) ring
     rings = trace_rings(m)
     assert len(rings) == 2 and rings[0].shape[0] > rings[1].shape[0] == 5
+    assert ring_area(rings[0]) > 0 > ring_area(rings[1])  # outer CCW, hole CW
+
+
+def test_extract_lakes_serpentine_island_is_not_the_polygon():
+    """A wiggly island inside a compact lake has the longer boundary; the
+    polygon must still be the (shorter) outer shore, counter-clockwise."""
+    from globe.cubesphere import Grid
+
+    g = Grid(24, 2, 100.0)
+    N = g.N
+    lake = np.zeros((6, N, N), bool)
+    lake[1, 2:20, 2:20] = True
+    # serpentine island: comb of 8 teeth -> boundary 2*(8*13)+... > outer 4*18
+    for t in range(8):
+        lake[1, 4:17, 4 + 2 * t] = False
+    lake[1, 4, 4:19] = False  # spine joining the teeth
+    outer_len = 4 * 18
+    ws = np.where(lake, 5.0, 0.0).astype(np.float32)
+    M = 6 * N * N
+    order = np.arange(M, dtype=np.int64)  # cell (1,2,2) is the first lake cell popped
+    down = np.full(M, -1, dtype=np.int64)
+    lakes, lab = extract_lakes(lake, ws, order, down, g)
+    assert len(lakes) == 1
+    L = lakes[0]
+    assert L["area_cells"] == int(lake.sum())
+    poly = [[u * N, v * N] for _, u, v in L["polygon"]]
+    assert len(poly) == outer_len + 1  # the outer square, not the island
+    assert ring_area(poly) == 18 * 18  # encloses the whole square, CCW
+    assert L["rings"] == [L["polygon"]]
+    ij = np.array(poly)
+    assert ij.min() == 2 and ij.max() == 20
 
 
 # --------------------------------------------------------------------------
@@ -433,7 +464,13 @@ def test_lakes_json(tiny_hydro):
         assert len(poly) >= 5 and poly[0] == poly[-1]
         for fu, u, v in poly:
             assert 0 <= u <= 1 and 0 <= v <= 1 and fu in l["faces"]
-    assert store.read_json("graph/lakes.json")["lakes"] == L
+    assert not store.has("graph/lakes.json")  # derive's file, not hydro's
+    # polygons are the counter-clockwise outer shore (positive shoelace area)
+    from globe.hydro.lakes import ring_area
+
+    for l in L:
+        assert ring_area([[u * N, v * N] for _, u, v in l["polygon"]]) > 0
+        assert all(ring_area([[u * N, v * N] for _, u, v in r]) > 0 for r in l["rings"])
 
 
 def test_hydro_determinism(scratch):

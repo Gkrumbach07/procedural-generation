@@ -59,7 +59,7 @@ def _check_partition(basin_id, basins, flow_dir, grid, max_cells, min_cells, R, 
         assert b["area_cells"] == int(sel.sum()) == counts[bid]
         assert b["area_cells"] <= max_cells
         if b["area_cells"] < min_cells:
-            assert b["undersized_reason"] in ("island", "max")
+            assert b["undersized_reason"] in ("island", "edge", "max")
         # bbox (exclusive) is tight
         _, ii, jj = np.nonzero(sel)
         assert b["bbox"] == [int(ii.min()), int(jj.min()), int(ii.max()) + 1, int(jj.max()) + 1]
@@ -92,25 +92,38 @@ def _check_partition(basin_id, basins, flow_dir, grid, max_cells, min_cells, R, 
             seen.add(x)
             x = by_id[x]["parent"]
     assert any(b["parent"] == -1 for b in basins)
-    # every cell of a basin drains inside the basin until the basin's exits
-    # (a cell may only leave through the outlet, or - after a merge - through
-    # another cell whose downstream is outside the basin on a different
-    # basin/ocean/face); no cell drains into a *different* basin on the same
-    # face except at such an exit.  Weaker but cheap check: following
-    # flow from any cell stays in the basin until it leaves it once.
+    # exits: exactly the cells whose downstream lies outside the basin,
+    # outlet first, kinds right; every cell of a basin reaches one of its
+    # listed exits without leaving the basin (refine floods / sinks there)
     lab = basin_id.reshape(-1)
-    for b in basins[: min(len(basins), 40)]:
-        cells = np.nonzero(lab == b["id"])[0]
-        for c in cells[:: max(1, cells.size // 25)]:
-            x = int(c)
-            left = False
-            for _ in range(NN):
-                d = int(down[x])
-                if d < 0 or lab[d] != b["id"]:
-                    left = True
-                    break
-                x = d
-            assert left
+    landf = land.reshape(-1)
+    land_idx = np.nonzero(landf)[0]
+    d = down[land_idx]
+    is_exit = (d < 0) | (lab[np.maximum(d, 0)] != lab[land_idx])
+    exit_cells = land_idx[is_exit]
+    exit_of_basin = {}
+    for c in exit_cells.tolist():
+        exit_of_basin.setdefault(int(lab[c]), set()).add(c)
+    n_multi = 0
+    for b in basins:
+        ex = [(f * N + i) * N + j for f, i, j in b["exits"]]
+        assert ex[0] == (b["outlet"][0] * N + b["outlet"][1]) * N + b["outlet"][2]
+        assert len(set(ex)) == len(ex) and set(ex) == exit_of_basin[b["id"]]
+        assert len(b["exit_kinds"]) == len(ex)
+        for c, kind in zip(ex, b["exit_kinds"]):
+            dc = int(down[c])
+            want = "ocean" if (dc < 0 or lab[dc] < 0) else ("face" if dc // NN != c // NN else "basin")
+            assert kind == want and (dc < 0 or lab[dc] != b["id"])
+        n_multi += len(ex) > 1
+        if b["downstream_basin"] == -1:
+            assert b["exit_kinds"][0] == "ocean"
+    # reach an exit: label every land cell with the first exit on its path
+    is_exit_full = np.zeros(lab.size, bool)
+    is_exit_full[exit_cells] = True
+    reach = ws_stage._label_outlets(down, ws_stage.topological_order(down, landf), is_exit_full)
+    assert (reach[land_idx] >= 0).all()
+    assert np.array_equal(lab[reach[land_idx]], lab[land_idx])  # exit reached lies in the same basin
+    return n_multi
 
 
 # --------------------------------------------------------------------------
@@ -145,9 +158,10 @@ def test_partition_synthetic_splits_and_edge_cuts(synthetic):
     R, T = 2, 16
     part = partition(fd, g, max_cells, min_cells, R=R, T=T)
     basins = part.basins
-    _check_partition(part.basin_id, basins, fd, g, max_cells, min_cells, R, T)
+    n_multi = _check_partition(part.basin_id, basins, fd, g, max_cells, min_cells, R, T)
     land = fd != OCEAN
     assert part.info["n_splits"] > 0 and part.info["n_merges"] > 0
+    assert n_multi == part.info["n_multi_exit"] > 0  # merged coastal strips have several exits
     assert len(basins) >= land.sum() // max_cells
     # channels crossing a face edge produce child basins whose outlet's
     # downstream cell is on another face

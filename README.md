@@ -57,10 +57,18 @@ Every stage writes `worlds/<name>/quicklook/<stage>.png` (an unfolded cube net);
 * `flow_dir` is `uint8` (PLAN says `int8`; the 255 sentinel does not fit).
 * `tiles/.../flow.png` is RGB8: R = log discharge, G = basin-local id,
   B = river mask (PLAN: RG8).
-* `tiles/.../meta.json` currently has no `neighbors` entry (tile neighbours
-  are derived from `(lod, face, x, y)` via cubesphere); add it later if the
-  Godot loader needs it.  Tiles are `(T+1)²` *vertex* samples on fine-cell
-  corners (see `globe/io/tiles.py`, docs/DEVELOPING.md).
+* `tiles/.../meta.json` carries `neighbors`: the `[lod, face, x, y]` of the
+  4 edge-adjacent tiles (sides `+i, -i, +j, -j`, crossing cube edges via
+  cubesphere), and `basins` (ids indexed by `flow.G`).  Tiles are `(T+1)²`
+  *vertex* samples on fine-cell corners; a vertex shared by two tiles —
+  also across a cube edge — is bit-identical in both (reduction of the
+  same fine cells, no seam interpolation); `height.png` is the surface
+  `height + sediment` (sediment depth in `layers.R`).  The LOD pyramid
+  pools 3×3 vertex neighbourhoods across face edges (PLAN 10.3 says 2×2
+  box filtering): heights are strided LOD-0 vertices, water/river mask
+  max, ids/biome mode, other bytes mean.  `tiles/index.json` lists the
+  LODs for the Godot loader (see `globe/io/tiles.py`, `globe/refine/lod.py`,
+  docs/DEVELOPING.md).
 * Climate writes an extra coarse field `evap`: the dimensionless
   evaporation multiplier `k_evap·max(T,0)` (~1 at `T_eq`) that erosion
   applies to `erosion.evap_rate`.

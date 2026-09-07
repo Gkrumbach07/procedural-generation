@@ -105,6 +105,17 @@ def trace_rings(mask2d: np.ndarray) -> list[np.ndarray]:
     return rings
 
 
+def ring_area(ring) -> float:
+    """Signed shoelace area of a closed (i, j) ring in cell units: positive
+    for counter-clockwise rings (outer boundaries from :func:`trace_rings`),
+    negative for holes."""
+    r = np.asarray(ring, dtype=np.float64)
+    if r.shape[0] < 3:
+        return 0.0
+    x, y = r[:, 0], r[:, 1]
+    return 0.5 * float(np.sum(x[:-1] * y[1:] - x[1:] * y[:-1]))
+
+
 def extract_lakes(lake_mask, water_surface, order, down, grid, cell_area=None) -> tuple[list[dict], np.ndarray]:
     """Lake records for ``graph/lakes_coarse.json``.
 
@@ -117,7 +128,9 @@ def extract_lakes(lake_mask, water_surface, order, down, grid, cell_area=None) -
     ``[f, i, j]`` — the lake cell at the spill point (first cell of the lake
     popped by the flood; its downstream cell is outside the lake) —
     ``outlet_downstream`` (the cell it drains to), ``faces``, ``polygon``
-    (largest face piece) and ``rings`` (every face piece) in ``[f, u, v]``.
+    (outer ring enclosing the largest area, counter-clockwise in (u, v))
+    and ``rings`` (every outer ring of every face piece, largest first) in
+    ``[f, u, v]``.  Holes (islands in the lake) are not emitted.
     """
     N, H = grid.N, grid.H
     M = 6 * N * N
@@ -146,10 +159,21 @@ def extract_lakes(lake_mask, water_surface, order, down, grid, cell_area=None) -
         faces = np.unique(cc // (N * N))
         rings = []
         for f in faces:
-            m2 = lab3[f] == L
-            for r in trace_rings(m2)[:1]:  # outer ring of this face piece
-                rings.append((int(m2.sum()), [[int(f), float(a) / N, float(b) / N] for a, b in r]))
-        rings.sort(key=lambda t: -t[0])
+            # trace inside the lake's bbox on this face only (O(lake) not O(N²))
+            fc = cc[cc // (N * N) == f]
+            li = (fc % (N * N)) // N
+            lj = fc % N
+            bi0, bi1 = int(li.min()), int(li.max()) + 1
+            bj0, bj1 = int(lj.min()), int(lj.max()) + 1
+            m2 = lab3[f, bi0:bi1, bj0:bj1] == L
+            for r in trace_rings(m2):
+                a_r = ring_area(r)
+                if a_r <= 0:  # hole (clockwise): an island inside the lake, not the shore
+                    continue
+                rings.append((a_r, [[int(f), float(a + bi0) / N, float(b + bj0) / N] for a, b in r]))
+        # largest enclosed area first (a face piece may consist of several
+        # 4-disconnected parts, each with its own outer ring)
+        rings.sort(key=lambda t: (-t[0], t[1][0]))
         lakes.append(
             {
                 "id": L,
@@ -166,4 +190,4 @@ def extract_lakes(lake_mask, water_surface, order, down, grid, cell_area=None) -
     return lakes, lab3
 
 
-__all__ = ["label_components", "trace_rings", "extract_lakes"]
+__all__ = ["label_components", "trace_rings", "ring_area", "extract_lakes"]

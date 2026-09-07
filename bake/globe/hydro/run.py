@@ -4,8 +4,8 @@ routing, flow accumulation, drainage tree, lakes.
 Inputs (coarse): ``height``, ``sediment``, ``precip``.
 Outputs: ``water_surface`` (f32, 0 on ocean), ``flow_dir`` (u8, 255 ocean),
 ``flow_acc`` (f32 accumulated precip volume), ``graph/drainage.json``,
-``graph/lakes_coarse.json`` (+ ``graph/lakes.json`` copy until derive
-writes the fine one).  With ``hydro.requantile_land_fraction`` the stage
+``graph/lakes_coarse.json`` (``graph/lakes.json`` is derive's fine
+version; consumers that run before derive read the coarse file).  With ``hydro.requantile_land_fraction`` the stage
 also shifts ``height`` (not ``sediment``) so that exactly
 ``world.land_fraction`` of the coarse cells have ``surface >= 0`` and
 writes ``height`` back (not listed in ``OUTPUTS`` — it is an upstream
@@ -23,7 +23,7 @@ from .lakes import extract_lakes
 from .priority_flood import priority_flood_sphere
 from .routing import accumulate, channel_network, flow_directions
 
-OUTPUTS = ["water_surface", "flow_dir", "flow_acc", "graph/drainage.json", "graph/lakes_coarse.json", "graph/lakes.json"]
+OUTPUTS = ["water_surface", "flow_dir", "flow_acc", "graph/drainage.json", "graph/lakes_coarse.json"]
 
 
 def requantile_height(height: np.ndarray, sediment: np.ndarray, land_fraction: float) -> tuple[np.ndarray, float]:
@@ -123,7 +123,6 @@ def run(store, params, log=print) -> dict:
     info["lake_cells"] = int(np.count_nonzero(lake))
     lakes_json = {"lakes": lakes, "lake_min_depth": hp.lake_min_depth}
     store.write_json("graph/lakes_coarse.json", lakes_json)
-    store.write_json("graph/lakes.json", lakes_json)  # coarse copy until derive writes the fine lakes
     log(f"[hydro] lakes: {len(lakes)} ({info['lake_cells']:,} cells)")
 
     # outputs
@@ -159,16 +158,20 @@ def _dilate(mask: np.ndarray, r: int) -> np.ndarray:
     return out
 
 
-def render_hydro(surface, water_surface, cell_order, cell_size_m, lake_min_depth=0.5):
+def render_hydro(surface, water_surface, cell_order, cell_size_m, lake_min_depth=0.5, minor=None):
     """Hillshade + lakes + channels drawn with width by Strahler order.
     ``surface``/``water_surface`` (6, N, N) float, ``cell_order`` (6, N, N)
-    int.  Returns (6, N, N, 3) uint8 [f, i, j]."""
+    int; ``minor`` optional (6, N, N) bool mask of sub-threshold channels
+    drawn faintly underneath (drawing aid only).  Returns (6, N, N, 3)
+    uint8 [f, i, j]."""
     from ..viz import quicklook as ql
 
     img = ql.render_height(surface, 0.0, cell_size_m)
     lake = (water_surface - surface) > lake_min_depth
     lake &= surface >= 0
     img = ql.overlay(img, lake, (70, 130, 230), 0.9)
+    if minor is not None:
+        img = ql.overlay(img, minor & (surface >= 0), (90, 140, 230), 0.45)
     omax = int(cell_order.max()) if cell_order.size else 0
     for o in range(1, omax + 1):
         m = cell_order >= o
@@ -197,5 +200,6 @@ def quicklook(store, params, path):
     lake = (ws.interior - surface) > params.hydro.lake_min_depth
     lake &= land
     _, _, cell_order = channel_network(fd.interior, acc.interior, thr, grid, lake=lake)
-    img = render_hydro(surface, ws.interior, cell_order, grid.cell_size_m, params.hydro.lake_min_depth)
+    minor = (acc.interior > 0.25 * thr) & land  # faint sub-threshold channels (drawing only)
+    img = render_hydro(surface, ws.interior, cell_order, grid.cell_size_m, params.hydro.lake_min_depth, minor=minor)
     return ql.save_image(path, img)
