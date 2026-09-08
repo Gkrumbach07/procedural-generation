@@ -169,12 +169,15 @@ func _process(dt: float) -> void:
 		_update_desired()
 		_apply_desired()
 	if ocean and player:
+		_fit_ocean()
 		var p := to_local_pos(player.sphere_pos, 0.0)
 		ocean.position = Vector3(p.x, 0.0, p.z)
 
 
 ## Synchronous streaming pass (loads everything desired before returning).
 func stream_now() -> void:
+	if ocean and player:
+		_fit_ocean()
 	_maybe_reanchor()
 	_update_desired()
 	var was_sync := sync_loads
@@ -355,11 +358,27 @@ func basin_at(p: Vector3) -> int:
 	return -1
 
 
+## Keep the sea plane wider than the camera can see, so no sky-ground shows
+## under the horizon.  A no-op after the first call unless the far plane moves.
+func _fit_ocean() -> void:
+	var cam: Camera3D = player.get("camera") if player else null
+	if cam == null or ocean == null:
+		return
+	var want := maxf(view_distance_m * 2.4, cam.far * 2.2)
+	var pm := ocean.mesh as PlaneMesh
+	if pm and absf(pm.size.x - want) > 1.0:
+		pm.size = Vector2(want, want)
+
+
 func _make_ocean() -> void:
 	var pm := PlaneMesh.new()
-	# sized by the raw view distance, not effective_view_distance(): the sea is a
-	# flat sea-level plane, so it costs nothing to cover the horizon beyond the
-	# streamed tiles, and clamping it leaves a band of sky-ground under the horizon
+	# Sized by the *camera far plane*, not view_distance_m and not
+	# effective_view_distance(): the sea is two triangles at y = 0 whose only job
+	# is to cover everything below the horizon, so any gap between its edge and
+	# the far plane shows the procedural sky's ground colour as a grey wedge
+	# under the horizon, growing with altitude (at 1800 m over a 9.6 km half-
+	# extent the wedge is ~10 degrees tall).  _fit_ocean() re-fits it once the
+	# player's camera exists.
 	pm.size = Vector2(view_distance_m * 2.4, view_distance_m * 2.4)
 	ocean = MeshInstance3D.new()
 	ocean.mesh = pm
