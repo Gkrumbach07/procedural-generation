@@ -85,6 +85,7 @@ def erosion_frames(store: WorldStore, params: WorldParams, frames: int, width: i
     bedrock.  Rivers are the live discharge map (log-weighted blue) and
     lakes the flooded routing surface, so the frames show the network
     organising itself rather than just the relief changing."""
+    from globe.erosion import route as rt
     from globe.erosion import run as er
     from globe.erosion.maps import step
 
@@ -102,14 +103,24 @@ def erosion_frames(store: WorldStore, params: WorldParams, frames: int, width: i
     while True:
         surf = state.surface()[state.interior] * state.height_unit_m
         img = ql.render_height(surf, cell_size=state.grid.cell_size_m, **scale)
-        # Lakes: the epsilon-flooded routing surface standing above the
-        # terrain — masked to LAND, because over the sea that surface sits at
-        # sea level above every submerged cell and would paint the whole ocean.
-        if state.route is not None:
-            depth = (state.route - state.surface())[state.interior] * state.height_unit_m
-            lake = (depth > 0.5) & (surf > 0.0)
-            if lake.any():
-                img = ql.overlay(img, lake, (60, 120, 220), 0.9)
+        # Standing water: an epsilon priority flood computed *fresh for this
+        # frame*, masked to land.
+        #
+        # `state.route` is NOT usable here even though it is the same
+        # quantity: the kernel only refreshes it every `flood_every`
+        # iterations, so between refreshes the terrain erodes out from under a
+        # stale surface and the flooded area grows and grows, then snaps back
+        # at the refresh — a sawtooth that read as the whole world flooding
+        # and draining on a loop (measured 23 % -> 52 % of land over 10
+        # iterations, then back to 30 %).  A fresh flood costs 0.11 s at
+        # N_c = 256 against ~0.4 s for an iteration, and ponds 0.8 % of land.
+        # Masked to land because over the sea the flood surface sits at sea
+        # level above every submerged cell and would paint the whole ocean.
+        route = rt.priority_flood_eps(state.surface(), state.mask, state.owner_table(), state.H, state.N, float(p.erosion.route_eps))
+        depth = (route - state.surface())[state.interior] * state.height_unit_m
+        lake = (depth > 0.5) & (surf > 0.0)
+        if lake.any():
+            img = ql.overlay(img, lake, (60, 120, 220), 0.9)
         # rivers: the live discharge map, log-weighted above its 97th percentile
         q = np.where(surf > 0.0, state.discharge[state.interior].astype(np.float64), 0.0)
         lq = np.log1p(np.maximum(q, 0.0))
@@ -128,14 +139,21 @@ def erosion_frames(store: WorldStore, params: WorldParams, frames: int, width: i
 # --------------------------------------------------------------------------
 # driver
 # --------------------------------------------------------------------------
-def write_animation(path: Path, frames: list[Image.Image], fps: float, gif: bool) -> Path:
+def write_animation(path: Path, frames: list[Image.Image], fps: float, gif: bool, hold_ms: int = 1500) -> Path:
+    """Write the loop, holding the last frame for ``hold_ms``.
+
+    These animations are not cyclic — the last frame is a fully evolved world
+    and the first is bare crust — so a plain loop cuts hard between two very
+    different images (measured: 38 % of the map changes land/sea class across
+    the seam).  A pause on the finished state makes the restart read as a
+    restart rather than a glitch.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    duration = max(20, int(round(1000.0 / max(fps, 0.1))))
+    step_ms = max(20, int(round(1000.0 / max(fps, 0.1))))
+    durations = [step_ms] * (len(frames) - 1) + [max(step_ms, hold_ms)]
     head, rest = frames[0], frames[1:]
-    if gif:
-        head.save(str(path), save_all=True, append_images=rest, duration=duration, loop=0, optimize=True)
-    else:
-        head.save(str(path), format="WEBP", save_all=True, append_images=rest, duration=duration, loop=0, quality=88, method=4)
+    fmt = {} if gif else {"format": "WEBP", "quality": 88, "method": 4}
+    head.save(str(path), save_all=True, append_images=rest, duration=durations, loop=0, **({"optimize": True} if gif else fmt))
     return path
 
 
