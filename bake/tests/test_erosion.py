@@ -23,6 +23,7 @@ import pytest
 from scipy import ndimage
 
 from globe.config import WorldParams
+from globe.erosion import glacial
 from globe.erosion import particle as pk
 from globe.erosion import run as erosion_run
 from globe.erosion.maps import ErosionState, apply_uplift, run_iteration, step
@@ -518,3 +519,42 @@ def test_alluvial_cover_lets_hardness_shape_the_landscape():
     relief_on = hard_on - soft_on  # measured +0.139
     assert relief_on > 2.0 * relief_off, (relief_off, relief_on)
     assert relief_on > 0.08, relief_on  # soft rock really is carved down
+
+
+def test_glacial_carving_makes_closed_basins_and_conserves_mass():
+    """Glacial carving is the only pass that can leave a lake.
+
+    Every other erosional term is bounded below by where the water can get
+    out, so a fluvial landscape drains completely: the tectonic bedrock of a
+    baked world had 1 closed depression in 456,693 land cells.  Ice flows
+    uphill out of a basin, so `glacial.carve` lowers the bed under ice with
+    no base-level limit at all, and puts the spoil on the margin as moraine.
+
+    Checks the two properties the rest of the pipeline relies on: it really
+    does create depressions the flood can pond in, and it moves rock rather
+    than creating or destroying it (so it composes with `hold_datum`).
+    """
+    p = WorldParams.small_world(0).with_overrides(erosion={"glacial_rate": 1.0, "glacial_every": 10})
+    st = make_window(64, "dome", p, iters=40)
+    # freeze the upper half of the dome: `evap <= 0` is the kernel's `T <= 0`
+    st.evap[...] = 1.0
+    high = st.surface() > np.percentile(st.surface()[st.interior], 70)
+    st.evap[high] = 0.0
+    st.discharge[...] = 4.0  # a uniform ice flux, so the taper alone shapes the cut
+
+    before = st.total_mass()
+    depressions_before = _closed_depressions(st)
+    stats = glacial.carve(st, p)
+    after = st.total_mass()
+
+    assert stats["ice_cells"] > 0 and stats["carved"] > 0.0
+    assert stats["moraine_cells"] > 0
+    assert abs(after - before) <= 1e-9 * max(abs(before), 1.0), (before, after)
+    assert _closed_depressions(st) > depressions_before
+
+
+def _closed_depressions(state) -> int:
+    """Interior land cells with no strictly lower 8-neighbour."""
+    surf = state.surface()[state.interior]
+    lo = ndimage.minimum_filter(surf, size=3, mode="nearest")
+    return int(((surf <= lo) & (surf > 0)).sum())

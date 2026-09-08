@@ -264,3 +264,30 @@ def test_runtime_small_preset():
     dt = time.time() - t0
     assert sim.step_index == 300
     assert dt < 20.0, f"300 steps took {dt:.1f}s"
+
+
+def test_strata_fabric_gives_hardness_structure_at_basin_scale():
+    """`tectonics.strata_period/amp` lay bedrock fabric along lines of equal
+    crust age (the strata the crust accreted in).
+
+    Without it hardness is a smooth blend of age, density and boundary
+    proximity — broad two-tone plateaus whose autocorrelation is still high
+    a basin's width away, so rock strength has no structure for drainage to
+    organise around and every continent develops the same radial network.
+    The fabric both widens the contrast and shortens the correlation length.
+    """
+    p = WorldParams.tiny_world(0)
+    flat = tect.finalise(tect.simulate(p.with_overrides(tectonics={"strata_amp": 0.0}), log=lambda *a: None))["hardness"].interior
+    band = tect.finalise(tect.simulate(p, log=lambda *a: None))["hardness"].interior
+
+    def spread(a):
+        return float(np.percentile(a, 90) - np.percentile(a, 10))
+
+    def autocorr(a, lag):
+        x = a[1].astype(np.float64)
+        x = x - x.mean()
+        return float((x[:-lag] * x[lag:]).mean() / max((x * x).mean(), 1e-12))
+
+    assert spread(band) > 1.5 * spread(flat), (spread(flat), spread(band))
+    assert autocorr(band, 8) < 0.6 * autocorr(flat, 8), (autocorr(flat, 8), autocorr(band, 8))
+    assert float(band.min()) >= 0.0 and float(band.max()) <= 1.0

@@ -414,7 +414,19 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     d_lo, d_hi = np.percentile(den_c, [1, 99])
     den_norm = np.clip((den_c - d_lo) / max(d_hi - d_lo, 1e-6), 0.0, 1.0)
     prox = np.clip(1.0 - bd_c / (tp.boundary_width_factor * sim.spacing), 0.0, 1.0)
-    hard = np.clip(0.3 + 0.5 * age_norm + 0.3 * den_norm - 0.4 * prox, 0.0, 1.0)
+    # Bedrock fabric.  Crust accretes at plate boundaries, so lines of equal
+    # age are the strata it was laid down in: modulating hardness along age
+    # lays bands parallel to the boundary that built them, narrow where
+    # accretion was fast and wide where it was slow.  Without this the field
+    # is a smooth two-tone blend (autocorrelation 0.53 at 64 cells) with
+    # nothing for drainage to organise around, and every continent develops
+    # the same radial network.  `tanh` sharpens the contacts: real strata
+    # meet at a contact, not a gradient.
+    strata = 0.0
+    if tp.strata_amp > 0.0 and tp.strata_period > 0.0:
+        wave = np.sin(2.0 * np.pi * age_c / float(tp.strata_period))
+        strata = np.tanh(2.5 * wave) / np.tanh(2.5)
+    hard = np.clip(0.3 + 0.5 * age_norm + 0.3 * den_norm - 0.4 * prox + float(tp.strata_amp) * strata, 0.0, 1.0)
     hardness = FaceField.from_interior(coarse, hard.astype(np.float32), name="hardness")
 
     # -- plate ids (compacted to 0..P'-1 in original order) and velocities --

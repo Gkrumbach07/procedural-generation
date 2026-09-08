@@ -44,6 +44,7 @@ from numba import get_num_threads, parallel_chunksize
 from ..config import ErosionParams, WorldParams
 from ..cubesphere import Grid
 from ..field import FaceField
+from . import glacial
 from . import particle as pk
 
 
@@ -648,6 +649,12 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
     t1 = time.time()
     thermal_erosion(state, params)
     apply_uplift(state)
+    # Glacial carving: the only pass that may leave a closed depression, so
+    # the only one that can produce a lake.  Global pass only — a refinement
+    # window inherits the coarse result rather than re-carving it.
+    if state.spherical and ep.glacial_every > 0 and (state.iteration + 1) % int(ep.glacial_every) == 0 \
+            and (state.iteration + 1) >= float(ep.glacial_from) * int(ep.iterations):
+        st["glacial"] = glacial.carve(state, params)
     if state.spherical and isinstance(params, WorldParams):
         st["datum_shift"] = hold_datum(state, params.world.land_fraction)
     state.exchange_halos()

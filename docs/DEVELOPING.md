@@ -146,6 +146,11 @@ the drainage network).  The stage reports the removed drift as
 `datum_drift_m`, and its `land_fraction` equals `world.land_fraction` up to
 a cell or two of rounding.  Windows have no planetary datum and skip it.
 
+Bedrock fabric: `tectonics.strata_period/amp` modulate `hardness` along
+lines of equal crust age — the strata the crust accreted in — so bands run
+parallel to the boundary that built them.  Without it the field is a smooth
+two-tone blend with no structure at drainage-basin scale.
+
 Rock strength: erodibility blends between sediment (fully erodible) and
 bedrock (scaled by `hardness`) across `erosion.cover_depth` of alluvial
 cover — a thin film only partly shields the rock beneath it (the Sklar &
@@ -153,6 +158,22 @@ Dietrich cover effect).  `cover_depth = 0` restores the older bare-rock-only
 gate, under which `hardness` reached the 0.1 % of land cells with exactly
 zero sediment and had no measurable effect on the landscape (striped-rock
 test: relief contrast -0.003 cell units at 0, +0.139 at 0.1).
+
+Glacial carving (`erosion/glacial.py`, global pass only): the one pass that
+may leave a **closed depression**, and so the only source of lakes — every
+other erosional term is bounded below by where the water can get out, and a
+fluvial landscape drains completely (the tectonic bedrock of a baked world
+had 1 depression in 456,693 land cells).  Ice is `evap <= 0`, i.e. mean
+annual temperature at or below freezing (~9 % of land at the defaults);
+ice flux is `discharge`, which is already a seam-correct accumulation of
+precipitation.  The bed is lowered with no base-level limit, tapered to
+zero over `glacial_ramp` cells at the margin so the deepest point lies
+*inside* the ice behind a rock lip, and the spoil is deposited on the
+margin as moraine (capped per cell at `iter_deposit`; the excess waits in
+`pending` as outwash).  The pass is mass-conserving, so it composes with
+`hold_datum`.  It runs only after `glacial_from` of the run, because lakes
+survive on Earth by being young: carving throughout gives the fluvial
+system the rest of the run to backfill everything.
 
 Hillslope processes: `thermal_erosion` runs the talus pass and then, when
 `erosion.creep_rate > 0`, a second conservative pass with talus 0 (linear

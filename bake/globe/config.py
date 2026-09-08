@@ -103,6 +103,8 @@ class TectonicsParams:
     heat_diffusion: float = 2e-5  # rad² per step (explicit, sub-stepped for stability)
     heat_grid_divisor: int = 4  # the heat field lives on an N_tect / divisor grid (low-frequency driver; cheap diffusion)
     heat_relax: float = 0.002  # per-step relaxation of heat towards the initial background field (keeps the sources from saturating)
+    strata_period: float = 40.0  # bedrock fabric: age interval (tectonic steps) between successive hard bands.  Crust accretes at plate boundaries, so lines of equal age are the strata it was laid down in and bands run parallel to the boundary that made them — narrow where accretion was fast, wide where it was slow (median ~7 coarse cells at the defaults).  0 = no fabric
+    strata_amp: float = 0.35  # how far the fabric swings hardness either side of the base value.  Without it hardness is a smooth two-tone blend of crust age and density (autocorrelation still 0.53 at 64 cells) with no structure at drainage-basin scale, so every continent develops the same radial network
     heat_noise_octaves: int = 3
     heat_noise_freq: float = 1.5  # base lattice frequency of the initial heat noise (features ~ 1/freq of the diameter)
     damping: float = 0.05  # omega *= (1 - damping) per step
@@ -211,6 +213,12 @@ class ErosionParams:
     ocean_steps: int = 64  # at most this many seafloor steps (then the rest waits in the cell's pending stockpile, re-injected next iteration)
     fan_room: float = 1.0  # a seafloor step may settle at most this much (cell units) on a flat sea floor per particle-step (the drop to the previous cell when larger); the sea-level ceiling, the fan_slope descent and iter_deposit still bound the pile in apply_changes.  0.02 (= DEP_FLOOR) throttled offshore dispersal to ~1 cell unit per stockpile and iteration, so river mouths parked most of their load in `pending`
     fan_slope: float = 0.05  # a submarine fan descends at least this much per cell away from its source (cell units per cell): the deposit ceiling of a seafloor step is the previous path cell minus this, and never above -DEP_FLOOR
+    glacial_every: int = 10  # run the glacial pass (erosion/glacial.py) every k iterations; 0 = off.  Ice is where the mean annual temperature is at or below freezing (evap <= 0), which at the defaults is ~9 % of land, close to Earth's glaciated fraction
+    glacial_from: float = 0.75  # start glaciating this far through the run (fraction of erosion.iterations); 0 = glaciate throughout.  Earth is lake-rich because glaciation was *recent* — the basins ice cut ~10 ka ago have not had time to fill, and lake lifetime is short next to landscape evolution time.  Carving throughout instead gives the fluvial system the whole rest of the run to drain and backfill every basin
+    glacial_rate: float = 1.0  # bed lowered per glacial pass (cell units) at the reference ice flux, scaled by sqrt(discharge/disc_saturation) and by (1 - 0.5*hardness).  Unlike every other erosional term this one has NO base-level limit — ice flows uphill out of a basin — which is what leaves the closed depressions that become lakes
+    glacial_ramp: int = 4  # cells over which the carve ramps up from the ice margin inward.  Erosion that only scales with ice flux deepens a valley monotonically downstream, which drains; tapering it to zero at the snout leaves a rock lip with the deepest point inside the ice, i.e. a closed basin
+    glacial_max: float = 0.4  # cap on the bed a cell loses in one glacial pass (cell units)
+    moraine_frac: float = 1.0  # fraction of the excavated rock deposited on the ice margin as moraine (the rest is lost); 1.0 keeps the pass mass-conserving, and the moraine dams valleys leaving an ice field, which is the second way ice makes lakes
     resume: bool = True  # resume from checkpoints/ whose parameter + upstream + kernel-version hash matches; False recomputes from bedrock
     flood_every: int = 10  # recompute the particle routing surface (epsilon priority flood, erosion/route.py) every k iterations; 0 = steer on the raw terrain
     route_eps: float = 1e-3  # minimum drop per cell (cell units) of the routing surface across lakes
