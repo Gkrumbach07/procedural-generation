@@ -39,10 +39,9 @@ inline double planet_radius(int N, double cell_size_m) {
     return N * cell_size_m * 4.0 / (2.0 * 3.141592653589793);
 }
 
-// Face-local (u, v) -> unit vector.  Valid slightly outside [0, 1).
-inline Vec3 to_sphere(int face, double u, double v) {
-    const double s = std::tan((u - 0.5) * HALF_PI);
-    const double t = std::tan((v - 0.5) * HALF_PI);
+// to_sphere with the tangents already taken; `s = tan((u - 0.5) * HALF_PI)`.
+// Lets a tile grid take one tan per row/column instead of two per vertex.
+inline Vec3 to_sphere_st(int face, double s, double t) {
     const double *r = BASES[face][0];
     const double *up = BASES[face][1];
     const double *n = BASES[face][2];
@@ -51,6 +50,11 @@ inline Vec3 to_sphere(int face, double u, double v) {
     const double z = n[2] + s * r[2] + t * up[2];
     const double inv = 1.0 / std::sqrt(x * x + y * y + z * z);
     return {x * inv, y * inv, z * inv};
+}
+
+// Face-local (u, v) -> unit vector.  Valid slightly outside [0, 1).
+inline Vec3 to_sphere(int face, double u, double v) {
+    return to_sphere_st(face, std::tan((u - 0.5) * HALF_PI), std::tan((v - 0.5) * HALF_PI));
 }
 
 // argmax |component| with sign; ties resolve X > Y > Z (same as Python).
@@ -104,6 +108,29 @@ inline void tile_of(double u, double v, int N_fine, int T, int lod, int &tx, int
 inline void gnomonic_local(const Vec3 &Q, const Vec3 &A, const Vec3 &e1, const Vec3 &e2, double R_planet,
                            double &lx, double &lz) {
     const double d = Q.x * A.x + Q.y * A.y + Q.z * A.z;
+    const double dx = Q.x / d, dy = Q.y / d, dz = Q.z / d;
+    lx = (dx * e1.x + dy * e1.y + dz * e1.z) * R_planet;
+    lz = (dx * e2.x + dy * e2.y + dz * e2.z) * R_planet;
+}
+
+// Face-local coordinate of vertex `k` (0..T) of tile index `t` at `lod`
+// (T fine cells per tile edge at LOD 0, N_fine fine cells per face edge);
+// the twin of WorldRoot.tile_local_pos / terrain.gdshader local_pos.
+inline double tile_uv(int t, int k, int T, int n_fine, int lod) {
+    const double scale = double(1 << lod);
+    return (double(t) * double(T) + double(k)) * scale / double(n_fine);
+}
+
+// The renderer clamps dot(Q, A) (terrain.gdshader local_pos and
+// GlobeMath.gnomonic_local) so points at or behind the horizon stay finite
+// instead of diverging; collision built from the same clamp matches the mesh.
+static const double GNOMONIC_MIN_D = 0.05;
+
+// gnomonic_local with that clamp.
+inline void gnomonic_local_clamped(const Vec3 &Q, const Vec3 &A, const Vec3 &e1, const Vec3 &e2, double R_planet,
+                                   double min_d, double &lx, double &lz) {
+    double d = Q.x * A.x + Q.y * A.y + Q.z * A.z;
+    if (d < min_d) d = min_d;
     const double dx = Q.x / d, dy = Q.y / d, dz = Q.z / d;
     lx = (dx * e1.x + dy * e1.y + dz * e1.z) * R_planet;
     lz = (dx * e2.x + dy * e2.y + dz * e2.z) * R_planet;

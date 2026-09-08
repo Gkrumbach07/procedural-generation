@@ -19,7 +19,7 @@ docs/DEVELOPING.md — change both):
 |  9   | savanna                  | T >= 20, 30 <= P < 100                                |
 | 10   | tropical_seasonal_forest | T >= 20, 100 <= P < 220                               |
 | 11   | tropical_rainforest      | T >= 20, P >= 220                                     |
-| 12   | alpine                   | override: surface >= alpine_min_m and T < alpine_T    |
+| 12   | alpine                   | override: surface >= alpine min (see below) and T < alpine_T |
 | 13   | cliff                    | override: slope > cliff_slope (rise/run)              |
 | 14   | riparian                 | override: within riparian_cells of a channel / river  |
 | 15   | wetland                  | override: within wetland_cells of a lake              |
@@ -38,6 +38,14 @@ temperate forest), a quarter of the mean 50 cm (grassland / savanna), a
 sixteenth 25 cm (desert), 4x the mean 200 cm (rainforest).
 Override precedence, lowest to highest: riparian < alpine < cliff <
 wetland < lake < ocean.
+
+The two elevation/slope thresholds adapt to the world instead of being
+fixed metres: the alpine one is ``derive.alpine_min_m`` if set, else
+``alpine_min_relief_frac`` of the achieved land relief
+(:func:`effective_alpine_min`) — the tectonic relief scales with the
+planet (``tectonics.relief_spacings``) — and the cliff one is raised, if
+need be, so cliffs never cover more than ``cliff_max_fraction`` of the
+land (:func:`effective_cliff_slope`).
 """
 from __future__ import annotations
 
@@ -180,18 +188,35 @@ def effective_cliff_slope(slope_land: np.ndarray, dp) -> float:
     return thr
 
 
-def classify(T, P_cm, surface, slope, lake, river_near, lake_near, dp, cliff_slope: float | None = None) -> np.ndarray:
+def effective_alpine_min(surface_land: np.ndarray, dp) -> float:
+    """Alpine elevation threshold: ``dp.alpine_min_m`` when > 0, else
+    ``dp.alpine_min_relief_frac`` of the achieved land relief (the 99.9th
+    percentile of the land surface).  The tectonic relief scales with the
+    planet (``tectonics.relief_spacings``), so a fixed metre threshold
+    either never fires on a small world or fires everywhere on a large
+    one."""
+    if float(dp.alpine_min_m) > 0.0:
+        return float(dp.alpine_min_m)
+    s = np.asarray(surface_land, dtype=np.float32).ravel()
+    if not s.size:
+        return 0.0
+    return float(dp.alpine_min_relief_frac) * float(np.quantile(s, 0.999))
+
+
+def classify(T, P_cm, surface, slope, lake, river_near, lake_near, dp, cliff_slope: float | None = None, alpine_min: float | None = None) -> np.ndarray:
     """Full biome classification of one array (coarse ``(6, N, N)`` or one
     fine face ``(Nf, Nf)``): Whittaker base plus the overrides of the module
     table.  ``dp`` is ``params.derive``; ``cliff_slope`` overrides
-    ``dp.cliff_slope`` (see :func:`effective_cliff_slope`).  ``lake`` /
+    ``dp.cliff_slope`` (see :func:`effective_cliff_slope`), ``alpine_min``
+    overrides ``dp.alpine_min_m`` (see :func:`effective_alpine_min`).  ``lake`` /
     ``river_near`` / ``lake_near`` are bool masks (``river_near`` = within
     ``riparian_cells`` of a channel; ``lake_near`` = within
     ``wetland_cells`` of a lake)."""
     surface = np.asarray(surface, dtype=np.float32)
     T = np.asarray(T, dtype=np.float32)
     ocean = surface < 0.0
-    alpine = (surface >= np.float32(dp.alpine_min_m)) & (T < np.float32(dp.alpine_T))
+    am = dp.alpine_min_m if alpine_min is None else alpine_min
+    alpine = (surface >= np.float32(am)) & (T < np.float32(dp.alpine_T))
     cs = dp.cliff_slope if cliff_slope is None else cliff_slope
     cliff = np.asarray(slope, dtype=np.float32) > np.float32(cs)
     lake = np.asarray(lake, dtype=bool)
@@ -284,5 +309,5 @@ __all__ = [
     "OCEAN", "ICE", "TUNDRA", "BOREAL_FOREST", "TEMPERATE_GRASSLAND", "TEMPERATE_FOREST", "TEMPERATE_RAINFOREST",
     "DESERT", "SHRUBLAND", "SAVANNA", "TROPICAL_SEASONAL_FOREST", "TROPICAL_RAINFOREST", "ALPINE", "CLIFF",
     "RIPARIAN", "WETLAND", "LAKE",
-    "wetness", "precip_cm", "whittaker", "apply_overrides", "effective_cliff_slope", "classify", "near", "near_padded", "near_faces", "vegetation", "colorize",
+    "wetness", "precip_cm", "whittaker", "apply_overrides", "effective_cliff_slope", "effective_alpine_min", "classify", "near", "near_padded", "near_faces", "vegetation", "colorize",
 ]

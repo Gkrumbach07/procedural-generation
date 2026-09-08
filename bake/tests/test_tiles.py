@@ -1,6 +1,7 @@
 """Tiles stage (PLAN 10.3): vertex tiles, shared columns (also across cube
 edges), the LOD pyramid, neighbours, index.json, determinism."""
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -384,6 +385,29 @@ def test_pipeline_bake_tiny(tmp_path):
     if not (fine / "river_mask.f0.npy").exists():
         assert not t.flow[..., 2].any()
     assert store.stage_info("tiles")["info"]["tiles"] == 6 * (npf * npf + (npf // 2) ** 2 + 1)
+
+
+def _suicide_job(args):  # module level: the executor pickles the callable by reference
+    os._exit(9)
+
+
+def test_dead_tile_worker_raises_instead_of_hanging(tmp_path, monkeypatch):
+    """A worker that dies without returning (OOM kill) must break the pool,
+    not block the bake forever: ``multiprocessing.Pool.imap_unordered``
+    silently replaces the worker and never yields the in-flight result."""
+    import multiprocessing as mp
+    import types
+    from concurrent.futures.process import BrokenProcessPool
+
+    if "fork" not in mp.get_all_start_methods():  # pragma: no cover - not linux
+        pytest.skip("needs the fork start method")
+
+    monkeypatch.setattr(tl, "_write_tiles_job", _suicide_job)  # inherited by the forked workers
+    params = WorldParams.tiny_world(seed=0)
+    store = types.SimpleNamespace(root=tmp_path)
+    ls = types.SimpleNamespace(work=tmp_path / "_work")
+    with pytest.raises(BrokenProcessPool):
+        tl.write_all_tiles(store, params, ls, log=lambda m: None, workers=2)
 
 
 def test_edge_links_and_extend():

@@ -9,11 +9,15 @@ Pipeline::
     quicklooks: the 3 largest basins (refine_basin<id>.png), then the planet
 
 Workers (``refine.workers``, 0 = all cores) are a *spawned*
-``multiprocessing.Pool``: numba's OpenMP threading layer deadlocks in a
-forked child once the parent has run a parallel kernel (the upstream
-stages have).  Each worker loads the coarse fields once
+``concurrent.futures.ProcessPoolExecutor``: numba's OpenMP threading layer
+deadlocks in a forked child once the parent has run a parallel kernel (the
+upstream stages have).  Each worker loads the coarse fields once
 (:func:`basin_job.pool_init`) and gets ``cpu_count / workers`` numba
-threads.  With one worker everything runs in-process.
+threads.  With one worker everything runs in-process.  The executor (not
+``multiprocessing.Pool``) is what makes a dead worker fatal: ``Pool``
+silently replaces a worker killed by the OOM killer and the in-flight
+task's result is then never produced, so ``imap_unordered`` blocks
+forever; the executor raises ``BrokenProcessPool`` instead.
 
 Determinism: a basin's arrays depend only on ``(seed, params, basin
 record)`` (``params.rng("refine", basin_id)``; the kernel is thread-count
@@ -90,11 +94,14 @@ def _run_jobs(jobs: list[dict], params: WorldParams, root: Path, workers: int, l
             report(st, k)
         return out
     import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
 
     threads = max(1, (os.cpu_count() or 1) // workers)
     ctx = mp.get_context("spawn")
-    with ctx.Pool(min(workers, n), initializer=bj.pool_init, initargs=(threads, str(root), params)) as pool:
-        for k, st in enumerate(pool.imap_unordered(bj.job, jobs), 1):
+    with ProcessPoolExecutor(max_workers=min(workers, n), mp_context=ctx, initializer=bj.pool_init, initargs=(threads, str(root), params)) as ex:
+        futs = [ex.submit(bj.job, j) for j in jobs]
+        for k, fut in enumerate(as_completed(futs), 1):
+            st = fut.result()  # a worker that died (OOM kill) raises BrokenProcessPool here
             out.append(st)
             report(st, k)
     return out

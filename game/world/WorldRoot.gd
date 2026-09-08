@@ -95,6 +95,17 @@ func tile_edge_m(lod: int) -> float:
 	return (PI * 0.5 * R_planet) / float(tiles_per_face(lod))
 
 
+## Streaming radius actually used.  The flat gnomonic frame only holds near
+## the anchor (PLAN 12.2), so cap the requested view distance by the planet:
+## 0.5 rad of arc for a tile centre, i.e. no retained vertex past ~60 deg,
+## where the gnomonic magnification is still under 2x.  Without the cap a
+## small planet streams the back hemisphere and `gnomonic_local`'s 0.05
+## clamp smears those tiles across the sky at up to 20x R_planet.
+## A no-op when R_planet >= 2 * view_distance_m (PLAN's default world).
+func effective_view_distance() -> float:
+	return minf(view_distance_m, 0.5 * R_planet)
+
+
 func tile_key(lod: int, face: int, x: int, y: int) -> String:
 	return "L%d/f%d/%d_%d" % [lod, face, x, y]
 
@@ -189,7 +200,7 @@ func _update_desired() -> void:
 func _descend(face: int, lod: int, x: int, y: int, p: Vector3) -> void:
 	var edge := tile_edge_m(lod)
 	var dist := GlobeMath.arc_distance(tile_center(face, lod, x, y), p) * R_planet - edge * 0.75
-	if dist > view_distance_m:
+	if dist > effective_view_distance():
 		return
 	if lod > 0:
 		# hysteresis: keep refined children if they are already loaded
@@ -335,20 +346,20 @@ func sample_water(p: Vector3) -> float:
 	return r[0].water_surface_at(r[1], r[2])
 
 
+## Global basin id at p, or -1 when unknown (ocean, no tile, or no
+## DrainageGraph -- the tiles only carry tile-local basin indices).
 func basin_at(p: Vector3) -> int:
 	if drainage:
 		var fuv := GlobeMath.from_sphere(p)
 		return drainage.call("basin_of", fuv[0], fuv[1], fuv[2])
-	var r := tile_at(p)
-	if r.is_empty():
-		return -1
-	var t: TerrainTile = r[0]
-	var basins: Array = t.meta.get("basins", [])
-	return basins.size()  # placeholder count without the extension
+	return -1
 
 
 func _make_ocean() -> void:
 	var pm := PlaneMesh.new()
+	# sized by the raw view distance, not effective_view_distance(): the sea is a
+	# flat sea-level plane, so it costs nothing to cover the horizon beyond the
+	# streamed tiles, and clamping it leaves a band of sky-ground under the horizon
 	pm.size = Vector2(view_distance_m * 2.4, view_distance_m * 2.4)
 	ocean = MeshInstance3D.new()
 	ocean.mesh = pm

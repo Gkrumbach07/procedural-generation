@@ -30,26 +30,37 @@ def test_net_edges_are_continuous():
 
 
 def seam_discontinuity(field: FaceField) -> float:
-    """Max |gradient jump| across face edges relative to the interior
-    gradient scale (PLAN 15 seam test helper).  Vector fields are compared
-    via their physical norm (cell components are basis-dependent)."""
+    """Max |gradient jump| across face edges relative to the gradient scale
+    *next to that edge* (PLAN 15 seam test helper).  Vector fields are
+    compared via their physical norm (cell components are basis-dependent).
+
+    Each edge line (centred differences straddling the edge) is divided by
+    the mean of the two parallel lines just inside the face, not by the
+    whole-face mean: a seam is a *jump* confined to the edge line, while a
+    field that is simply concentrated near an edge (a trunk river along a
+    face boundary, a coastal band) ramps up over several lines and is not a
+    seam.  Normalising against the face mean flags such ramps — e.g. the
+    tiny preset's ``momentum`` (edge 3.18 x the face mean, but 2.91 / 2.43
+    on the two lines inside it) and the small preset's ``water_surface``
+    (3.03) — while the local form scores them 1.2 and 1.1 and still scores
+    every real seam below (per-face offset, mis-oriented face, per-face
+    noise, constant cell components) above 4.9."""
     if field.is_vector:
         field = field.vec_norm()
     f = field.copy()
     f.exchange_halos()
     d = f.data.astype(np.float64)
     H, N = f.H, f.N
-    gi = d[:, 2:, :] - d[:, :-2, :]
-    gj = d[:, :, 2:] - d[:, :, :-2]
-    inner = max(np.abs(gi[:, H : H + N - 2, H : H + N]).mean(), np.abs(gj[:, H : H + N, H : H + N - 2]).mean(), 1e-12)
-    # centred differences straddling the four edges of every face
+    gi = np.abs(d[:, 2:, :] - d[:, :-2, :])
+    gj = np.abs(d[:, :, 2:] - d[:, :, :-2])
+    # [edge line, first line inside, second line inside] for the four edges
     edges = [
-        np.abs(gi[:, H - 1, H : H + N]),
-        np.abs(gi[:, H + N - 1, H : H + N]),
-        np.abs(gj[:, H : H + N, H - 1]),
-        np.abs(gj[:, H : H + N, H + N - 1]),
+        [gi[:, H - 1 + k, H : H + N] for k in range(3)],
+        [gi[:, H + N - 1 - k, H : H + N] for k in range(3)],
+        [gj[:, H : H + N, H - 1 + k] for k in range(3)],
+        [gj[:, H : H + N, H + N - 1 - k] for k in range(3)],
     ]
-    return float(max(e.mean() for e in edges) / inner)
+    return float(max(e[0].mean() / max(0.5 * (e[1].mean() + e[2].mean()), 1e-12) for e in edges))
 
 
 def test_seam_metric_on_smooth_function():
@@ -81,6 +92,22 @@ def test_seam_metric_detects_seams():
     c.data[..., 0] = 1.0
     assert seam_discontinuity(c) > 3.0  # constant cell components are not a continuous tangent field
     assert seam_discontinuity(rotation_field(g, (0.3, -0.5, 0.8), "w")) < 3.0  # a rigid rotation is
+
+
+def test_seam_metric_ignores_features_that_hug_an_edge():
+    """False-positive test: a field that is smooth on the sphere but has a
+    narrow, steep ridge lying *along* a cube edge (|x| = |z|) is continuous
+    there — as a trunk river or a coastal band along a face boundary is.
+    Normalised against the face-wide gradient mean such a field scores 8.7;
+    against the lines next to the edge it scores 1.4."""
+    g = Grid(64, 4)
+    f = FaceField.from_function(g, lambda p: np.exp(-((p[..., 0] ** 2 - p[..., 2] ** 2) ** 2) / 2e-3), dtype=np.float32, name="ridge")
+    assert f.interior.max() > 0.9 and float(np.median(f.interior)) < 0.1  # it really is a narrow ridge
+    assert seam_discontinuity(f) < 3.0
+    # and it is still caught once a jump is added on top of the ridge
+    s = f.copy()
+    s.data += (np.arange(6)[:, None, None] * 0.2).astype(np.float32)
+    assert seam_discontinuity(s) > 3.0
 
 
 def test_quicklook_writes(tmp_path):

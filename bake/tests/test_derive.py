@@ -4,12 +4,14 @@ biome codes, vegetation range, river mask aligned with high discharge,
 rivers.json geometry (inside faces, descending, widths grow with
 discharge, Strahler from the fine graph and from a coarse graph), lakes.json
 polygons, determinism, runtime at N_fine = 256 with an estimate for 4096."""
+import dataclasses
 import json
 import time
 
 import numpy as np
 import pytest
 
+from globe.climate.temperature import retarget, temperature
 from globe.config import WorldParams
 from globe.derive import biomes, lakes, rivers, soil
 from globe.derive import run as derive_run
@@ -189,6 +191,60 @@ def test_whittaker_and_overrides():
     assert out.tolist() == [biomes.OCEAN, biomes.LAKE, biomes.CLIFF, biomes.RIPARIAN]
     assert biomes.PALETTE.shape == (biomes.N_BIOMES, 3) and len(biomes.NAMES) == biomes.N_BIOMES
     assert soil.soil_factor(np.array([0.0, 0.5, 5.0]), 1.0).tolist() == pytest.approx([0.7, 0.85, 1.0])
+
+
+def test_effective_alpine_min_follows_the_achieved_relief():
+    """A fixed metre threshold does not survive a planet whose relief
+    scales with its size (tectonics.relief_spacings), so 0 means "a
+    fraction of the achieved land relief"."""
+    p = WorldParams.tiny_world()
+    dp = p.derive
+    land = np.linspace(0.0, 1000.0, 10001, dtype=np.float32)
+    assert dp.alpine_min_m == 0.0  # the default is relative
+    got = biomes.effective_alpine_min(land, dp)
+    assert got == pytest.approx(dp.alpine_min_relief_frac * float(np.quantile(land, 0.999)), rel=1e-6)
+    assert biomes.effective_alpine_min(np.array([], np.float32), dp) == 0.0
+    fixed = dataclasses.replace(dp, alpine_min_m=800.0)
+    assert biomes.effective_alpine_min(land, fixed) == 800.0
+    # and it is what classify uses
+    surf = np.array([300.0, 700.0], np.float32)
+    T = np.full(2, -5.0, np.float32)
+    P = np.full(2, 100.0, np.float32)
+    zero = np.zeros(2, bool)
+    out = biomes.classify(T, P, surf, np.zeros(2, np.float32), zero, zero, zero, dp, 1.6, got)
+    assert out.tolist() == [biomes.TUNDRA, biomes.ALPINE]
+
+
+def test_biome_temperature_is_taken_at_the_eroded_surface(tiny):
+    """``climate/temperature`` is computed on the pre-erosion bedrock;
+    derive re-references it to the surface it classifies (coarse and per
+    fine cell), so peaks are not classified several degrees too warm."""
+    store, params, info = tiny
+    grid = params.coarse_grid()
+    cp = params.climate
+    T = store.load_field("temperature", grid)
+    bed = store.load_field("bedrock", grid)
+    surface_c = (store.load_field("height", grid).interior + store.load_field("sediment", grid).interior).astype(np.float32)
+    land = surface_c >= 0.0
+    surf_field = FaceField.from_interior(grid, surface_c, name="surface")
+    # re-referencing is exactly a full recompute of climate.temperature on
+    # the eroded surface (checked on the real formula: the stub climate uses
+    # its own latitude law, so only the terrain is borrowed here)
+    T_bed = temperature(grid, bed.data, cp)
+    round_trip = retarget(retarget(T_bed, bed.data, 0.0, cp), 0.0, surf_field.data, cp)
+    assert np.allclose(round_trip, temperature(grid, surf_field.data, cp), atol=1e-4)
+    # the stage classified with the stored field re-referenced that way ...
+    exp_c = retarget(retarget(T.interior, bed.interior, 0.0, cp), 0.0, surface_c, cp)
+    assert info["T_biome_land_mean"] == pytest.approx(float(exp_c[land].mean()), abs=1e-4)
+    # ... which really differs from the stale (bedrock) field
+    assert np.abs(exp_c - T.interior)[land].max() > 0.1
+    # fine: each face's lapse is applied at its own cells, not upsampled
+    T0 = FaceField.from_interior(grid, retarget(T.interior, bed.interior, 0.0, cp), name="T0")
+    for f in (0, edge_features(params)["A"]):
+        surface_f = np.asarray(load_face(store, "height", f), np.float32) + np.asarray(load_face(store, "sediment", f), np.float32)
+        exp = retarget(fine_mod.upsample_face(T0, f, params.world.R, order=1), 0.0, surface_f, cp)
+        m = surface_f >= 0.0
+        assert info["faces"][f]["T_land_mean"] == pytest.approx(float(exp[m].mean()), abs=1e-4)
 
 
 def test_thinning_gives_connected_one_pixel_skeleton():

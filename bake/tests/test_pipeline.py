@@ -216,6 +216,7 @@ def test_runtime_knobs_do_not_invalidate(scratch):
     knobs = WorldParams.tiny_world(seed=13)
     knobs.refine.workers = 3
     knobs.erosion.checkpoint_every = 1
+    knobs.erosion.resume = False  # only chooses whether checkpoints/ is read
     knobs.render.view_distance_m = 1.0
     assert knobs.content_hash() == params.content_hash()
     log = []

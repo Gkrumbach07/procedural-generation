@@ -14,7 +14,7 @@ from globe.field import rotation_field
 from globe.io.world_store import WorldStore
 from globe.pipeline import bake
 from globe.tectonics import run as tect
-from globe.tectonics.collision import build_tree, collide, label_map, label_map_fast, relax_segments, spread_collisions
+from globe.tectonics.collision import build_tree, collide, label_map, label_map_fast, relax_segments, spread_collisions, weighted_quantile
 from globe.tectonics.plates import Plates, cluster_plates, rotate_segments
 from globe.tectonics.segments import Segments, best_candidate_sphere, greedy_accept, mean_spacing
 
@@ -174,7 +174,7 @@ def test_output_dtypes_and_ranges(tiny_out):
     area = p.coarse_grid().interior_cell_area
     land = float(area[bed >= 0].sum() / area.sum())
     assert abs(land - p.world.land_fraction) < 0.03
-    assert bed.max() > 500 and bed.min() < 0
+    assert bed.max() > 0.5 * relief_target(p) and bed.min() < 0
     h = out["hardness"].interior
     assert h.min() >= 0 and h.max() <= 1 and h.std() > 0.01
     pid = out["plate_id"].interior
@@ -184,6 +184,34 @@ def test_output_dtypes_and_ranges(tiny_out):
     up = out["uplift"].interior
     assert up.max() > 0
     assert (up[out["collision_zone"].interior.astype(bool)] >= 0).all()
+
+
+def relief_target(p: WorldParams) -> float:
+    """The metre height the 99.9th percentile of land is scaled to."""
+    tp = p.tectonics
+    return float(tp.relief_m) if tp.relief_m > 0 else float(tp.relief_spacings) * mean_spacing(int(tp.segments)) * p.R_planet
+
+
+def test_relief_follows_the_tectonic_spacing(tiny_out):
+    """The vertical scale is tied to the horizontal one: the 99.9th
+    percentile of land sits at ``relief_spacings`` mean segment spacings,
+    so the land slope stays well under the talus angle at every preset (a
+    fixed relief_m puts kilometres on a pattern a few cells wide and the
+    whole planet ends up at the angle of repose)."""
+    p = WorldParams.tiny_world()
+    grid = p.coarse_grid()
+    bed = tiny_out["bedrock"].interior
+    land = bed > 0
+    top = weighted_quantile(bed[land], grid.interior_cell_area[land], 0.999)
+    target = relief_target(p)
+    assert abs(top - target) < 0.05 * target, (top, target)
+    info = tiny_out["_land_slope"]
+    slope = tiny_out["bedrock"].gradient().vec_norm().interior[land]
+    assert info["land_slope_median"] == pytest.approx(float(np.median(slope)))
+    assert info["land_slope_p90"] == pytest.approx(float(np.percentile(slope, 90)))
+    hard = p.erosion.talus_slope_hard
+    assert info["land_slope_median"] < 0.5 * hard, info  # not already at the talus angle
+    assert info["land_above_talus_fraction"] < 0.1, info
 
 
 def test_plate_vel_is_rigid_rotation_of_each_plate(tiny_sim, tiny_out):
@@ -222,7 +250,9 @@ def test_stage_runs_in_pipeline(tmp_path):
     assert pid.dtype == np.int16 and (pid.interior >= 0).all()
     vel = store.load_field("plate_vel", grid)
     assert vel.is_vector
-    assert isinstance(WorldStore(tmp_path / "w").stage_info("tectonics")["info"]["segments_final"], int)
+    stage = WorldStore(tmp_path / "w").stage_info("tectonics")["info"]
+    assert isinstance(stage["segments_final"], int)
+    assert 0.0 < stage["land_slope_median"] < p.erosion.talus_slope_hard  # recorded at bake time
 
 
 def test_runtime_small_preset():

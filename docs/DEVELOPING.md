@@ -18,8 +18,8 @@ All `Grid`s share `R_planet` (derived from the coarse grid).
 
 | stage | field | dtype | units / meaning |
 |---|---|---|---|
-| tectonics | `bedrock` | f32 | metres; shifted so `land_fraction` of cells are ≥ 0 |
-| | `uplift` | f32 | metres per **erosion iteration** (already divided by `erosion.iterations`, scaled by `uplift_scale`) |
+| tectonics | `bedrock` | f32 | metres; shifted so `land_fraction` of cells are ≥ 0, and scaled so the 99.9th percentile of land sits at `tectonics.relief_spacings` mean segment spacings (`relief_m` metres when set) — the vertical scale follows the horizontal one, so the land does not stand at the talus angle at every preset |
+| | `uplift` | f32 | metres per **erosion iteration** (already divided by `erosion.iterations`, scaled by `uplift_scale`).  The global erosion pass applies it *mean-free* (`apply_uplift`): its area mean is a rise of the whole planet against the kernel's fixed base level, not relief, and would leave hydro's re-quantile to drown the lowlands |
 | | `hardness` | f32 | [0,1], 1 = hardest |
 | | `plate_id` | i16 | plate index; every cell has one |
 | | `plate_vel` | f32 (2) | contravariant coarse cells per tectonic step (vector field) |
@@ -37,8 +37,11 @@ All `Grid`s share `R_planet` (derived from the coarse grid).
 | watersheds | `basin_id` | i32 | −1 = ocean; otherwise a basin id from `graph/basins.json` |
 | derive | `biome` | u8 | biome code (see `derive/biomes.py`); 0 = ocean |
 
-`surface = height + sediment` everywhere; `ocean = surface < 0` (hydro may
-re-quantile `height` so that exactly `land_fraction` is land).
+`surface = height + sediment` everywhere; `ocean = surface < 0`.  Erosion
+already holds the datum every iteration (see *Erosion kernel contract*), so
+`land_fraction` of the coarse cells are land from the first stage on;
+hydro's `requantile_land_fraction` stays as the exact final guarantee and
+is a no-op (a shift of a few metres at most).
 
 ## D8
 
@@ -125,6 +128,24 @@ the deep ocean instead of deadlocking in `pending`; the per-iteration
 total is `lost_offshore` (stage info `lost_offshore_m`).  `pending` is a
 per-cell stockpile for **land** pits only.
 
+Uplift: `apply_uplift` subtracts the active-interior mean of `uplift`
+before adding it, but only on the **global** 6-face state, whose `z = 0`
+is the planetary datum; a window applies its uplift as given (a window
+mean would subside a basin against a base level it does not own), so a
+windowed run with a real uplift field must be handed one that is already
+mean-free over the whole sphere.  Refine passes `uplift = 0`.
+
+Datum: every global iteration ends with `maps.hold_datum`, a rigid shift of
+`height` onto the `land_fraction` order statistic of `height + sediment`
+(the same one `hydro.requantile_height` applies at the end of the bake, in
+cell units).  Uplift is a forcing and mass leaves the surface for the deep
+ocean, so without it the coastline erosion sculpts is not the coastline the
+rest of the pipeline uses (measured on the small e2e world: land fraction
+0.30 -> 0.56, corrected by a single -164 m shift in hydro, which drowned
+the drainage network).  The stage reports the removed drift as
+`datum_drift_m`, and its `land_fraction` equals `world.land_fraction` up to
+a cell or two of rounding.  Windows have no planetary datum and skip it.
+
 Hillslope processes: `thermal_erosion` runs the talus pass and then, when
 `erosion.creep_rate > 0`, a second conservative pass with talus 0 (linear
 diffusion at that rate) in which submerged cells are frozen, so creep
@@ -164,7 +185,10 @@ it is on by default.
 * `flow.G` is the index into `meta["basins"]` (basin ids present in the
   tile, −1 excluded, most frequent first, capped at 255 entries); 255 =
   ocean / not listed (basins beyond the first 255 in a tile), so index
-  255 never names a basin.
+  255 never names a basin.  It is *tile-local*: the same basin normally
+  has a different index in each tile it touches, so a consumer comparing
+  basins across tiles (e.g. the runtime's debug tint) must map through
+  `meta["basins"]` first.
 * `meta["neighbors"]` = `[[lod, face, x, y] × 4]` of the edge-adjacent
   tiles across the tile's sides `+i (u = 1), −i, +j (v = 1), −j`, crossing
   cube edges through `cubesphere` (`lod.tile_neighbors`; the neighbour's
@@ -186,7 +210,9 @@ Each stage module defines `quicklook(store, params, path)`.  Use
 
 `bake/tests/test_<stage>.py`, runnable in < 60 s on the `tiny`/`small`
 presets; never depend on another stage's real implementation when its stub
-suffices.
+suffices.  The exception is `bake/tests/test_perf.py`: runtime-scaling
+tests on a grid one step above the rest of the suite (`N_c = 512`), marked
+`slow` — `pytest -m "not slow"` skips them.
 
 ## Biome codes (`derive/biomes.py`, coarse `biome` and `fine/biome`)
 
@@ -199,6 +225,15 @@ wetness^derive.precip_gamma, derive.precip_max_cm)`, `wetness = precip /
 a quarter of it to 50 cm, a sixteenth to 25 cm (desert), 4× to 200 cm.
 Override precedence, lowest to highest: riparian < alpine < cliff <
 wetland < lake < ocean.
+
+`T` for biomes is **not** the stored `coarse/temperature` verbatim: that
+field is computed by `climate` on the pre-erosion bedrock surface, so
+`derive` removes its lapse term (`climate.lapse` per km of `max(bedrock, 0)`)
+and re-applies it at the classification surface — the eroded coarse
+`surface` and, in the fine pass, each fine cell's own surface (the coarse
+sea-level field is what gets upsampled).  The stored `temperature` and
+`evap` fields are unchanged: erosion runs before this and must keep the
+pre-erosion field.
 
 | code | name | rule |
 |---:|---|---|
@@ -214,7 +249,7 @@ wetland < lake < ocean.
 | 9 | savanna | T ≥ 20, 30 ≤ P < 100 |
 | 10 | tropical_seasonal_forest | T ≥ 20, 100 ≤ P < 220 |
 | 11 | tropical_rainforest | T ≥ 20, P ≥ 220 |
-| 12 | alpine | `surface ≥ derive.alpine_min_m` and T < `derive.alpine_T` |
+| 12 | alpine | `surface ≥` the alpine threshold (`derive.alpine_min_m`, or `derive.alpine_min_relief_frac` of the achieved land relief when that is 0) and T < `derive.alpine_T` |
 | 13 | cliff | slope > `derive.cliff_slope` (rise/run) |
 | 14 | riparian | within `derive.riparian_cells` coarse cells (× R at fine) of a channel / river-mask cell |
 | 15 | wetland | within `derive.wetland_cells` of a lake cell |

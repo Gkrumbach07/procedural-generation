@@ -7,17 +7,31 @@ Inputs (coarse fields): ``bedrock``, ``uplift``, ``hardness`` (tectonics),
 pits at the end of the run (``ErosionState.pending``) is not part of the
 outputs; its total is reported as ``pending_total_m`` in the stage info,
 next to ``lost_offshore_m`` (load that submarine fans could not place: it
-left the modelled surface for the deep ocean) (and ``land_fraction`` next to ``land_fraction_bedrock``:
-the particle pass never turns sea into land or land into sea, so any
-drift is tectonic uplift / subsidence).
+left the modelled surface for the deep ocean).
+
+``land_fraction`` (reported next to ``land_fraction_bedrock``) is held at
+``world.land_fraction`` throughout the run: uplift is applied mean-free and
+every iteration ends with :func:`globe.erosion.maps.hold_datum`, a rigid
+shift of ``height`` onto the land-fraction order statistic of the surface.
+Without it the datum drifts (uplift is a forcing, and mass leaves the
+surface for the deep ocean), and hydro's one-shot re-quantile then drops
+sea level onto terrain that was sculpted against a different base level.
+The drift it removed is reported as ``datum_drift_m``; the residual
+``land_fraction`` differs from ``world.land_fraction`` only by the
+tie/rounding of a cell or two.
 
 Checkpoints: ``checkpoints/erosion_iterNNNN.npz`` (extended state arrays in
 cell units) + ``checkpoints/erosion_iterNNNN.json`` (iteration, parameter
 hash); ``run`` resumes from the newest checkpoint whose hash (parameters,
 upstream output hashes, kernel version) matches unless ``erosion.resume``
-is False.  ``bake.py --force`` clears the outputs but not ``checkpoints/``:
-with an unchanged hash the final checkpoint is reused (that is what it is
-for); a kernel change bumps ``KERNEL_VERSION`` and invalidates it.
+is False.  Only the two newest checkpoints per parameter hash are retained
+(the older ones can never be resumed from); other parameter families are
+left alone.  ``bake.py --force`` clears the outputs but not
+``checkpoints/``: with an unchanged hash the final checkpoint is reused
+(that is what it is for); a kernel change bumps ``KERNEL_VERSION`` and
+invalidates it.  ``erosion.iterations`` is not part of the checkpoint hash,
+so lowering it resumes from the newest checkpoint at or below the new end
+instead of recomputing from bedrock.
 """
 from __future__ import annotations
 
@@ -45,13 +59,23 @@ def _ckpt_hash(params: WorldParams, store: WorldStore | None = None) -> str:
     code change never resumes stale results) and the manifest hashes of the
     tectonics and climate outputs (so a re-baked upstream stage — even with
     the same parameters, e.g. a stub replaced by the real stage —
-    invalidates it)."""
+    invalidates it).
+
+    ``erosion.iterations`` and ``erosion.resume`` are normalised out: they
+    are run-control knobs, not state knobs (the per-iteration uplift that
+    ``iterations`` scales is already covered by the tectonics output hash),
+    so a shortened, extended or ``resume=False`` run still matches its own
+    checkpoints and :func:`find_checkpoint`'s ``max_iteration`` guard — not
+    the hash — is what rejects a checkpoint past the requested end.  This
+    normalisation is a one-time invalidation of checkpoints written by the
+    old scheme."""
     up = f":k{KERNEL_VERSION}"
     if store is not None:
         for s in ("tectonics", "climate"):
             info = store.stage_info(s) or {}
             up += ":" + str(info.get("hash", ""))
-    return params.group_hash("world", "erosion") + ":" + params.group_hash("tectonics", "climate") + up
+    norm = params.with_overrides(erosion={"iterations": 0, "resume": True})
+    return norm.group_hash("world", "erosion") + ":" + params.group_hash("tectonics", "climate") + up
 
 
 def save_checkpoint(store: WorldStore, state: ErosionState, params: WorldParams) -> Path:
@@ -69,7 +93,36 @@ def save_checkpoint(store: WorldStore, state: ErosionState, params: WorldParams)
     meta = {"iteration": it, "params_hash": _ckpt_hash(params, store), "height_unit_m": state.height_unit_m, "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
     with open(p.with_suffix(".json"), "w") as fh:
         json.dump(meta, fh, indent=1)
+    # after the .json write, so a crash between tmp.replace(p) and it leaves
+    # the previous checkpoint in place for find_checkpoint to fall back to
+    _prune_checkpoints(d, meta["params_hash"], keep=2)
     return p
+
+
+def _prune_checkpoints(d: Path, params_hash: str, keep: int = 2) -> None:
+    """Keep only the ``keep`` newest checkpoints of this parameter family.
+
+    :func:`find_checkpoint` only ever resumes from the newest matching
+    checkpoint, so the rest are dead weight (~358 MB each at the default
+    N_c=1024, ~5.7 GB over a default 800-iteration run, kept for the life of
+    the world directory because ``bake --force`` preserves ``checkpoints/``).
+    One spare is kept so a truncated newest checkpoint still has a fallback;
+    other parameter families are left alone."""
+    mine = []
+    for q in d.glob("erosion_iter*.npz"):
+        m = _CKPT_RE.search(q.name)
+        jq = q.with_suffix(".json")
+        if not m or not jq.exists():
+            continue
+        try:
+            if json.loads(jq.read_text()).get("params_hash") != params_hash:
+                continue
+        except json.JSONDecodeError:
+            continue
+        mine.append((int(m.group(1)), q))
+    for _, q in sorted(mine)[: max(0, len(mine) - keep)]:
+        q.unlink(missing_ok=True)
+        q.with_suffix(".json").unlink(missing_ok=True)
 
 
 def find_checkpoint(store: WorldStore, params: WorldParams, max_iteration: int | None = None) -> tuple[Path, dict] | None:
@@ -140,6 +193,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     times = []
     clamped = 0
     lost_offshore = 0.0
+    datum_shift = 0.0
     while state.iteration < n_iter:
         it = state.iteration
         t0 = time.time()
@@ -148,6 +202,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         times.append(dt)
         clamped += int(st.get("clamped", 0))
         lost_offshore += float(st.get("lost_offshore", 0.0))
+        datum_shift += float(st.get("datum_shift", 0.0))
         d = st.get("deaths", {})
         log(
             f"[erosion] iter {it + 1}/{n_iter}: {st['particles']} particles, mean {st['steps_mean']:.0f} steps, "
@@ -177,6 +232,10 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         "sediment_p99_m": float(np.percentile(state.sediment[state.interior], 99) * state.height_unit_m),
         "pending_total_m": float(state.pending[state.interior].sum() * state.height_unit_m),
         "clamped_entries": clamped,
+        # metres of surface drift the in-loop datum hold removed over the run
+        # (positive = the planet would have inflated by this much); the same
+        # sign convention as hydro's ``height_shift_m``
+        "datum_drift_m": datum_shift * state.height_unit_m,
         "lost_offshore_m": lost_offshore * state.height_unit_m,
     }
     return info

@@ -30,3 +30,6 @@ include = ["globe*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# `slow` marks the runtime-scaling tests (tests/test_perf.py, ~1 min each):
+# they run with the suite; `pytest -m "not slow"` skips them.
+markers = ["slow: takes tens of seconds (runtime scaling)"]

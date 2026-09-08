@@ -3,6 +3,8 @@
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/basis.hpp>
+#include <godot_cpp/variant/packed_float32_array.hpp>
+#include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 #include <godot_cpp/variant/vector3i.hpp>
 
@@ -30,6 +32,12 @@ public:
     // Gnomonic local position of a sphere point Q at height h (PLAN 12.2)
     static godot::Vector3 gnomonic_local(const godot::Vector3 &q, double h, const godot::Basis &frame, double r_planet);
     static double planet_radius(int N, double cell_size_m);
+    // Triangle soup (2*(size-1)^2 triangles) of a tile's vertices projected
+    // into `frame`, for ConcavePolygonShape3D.set_faces (PLAN 12.3).  `height`
+    // is the tile's size*size heights, [j * size + i]; empty on bad input.
+    static godot::PackedVector3Array build_collision_faces(int face, int lod, int tile_x, int tile_y, int T, int n_fine,
+                                                           double r_planet, const godot::Basis &frame,
+                                                           const godot::PackedFloat32Array &height);
 };
 
 }  // namespace globe

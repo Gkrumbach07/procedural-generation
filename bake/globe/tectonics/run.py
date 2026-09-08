@@ -29,9 +29,11 @@ Units
 * Bedrock height per segment is ``thickness * (1 - density)`` ("bedrock
   units") plus the thermal buoyancy of young crust
   ``ridge_height * exp(-age / ridge_age)`` (mid-ocean ridges, subsidence
-  with age; not part of the mass); the map to metres is ``relief_m``
-  (99.9th percentile of land) or ``height_scale_m`` per unit, see
-  :func:`finalise`.
+  with age; not part of the mass); the map to metres puts the 99.9th
+  percentile of land at ``relief_spacings`` mean segment spacings (the
+  horizontal scale of the tectonic pattern, in metres), or at ``relief_m``
+  when that is set, or scales by ``height_scale_m`` per unit when both are
+  0, see :func:`finalise`.
 * The heat field lives on a coarser grid (``N_tect / heat_grid_divisor``).
 * ``uplift`` is *metres per erosion iteration*: the per-segment height
   gained since the reference step (``steps - uplift_window``) in metres,
@@ -328,6 +330,23 @@ class _Resampler:
         return field.sample_cubic(self.face, self.u, self.v)
 
 
+def _land_slope_info(coarse: Grid, bed_m: np.ndarray, params: WorldParams) -> dict:
+    """Median / p90 land slope (rise/run) of the tectonic bedrock and the
+    fraction of the land above ``erosion.talus_slope_hard``.  The vertical
+    scale is only sane if this stays well below the talus angle: erosion
+    cannot carve a landscape out of a surface that already stands at it."""
+    land = bed_m > 0.0
+    if not land.any():
+        return {"land_slope_median": None, "land_slope_p90": None, "land_above_talus_fraction": None}
+    slope = FaceField.from_interior(coarse, bed_m.astype(np.float32), name="bed").gradient().vec_norm().interior[land]
+    hard = float(params.erosion.talus_slope_hard)
+    return {
+        "land_slope_median": float(np.median(slope)),
+        "land_slope_p90": float(np.percentile(slope, 90)),
+        "land_above_talus_fraction": float((slope > hard).mean()),
+    }
+
+
 def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     """Coarse-grid outputs (docs/DEVELOPING.md): ``bedrock`` (m), ``uplift``
     (m per erosion iteration), ``hardness`` [0, 1], ``plate_id`` (int16),
@@ -356,9 +375,15 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     q = weighted_quantile(bed, area, 1.0 - params.world.land_fraction)
     bed -= q
     land = bed > 0
-    if tp.relief_m > 0 and land.any():
+    # vertical scale: tie the relief to the *horizontal* scale of the
+    # tectonic pattern (the mean segment spacing, in metres) unless an
+    # explicit relief_m is given.  A constant relief_m puts the same 5 km
+    # on a pattern whose feature width in cells is preset-independent, so
+    # the land ends up at the talus angle everywhere.
+    target = float(tp.relief_m) if tp.relief_m > 0 else float(tp.relief_spacings) * sim.spacing * params.R_planet
+    if target > 0 and land.any():
         top = weighted_quantile(bed[land], area[land], 0.999)
-        scale = tp.relief_m / max(top, 1e-6)
+        scale = target / max(top, 1e-6)
     else:
         scale = tp.height_scale_m
     bedrock = FaceField.from_interior(coarse, (bed * scale).astype(np.float32), name="bedrock")
@@ -370,6 +395,7 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     else:
         zone_t = np.zeros((6, grid.N, grid.N), dtype=bool)
     zone = _resample(FaceField.from_interior(grid, zone_t.astype(np.uint8), exchange=True), order=0).astype(bool)
+    slope_info = _land_slope_info(coarse, bed * scale, params)
     n_iter = max(int(params.erosion.iterations), 1)
     up = dh * scale * tp.uplift_scale / n_iter
     pos_up = up[up > 0]
@@ -418,6 +444,7 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
         "plate_vel": plate_vel,
         "collision_zone": zone_f,
         "heat": heat_c,
+        "_land_slope": slope_info,
         "_scale_m_per_unit": scale,
         "_sea_level_units": q,
     }
@@ -454,7 +481,15 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         "bedrock_min_m": float(out["bedrock"].interior.min()),
         "uplift_max": float(out["uplift"].interior.max()),
         "uplift_min": float(out["uplift"].interior.min()),
+        **out["_land_slope"],
     }
+    med, hard = info["land_slope_median"], float(params.erosion.talus_slope_hard)
+    if med is not None and med > hard:
+        log(
+            f"[tectonics] WARNING: median land slope {med:.2f} exceeds erosion.talus_slope_hard {hard:.2f} — "
+            f"the bedrock already stands at the talus angle; lower tectonics.relief_spacings ({params.tectonics.relief_spacings}) "
+            f"or relief_m ({params.tectonics.relief_m})"
+        )
     log(f"[tectonics] done: {info}")
     return info
 

@@ -25,7 +25,8 @@ from scipy import ndimage
 from globe.config import WorldParams
 from globe.erosion import particle as pk
 from globe.erosion import run as erosion_run
-from globe.erosion.maps import ErosionState, run_iteration, step
+from globe.erosion.maps import ErosionState, apply_uplift, run_iteration, step
+from globe.hydro import run as hydro_run
 from globe.io.world_store import WorldStore
 from globe.stubs import stub_climate, stub_tectonics
 
@@ -183,6 +184,8 @@ def test_offshore_loss_is_accounted():
         # no deficit leaves this window: the residue is the rounding of
         # cancelling a clamped particle's later deposits (~1e-18)
         assert s["deficit_out"] <= 1e-12 * abs(m0)
+    # window mode applies uplift as given (only the global state is made
+    # mean-free, apply_uplift), so it is still a mass source here
     upl = float(st.uplift[st.interior][st.mask[st.interior] == pk.MASK_ACTIVE].sum()) * 25
     m1 = st.total_mass()
     assert abs((m1 + lost) - (m0 + upl)) <= 1e-6 * abs(m0), (m0, m1, lost, upl)
@@ -344,12 +347,43 @@ def test_driver_checkpoint_resume(scratch):
     # the kernel version is part of the checkpoint hash
     assert f":k{pk.KERNEL_VERSION}" in erosion_run._ckpt_hash(p, store)
     # resume=False recomputes from bedrock (and still lands on the same output)
+    # without orphaning the checkpoints it did not read (it is a run-control
+    # knob: same checkpoint hash, and excluded from the content hash)
     p3 = p.with_overrides(erosion={"resume": False})
+    assert erosion_run._ckpt_hash(p3, store) == erosion_run._ckpt_hash(p, store)
+    assert p3.content_hash() == p.content_hash()
     msgs = []
     erosion_run.run(store, p3, msgs.append)
     assert not any("resumed" in m for m in msgs)
     for n in erosion_run.OUTPUTS:
         assert store.load_field(n, p.coarse_grid()).data.tobytes() == ref[n].tobytes(), n
+
+
+def test_checkpoints_are_pruned_and_a_shorter_run_resumes(scratch):
+    """Only the two newest checkpoints of a parameter family survive, and
+    ``iterations`` is not part of the checkpoint identity: a shorter rerun
+    resumes from the newest checkpoint at or below its end."""
+    p = WorldParams.tiny_world(11)
+    p.erosion = dataclasses.replace(p.erosion, iterations=9, checkpoint_every=3, quicklook_every=0)
+    store = _stub_world(scratch, "erosion_prune", p)
+    erosion_run.run(store, p, _log)
+    kept = sorted(q.name for q in store.checkpoint_dir.glob("erosion_iter*.npz"))
+    assert kept == ["erosion_iter0006.npz", "erosion_iter0009.npz"], kept
+    assert not (store.checkpoint_dir / "erosion_iter0003.json").exists()
+    assert erosion_run.find_checkpoint(store, p)[1]["iteration"] == 9
+    # shortening the run reuses the checkpoints (max_iteration rejects 9)
+    p6 = p.with_overrides(erosion={"iterations": 6})
+    assert erosion_run._ckpt_hash(p6, store) == erosion_run._ckpt_hash(p, store)
+    assert erosion_run.find_checkpoint(store, p6, max_iteration=6)[1]["iteration"] == 6
+    # ... and a real state knob still separates the families
+    p2 = p.with_overrides(erosion={"friction": p.erosion.friction * 0.5})
+    assert erosion_run._ckpt_hash(p2, store) != erosion_run._ckpt_hash(p, store)
+    # the prune only ever touches its own family
+    foreign = store.checkpoint_dir / "erosion_iter0001.npz"
+    foreign.write_bytes(b"")
+    foreign.with_suffix(".json").write_text(json.dumps({"iteration": 1, "params_hash": "other"}))
+    erosion_run._prune_checkpoints(store.checkpoint_dir, erosion_run._ckpt_hash(p, store), keep=1)
+    assert sorted(q.name for q in store.checkpoint_dir.glob("erosion_iter*.npz")) == ["erosion_iter0001.npz", "erosion_iter0009.npz"]
 
 
 # --------------------------------------------------------------------------
@@ -370,6 +404,69 @@ def test_uplift_keeps_region_high():
     sb = b.surface()[b.interior][0][c, c].mean()
     assert sa - sb > 0.5 * 6.0, (sa, sb)  # at least half the applied uplift survives erosion
     assert a.surface()[a.interior].max() < 40.0  # and nothing blew up
+
+
+def test_uplift_is_mean_free_on_the_sphere(scratch):
+    """On the global state ``apply_uplift`` adds no net mass: it raises the
+    cells above the active-interior mean uplift and lowers the rest by the
+    same total, so the kernel's base level stays at z = 0 (the planet does
+    not inflate and hydro's re-quantile has nothing to undo).  A window
+    keeps its uplift as given — it owns no planetary datum."""
+    p = WorldParams.small_world(0)
+    grid = p.coarse_grid()
+    store = _stub_world(scratch, "uplift_mean_free", p)
+    f = {n: store.load_field(n, grid) for n in ("bedrock", "hardness", "precip", "evap", "uplift")}
+    st = ErosionState.from_grid(grid, f["bedrock"], f["hardness"], f["precip"], f["evap"], f["uplift"], p.erosion)
+    assert st.uplift[st.interior].mean() > 0.0  # the stub uplift really is a source
+    m0 = st.total_mass()
+    h0 = st.height.copy()
+    apply_uplift(st)
+    assert abs(st.total_mass() - m0) <= 1e-9 * max(abs(m0), 1.0)
+    d = (st.height - h0)[st.interior]
+    u = st.uplift[st.interior]
+    assert np.allclose(d - d.mean(), u - u.mean(), atol=1e-12)  # only the datum moved
+    assert d.max() > 0.0 > d.min()  # a real shift, not a no-op
+    # the surface therefore does not drift upwards over an iteration
+    w = make_window(48, "dome", p, iters=10, uplift_total=8.0)
+    m0 = w.total_mass()
+    apply_uplift(w)
+    up = float(w.uplift[w.interior][w.mask[w.interior] == pk.MASK_ACTIVE].sum())
+    assert abs((w.total_mass() - m0) - up) <= 1e-9 * max(abs(m0), 1.0)
+
+
+def test_datum_is_held_through_the_run(scratch):
+    """The global pass keeps ``world.land_fraction`` of the cells above sea
+    level from the first iteration to the last (``maps.hold_datum``), so
+    hydro's re-quantile has nothing left to correct and never drops sea
+    level onto terrain that was sculpted against a different base level.
+
+    Two things move the datum: uplift is a forcing (``apply_uplift``
+    removes its mean, but only over the *active* cells) and mass leaves the
+    surface for the deep ocean.  The drift is therefore real even with a
+    mean-free uplift — with the hold disabled this world ends at land
+    fraction 0.263 instead of 0.300, and before the mean-free uplift the
+    small e2e world ended at 0.56 with a -164 m hydro shift.  The stub
+    uplift is scaled to the ~1 m per iteration the real tectonics stage
+    produces (the unscaled stub is 4 orders of magnitude smaller, which is
+    why the other global-pass tests cannot see this).
+    """
+    p = WorldParams.tiny_world(3)
+    p.erosion = dataclasses.replace(p.erosion, iterations=20, checkpoint_every=0, quicklook_every=0, resume=False)
+    store = _stub_world(scratch, "erosion_datum", p)
+    grid = p.coarse_grid()
+    upl = store.load_field("uplift", grid)
+    upl.data *= 1000.0
+    store.save_field(upl)
+    assert float(upl.interior.mean()) > 0.5  # net positive, as tectonic uplift is
+
+    info = erosion_run.run(store, p, _log)
+    assert abs(info["land_fraction"] - p.world.land_fraction) < 0.02, info["land_fraction"]
+    assert "datum_drift_m" in info
+
+    # ... and the hydro re-quantile the contract keeps as a backstop is a no-op
+    hinfo = hydro_run.run(store, p, _log)
+    assert abs(hinfo["height_shift_m"]) < 5.0, hinfo["height_shift_m"]
+    assert abs(hinfo["land_fraction"] - p.world.land_fraction) < 0.02
 
 
 # --------------------------------------------------------------------------

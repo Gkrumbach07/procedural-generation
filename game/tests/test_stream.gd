@@ -28,7 +28,7 @@ func _run() -> void:
 	var world: WorldRoot = scene.instantiate()
 	world.world_dir = world_dir
 	world.sync_loads = true
-	world.view_distance_m = 1e9  # keep everything at some LOD
+	world.view_distance_m = 1e9  # every face at some LOD (WorldRoot still caps it at 0.5 * R_planet)
 	var player: GlobePlayer = world.get_node("Player")
 	# a point on the edge between +Z (face 4) and +X (face 0), slightly inside +Z
 	var p := GlobeMath.to_sphere(4, 0.999, 0.5)
@@ -114,5 +114,95 @@ func _run() -> void:
 	print("collision: %d bodies, %d/12 ray hits, worst |ray - sample_height| = %.2f m" % [n_bodies, hits, worst])
 	check(hits >= 10, "rays hit the collision heightmap")
 	check(worst < 8.0, "collision surface matches rendered heights (worst %.2f m)" % worst)
+	# streaming stays on the anchor's near hemisphere: the flat gnomonic frame
+	# diverges past 90 deg, so WorldRoot caps the radius by the planet
+	check(world.effective_view_distance() <= 0.5 * world.R_planet + 1e-3, "view distance clamped by the planet")
+	var min_dot := 1.0
+	var max_xz := 0.0
+	for t in world.tiles.values():
+		var n := float(world.tiles_per_face(t.lod))
+		for c in [Vector2(0, 0), Vector2(1, 0), Vector2(0, 1), Vector2(1, 1)]:
+			var cq := GlobeMath.to_sphere(t.face, (t.tx + c.x) / n, (t.ty + c.y) / n)
+			min_dot = minf(min_dot, cq.dot(world.anchor))
+			var clp := world.to_local_pos(cq, 0.0)
+			max_xz = maxf(max_xz, Vector2(clp.x, clp.z).length() / world.R_planet)
+	print("streamed extent: %d tiles, min dot(vertex, anchor) = %.3f, max |local xz| = %.2f x R" % [world.tiles.size(), min_dot, max_xz])
+	check(min_dot > 0.3, "streamed tiles stay on the near hemisphere (min dot %.3f)" % min_dot)
+	check(max_xz < 3.0, "no tile is smeared by the gnomonic horizon clamp (max %.2f x R)" % max_xz)
+	# collision faces: the GDExtension builder and the GDScript fallback agree
+	var tb: TerrainTile = null
+	for t in world.tiles.values():
+		if t.body:
+			tb = t
+	check(tb != null, "a tile with a body exists")
+	if tb and TerrainTile._has_cubesphere:
+		var f_ext: PackedVector3Array = tb._collision_faces(world)
+		TerrainTile._has_cubesphere = false
+		tb._dirs = PackedVector3Array()
+		var f_gd: PackedVector3Array = tb._collision_faces(world)
+		TerrainTile._has_cubesphere = true
+		var worst_v := 0.0
+		for i in range(mini(f_ext.size(), f_gd.size())):
+			worst_v = maxf(worst_v, (f_ext[i] - f_gd[i]).length())
+		check(f_ext.size() == f_gd.size(), "both collision paths build the same triangle count")
+		check(worst_v < 0.01, "extension and GDScript collision faces agree (worst %.4f m)" % worst_v)
+	# re-anchoring rebuilds the bodies in place (no node churn) and the surface
+	# must follow the new frame in the same frame it changes
+	if tb:
+		var body_id := tb.body.get_instance_id()
+		var shape_id := tb._shape.get_instance_id()
+		var p2 := (p + frame.x * (200.0 / world.R_planet)).normalized()
+		var t_us := Time.get_ticks_usec()
+		world.set_anchor(p2)
+		var reanchor_ms := (Time.get_ticks_usec() - t_us) / 1000.0
+		check(tb.body != null and tb.body.get_instance_id() == body_id, "re-anchor reuses the collision body")
+		check(tb._shape != null and tb._shape.get_instance_id() == shape_id, "re-anchor reuses the collision shape")
+		await physics_frame
+		await physics_frame
+		var worst2 := 0.0
+		var hits2 := 0
+		for k in range(12):
+			var ang := k * PI / 6.0
+			var q := (p2 + (frame.x * cos(ang) + frame.z * sin(ang)) * (120.0 / world.R_planet)).normalized()
+			var h := world.sample_height(q)
+			var lp := world.to_local_pos(q, h)
+			var query := PhysicsRayQueryParameters3D.create(lp + Vector3(0, 2000, 0), lp - Vector3(0, 2000, 0))
+			var hit := space.intersect_ray(query)
+			if hit.is_empty():
+				continue
+			hits2 += 1
+			worst2 = maxf(worst2, absf(hit.position.y - h))
+		print("re-anchor: %d bodies rebuilt in %.1f ms, %d/12 ray hits, worst %.2f m" % [n_bodies, reanchor_ms, hits2, worst2])
+		check(hits2 >= 10, "rays still hit the collision mesh after re-anchor")
+		check(worst2 < 8.0, "collision follows the new anchor frame (worst %.2f m)" % worst2)
+	# debug mode 1 tints by *global* basin id: each tile uploads its own
+	# local-index -> id map from meta["basins"] (index 255 = unlisted)
+	var bad_maps := 0
+	var mapped := 0
+	var seen := {}       # global basin id -> local index in the tile that had it first
+	var cross := 0       # ids whose local index differs between tiles
+	for t in world.tiles.values():
+		var mat: ShaderMaterial = t.mesh_instance.material_override
+		var ids: PackedInt32Array = mat.get_shader_parameter("basin_ids")
+		var bl: Array = t.meta.get("basins", [])
+		if ids.size() != 256 or ids[255] != -1:
+			bad_maps += 1
+			continue
+		for bi in range(mini(bl.size(), 255)):
+			if ids[bi] != int(bl[bi]):
+				bad_maps += 1
+			mapped += 1
+			if seen.has(int(bl[bi])):
+				if seen[int(bl[bi])] != bi:
+					cross += 1
+			else:
+				seen[int(bl[bi])] = bi
+	print("basin_ids: %d tile entries mapped, %d ids with a different local index in another tile" % [mapped, cross])
+	check(bad_maps == 0, "every tile uploads meta[basins] as basin_ids (%d bad)" % bad_maps)
+	# without the DrainageGraph extension basin_at has no answer, not a count
+	var saved_drainage: Object = world.drainage
+	world.drainage = null
+	check(world.basin_at(p) == -1, "basin_at is -1 without DrainageGraph (got %d)" % world.basin_at(p))
+	world.drainage = saved_drainage
 	print("test_stream: %d failure(s)" % failures)
 	quit(1 if failures > 0 else 0)

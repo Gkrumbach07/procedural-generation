@@ -553,13 +553,91 @@ def _mass_wasting_pass(state: ErosionState, talus: np.ndarray, rate: float, cap:
 
 
 def apply_uplift(state: ErosionState) -> None:
+    """Add the per-iteration uplift, **mean-free** over the active interior.
+
+    The raw tectonic uplift has a positive area mean (it is a growth rate,
+    not a redistribution), so adding it verbatim inflates the whole planet
+    a little every iteration and the erosion kernel's base level (z = 0)
+    drifts away from sea level; hydro's re-quantile then has to drop the
+    finished surface by that accumulated amount and drowns the lowlands
+    erosion just built.  Removing the mean is a rigid global shift — the
+    same thing as raising the datum instead of the crust — and makes the
+    applied mass change exactly zero, so uplift only redistributes relief.
+
+    The mean is taken over *interior* active cells of the whole sphere: halo
+    cells are copies of neighbouring interior cells (``exchange_halos``
+    overwrites them right after) and must not bias it.  No area weighting:
+    the rest of the kernel treats cells as equal-mass units
+    (:meth:`ErosionState.total_mass`), so an unweighted mean is the
+    consistent choice and makes the applied mass change exactly zero.
+
+    Only the global (``spherical``) state has that planetary datum, so a
+    window (refinement) applies its uplift as given — a *window* mean would
+    subside the basin against a base level it does not own.  Refine passes
+    ``uplift = 0``; a windowed run with a real uplift field must be handed
+    one that is already mean-free over the whole sphere.
+    """
     act = state.mask == pk.MASK_ACTIVE
-    state.height[act] += state.uplift[act]
+    mean = 0.0
+    if state.spherical:
+        iact = state.mask[state.interior] == pk.MASK_ACTIVE
+        mean = float(state.uplift[state.interior][iact].mean()) if iact.any() else 0.0
+    state.height[act] += state.uplift[act] - mean
+
+
+def hold_datum(state: ErosionState, land_fraction: float) -> float:
+    """Hold the planetary datum: shift ``height`` (a rigid global shift, no
+    mass moves between cells) so that exactly ``round(land_fraction * M)``
+    of the ``M`` interior cells have ``height + sediment >= 0``.  This is
+    the same order statistic :func:`globe.hydro.run.requantile_height`
+    applies at the end of the bake, here in cell units and once per
+    iteration.  Returns the shift applied (cell units).
+
+    Uplift alone is not the only thing that moves the datum: the surface
+    also exports mass to the deep ocean (``lost_offshore``) and buries the
+    shelf, so even with a mean-free :func:`apply_uplift` the coastline
+    drifts (measured on the small e2e world, 60 iterations at
+    ``N_c = 128``: land fraction 0.30 -> 0.248, i.e. hydro still had to
+    shift the finished surface by +5.8 m; before the mean-free uplift it
+    was 0.30 -> 0.56 and -163.8 m).  Any such late one-shot shift drops
+    sea level onto terrain that was sculpted against a different base
+    level and drowns the drainage network erosion built, which PLAN 9-11
+    then have to work with.  Holding the datum every iteration keeps the
+    coastline erosion sees equal to the one hydro will use, and makes
+    ``hydro.requantile_land_fraction`` (kept as the final guarantee) a
+    no-op.
+
+    One ``np.partition`` over the interior — 2 ms at ``N_c = 256``, 70 ms
+    at ``N_c = 1024``, i.e. 0.2 % of an iteration (1.3 s / 29 s, see
+    ``tests/test_perf.py``) — so it runs every iteration rather than on a
+    stride, and never on ``erosion.checkpoint_every``, which is
+    hash-exempt (``config.RUNTIME_KNOBS``) and must never change results.
+
+    Global (``spherical``) pass only: a refinement window is one basin,
+    not a planet, and has no land fraction of its own.
+    """
+    inter = state.interior
+    surf = (state.height[inter] + state.sediment[inter]).ravel()
+    M = surf.size
+    n_land = min(max(int(round(float(land_fraction) * M)), 0), M)
+    if n_land == 0:
+        q = float(surf.max()) + 1.0
+    elif n_land == M:
+        q = float(surf.min())
+    else:
+        k = M - n_land  # index of the lowest land cell in sorted order
+        q = float(np.partition(surf, k)[k])
+    if q != 0.0:
+        state.height -= q
+        if state.route is not None:  # the cached routing surface must stay registered with the terrain
+            state.route -= q
+    return q
 
 
 def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
     """One full PLAN 8.2 iteration: particles, thermal erosion, uplift,
-    halo exchange.  Increments ``state.iteration``."""
+    datum hold (:func:`hold_datum`, global pass only), halo exchange.
+    Increments ``state.iteration``."""
     ep = _eparams(params)
     t0 = time.time()
     if ep.flood_every > 0 and (state.route is None or state.iteration % ep.flood_every == 0):
@@ -569,6 +647,8 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
     t1 = time.time()
     thermal_erosion(state, params)
     apply_uplift(state)
+    if state.spherical and isinstance(params, WorldParams):
+        st["datum_shift"] = hold_datum(state, params.world.land_fraction)
     state.exchange_halos()
     state.iteration += 1
     st["seconds_route"] = tr
@@ -577,4 +657,4 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
     return st
 
 
-__all__ = ["ErosionState", "run_iteration", "thermal_erosion", "apply_uplift", "step", "spawn_particles", "height_unit", "max_steps_of"]
+__all__ = ["ErosionState", "run_iteration", "thermal_erosion", "apply_uplift", "hold_datum", "step", "spawn_particles", "height_unit", "max_steps_of"]

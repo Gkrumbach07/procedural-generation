@@ -1,5 +1,7 @@
 #include "cubesphere.h"
 
+#include <vector>
+
 using namespace godot;
 
 namespace globe {
@@ -12,6 +14,10 @@ void CubeSphere::_bind_methods() {
     ClassDB::bind_static_method("CubeSphere", D_METHOD("tangent_frame", "anchor"), &CubeSphere::tangent_frame);
     ClassDB::bind_static_method("CubeSphere", D_METHOD("gnomonic_local", "q", "h", "frame", "r_planet"), &CubeSphere::gnomonic_local);
     ClassDB::bind_static_method("CubeSphere", D_METHOD("planet_radius", "N", "cell_size_m"), &CubeSphere::planet_radius);
+    ClassDB::bind_static_method(
+        "CubeSphere",
+        D_METHOD("build_collision_faces", "face", "lod", "tile_x", "tile_y", "T", "n_fine", "r_planet", "frame", "height"),
+        &CubeSphere::build_collision_faces);
 }
 
 Vector3 CubeSphere::to_sphere(int face, double u, double v) {
@@ -85,6 +91,50 @@ Vector3 CubeSphere::gnomonic_local(const Vector3 &q, double h, const Basis &fram
 
 double CubeSphere::planet_radius(int N, double cell_size_m) {
     return globe::planet_radius(N, cell_size_m);
+}
+
+PackedVector3Array CubeSphere::build_collision_faces(int face, int lod, int tile_x, int tile_y, int T, int n_fine,
+                                                     double r_planet, const Basis &frame,
+                                                     const PackedFloat32Array &height) {
+    PackedVector3Array out;
+    const int64_t n = height.size();
+    const int size = int(std::llround(std::sqrt(double(n))));
+    if (face < 0 || face > 5 || lod < 0 || T < 1 || n_fine < 1 || size < 2 || int64_t(size) * size != n) return out;
+    const Vector3 c0 = frame.get_column(0), c1 = frame.get_column(1), c2 = frame.get_column(2);
+    const Vec3 e1{double(c0.x), double(c0.y), double(c0.z)};
+    const Vec3 A{double(c1.x), double(c1.y), double(c1.z)};
+    const Vec3 e2{double(c2.x), double(c2.y), double(c2.z)};
+    // one tan per row and per column instead of two per vertex
+    std::vector<double> su(size), tv(size);
+    for (int k = 0; k < size; ++k) {
+        su[k] = std::tan((globe::tile_uv(tile_x, k, T, n_fine, lod) - 0.5) * HALF_PI);
+        tv[k] = std::tan((globe::tile_uv(tile_y, k, T, n_fine, lod) - 0.5) * HALF_PI);
+    }
+    const float *h = height.ptr();
+    std::vector<Vector3> pts(size_t(size) * size);
+    for (int j = 0; j < size; ++j) {
+        for (int i = 0; i < size; ++i) {
+            const Vec3 q = globe::to_sphere_st(face, su[i], tv[j]);
+            double lx, lz;
+            globe::gnomonic_local_clamped(q, A, e1, e2, r_planet, globe::GNOMONIC_MIN_D, lx, lz);
+            pts[size_t(j) * size + i] = Vector3(real_t(lx), real_t(h[j * size + i]), real_t(lz));
+        }
+    }
+    out.resize(int64_t(size - 1) * (size - 1) * 6);
+    Vector3 *w = out.ptrw();
+    int64_t k = 0;
+    for (int j = 0; j < size - 1; ++j) {
+        for (int i = 0; i < size - 1; ++i) {
+            const Vector3 &v00 = pts[size_t(j) * size + i];
+            const Vector3 &v10 = pts[size_t(j) * size + i + 1];
+            const Vector3 &v01 = pts[size_t(j + 1) * size + i];
+            const Vector3 &v11 = pts[size_t(j + 1) * size + i + 1];
+            w[k] = v00; w[k + 1] = v01; w[k + 2] = v10;
+            w[k + 3] = v10; w[k + 4] = v01; w[k + 5] = v11;
+            k += 6;
+        }
+    }
+    return out;
 }
 
 }  // namespace globe

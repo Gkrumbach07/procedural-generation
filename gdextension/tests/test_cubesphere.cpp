@@ -130,6 +130,43 @@ int main(int argc, char **argv) {
     double arc = std::acos(Q.x * A.x + Q.y * A.y + Q.z * A.z) * 1000.0;
     CHECK(std::fabs(dist - arc) / arc < 1e-3, "gnomonic distance %g vs arc %g", dist, arc);
 
+    // to_sphere_st (one tan per row/column, used by build_collision_faces)
+    // is the same map as to_sphere
+    double worst_st = 0.0;
+    for (int f = 0; f < 6; ++f) {
+        for (int a = 0; a <= 16; ++a) {
+            for (int b = 0; b <= 16; ++b) {
+                const double u = a / 16.0, vv = b / 16.0;
+                Vec3 p1 = to_sphere(f, u, vv);
+                Vec3 p2 = to_sphere_st(f, std::tan((u - 0.5) * HALF_PI), std::tan((vv - 0.5) * HALF_PI));
+                worst_st = std::max(worst_st, std::max({std::fabs(p1.x - p2.x), std::fabs(p1.y - p2.y), std::fabs(p1.z - p2.z)}));
+            }
+        }
+    }
+    CHECK(worst_st == 0.0, "to_sphere_st differs from to_sphere by %g", worst_st);
+
+    // tile vertex (i, j) of tile (tx, ty) is the fine sample (tx*T + i) << lod
+    CHECK(tile_uv(3, 0, 64, 512, 0) == 3 * 64 / 512.0, "tile_uv origin");
+    CHECK(tile_uv(3, 64, 64, 512, 0) == 4 * 64 / 512.0, "tile_uv far edge");
+    CHECK(tile_uv(1, 64, 64, 512, 1) == tile_uv(2, 128, 64, 512, 0), "tile_uv lod 1 vertex is the strided lod 0 vertex");
+
+    // the collision builder clamps dot(Q, A) exactly like the renderer, so a
+    // point at/behind the horizon stays finite instead of diverging
+    double lx2, lz2;
+    gnomonic_local_clamped(A, A, e1, e2, 1000.0, GNOMONIC_MIN_D, lx2, lz2);
+    CHECK(std::fabs(lx2) < 1e-9 && std::fabs(lz2) < 1e-9, "clamped anchor not at origin");
+    Vec3 Q2 = to_sphere(4, 0.5 + 0.01, 0.5);
+    gnomonic_local_clamped(Q2, A, e1, e2, 1000.0, GNOMONIC_MIN_D, lx2, lz2);
+    gnomonic_local(Q2, A, e1, e2, 1000.0, lx, lz);
+    CHECK(std::fabs(lx2 - lx) < 1e-9 && std::fabs(lz2 - lz) < 1e-9, "clamp changes a near point");
+    Vec3 H = e1;  // 90 deg from the anchor: dot(Q, A) = 0, unclamped it diverges
+    gnomonic_local_clamped(H, A, e1, e2, 1000.0, GNOMONIC_MIN_D, lx2, lz2);
+    const double horizon = std::sqrt(lx2 * lx2 + lz2 * lz2);
+    CHECK(std::isfinite(horizon) && horizon <= 1000.0 / GNOMONIC_MIN_D + 1e-6, "clamped horizon point is bounded (%g)",
+          horizon);
+    gnomonic_local(H, A, e1, e2, 1000.0, lx, lz);
+    CHECK(!std::isfinite(std::sqrt(lx * lx + lz * lz)), "unclamped horizon point is finite (%g)", lx);
+
     if (failures == 0) std::printf("OK\n");
     return failures == 0 ? 0 : 1;
 }

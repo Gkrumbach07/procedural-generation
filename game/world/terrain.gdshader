@@ -14,7 +14,8 @@ uniform int n_fine = 256;
 uniform int tile_size = 64;
 uniform float skirt_drop = 40.0;
 uniform float sea_level = 0.0;
-uniform float tile_seed = 0.0;
+// local basin index (flow.G) -> global basin id from meta["basins"]; -1 = unlisted
+uniform int basin_ids[256];
 
 global uniform vec3 globe_e1;
 global uniform vec3 globe_n;
@@ -123,7 +124,9 @@ void fragment() {
 	if (v_h < sea_level) col = mix(col, vec3(0.30, 0.32, 0.28), 0.6);
 	if (flow.b > 0.5) col = mix(col, vec3(0.15, 0.35, 0.7), 0.7);
 	if (globe_debug_mode == 1) {
-		col = mix(col, hash_color(flow.g * 255.0 + tile_seed), 0.65);
+		// tint by the *global* basin id so a basin keeps its colour across tiles
+		int bi = basin_ids[int(flow.g * 255.0 + 0.5)];
+		if (bi >= 0) col = mix(col, hash_color(float(bi)), 0.65);
 	} else if (globe_debug_mode == 2) {
 		col = mix(col, vec3(0.1, 0.3, 1.0), clamp(flow.r * 1.5, 0.0, 1.0));
 	} else if (globe_debug_mode == 4) {
@@ -131,7 +134,9 @@ void fragment() {
 		col = t >= 0.0 ? vec3(t, 1.0 - t, 0.0) : vec3(0.0, 0.0, -t);
 	} else if (globe_debug_mode == 3) {
 		col = mix(col, hash_color(float(tile_x * 131 + tile_y * 17 + lod * 977 + face * 3001)), 0.5);
-		if (v_uv.x < 0.004 || v_uv.y < 0.004 || v_uv.x > 0.996 || v_uv.y > 0.996) col = vec3(1.0, 0.2, 0.2);
+		// one-cell band: v_uv spans [0.5, tile_size + 0.5] / (tile_size + 1)
+		float bw = 1.5 / float(tile_size + 1);
+		if (v_uv.x < bw || v_uv.y < bw || v_uv.x > 1.0 - bw || v_uv.y > 1.0 - bw) col = vec3(1.0, 0.2, 0.2);
 		if (v_skirt > 0.5) col = vec3(1.0, 0.0, 1.0);
 	}
 	ALBEDO = col;

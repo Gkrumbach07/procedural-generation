@@ -2,7 +2,7 @@
 lakes, from the fine refine output plus the coarse climate / hydro fields.
 
 Inputs
-    coarse: ``temperature``, ``precip``, ``height``, ``sediment``,
+    coarse: ``temperature``, ``bedrock``, ``precip``, ``height``, ``sediment``,
     ``water_surface``, ``flow_acc`` (optional), ``graph/drainage.json``
     (optional; empty graph tolerated), ``graph/lakes_coarse.json``
     (optional).
@@ -13,6 +13,11 @@ Outputs
     ``fine/biome``, ``fine/vegetation``, ``fine/river_mask`` (u8, one
     memmapped face at a time); ``graph/rivers.json`` (points ``[f, u, v,
     width_m, height_m]``); ``graph/lakes.json``.
+
+``temperature`` is the climate field, which was computed on the
+pre-erosion *bedrock* surface: derive removes its lapse term and re-applies
+it at the final surface (coarse) and at every fine cell, so peaks are
+classified at the temperature of the terrain that is actually rendered.
 
 Rivers are derived from the *fine* discharge (``derive/rivers.py``); the
 coarse drainage graph only supplies Strahler orders / reach ids where a
@@ -31,6 +36,7 @@ import time
 
 import numpy as np
 
+from ..climate.temperature import retarget
 from ..field import FaceField
 from . import biomes, soil
 from . import lakes as lakes_mod
@@ -132,6 +138,12 @@ def run(store, params, log=print) -> dict:
 
     surface_c = (h.interior + sed.interior).astype(np.float32)
     land_c = surface_c >= 0.0
+    # the stored climate temperature was computed before erosion, on the
+    # *bedrock* surface (climate/run.py); erosion then moved that surface by
+    # hundreds of metres.  Undo the old lapse term and re-apply it at the
+    # surface the biomes are classified on (sea-level temperature in between).
+    T0_c = retarget(T.interior, store.load_field("bedrock", grid).interior, 0.0, params.climate)  # sea-level field
+    T_c = retarget(T0_c, 0.0, surface_c, params.climate)
     area_factor = (grid.interior_cell_area / grid.cell_size_m**2).astype(np.float32)
     wet_c = biomes.wetness(P.interior, area_factor, params.climate.precip_mean, land=land_c)
     Pcm_c = biomes.precip_cm(wet_c, dp.precip_scale_cm, dp.precip_gamma, getattr(dp, "precip_max_cm", 0.0))
@@ -143,18 +155,31 @@ def run(store, params, log=print) -> dict:
     surf_field = FaceField.from_interior(grid, surface_c, name="surface")
     slope_c = surf_field.gradient().vec_norm().interior
     cliff_slope = biomes.effective_cliff_slope(slope_c[land_c], dp)
+    alpine_min = biomes.effective_alpine_min(surface_c[land_c], dp)
     river_near_c = biomes.near_faces(chan_c, dp.riparian_cells, grid)
     lake_near_c = biomes.near_faces(lake_c, dp.wetland_cells, grid)
-    biome_c = biomes.classify(T.interior, Pcm_c, surface_c, slope_c, lake_c, river_near_c, lake_near_c, dp, cliff_slope)
+    biome_c = biomes.classify(T_c, Pcm_c, surface_c, slope_c, lake_c, river_near_c, lake_near_c, dp, cliff_slope, alpine_min)
     store.save_field(FaceField.from_interior(grid, biome_c, name="biome", exchange=False))
     hist = np.bincount(biome_c.ravel(), minlength=biomes.N_BIOMES)
     info["coarse_biome_hist"] = {biomes.NAMES[k]: int(hist[k]) for k in range(biomes.N_BIOMES) if hist[k]}
     info["coarse_channel_fraction"] = chan_frac
     info["coarse_lakes"] = int(n_coarse_lakes)
     info["cliff_slope"] = cliff_slope
+    # what the *configured* threshold would have selected: effective_cliff_slope
+    # raises it to keep cliffs under cliff_max_fraction, which would otherwise
+    # hide a bedrock that stands at the talus angle everywhere
+    info["cliff_fraction_at_configured_slope"] = float((slope_c[land_c] > dp.cliff_slope).mean()) if land_c.any() else None
+    info["alpine_min_m"] = alpine_min
+    info["T_biome_land_mean"] = float(T_c[land_c].mean()) if land_c.any() else None
+    info["land_slope_median"] = float(np.median(slope_c[land_c])) if land_c.any() else None
     info["t_coarse_s"] = time.time() - t0
     info["P_cm_land_quantiles"] = [float(v) for v in np.percentile(Pcm_c[land_c], [5, 25, 50, 75, 95])] if land_c.any() else []
-    log(f"[derive] coarse biomes in {info['t_coarse_s']:.1f}s: channel fraction {chan_frac:.4f}, {n_coarse_lakes} coarse lakes, P_cm land quantiles [5,25,50,75,95] {np.round(info['P_cm_land_quantiles']).tolist()}, cliff slope {cliff_slope:.2f}")
+    log(
+        f"[derive] coarse biomes in {info['t_coarse_s']:.1f}s: channel fraction {chan_frac:.4f}, {n_coarse_lakes} coarse lakes, "
+        f"P_cm land quantiles [5,25,50,75,95] {np.round(info['P_cm_land_quantiles']).tolist()}, cliff slope {cliff_slope:.2f} "
+        f"(configured {dp.cliff_slope:.2f} would take {info['cliff_fraction_at_configured_slope'] if info['cliff_fraction_at_configured_slope'] is None else round(info['cliff_fraction_at_configured_slope'], 3)} of the land; "
+        f"median land slope {info['land_slope_median'] if info['land_slope_median'] is None else round(info['land_slope_median'], 3)}), alpine above {alpine_min:.0f} m"
+    )
 
     # ---- fine pass 1: global discharge threshold + blob connectivity -----
     if not has_fine(store, "height"):
@@ -192,6 +217,7 @@ def run(store, params, log=print) -> dict:
 
     # ---- fine pass 2: per face ---------------------------------------------
     Pcm_field = FaceField.from_interior(grid, Pcm_c, name="P_cm")
+    T0_field = FaceField.from_interior(grid, T0_c, name="T0")  # sea-level temperature: the lapse is re-applied per fine cell
     stencil = int(dp.slope_stencil) if dp.slope_stencil > 0 else R
     lake_min_cells = max(1, int(round(dp.lake_min_cells * R * R)))
     all_rivers: list[dict] = []
@@ -245,7 +271,7 @@ def run(store, params, log=print) -> dict:
         ws_f = _fine_optional(store, "water_surface", f, Nf, 0.0)
         lake_f = lakes_mod.lake_mask(surface_f, ws_f, depth)
         river_mask = np.asarray(load_face(store, "river_mask", f))
-        T_f = upsample_face(T, f, R, order=1)
+        T_f = retarget(upsample_face(T0_field, f, R, order=1), 0.0, surface_f, params.climate)
         Pcm_f = np.maximum(upsample_face(Pcm_field, f, R, order=1), 0.0)
         pads = face_pads(surface_reader, Nf, f, stencil)
         slope_f = slope_magnitude(surface_f, coarse_face_array(grid, grid.metric_inv, f), R, cs_f, stencil, pads=pads)
@@ -258,8 +284,10 @@ def run(store, params, log=print) -> dict:
         else:
             lake_pads = None
         lake_near_f = biomes.near_padded(lake_f, lake_pads, d_wet)
-        biome_f = biomes.classify(T_f, Pcm_f, surface_f, slope_f, lake_f, river_near_f, lake_near_f, dp, cliff_slope)
-        del T_f, river_near_f, lake_near_f, river_mask, pads, lake_pads, ws_f, lake_f
+        biome_f = biomes.classify(T_f, Pcm_f, surface_f, slope_f, lake_f, river_near_f, lake_near_f, dp, cliff_slope, alpine_min)
+        land_mask_f = surface_f >= 0.0
+        face_info[f]["T_land_mean"] = float(T_f[land_mask_f].mean()) if land_mask_f.any() else None
+        del T_f, land_mask_f, river_near_f, lake_near_f, river_mask, pads, lake_pads, ws_f, lake_f
         sf = soil.soil_factor(_fine_optional(store, "sediment", f, Nf, 0.0), dp.soil_full_depth_m)
         veg_f = biomes.vegetation(biome_f, Pcm_f, slope_f, sf, dp, cliff_slope)
         write_face(store, "biome", f, biome_f)

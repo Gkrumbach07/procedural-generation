@@ -34,9 +34,22 @@ def temperature(grid: Grid, height_m: np.ndarray, cp: ClimateParams) -> np.ndarr
     return T.astype(np.float32)
 
 
+def retarget(temperature_c: np.ndarray, from_height_m, to_height_m, cp: ClimateParams) -> np.ndarray:
+    """The same temperature field referenced to another surface: remove the
+    lapse term of ``from_height_m`` and apply it at ``to_height_m`` (both in
+    metres, below sea level counts as sea level).  ``retarget(T, h, 0)`` is
+    the sea-level field, ``retarget(T0, 0, h)`` puts it back at ``h``.
+
+    ``derive`` needs this because ``climate`` runs before ``erosion`` and its
+    ``temperature`` therefore sits on the *bedrock* surface, hundreds of
+    metres away from the terrain the biomes are classified on."""
+    dh = np.maximum(np.asarray(from_height_m, dtype=np.float64), 0.0) - np.maximum(np.asarray(to_height_m, dtype=np.float64), 0.0)
+    return (np.asarray(temperature_c, dtype=np.float64) + cp.lapse * dh / 1000.0).astype(np.float32)
+
+
 def evaporation(temperature_c: np.ndarray, cp: ClimateParams) -> np.ndarray:
     """``k_evap·max(T, 0)`` as float32 (same shape as the input)."""
     return (cp.k_evap * np.maximum(np.asarray(temperature_c, dtype=np.float64), 0.0)).astype(np.float32)
 
 
-__all__ = ["temperature", "evaporation"]
+__all__ = ["temperature", "retarget", "evaporation"]

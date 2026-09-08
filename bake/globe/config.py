@@ -54,7 +54,11 @@ STAGE_PARAM_GROUPS = {
 ALL = object()
 RUNTIME_KNOBS: dict[str, Any] = {
     "refine": {"workers"},
-    "erosion": {"checkpoint_every", "quicklook_every"},
+    # ``erosion.resume`` only chooses whether ``checkpoints/`` is read, never
+    # what is computed: in the hash it would make toggling it invalidate the
+    # whole world (``bake`` refuses without ``--force``, and ``--force``
+    # without ``--from`` reruns from tectonics).
+    "erosion": {"checkpoint_every", "quicklook_every", "resume"},
     "render": ALL,
 }
 
@@ -103,8 +107,9 @@ class TectonicsParams:
     heat_noise_freq: float = 1.5  # base lattice frequency of the initial heat noise (features ~ 1/freq of the diameter)
     damping: float = 0.05  # omega *= (1 - damping) per step
     density_base: float = 0.5  # d_b in the growth term
-    height_scale_m: float = 4000.0  # metres per bedrock unit when relief_m == 0
-    relief_m: float = 5000.0  # if > 0: scale bedrock so the 99.9th percentile of land sits at this height (overrides height_scale_m)
+    height_scale_m: float = 4000.0  # metres per bedrock unit when both relief_m and relief_spacings are 0
+    relief_m: float = 0.0  # explicit override, metres: if > 0, scale bedrock so the 99.9th percentile of land sits at this height
+    relief_spacings: float = 1.5  # when relief_m == 0: that percentile sits at this many mean segment spacings (metres), so the vertical scale follows the horizontal one at every preset (0 = use height_scale_m)
     smooth_sigma: float = 1.0  # final Gaussian on the tect grid (tect cells); resampling to the coarse grid is cubic
     # -- sphere-specific knobs (see globe/tectonics/plates.py for the force model) --
     force_scale: float = 3e-4  # plate angular acceleration in spacings/step² per unit (convection × |∇heat| [heat per radian] / mass per area)
@@ -263,7 +268,8 @@ class DeriveParams:
     precip_scale_cm: float = 100.0  # annual precipitation (cm) at the land *mean* rain rate (wetness = 1; climate.precip_mean by contract)
     precip_gamma: float = 0.5  # P_cm = precip_scale_cm * wetness^gamma: compresses the skewed rain rate (coasts 10-30x the mean, interiors 0.05x) into the Whittaker range
     precip_max_cm: float = 400.0  # cap on P_cm (the Whittaker bins end at 220 cm); 0 = none
-    alpine_min_m: float = 800.0  # alpine override: surface above this AND temperature below alpine_T
+    alpine_min_m: float = 0.0  # alpine override: surface above this (metres) AND temperature below alpine_T; 0 = use alpine_min_relief_frac
+    alpine_min_relief_frac: float = 0.6  # when alpine_min_m == 0: the alpine threshold is this fraction of the achieved land relief (99.9th percentile of the land surface), so it follows tectonics.relief_spacings
     alpine_T: float = 0.0  # degC
     cliff_slope: float = 1.6  # rise/run above which a cell is bare cliff (and vegetation is 0)
     cliff_max_fraction: float = 0.03  # cliffs cover at most this fraction of the land: the effective threshold is max(cliff_slope, that land quantile of the coarse slope)

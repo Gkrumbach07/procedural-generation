@@ -15,10 +15,19 @@ game/          Godot 4 project (streaming, gnomonic tile renderer, debug overlay
 ```sh
 cd bake && pip install -e .
 python scripts/bake.py --world demo --preset small           # ~1 minute test world
-python scripts/bake.py --world big  --params my.yaml         # full world
+python scripts/bake.py --world big  --params my.yaml         # full world: hours, see below
 python scripts/bake.py --world big  --from erosion           # resume from a stage
 python scripts/inspect_world.py worlds/demo                  # stats + images
 ```
+
+A default `big` bake is not a coffee break: at the default `N_c = 1024` an
+erosion iteration measures 29 s on 4 cores (~20 s projected on 8), so the
+default `erosion.iterations = 800` is ~6 h of erosion on 4 cores and ~4 h on
+8 — not PLAN 8.4's "≈ 30 min global" (see *Deviations from PLAN.md*).  The
+stage checkpoints every `erosion.checkpoint_every` iterations and `--from
+erosion` resumes, so a long bake can be interrupted (only the two newest
+checkpoints per parameter hash are kept; `erosion.iterations` is not part of
+that hash, so lowering it resumes rather than recomputing from bedrock).
 
 Stages: `tectonics, climate, erosion, hydro, watersheds, refine, derive, tiles`.
 Every stage writes `worlds/<name>/quicklook/<stage>.png` (an unfolded cube net);
@@ -93,9 +102,59 @@ erosion defaults; re-run any row of it with
   gnomonically projected tile is a skewed quadrilateral and physics shapes
   cannot be skewed (the error was ~100 m on the small test planet).  Only
   LOD-0 tiles within `physics_radius_m` get a body; they are rebuilt on
-  re-anchor.
+  re-anchor, synchronously (collision must never lag the anchor frame).
+  The faces come from `CubeSphere.build_collision_faces` (an extra
+  GDExtension entry point beyond PLAN 12.1) and the body and its shape are
+  reused in place; the GDScript fallback caches the anchor-independent
+  unit-sphere direction of each vertex.  At `T = 64` that is 0.1 ms of
+  projection plus ~5 ms of `ConcavePolygonShape3D.set_faces` per tile
+  (was ~20 ms), i.e. ~24 ms for a 4-body re-anchor; the remainder is
+  Godot's own shape upload and scales with `T²`, so a large `T` still
+  costs a visible hitch every `reanchor_distance_tiles` of travel.
+* `WorldRoot.effective_view_distance()` caps `view_distance_m` at
+  `0.5 · R_planet` (0.5 rad of arc).  PLAN 12.2's flat gnomonic frame only
+  holds near the anchor and `gnomonic_local` clamps `dot(Q, A)` at 0.05
+  instead of rejecting far points, so without the cap a small planet
+  streams the back hemisphere and smears it across the sky (on the `small`
+  preset, `R_planet = 4074 m`: 57 tiles, vertices down to
+  `dot(vertex, anchor) = -0.98` and 20× `R_planet` from the origin;
+  with it 13 tiles, 0.56 and 1.5×).  It is a no-op on PLAN's default
+  world (`R_planet ≈ 32.6 km` ≥ 2 × the 8 km default).  The sea-level
+  plane keeps the raw `view_distance_m`: it is flat, so covering the
+  horizon beyond the streamed tiles costs nothing.
+* Debug mode 1 (F3) tints by the **global** basin id: each tile uploads
+  its `meta["basins"]` map as the `basin_ids` uniform, since `flow.G` is
+  only a tile-local index (a basin that crosses a tile edge has a
+  different index on each side — 100 % of the 6223 shared-edge land
+  samples on the medium test world).
+* PLAN 8.4's erosion runtime target (≤ 2 s per iteration at `N_c = 1024`
+  on 8 cores, "≈ 30 min global") is not met, and nothing in the repo
+  measured the cost above `N_c = 256` before `bake/tests/test_perf.py`.
+  Measured on 4 cores with the shipped `erosion` defaults (mean of 2
+  iterations after warm-up, stub upstream fields): 1.30 s/iteration at
+  `N_c = 256`, 4.94 s at 512, 29.0 s at 1024 (2.6 GB RSS).  Cost grows as
+  ~cells^1.1 because the mean particle path grows with the grid (50 → 76
+  → 119 steps); the `max_steps = 2·N` cap is not the driver (< 0.1 % of
+  particles ever reach it).  A quarter of an iteration (8.1 s of the 29 s
+  at `N_c = 1024`) is `particle.apply_changes`, which is serial by
+  construction — the change list is applied in particle order, which is
+  what makes a run byte-reproducible — so more cores cannot take the
+  iteration below ~8 s there, and 8 cores project to ~20 s/iteration
+  (trace halves, the rest does not).  The default
+  `erosion.iterations = 800` at `N_c = 1024` is therefore a multi-hour
+  stage; budget for it or lower `world.N_c` / `erosion.iterations`.
+* Erosion holds the planetary datum every iteration
+  (`erosion/maps.py: hold_datum`, plus a mean-free `apply_uplift`) instead
+  of PLAN 8.2's plain `height += uplift`: uplift is a forcing with a
+  positive area mean and mass leaves the surface for the deep ocean, so
+  the surface drifts (measured on the small e2e world: land fraction
+  0.30 → 0.56 over 60 iterations, a −164 m one-shot correction in hydro)
+  and PLAN 9.1's "optionally re-quantile" then drowned the terrain
+  erosion had just sculpted.  With the hold, hydro's re-quantile is a
+  no-op and the coarse network keeps ~6 % more channel cells (2305 vs
+  2183 at `N_c = 256`, 200 iterations) and a 30 % larger trunk basin.
 * Content hashes ignore runtime-only knobs (`refine.workers`,
-  `erosion.checkpoint_every/quicklook_every`, `render.*`), and every stage
+  `erosion.checkpoint_every/quicklook_every/resume`, `render.*`), and every stage
   records the hash of its own parameter group so a resume detects upstream
   parameter drift.
 
@@ -103,12 +162,12 @@ erosion defaults; re-run any row of it with
 
 ```sh
 # 1. bake a world and make it visible to the project
-python bake/scripts/bake.py --world demo --preset small
+(cd bake && python scripts/bake.py --world demo --preset small)   # -> bake/worlds/demo
 ln -s "$PWD/bake/worlds/demo" game/data/worlds/demo      # or copy; also set globe/world_dir in project.godot
 
 # 2. (optional but recommended) build the GDExtension for fast tile decode
 git submodule update --init                              # godot-cpp (godot-4.4-stable)
-cd gdextension && scons platform=linux target=template_debug   # -> game/addons/globe/bin
+(cd gdextension && scons platform=linux target=template_debug)  # -> game/addons/globe/bin
 
 # 3. run
 godot --path game                                        # WASD/QE move, Shift sprint, Esc mouse, F fly/walk, F3 debug

@@ -38,7 +38,7 @@ func rebuild() -> void:
 	var n_edges: int = world.drainage.call("edge_count")
 	if n_edges == 0:
 		return
-	var max_arc: float = world.view_distance_m / world.R_planet
+	var max_arc: float = world.effective_view_distance() / world.R_planet
 	var any := false
 	for e in range(n_edges):
 		var ed: Dictionary = world.drainage.call("edge", e)

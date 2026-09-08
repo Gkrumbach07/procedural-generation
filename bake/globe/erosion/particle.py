@@ -57,7 +57,7 @@ MASK_FROZEN = 2
 
 #: bumped whenever a kernel change alters results: part of the checkpoint
 #: hash, so stale checkpoints are never resumed after a code change
-KERNEL_VERSION = 3
+KERNEL_VERSION = 4
 
 #: a dying particle deposits its remaining load at the cell it died in; the
 #: excess over that cell's caps moves back up its last SPREAD active cells

@@ -272,7 +272,13 @@ def write_index(store, params) -> Path:
 def _write_tiles_job(args) -> int:
     """One (lod, face) worth of tiles (multiprocessing target; the face's
     lattice memmaps are opened once from disk, outputs are independent
-    files)."""
+    files).
+
+    This job runs in a *forked* worker (cheap: no spawn-time numpy import
+    per tile worker), so it must stay free of numba parallel kernels: the
+    parent has already run ``lod0_lattice`` / ``next_lod`` under the OpenMP
+    layer, which is not fork-safe (the same reason ``refine.run`` spawns).
+    """
     root, work, lod, f, T, n, N = args
     ls = LatticeStore(work)
     lat = {c.name: ls.load(c.name, lod, f) for c in CHANNELS}
@@ -293,11 +299,13 @@ def write_all_tiles(store, params, ls: LatticeStore, log=print, workers: int | N
     n_written = 0
     if workers > 1 and len(jobs) > 1:
         import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor, as_completed
 
         ctx = mp.get_context("fork") if "fork" in mp.get_all_start_methods() else mp.get_context()
-        with ctx.Pool(min(workers, len(jobs))) as pool:
-            for k in pool.imap_unordered(_write_tiles_job, jobs):
-                n_written += k
+        with ProcessPoolExecutor(max_workers=min(workers, len(jobs)), mp_context=ctx) as ex:
+            futs = [ex.submit(_write_tiles_job, j) for j in jobs]
+            for fut in as_completed(futs):
+                n_written += fut.result()  # a dead worker raises BrokenProcessPool (Pool would hang)
     else:
         for job in jobs:
             n_written += _write_tiles_job(job)
