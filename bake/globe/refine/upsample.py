@@ -19,7 +19,9 @@ upsampled instead of the water surface itself (a bilinear water surface
 against a bicubic terrain would show spurious 'lakes' on curved slopes).
 
 Detail noise: ridged FBM value noise on the fine lattice, wavelengths
-from 4 coarse cells down to ~2 fine cells, seeded by
+from 2 coarse cells down to ~2 fine cells (the basin job removes every
+coarse-cell block mean of the refined change afterwards, so longer
+octaves would only be cancelled), seeded by
 ``params.rng("refine", basin_id)``, amplitude ``detail_amp * min(slope *
 cell_size_m, relief_3x3) * (0.5 + 0.5 * hardness)`` (metres; the local
 height change over one coarse cell, never more than the coarse 3x3
@@ -108,10 +110,25 @@ def basin_window(basin: dict, R: int, halo_cells: int) -> Window:
 # --------------------------------------------------------------------------
 # sampling
 # --------------------------------------------------------------------------
+#: ``sample`` works in row strips of at most this many fine cells (the
+#: cubic sampler allocates ~30 temporaries per point)
+SAMPLE_STRIP_CELLS = 1 << 20
+#: ``window_metric`` works in row chunks of at most this many cells
+METRIC_CHUNK_CELLS = 1 << 18
+
+
 def sample(field: FaceField, win: Window, order: int = 1) -> np.ndarray:
-    """Field on the window's extended fine array ``(NE, NE[, C])``."""
+    """Field on the window's extended fine array ``(NE, NE[, C])``.  Large
+    windows are sampled in coarse-row strips (identical values: every point
+    is sampled independently)."""
     a0, a1, b0, b1 = win.ext_range()
-    out = field.sample_window(win.face, a0, a1, b0, b1, win.R, order=order)
+    R = win.R
+    rows = max(1, SAMPLE_STRIP_CELLS // max(1, (b1 - b0) * R * R))  # coarse rows per strip
+    if a1 - a0 <= rows:
+        out = field.sample_window(win.face, a0, a1, b0, b1, R, order=order)
+    else:
+        parts = [field.sample_window(win.face, s0, min(a1, s0 + rows), b0, b1, R, order=order) for s0 in range(a0, a1, rows)]
+        out = np.concatenate(parts, axis=0)
     assert out.shape[:2] == (win.NE, win.NE), (out.shape, win)
     return np.ascontiguousarray(out)
 
@@ -124,24 +141,33 @@ def window_metric(win: Window, grid: Grid) -> tuple[np.ndarray, np.ndarray]:
     R, N = win.R, grid.N
     Nf = N * R
     a0, a1, b0, b1 = win.ext_range()
+    NE = win.NE
     u = (np.arange(a0 * R, a1 * R) + 0.5) / Nf
     v = (np.arange(b0 * R, b1 * R) + 0.5) / Nf
-    U, V = np.meshgrid(u, v, indexing="ij")
-    ju, jv = jacobian_v(np.full(U.shape, win.face), U, V)
-    g = np.empty(U.shape + (3,), dtype=np.float64)
-    g[..., 0] = np.sum(ju * ju, -1)
-    g[..., 1] = np.sum(ju * jv, -1)
-    g[..., 2] = np.sum(jv * jv, -1)
     cell_fine = grid.cell_size_m / R
     k = (grid.R_planet / (Nf * cell_fine)) ** 2
-    metric = (g * k).astype(np.float32)
-    gd = metric.astype(np.float64)
-    det = gd[..., 0] * gd[..., 2] - gd[..., 1] ** 2
-    inv = np.empty_like(gd)
-    inv[..., 0] = gd[..., 2] / det
-    inv[..., 1] = -gd[..., 1] / det
-    inv[..., 2] = gd[..., 0] / det
-    return metric, inv.astype(np.float32)
+    metric = np.empty((NE, NE, 3), dtype=np.float32)
+    inv = np.empty((NE, NE, 3), dtype=np.float32)
+    # row chunks: the float64 jacobian temporaries of a whole 2112² window
+    # would be ~0.7 GB at once (they set the job's peak memory)
+    rows = max(1, METRIC_CHUNK_CELLS // NE)
+    for r0 in range(0, NE, rows):
+        r1 = min(NE, r0 + rows)
+        U, V = np.meshgrid(u[r0:r1], v, indexing="ij")
+        ju, jv = jacobian_v(np.full(U.shape, win.face), U, V)
+        g = np.empty(U.shape + (3,), dtype=np.float64)
+        g[..., 0] = np.sum(ju * ju, -1)
+        g[..., 1] = np.sum(ju * jv, -1)
+        g[..., 2] = np.sum(jv * jv, -1)
+        del ju, jv, U, V
+        m = (g * k).astype(np.float32)
+        metric[r0:r1] = m
+        gd = m.astype(np.float64)
+        det = gd[..., 0] * gd[..., 2] - gd[..., 1] ** 2
+        inv[r0:r1, :, 0] = gd[..., 2] / det
+        inv[r0:r1, :, 1] = -gd[..., 1] / det
+        inv[r0:r1, :, 2] = gd[..., 0] / det
+    return metric, inv
 
 
 # --------------------------------------------------------------------------
@@ -233,7 +259,7 @@ def detail_noise(win: Window, slope: np.ndarray, relief: np.ndarray, hardness: n
     amp = float(detail_amp) * np.minimum(np.maximum(slope, 0.0) * float(cell_size_m), np.maximum(relief, 0.0)) * (0.5 + 0.5 * np.clip(hardness, 0.0, 1.0))
     if detail_amp <= 0.0:
         return np.zeros((win.NE, win.NE), dtype=np.float32)
-    noise = ridged_fbm((win.NE, win.NE), 4.0 * win.R, rng)
+    noise = ridged_fbm((win.NE, win.NE), 2.0 * win.R, rng)  # octaves 2R, R, R/2 ... 2 cells: what survives the coarse-cell drift removal of the job
     return (amp * noise).astype(np.float32)
 
 

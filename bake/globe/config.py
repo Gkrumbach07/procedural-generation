@@ -232,7 +232,7 @@ class RefineParams:
     detail_amp: float = 0.3
     halo_cells: int = 8
     workers: int = 0  # 0 -> os.cpu_count()
-    feather_cells: int = 2
+    feather_cells: int = 8  # fine cells over which a basin's refined detail ramps in from its (frozen) divide; keep >= 2R (a coarse cell): a 2-cell ramp reads as a crease in the LOD-0 hillshade
     particles_per_cell: float = 0.25
 
 
@@ -462,7 +462,7 @@ class WorldParams:
         p.climate = dataclasses.replace(p.climate, n_advect=0)  # auto: sweep until stationary (cap 4*N)
         p.erosion = dataclasses.replace(p.erosion, iterations=60, checkpoint_every=30, quicklook_every=30)
         p.watersheds = WatershedParams(basin_max_cells=48 * 48, basin_min_cells=8 * 8)
-        p.refine = dataclasses.replace(p.refine, refine_iterations=20, halo_cells=4)
+        p.refine = dataclasses.replace(p.refine, refine_iterations=20, halo_cells=4, feather_cells=4)  # 2R
         return p
 
     @classmethod
