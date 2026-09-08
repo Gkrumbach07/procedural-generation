@@ -57,7 +57,7 @@ MASK_FROZEN = 2
 
 #: bumped whenever a kernel change alters results: part of the checkpoint
 #: hash, so stale checkpoints are never resumed after a code change
-KERNEL_VERSION = 2
+KERNEL_VERSION = 3
 
 #: a dying particle deposits its remaining load at the cell it died in; the
 #: excess over that cell's caps moves back up its last SPREAD active cells
@@ -132,6 +132,7 @@ S_HARD = 6
 S_SED = 7  # sediment thickness (erodibility rule)
 S_G = 8  # metric g_ii, g_ij, g_jj (8..10)
 S_GINV = 11  # inverse metric (11..13)
+S_RFLAG = 14  # 1.0 where the packed routing surface differs from the (live) surface of this cell; a bilinear route sample is skipped when all four stencil cells are 0 (identical inputs give an identical bilinear, so this is exact)
 NS = 16
 
 
@@ -157,7 +158,7 @@ def pack_samples(samp, height, sediment, route, use_route, discharge, momentum, 
                 for k in range(3):
                     samp[f, ei, ej, S_G + k] = metric[f, ei, ej, k]
                     samp[f, ei, ej, S_GINV + k] = metric_inv[f, ei, ej, k]
-                samp[f, ei, ej, 14] = 0.0
+                samp[f, ei, ej, S_RFLAG] = 1.0 if (use_route and samp[f, ei, ej, S_ROUTE] != samp[f, ei, ej, S_SURF]) else 0.0
                 samp[f, ei, ej, 15] = 0.0
 
 
@@ -192,6 +193,15 @@ def _sbilin_grad(samp, f, fi, fj, c):
     gi = (h10 - h00) * (1.0 - wj) + (h11 - h01) * wj
     gj = (h01 - h00) * (1.0 - wi) + (h11 - h10) * wi
     return val, gi, gj
+
+
+@njit(cache=True, inline="always")
+def _rflag(samp, f, fi, fj):
+    """True when the routing surface differs from the terrain somewhere in
+    the 2x2 stencil of the bilinear sample at (fi, fj) (the four cells the
+    sample reads anyway, so this costs no extra cache lines)."""
+    i0, j0, _wi, _wj = _clamp_ij(fi, fj, samp.shape[1])
+    return (samp[f, i0, j0, S_RFLAG] + samp[f, i0 + 1, j0, S_RFLAG] + samp[f, i0, j0 + 1, S_RFLAG] + samp[f, i0 + 1, j0 + 1, S_RFLAG]) != 0.0
 
 
 @njit(cache=True, inline="always")
@@ -241,6 +251,7 @@ def trace_particles(
     k_mom,
     k_disc,
     disc_saturation,
+    disc_exponent,
     slope_gain,
     slope_sat,
     erodibility,
@@ -252,6 +263,7 @@ def trace_particles(
     deposit_on_exit,
     ocean_rate,
     ocean_steps,
+    fan_room,
     # change list: (P*cap,) arrays + (P,) counts, cell range, death cause
     cl_cell,
     cl_delta,
@@ -278,7 +290,7 @@ def trace_particles(
     0 — overflow slots that :func:`apply_changes` fills with whatever the
     death cell cannot take (a pit fills to the level of the path).  A load
     that reached the sea is offered to the ocean cell only; the excess
-    waits in that cell's ``pending`` stockpile and spreads offshore.  Frozen cells (mask 2) are transparent: sampled, never
+    is lost to the deep ocean (see :func:`apply_changes`).  Frozen cells (mask 2) are transparent: sampled, never
     written, no sediment exchange.  Returns nothing; ``cl_count[p]`` is the
     number of entries of particle p, ``cl_lo[p]..cl_hi[p]`` the range of
     flat cell indices they touch and ``sp_death[p]`` why it stopped
@@ -290,7 +302,11 @@ def trace_particles(
     dt * gravity / (vol * density))`` — friction is the inertia weight of the
     previous direction (``1/dt`` = no inertia).  PLAN 8.2's ``|speed|``
     factor in ``c_eq`` is the constant 1 cell/step here, absorbed in
-    ``erodibility``.
+    ``erodibility``.  The entrainment factor ``1 + k_disc * f(q)`` uses
+    ``f = erf(q / disc_saturation)`` (saturating) or, with
+    ``disc_exponent > 0``, ``f = (q / disc_saturation) ** disc_exponent``
+    (stream-power-like: a trunk river carries a given load at a gentler
+    slope than a rill, so long profiles are concave and floodplains form).
 
     Gravity: the tangential part of the surface normal scaled by
     ``slope_gain`` (McDonald) when ``slope_sat <= 0``; otherwise the unit
@@ -368,7 +384,7 @@ def trace_particles(
             # --- forces ---------------------------------------------------
             h0, gi, gj = _sbilin_grad(samp, f, fi, fj, S_SURF)
             h0r = h0
-            if use_route:
+            if use_route and _rflag(samp, f, fi, fj):
                 # steer on the epsilon-filled routing surface where it is
                 # above the terrain (lakes / pits); erode on the terrain
                 r0, rgi, rgj = _sbilin_grad(samp, f, fi, fj, S_ROUTE)
@@ -468,7 +484,7 @@ def trace_particles(
             h1 = _sbilin(samp, nf, nfi, nfj, S_SURF)
             dh = h0 - (h1 if h1 > 0.0 else 0.0)  # the drop into the sea counts down to sea level only
             h1r = h1
-            if use_route:
+            if use_route and _rflag(samp, nf, nfi, nfj):
                 r1 = _sbilin(samp, nf, nfi, nfj, S_ROUTE)
                 if r1 > h1:
                     h1r = r1
@@ -477,9 +493,9 @@ def trace_particles(
             if m == MASK_ACTIVE and in_sea:
                 # seafloor: settle a fixed fraction of the load, never erode
                 cdiff = -ocean_rate * sed
-                room = h_prev - h_here if h_prev > -1e300 else DEP_FLOOR
-                if room < DEP_FLOOR:
-                    room = DEP_FLOOR  # flat seafloor: fans still build (live caps bound the pile)
+                room = h_prev - h_here if h_prev > -1e300 else fan_room
+                if room < fan_room:
+                    room = fan_room  # flat seafloor: fans still build (the live caps bound the pile)
                 lim = -DEP_FLOOR - h_here  # sea-level ceiling
                 if lim < room:
                     room = lim
@@ -501,7 +517,14 @@ def trace_particles(
             elif m == MASK_ACTIVE:
                 # equilibrium concentration (cell units of height per unit
                 # spawn volume); carried mass = sed * vol_rel
-                qe = math.erf(q * inv_sat) if inv_sat > 0.0 else 0.0
+                if inv_sat <= 0.0:
+                    qe = 0.0
+                elif disc_exponent == 0.5:
+                    qe = math.sqrt(q * inv_sat)  # unsaturated: trunks grade to gentler slopes than rills
+                elif disc_exponent > 0.0:
+                    qe = (q * inv_sat) ** disc_exponent
+                else:
+                    qe = math.erf(q * inv_sat)
                 c_eq = erodibility * dh * (1.0 + k_disc * qe)
                 if c_eq < 0.0:
                     c_eq = 0.0
@@ -631,7 +654,7 @@ def trace_particles(
 def apply_changes(
     cl_cell, cl_delta, cl_vol, cl_mom, cl_count, cap,
     height, sediment, acc, pending, samp, disch_track, mom_track, mask,
-    iter_erode, iter_deposit, fan_slope,
+    iter_erode, iter_deposit, fan_slope, use_route,
 ):
     """Apply a change list serially in particle order against the live
     terrain.  This is the single place where physical limits are enforced
@@ -664,16 +687,20 @@ def apply_changes(
       the surface as submarine fans).
       The excess becomes the *surplus*
       offered to the next entries; whatever is left after the last entry
-      goes to ``pending`` of the death cell — a per-cell stockpile that the
+      goes to ``pending`` of the death cell when that cell is land (a submerged death cell — a shelf filled to sea level that never becomes land — loses it to the deep ocean instead, as PLAN 8.2's ``into ocean: break`` does; reported as ``lost_offshore``) — a per-cell stockpile that the
       next iteration re-injects as a particle starting with that load (in
       seafloor mode if the cell is submerged), so parked mass keeps moving
       until it finds room.
+
+    With ``use_route`` the ``S_RFLAG`` channel of every touched cell is
+    kept equal to ``route != live surface`` (the kernel skips the route
+    samples where the whole stencil is unflagged).
 
     Tracks: ``disch_track[c] += volume`` and ``mom_track[c] += volume *
     velocity`` for land step entries (volume > 0; seafloor steps carry
     volume 0, final deposits -1).
     Returns ``(clamped entries, mass sent to pending, mass of deficits
-    left at the end of a list)``.
+    left at the end of a list, mass lost offshore)``.
     """
     F, NE, _ = height.shape
     total = F * NE * NE
@@ -689,6 +716,7 @@ def apply_changes(
     n_clamp = 0
     to_pending = 0.0
     lost = 0.0
+    lost_offshore = 0.0
     for p in range(P):
         base = p * cap
         cnt = cl_count[p]
@@ -761,9 +789,13 @@ def apply_changes(
                 if not is_step and death < 0:
                     death = c
             a2 = aflat[c]
-            pflat[c, S_SURF] = hflat[c] + sflat[c] + a2
+            s_new = hflat[c] + sflat[c] + a2
+            pflat[c, S_SURF] = s_new
             sd = sflat[c] + a2
             pflat[c, S_SED] = sd if sd > 0.0 else 0.0
+            if use_route:
+                # keep the route flag in step with the live surface
+                pflat[c, S_RFLAG] = 1.0 if pflat[c, S_ROUTE] != pflat[c, S_SURF] else 0.0
             if is_step:
                 if v > 0.0:
                     dflat[c] += v
@@ -772,11 +804,18 @@ def apply_changes(
                 prev = c
         if surplus > 0.0:
             if death >= 0:
-                pdflat[death] += surplus
-                to_pending += surplus
+                if hflat[death] + sflat[death] + aflat[death] < 0.0:
+                    # a load the seafloor walk could not place (a shelf
+                    # filled to sea level) leaves the modelled surface for
+                    # the deep ocean: parking it would deadlock, since sea
+                    # never turns into land (PLAN 8.2 drops it outright)
+                    lost_offshore += surplus
+                else:
+                    pdflat[death] += surplus
+                    to_pending += surplus
             # else: the particle left the window with that load
         lost += deficit
-    return n_clamp, to_pending, lost
+    return n_clamp, to_pending, lost, lost_offshore
 
 
 @njit(cache=True, parallel=True)

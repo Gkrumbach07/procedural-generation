@@ -15,6 +15,22 @@ Typical use::
     height_m, sediment_m = state.height_m(), state.sediment_m()
 
 Everything random comes from ``params.rng(rng_stage, *iteration_key)``.
+
+Model notes (PLAN milestone 2 tuning, docs/erosion-tuning.md):
+
+* ``erosion.creep_rate`` adds hillslope creep (a talus-0 mass-wasting pass,
+  submerged cells inert).  Without it every particle path incises its own
+  rill and the drainage density saturates at one channel per ~3 cells;
+  with it interfluves round off and a dendritic trunk network forms.
+* ``erosion.disc_exponent`` (0.5) makes the transport capacity grow with
+  discharge without saturating (``1 + k_disc * sqrt(q / disc_saturation)``,
+  stream-power concavity): trunk rivers grade to gentler slopes than
+  rills, so long profiles are concave, valleys widen downstream and a
+  channel survives on a floodplain.  With the saturating erf law every
+  plain became an alluvial fan and nothing could meander.
+* Sediment a submarine fan cannot place (a shelf filled to sea level, which
+  never becomes land) is lost to the deep ocean (``lost_offshore`` in the
+  iteration stats) instead of accumulating in ``pending`` forever.
 """
 from __future__ import annotations
 
@@ -416,6 +432,7 @@ def run_iteration(
     n_clamp = 0
     to_pending = 0.0
     lost = 0.0
+    lost_offshore = 0.0
     t_trace = 0.0
     t_apply = 0.0
     for c0 in range(0, P, chunk):
@@ -444,6 +461,7 @@ def run_iteration(
                 float(ep.k_mom),
                 float(ep.k_disc),
                 float(ep.disc_saturation),
+                float(ep.disc_exponent),
                 float(ep.slope_gain),
                 float(ep.slope_saturation),
                 float(ep.erodibility),
@@ -455,6 +473,7 @@ def run_iteration(
                 bool(state.deposit_on_exit),
                 float(ep.ocean_deposition_rate),
                 int(ep.ocean_steps),
+                float(ep.fan_room),
                 cl_cell,
                 cl_delta,
                 cl_vol,
@@ -465,14 +484,15 @@ def run_iteration(
                 sp_death[:m],
             )
         t2 = time.time()
-        nc, tp, lo = pk.apply_changes(
+        nc, tp, lo, lo_off = pk.apply_changes(
             cl_cell, cl_delta, cl_vol, cl_mom, cl_count[:m], cap,
             state.height, state.sediment, state.acc, state.pending, state.samp, state.disch_track, state.mom_track, state.mask,
-            float(ep.iter_erode), float(ep.iter_deposit), float(ep.fan_slope),
+            float(ep.iter_erode), float(ep.iter_deposit), float(ep.fan_slope), state.route is not None,
         )
         n_clamp += int(nc)
         to_pending += tp
         lost += lo
+        lost_offshore += lo_off
         t_trace += t2 - t1
         t_apply += time.time() - t2
         entries += int(cl_count[:m].sum())
@@ -486,6 +506,7 @@ def run_iteration(
     stats["released"] = float(released)
     stats["pending_total"] = float(state.pending[state.interior].sum())
     stats["deficit_out"] = lost
+    stats["lost_offshore"] = lost_offshore  # load a seafloor walk could not place: left the modelled surface (deep ocean)
     stats["seconds_trace"] = t_trace
     stats["seconds_apply"] = t_apply
     stats["chunk"] = int(chunk)
@@ -499,17 +520,34 @@ def thermal_erosion(state: ErosionState, params) -> None:
     talus slope ``soft + (hard - soft) * hardness`` (rise/run, cell units)
     moves to lower neighbours, sediment first, at most ``thermal_max`` per
     cell and pass, and never above ``-DEP_FLOOR`` into a submerged cell;
-    conservative between active cells."""
+    conservative between active cells.  With ``creep_rate > 0`` a second
+    pass with talus 0 follows (hillslope creep, a linear diffusion of the
+    surface at that rate): without it every particle path incises its own
+    rill and the drainage density saturates at one channel per ~3 cells
+    (parallel micro-rills, no coherent trunk network)."""
     ep = _eparams(params)
     talus = (ep.talus_slope_soft + (ep.talus_slope_hard - ep.talus_slope_soft) * state.hardness).astype(np.float64)
+    _mass_wasting_pass(state, talus, float(ep.thermal_rate), float(ep.thermal_max))
+    if ep.creep_rate > 0.0:
+        # hillslope creep: the same conservative pass with talus 0 (every
+        # lower neighbour receives creep_rate/2 of the height difference).
+        # Submerged cells are inert for it (frozen in a temporary mask):
+        # creep is a hillslope process, it must not diffuse the coast into
+        # the sea (the talus pass still lets sea cliffs collapse).
+        cmask = np.where(state.height + state.sediment < 0.0, np.uint8(pk.MASK_FROZEN), state.mask).astype(np.uint8)
+        _mass_wasting_pass(state, np.zeros_like(talus), float(ep.creep_rate), float(ep.thermal_max), cmask)
+
+
+def _mass_wasting_pass(state: ErosionState, talus: np.ndarray, rate: float, cap: float, mask: np.ndarray | None = None) -> None:
+    mask = state.mask if mask is None else mask
     out_total = np.zeros_like(state.height)
     scale = np.zeros_like(state.height)
-    pk.thermal_pass_a(state.height, state.sediment, state.metric, talus, state.mask, float(ep.thermal_rate), float(ep.thermal_max), out_total, scale)
+    pk.thermal_pass_a(state.height, state.sediment, state.metric, talus, mask, rate, cap, out_total, scale)
     rscale = np.ones_like(state.height)
-    pk.thermal_pass_r(state.height, state.sediment, state.metric, talus, state.mask, float(ep.thermal_rate), scale, rscale)
+    pk.thermal_pass_r(state.height, state.sediment, state.metric, talus, mask, rate, scale, rscale)
     new_h = state.height.copy()
     new_s = state.sediment.copy()
-    pk.thermal_pass_b(state.height, state.sediment, state.metric, talus, state.mask, float(ep.thermal_rate), out_total, scale, rscale, new_h, new_s)
+    pk.thermal_pass_b(state.height, state.sediment, state.metric, talus, mask, rate, out_total, scale, rscale, new_h, new_s)
     state.height[...] = new_h
     state.sediment[...] = new_s
 

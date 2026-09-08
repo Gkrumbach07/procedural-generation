@@ -117,6 +117,20 @@ particle by `volume *= 1 − dt·erosion.evap_rate·evap[cell]`.  PLAN 8.2's
 `evap_at_pos` reads as `evap_rate·evap(pos)`, so the ★ `evap_rate` keeps
 its published meaning.
 
+Mass: the kernel is conservative on a closed window *except* for load a
+submarine fan cannot place.  A shelf already filled to sea level can take
+nothing more (the fan-slope descent and the sea-level ceiling both bind)
+and sea never becomes land, so that load leaves the modelled surface for
+the deep ocean instead of deadlocking in `pending`; the per-iteration
+total is `lost_offshore` (stage info `lost_offshore_m`).  `pending` is a
+per-cell stockpile for **land** pits only.
+
+Hillslope processes: `thermal_erosion` runs the talus pass and then, when
+`erosion.creep_rate > 0`, a second conservative pass with talus 0 (linear
+diffusion at that rate) in which submerged cells are frozen, so creep
+never diffuses a coast into the sea.  See docs/erosion-tuning.md for why
+it is on by default.
+
 ## Tiles (`tiles/L{lod}/f{face}/{x}_{y}/`, see `globe/io/tiles.py`)
 
 * A tile holds `(T+1)×(T+1)` **vertex** samples.  Sample `(k, l)` of tile

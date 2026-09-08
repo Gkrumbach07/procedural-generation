@@ -24,6 +24,12 @@ Stages: `tectonics, climate, erosion, hydro, watersheds, refine, derive, tiles`.
 Every stage writes `worlds/<name>/quicklook/<stage>.png` (an unfolded cube net);
 `manifest.json` records parameters and a content hash per stage.
 
+Further reading: [docs/DEVELOPING.md](docs/DEVELOPING.md) is the binding
+cross-stage contract (field names, dtypes, units, JSON schemas).
+[docs/erosion-tuning.md](docs/erosion-tuning.md) is the sweep that chose the
+erosion defaults; re-run any row of it with
+`python scripts/erosion_face_experiment.py`.
+
 ## Conventions (read before touching any stage)
 
 * Faces `0..5 = +X, -X, +Y, -Y, +Z, -Z`, OpenGL cubemap bases; equi-angular

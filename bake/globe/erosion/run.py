@@ -3,10 +3,11 @@ grid with checkpoints, resume and periodic quicklooks.
 
 Inputs (coarse fields): ``bedrock``, ``uplift``, ``hardness`` (tectonics),
 ``precip``, ``evap`` (climate).  Outputs: ``height``, ``sediment``,
-``discharge``, ``momentum`` (docs/DEVELOPING.md).  Sediment that found no
-room below sea level by the end of the run (``ErosionState.pending``) is
-not part of the outputs; its total is reported as ``pending_total_m`` in
-the stage info (and ``land_fraction`` next to ``land_fraction_bedrock``:
+``discharge``, ``momentum`` (docs/DEVELOPING.md).  Sediment parked in land
+pits at the end of the run (``ErosionState.pending``) is not part of the
+outputs; its total is reported as ``pending_total_m`` in the stage info,
+next to ``lost_offshore_m`` (load that submarine fans could not place: it
+left the modelled surface for the deep ocean) (and ``land_fraction`` next to ``land_fraction_bedrock``:
 the particle pass never turns sea into land or land into sea, so any
 drift is tectonic uplift / subsidence).
 
@@ -138,6 +139,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     log(f"[erosion] {grid.describe()}; heights in units of {state.height_unit_m:.1f} m; {n_iter} iterations, {ep.particles_per_cell} particles/cell")
     times = []
     clamped = 0
+    lost_offshore = 0.0
     while state.iteration < n_iter:
         it = state.iteration
         t0 = time.time()
@@ -145,6 +147,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         dt = time.time() - t0
         times.append(dt)
         clamped += int(st.get("clamped", 0))
+        lost_offshore += float(st.get("lost_offshore", 0.0))
         d = st.get("deaths", {})
         log(
             f"[erosion] iter {it + 1}/{n_iter}: {st['particles']} particles, mean {st['steps_mean']:.0f} steps, "
@@ -174,6 +177,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         "sediment_p99_m": float(np.percentile(state.sediment[state.interior], 99) * state.height_unit_m),
         "pending_total_m": float(state.pending[state.interior].sum() * state.height_unit_m),
         "clamped_entries": clamped,
+        "lost_offshore_m": lost_offshore * state.height_unit_m,
     }
     return info
 

@@ -16,3 +16,4 @@ game/.godot/
 build/
 dist/
 gdextension/tests/test_cubesphere
+bake/erosion_runs/

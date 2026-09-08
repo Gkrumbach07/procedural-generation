@@ -168,6 +168,29 @@ def test_conservation_closed_window():
     assert np.all(st.pending >= 0)
 
 
+def test_offshore_loss_is_accounted():
+    """Open coast (``tilt`` window, deposit-on-exit): the mass that leaves
+    the modelled surface is exactly the load submarine fans could not
+    place (``lost_offshore``) — everything else stays in height + sediment
+    + pending — and nothing is parked in ``pending`` on a submerged cell."""
+    p = WorldParams.small_world(0)
+    st = make_window(48, "tilt", p, deposit_on_exit=True)
+    m0 = st.total_mass()
+    lost = 0.0
+    for it in range(25):
+        s = step(st, p, it)
+        lost += s["lost_offshore"]
+        # no deficit leaves this window: the residue is the rounding of
+        # cancelling a clamped particle's later deposits (~1e-18)
+        assert s["deficit_out"] <= 1e-12 * abs(m0)
+    upl = float(st.uplift[st.interior][st.mask[st.interior] == pk.MASK_ACTIVE].sum()) * 25
+    m1 = st.total_mass()
+    assert abs((m1 + lost) - (m0 + upl)) <= 1e-6 * abs(m0), (m0, m1, lost, upl)
+    sea = st.surface() < 0
+    assert st.pending[sea].sum() == 0.0
+    assert s["deaths"]["ocean"] > 0
+
+
 def test_exit_without_deposit_loses_mass_only():
     """Default window mode: particles leaving the mask deposit nothing, so
     the total can only decrease (and does, on an open face)."""
@@ -193,9 +216,11 @@ def test_dendritic_network_and_frozen_divides():
       (>= 60 % in 8-connected components of >= 16 cells, largest >= 48;
       measured 65-78).
     * Erosion did the work: the final channel cells are *incised* — their
-      local relief (7x7 neighbourhood mean minus the cell) grows by more
-      than 0.04 cells in the median (measured ~0.10), while the twin's
-      channels are not (measured ~0.00; thermal erosion only smooths).
+      local relief (17x17 neighbourhood mean minus the cell; hillslope
+      creep widens valleys to several cells, so a 7x7 window would sit
+      inside them) grows by more than 0.04 cells in the median (measured
+      0.09), while the twin's channels are not (measured -0.06: creep and
+      thermal erosion only smooth).
     * Frozen wall cells (mask 2) are sampled but never modified (refine's
       divide contract); the uplift ridge stays the highest part of the face.
     """
@@ -215,7 +240,7 @@ def test_dendritic_network_and_frozen_divides():
         surf = st.surface()[st.interior][0]
         res[erod] = {
             "metrics": discharge_metrics(st),
-            "incision": float(np.median(local_relief(surf, chan)) - np.median(local_relief(s0, chan))),
+            "incision": float(np.median(local_relief(surf, chan, r=8)) - np.median(local_relief(s0, chan, r=8))),
             "frozen_ok": bool(np.array_equal(st.height[frozen], h_frozen) and np.all(st.sediment[frozen] == 0.0)),
             "surf": surf,
         }
@@ -225,7 +250,7 @@ def test_dendritic_network_and_frozen_divides():
     assert m["largest"] >= 48, m
     inc, inc0 = res[p.erosion.erodibility]["incision"], res[0.0]["incision"]
     assert inc > 0.04, (inc, inc0)
-    assert inc > inc0 + 0.04, (inc, inc0)
+    assert inc > inc0 + 0.08, (inc, inc0)
     assert all(r["frozen_ok"] for r in res.values())
     # the uplift ridge stays the highest part of the face
     surf = res[p.erosion.erodibility]["surf"]

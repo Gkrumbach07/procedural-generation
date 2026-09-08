@@ -184,6 +184,7 @@ class ErosionParams:
     k_disc: float = 1.0
     ema: float = 0.1  # ★ map lerp
     thermal_rate: float = 0.5
+    creep_rate: float = 0.1  # hillslope creep: a second thermal pass with talus 0 at this rate (linear diffusion of the surface; submerged cells are inert); 0 = off.  Without it every particle path incises its own rill (drainage density saturates at one channel per ~3 cells, parallel micro-rills instead of a trunk network); 0.3 over-smooths the divides (docs/erosion-tuning.md)
     thermal_max: float = 1.0  # cap on the material a cell sheds per thermal pass (cell units): a tectonic cliff relaxes at a bounded rate instead of collapsing in one iteration
     talus_slope_soft: float = 0.6  # rise/run
     talus_slope_hard: float = 1.2
@@ -193,20 +194,22 @@ class ErosionParams:
     quicklook_every: int = 50
     slope_gain: float = 2.0  # multiplies the gravity force in the particle direction update
     slope_saturation: float = 0.0  # > 0: gravity = slope_gain * s / sqrt(s^2 + slope_saturation^2) along the downhill direction (terminal-velocity flow; gentle slopes still steer); 0 = tangential surface normal (McDonald)
-    erodibility: float = 0.2  # c_eq = erodibility * dh * (1 + k_disc * erf(q / disc_saturation)); 1.0 = McDonald 2022
+    erodibility: float = 0.2  # c_eq = erodibility * dh * (1 + k_disc * f(q)), f set by disc_exponent below; 1.0 = McDonald 2022
     height_unit_m: float = 0.0  # kernel heights are in cell units (height_m / cell_size_m): every cap, talus slope and gravity term is defined in them; 0 or 1 (= cell_size_m) are the only accepted values, anything else raises
-    disc_saturation: float = 32.0  # discharge (volume units ~ upstream cells) at which erf(q/disc_saturation) saturates the entrainment term
+    disc_saturation: float = 32.0  # discharge scale (volume units ~ upstream cells) of the entrainment term: erf(q/disc_saturation) when disc_exponent is 0, (q/disc_saturation)^disc_exponent otherwise
+    disc_exponent: float = 0.5  # > 0: unsaturated power-law entrainment c_eq = erodibility*dh*(1 + k_disc*(q/disc_saturation)^disc_exponent) (stream-power concavity theta = 0.5: a trunk river carries its load at a gentler slope than a rill, so long profiles are concave, valleys widen downstream and a channel survives on a floodplain); 0 = the saturating erf law, under which every plain became an alluvial fan and no channel could meander
     max_erode: float = 0.25  # cap on terrain removed per particle-step (cell units) at trace time (against the chunk-start terrain)
     iter_erode: float = 0.5  # net erosion a cell may receive per iteration (cell units), enforced against the live terrain in apply order; the shortfall cancels the particle's later deposits (erosion/particle.py apply_changes)
     iter_deposit: float = 1.0  # net deposition a cell may receive per iteration (cell units); the excess moves back up the particle's path, the remainder waits in the per-cell `pending` stockpile (released at this rate)
     ocean_deposition_rate: float = 0.3  # a particle that reaches the sea keeps walking downslope on the seafloor, deposit-only, dropping this fraction of its load per step (submarine fan); no erosion, no discharge track below sea level
     ocean_steps: int = 64  # at most this many seafloor steps (then the rest waits in the cell's pending stockpile, re-injected next iteration)
+    fan_room: float = 1.0  # a seafloor step may settle at most this much (cell units) on a flat sea floor per particle-step (the drop to the previous cell when larger); the sea-level ceiling, the fan_slope descent and iter_deposit still bound the pile in apply_changes.  0.02 (= DEP_FLOOR) throttled offshore dispersal to ~1 cell unit per stockpile and iteration, so river mouths parked most of their load in `pending`
     fan_slope: float = 0.05  # a submarine fan descends at least this much per cell away from its source (cell units per cell): the deposit ceiling of a seafloor step is the previous path cell minus this, and never above -DEP_FLOOR
     resume: bool = True  # resume from checkpoints/ whose parameter + upstream + kernel-version hash matches; False recomputes from bedrock
     flood_every: int = 10  # recompute the particle routing surface (epsilon priority flood, erosion/route.py) every k iterations; 0 = steer on the raw terrain
     route_eps: float = 1e-3  # minimum drop per cell (cell units) of the routing surface across lakes
     pit_steps: int = 16  # kill a particle after this many consecutive uphill steps (stuck in a pit)
-    chunk: int = 512  # particles per parallel chunk (change-list capacity = chunk*(max_steps+8) entries of 24 B, ~25 MB at N_c=1024); terrain is frozen within a chunk
+    chunk: int = 2048  # particles per parallel chunk (change-list capacity = chunk*(max_steps+16) entries of 24 B, ~100 MB at N_c=1024); terrain is frozen within a chunk.  2048 traces ~20 % faster than 512 (fewer parallel launches, less tail imbalance) with the same morphology on the single-face tests (docs/erosion-tuning.md)
     backend: str = "cpu"
 
 
