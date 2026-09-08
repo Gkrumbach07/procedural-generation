@@ -69,6 +69,9 @@ def tectonic_frames(params: WorldParams, frames: int, width: int, log=print):
         buoy = tp.ridge_height * np.exp(-sim.seg.age / max(float(tp.ridge_age), 1.0))
         bed = _smooth_field(grid, blend(sim.seg.height() + buoy), tp, cascade=True).interior
         sea = float(np.quantile(bed, 1.0 - params.world.land_fraction))
+        # Unlike erosion, the palette is deliberately *not* pinned here: the
+        # crust is still being created, so its relief grows by orders of
+        # magnitude and a scale fixed at step 0 would flatten everything after.
         yield _net(ql.render_height(bed - sea, cell_size=grid.cell_size_m), width), done
         if done >= total:
             return
@@ -90,20 +93,30 @@ def erosion_frames(store: WorldStore, params: WorldParams, frames: int, width: i
     total = int(p.erosion.iterations)
     every = max(1, total // max(1, frames))
     done = 0
+    # One palette and one vertical exaggeration for the whole run, taken from
+    # the starting bedrock: render_height derives them per call otherwise, and
+    # a rescaling palette makes terrain that never moved look like it did.
+    # Erosion only redistributes relief (the datum is held every iteration and
+    # p99 height moves ~8 % over a full run), so the bedrock scale stays right.
+    scale = ql.terrain_scale(state.surface()[state.interior] * state.height_unit_m, cell_size=state.grid.cell_size_m)
     while True:
         surf = state.surface()[state.interior] * state.height_unit_m
-        img = ql.render_height(surf, cell_size=state.grid.cell_size_m)
-        # lakes: the epsilon-flooded routing surface standing above the terrain
+        img = ql.render_height(surf, cell_size=state.grid.cell_size_m, **scale)
+        # Lakes: the epsilon-flooded routing surface standing above the
+        # terrain — masked to LAND, because over the sea that surface sits at
+        # sea level above every submerged cell and would paint the whole ocean.
         if state.route is not None:
-            lake = (state.route - state.surface())[state.interior] * state.height_unit_m > 0.5
+            depth = (state.route - state.surface())[state.interior] * state.height_unit_m
+            lake = (depth > 0.5) & (surf > 0.0)
             if lake.any():
                 img = ql.overlay(img, lake, (60, 120, 220), 0.9)
         # rivers: the live discharge map, log-weighted above its 97th percentile
-        lq = np.log1p(np.maximum(state.discharge[state.interior].astype(np.float64), 0.0))
+        q = np.where(surf > 0.0, state.discharge[state.interior].astype(np.float64), 0.0)
+        lq = np.log1p(np.maximum(q, 0.0))
         if lq.max() > 0:
-            thr = float(np.percentile(lq, 97))
+            thr = float(np.percentile(lq[surf > 0.0], 97)) if (surf > 0.0).any() else 0.0
             wgt = np.clip((lq - thr) / max(lq.max() - thr, 1e-9), 0, 1)
-            img = ql.overlay(img, wgt > 0, (30, 80, 255), 0.95, weight=0.35 + 0.65 * wgt)
+            img = ql.overlay(img, (wgt > 0) & (surf > 0.0), (30, 80, 255), 0.95, weight=0.35 + 0.65 * wgt)
         yield _net(img, width), done
         if done >= total:
             return

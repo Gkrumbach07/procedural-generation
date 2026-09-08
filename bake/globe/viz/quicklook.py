@@ -35,12 +35,22 @@ def _viridis(t: np.ndarray) -> np.ndarray:
     return (np.clip(np.stack([r, g, b], -1), 0, 1) * 255).astype(np.uint8)
 
 
-def _terrain_cmap(h: np.ndarray, sea_level: float = 0.0) -> np.ndarray:
-    """Hypsometric tint: blues below sea level, greens→browns→white above."""
+def _terrain_cmap(h: np.ndarray, sea_level: float = 0.0, hmax: float | None = None, hmin: float | None = None) -> np.ndarray:
+    """Hypsometric tint: blues below sea level, greens→browns→white above.
+
+    The tint spans ``sea_level..hmax`` on land and ``sea_level..hmin`` at
+    sea; both default to the 99.5th / 0.5th percentile of *this* array, so
+    a single image always uses its full range.  Pass them explicitly to
+    pin the palette across a series of images (an animation, or a
+    before/after pair) — otherwise every frame rescales and terrain that
+    never moved appears to change.
+    """
     out = np.zeros(h.shape + (3,), dtype=np.float32)
     land = h > sea_level
-    hmax = float(np.nanpercentile(h[land], 99.5)) if land.any() else 1.0
-    hmin = float(np.nanpercentile(h[~land], 0.5)) if (~land).any() else -1.0
+    if hmax is None:
+        hmax = float(np.nanpercentile(h[land], 99.5)) if land.any() else 1.0
+    if hmin is None:
+        hmin = float(np.nanpercentile(h[~land], 0.5)) if (~land).any() else -1.0
     t = np.clip((h - sea_level) / max(hmax - sea_level, 1e-6), 0, 1)
     stops = np.array([[0.30, 0.55, 0.25], [0.55, 0.65, 0.30], [0.72, 0.60, 0.40], [0.60, 0.50, 0.45], [0.95, 0.95, 0.95]])
     pos = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
@@ -68,14 +78,33 @@ def hillshade(h: np.ndarray, cell_size: float = 1.0, azimuth_deg: float = 315.0,
     return np.clip(shade, 0.0, 1.0)
 
 
-def render_height(h, sea_level: float = 0.0, cell_size: float = 1.0, z_factor: float | None = None, shade_strength: float = 0.7) -> np.ndarray:
-    """Hypsometric tint × hillshade → (6, N, N, 3) uint8 indexed [f, i, j]."""
+def terrain_scale(h, sea_level: float = 0.0, cell_size: float = 1.0) -> dict:
+    """The three scale values :func:`render_height` would derive from ``h``,
+    as a kwargs dict.  Compute once and splat into every call to keep a
+    series of frames on one palette and one vertical exaggeration."""
+    a = _interior(h).astype(np.float64)
+    land = a > sea_level
+    rng = float(np.nanpercentile(a, 99) - np.nanpercentile(a, 1)) or 1.0
+    return {
+        "z_factor": 0.5 * a.shape[-1] * cell_size / rng,
+        "hmax": float(np.nanpercentile(a[land], 99.5)) if land.any() else 1.0,
+        "hmin": float(np.nanpercentile(a[~land], 0.5)) if (~land).any() else -1.0,
+    }
+
+
+def render_height(h, sea_level: float = 0.0, cell_size: float = 1.0, z_factor: float | None = None, shade_strength: float = 0.7,
+                  hmax: float | None = None, hmin: float | None = None) -> np.ndarray:
+    """Hypsometric tint × hillshade → (6, N, N, 3) uint8 indexed [f, i, j].
+
+    ``z_factor``, ``hmax`` and ``hmin`` all default to values derived from
+    this array.  Pin all three (see :func:`terrain_scale`) to compare or
+    animate a series of heights on one scale."""
     h = _interior(h).astype(np.float64)
     if z_factor is None:
         rng = float(np.nanpercentile(h, 99) - np.nanpercentile(h, 1)) or 1.0
         z_factor = 0.5 * h.shape[-1] * cell_size / rng  # relief ≈ half the face width
     hs = hillshade(h, cell_size, z_factor=z_factor)
-    col = _terrain_cmap(h, sea_level)
+    col = _terrain_cmap(h, sea_level, hmax, hmin)
     img = col * (1.0 - shade_strength + shade_strength * hs[..., None] * 1.3)
     return (np.clip(img, 0, 1) * 255).astype(np.uint8)
 

@@ -119,3 +119,21 @@ def test_quicklook_writes(tmp_path):
     img = ql.render_labels(FaceField.full(g, 3, dtype=np.int32))
     assert img.shape == (6, 32, 32, 3)
     ql.save_image(tmp_path / "v.png", ql.render_vector(h.gradient(), base=ql.render_scalar(h)))
+
+
+def test_terrain_scale_pins_the_palette_across_frames():
+    """`render_height` derives its palette and vertical exaggeration from
+    each array, so an unchanged region re-tints when the rest of the world
+    changes — which makes an animation show motion that never happened.
+    `terrain_scale` freezes all three so a series shares one scale."""
+    g = Grid(32, 4)
+    a = FaceField.from_function(g, lambda p: 800 * p[..., 2], dtype=np.float32, name="a")
+    b = a.copy()
+    b.data[0] += 4000.0  # one face grows a plateau; the other five are untouched
+    keep = (slice(1, 6),)
+    auto_a, auto_b = ql.render_height(a)[keep], ql.render_height(b)[keep]
+    assert not np.array_equal(auto_a, auto_b)  # the untouched faces re-tint
+    sc = ql.terrain_scale(a)
+    fix_a, fix_b = ql.render_height(a, **sc)[keep], ql.render_height(b, **sc)[keep]
+    assert np.array_equal(fix_a, fix_b)  # pinned: untouched faces render identically
+    assert set(sc) == {"z_factor", "hmax", "hmin"}
