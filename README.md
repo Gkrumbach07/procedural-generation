@@ -33,6 +33,15 @@ Stages: `tectonics, climate, erosion, hydro, watersheds, refine, derive, tiles`.
 Every stage writes `worlds/<name>/quicklook/<stage>.png` (an unfolded cube net);
 `manifest.json` records parameters and a content hash per stage.
 
+`scripts/animate.py` re-runs a baked world's tectonics or erosion and writes
+an animated WebP of it — plates drifting and colliding, or the drainage
+network organising itself over the erosion iterations:
+
+```sh
+python scripts/animate.py --world worlds/demo --stage tectonics --out tect.webp
+python scripts/animate.py --world worlds/demo --stage erosion   --out ero.webp
+```
+
 Further reading: [docs/DEVELOPING.md](docs/DEVELOPING.md) is the binding
 cross-stage contract (field names, dtypes, units, JSON schemas).
 [docs/erosion-tuning.md](docs/erosion-tuning.md) is the sweep that chose the
