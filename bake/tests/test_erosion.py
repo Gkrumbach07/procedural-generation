@@ -483,3 +483,38 @@ def test_run_iteration_stats_and_height_units():
     assert st.disch_track.max() == 0.0  # tracks are folded into the EMA and zeroed
     assert st.discharge.max() > 0.0
     assert np.isfinite(st.momentum).all()
+
+
+def _striped_hardness_run(cover: float, N: int = 96, iters: int = 60, period: int = 16):
+    """Tilted window whose hardness alternates in bands *across* the regional
+    slope.  Returns (surface in soft bands, surface in hard bands)."""
+    p = WorldParams.small_world(0).with_overrides(erosion={"cover_depth": cover})
+    st = make_window(N, "tilt", p, iters=iters)
+    H = p.world.halo
+    jj = np.arange(st.hardness.shape[2])
+    band = 0.5 + 0.45 * np.sign(np.sin(2 * np.pi * (jj - H) / period))
+    st.hardness[...] = np.broadcast_to(band[None, None, :], st.hardness.shape).astype(st.hardness.dtype)
+    for i in range(iters):
+        step(st, p, (i,))
+    surf = st.surface()[st.interior][0]
+    soft = np.broadcast_to((band < 0.5)[H : H + N][None, :], surf.shape)
+    return float(surf[soft].mean()), float(surf[~soft].mean())
+
+
+def test_alluvial_cover_lets_hardness_shape_the_landscape():
+    """``erosion.cover_depth`` is what makes the hardness field bite.
+
+    Erodibility blends between sediment (fully erodible) and bedrock
+    (scaled by hardness) over ``cover_depth`` of cover, so a thin film no
+    longer shields the rock beneath it.  With the old bare-rock-only gate
+    (``cover_depth = 0``) hardness reached only the 0.1 % of land cells with
+    exactly zero sediment, and bands of hard and soft rock eroded to nearly
+    the same level; with a cover scale the soft bands sit distinctly lower,
+    which is what gives a landscape its structural grain.
+    """
+    soft_off, hard_off = _striped_hardness_run(0.0)
+    soft_on, hard_on = _striped_hardness_run(0.1)
+    relief_off = hard_off - soft_off  # measured -0.003 cell units: no response at all
+    relief_on = hard_on - soft_on  # measured +0.139
+    assert relief_on > 2.0 * relief_off, (relief_off, relief_on)
+    assert relief_on > 0.08, relief_on  # soft rock really is carved down

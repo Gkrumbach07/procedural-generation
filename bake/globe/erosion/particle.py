@@ -57,7 +57,7 @@ MASK_FROZEN = 2
 
 #: bumped whenever a kernel change alters results: part of the checkpoint
 #: hash, so stale checkpoints are never resumed after a code change
-KERNEL_VERSION = 4
+KERNEL_VERSION = 5
 
 #: a dying particle deposits its remaining load at the cell it died in; the
 #: excess over that cell's caps moves back up its last SPREAD active cells
@@ -255,6 +255,7 @@ def trace_particles(
     slope_gain,
     slope_sat,
     erodibility,
+    cover_depth,
     min_volume,
     max_steps,
     max_erode,
@@ -529,11 +530,23 @@ def trace_particles(
                 if c_eq < 0.0:
                     c_eq = 0.0
                 if c_eq > sed:
-                    # erosion: sediment layer fully erodible, bedrock scaled by hardness
-                    if samp[f, ei, ej, S_SED] <= 0.0:
-                        k_e = deposition_rate * (1.0 - samp[f, ei, ej, S_HARD])
+                    # Erosion.  Sediment is fully erodible; bedrock is scaled
+                    # by hardness.  A *thin* alluvial cover only partly shields
+                    # the rock beneath it (the Sklar & Dietrich 2001 cover
+                    # effect), so the two blend by how much of `cover_depth`
+                    # the cover fills.  With the old bare-rock-only gate
+                    # (cover_depth = 0) hardness reached 0.1 % of land cells:
+                    # half of all land carries under 40 cm of sediment but any
+                    # non-zero film counted as full cover, so the hardness
+                    # field could not shape the landscape at all.
+                    sthick = samp[f, ei, ej, S_SED]
+                    if cover_depth > 0.0:
+                        w_cover = sthick / cover_depth
+                        if w_cover > 1.0:
+                            w_cover = 1.0
                     else:
-                        k_e = deposition_rate
+                        w_cover = 1.0 if sthick > 0.0 else 0.0
+                    k_e = deposition_rate * (w_cover + (1.0 - w_cover) * (1.0 - samp[f, ei, ej, S_HARD]))
                 else:
                     k_e = deposition_rate
                 cdiff = k_e * (c_eq - sed)

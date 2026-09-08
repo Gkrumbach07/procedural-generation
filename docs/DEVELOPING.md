@@ -146,6 +146,14 @@ the drainage network).  The stage reports the removed drift as
 `datum_drift_m`, and its `land_fraction` equals `world.land_fraction` up to
 a cell or two of rounding.  Windows have no planetary datum and skip it.
 
+Rock strength: erodibility blends between sediment (fully erodible) and
+bedrock (scaled by `hardness`) across `erosion.cover_depth` of alluvial
+cover — a thin film only partly shields the rock beneath it (the Sklar &
+Dietrich cover effect).  `cover_depth = 0` restores the older bare-rock-only
+gate, under which `hardness` reached the 0.1 % of land cells with exactly
+zero sediment and had no measurable effect on the landscape (striped-rock
+test: relief contrast -0.003 cell units at 0, +0.139 at 0.1).
+
 Hillslope processes: `thermal_erosion` runs the talus pass and then, when
 `erosion.creep_rate > 0`, a second conservative pass with talus 0 (linear
 diffusion at that rate) in which submerged cells are frozen, so creep

@@ -465,6 +465,7 @@ def run_iteration(
                 float(ep.slope_gain),
                 float(ep.slope_saturation),
                 float(ep.erodibility),
+                float(ep.cover_depth),
                 float(ep.min_volume),
                 int(max_steps),
                 float(ep.max_erode),
