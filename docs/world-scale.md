@@ -91,6 +91,44 @@ whether the hierarchy actually helps needs many seeds, a larger world, or
 both. Treat the plate-size span as the thing to fix and hypsometry as the
 thing to then measure properly, not as a result already in hand.
 
+## 4. Erosion does not transfer to kilometre cells
+
+Measured on `ben`: an Earth-radius world (`N_c=1024`, 9773 m cells, 320,000
+segments) runs tectonics fine, but the erosion stage does not.
+
+The kernel works in **cell units** with `height_unit == cell_size`, and several
+inputs carry that dependence implicitly. The worst is the uplift field written
+by tectonics:
+
+| uplift | cell units / iteration | at 50 m cells | at 9773 m cells |
+|--------|------------------------|---------------|-----------------|
+| p50 | 0.31 | 15 m | 3.0 km |
+| p99 | 11.6 | 580 m | **113 km** |
+| max | 472.8 | 24 km | 4620 km |
+
+Left alone it inflates relief instead of reducing it — 8992 m of bedrock relief
+became 11,920 m after 60 iterations and 23,581 m after 200, with single cells
+moving 40 km. Only `hold_datum` and the per-iteration caps kept it finite.
+
+Scaling uplift and the caps by `50/9773` reverses the direction but does not
+make it usable: relief drops to 2640 m (98.5 % of land under 1 km, the
+mountains planed off), 88 % of cells still *rise*, and the worst cell still
+moves 28 km. Two scale factors are not enough.
+
+**The consequence is architectural.** Erosion is calibrated for ~50 m cells,
+and an Earth-sized planet at 50 m cells is 2.4e11 coarse cells — impossible.
+So erosion as tuned can only run on a small world, which is why the shipped
+presets are 16–33 km bodies. Either
+
+* run erosion only at the refine level, per basin, where cells genuinely are
+  tens of metres, and leave the coarse global grid to tectonics; or
+* recalibrate the erosion stage for kilometre cells, which means auditing
+  every parameter for implicit cell-size dependence rather than scaling two
+  of them.
+
+Not run: refine on this world, since it would be refining a surface the
+erosion stage produced incorrectly.
+
 ## What to change
 
 1. Set `world.cell_size_m` for the planet size you want — free.
