@@ -10,6 +10,33 @@ A :class:`Segments` object holds parallel arrays, one entry per segment::
     plate_id   (M,)   int32    owning plate
     area       (M,)   float64  steradians claimed on the label map (rolling blend)
     h_ref      (M,)   float64  bedrock height at the uplift reference step
+    kind       (M,)   int8     OCEANIC or CONTINENTAL (see below)
+
+Crust type
+----------
+``kind`` is the one piece of segment state that is not a continuous
+quantity, and it exists because Earth's hypsometry is *bimodal* -- a hump
+at the continental shelf and another on the abyssal plain, ~4.5 km apart,
+with little in between.  Measured before this field existed, ours was a
+single broad hump: thickness ran continuously from 0.18 to 8.3 and density
+from 0.20 to 0.96, because every segment obeyed the same growth law and so
+was just a running integral of the heat it had drifted through.  A
+continuum in, a continuum out; nothing marked a segment as ocean floor.
+
+What makes Earth's two populations is not a difference of degree but an
+irreversibility.  Continental crust is too buoyant to subduct, so it
+survives indefinitely and thickens with every orogeny.  Oceanic crust is
+dense enough to sink, so it is created at ridges and destroyed at trenches
+on a ~200 My conveyor and never gets the chance to thicken -- it is 7 km
+thick at birth and 7 km thick when it dies.  The gap between the humps is
+that asymmetry, integrated over time.
+
+So ``kind`` gates the laws rather than merely labelling the result:
+crystallisation grows continental crust only, spawned crust is always
+oceanic, subduction picks the oceanic member of a mixed pair regardless of
+density, and the two mass-sharing kernels (belt spreading, cascade) refuse
+to move thickness across a type boundary -- otherwise a mountain belt
+bleeds into the seafloor beside it and closes the gap again.
 
 Geometry helpers work on the unit sphere with *chord* distances (``|p - q|``,
 equal to the great-circle angle to second order); all radii in this
@@ -27,6 +54,9 @@ import math
 
 import numpy as np
 from numba import njit
+
+OCEANIC = 0
+CONTINENTAL = 1
 
 SPHERE_AREA = 4.0 * math.pi
 _MAX_VOXELS_PER_AXIS = 192
@@ -192,9 +222,9 @@ class Segments:
     """Structure-of-arrays segment store (see module docstring).  All
     mutating methods keep the parallel arrays aligned."""
 
-    FIELDS = ("pos", "mass", "thickness", "density", "age", "plate_id", "area", "h_ref")
+    FIELDS = ("pos", "mass", "thickness", "density", "age", "plate_id", "area", "h_ref", "kind")
 
-    def __init__(self, pos, thickness, density, age, plate_id, area, h_ref=None, mass=None):
+    def __init__(self, pos, thickness, density, age, plate_id, area, h_ref=None, mass=None, kind=OCEANIC):
         self.pos = np.ascontiguousarray(pos, dtype=np.float64).reshape(-1, 3)
         M = self.pos.shape[0]
         self.thickness = np.array(np.broadcast_to(np.asarray(thickness, dtype=np.float64), (M,)), dtype=np.float64)
@@ -204,6 +234,7 @@ class Segments:
         self.plate_id = np.array(np.broadcast_to(np.asarray(plate_id, dtype=np.int32), (M,)), dtype=np.int32)
         self.area = np.array(np.broadcast_to(np.asarray(area, dtype=np.float64), (M,)), dtype=np.float64)
         self.h_ref = self.height() if h_ref is None else np.array(np.broadcast_to(np.asarray(h_ref, dtype=np.float64), (M,)), dtype=np.float64)
+        self.kind = np.array(np.broadcast_to(np.asarray(kind, dtype=np.int8), (M,)), dtype=np.int8)
 
     @property
     def M(self) -> int:
@@ -234,10 +265,10 @@ class Segments:
             setattr(self, name, np.ascontiguousarray(np.concatenate([getattr(self, name), getattr(other, name)])))
 
     def copy(self) -> "Segments":
-        return Segments(self.pos.copy(), self.thickness.copy(), self.density.copy(), self.age.copy(), self.plate_id.copy(), self.area.copy(), self.h_ref.copy(), self.mass.copy())
+        return Segments(self.pos.copy(), self.thickness.copy(), self.density.copy(), self.age.copy(), self.plate_id.copy(), self.area.copy(), self.h_ref.copy(), self.mass.copy(), self.kind.copy())
 
     def renormalise(self) -> None:
         self.pos /= np.linalg.norm(self.pos, axis=1, keepdims=True)
 
 
-__all__ = ["Segments", "best_candidate_sphere", "greedy_accept", "mean_spacing", "random_unit_vectors", "SPHERE_AREA"]
+__all__ = ["OCEANIC", "CONTINENTAL", "Segments", "best_candidate_sphere", "greedy_accept", "mean_spacing", "random_unit_vectors", "SPHERE_AREA"]

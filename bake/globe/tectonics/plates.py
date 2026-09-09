@@ -34,7 +34,7 @@ from numba import njit
 
 from ..cubesphere import from_sphere_v, jacobian_v
 from ..field import FaceField
-from .segments import Segments, random_unit_vectors
+from .segments import CONTINENTAL, Segments, random_unit_vectors
 
 
 # --------------------------------------------------------------------------
@@ -255,4 +255,35 @@ def tangent_to_cell_components(grid, face, u, v, v3: np.ndarray) -> np.ndarray:
     return out
 
 
-__all__ = ["Plates", "cluster_plates", "random_initial_omega", "heat_gradient_3d", "plate_torques", "update_omega", "rotate_segments", "segment_velocities", "tangent_to_cell_components"]
+def seed_cratons(pos: np.ndarray, fraction: float, n_seeds: int, rng) -> np.ndarray:
+    """Mark ``fraction`` of the segments continental, in ``n_seeds`` blobs.
+
+    Continental crust has to start out *clustered*, not sprinkled: a random
+    per-segment draw at 35 % gives a salt-and-pepper crust whose coastline
+    is noise at the segment spacing and whose "continents" are one segment
+    wide.  Real cratons are coherent because they grew from arcs welded
+    together, so the initial condition should already look like that.
+
+    Each seed gets a random size weight (the same 1 ± jitter device
+    :func:`cluster_plates` uses, so cratons are not all the same size), and
+    segments are taken in order of weighted distance to the nearest seed
+    until the target fraction is reached.  With ``n_seeds`` small this makes
+    a supercontinent; large, a scatter of microcontinents.
+
+    Returns an (M,) int8 array of :data:`OCEANIC` / :data:`CONTINENTAL`.
+    """
+    M = pos.shape[0]
+    kind = np.zeros(M, dtype=np.int8)
+    target = int(round(float(fraction) * M))
+    if target <= 0 or n_seeds <= 0:
+        return kind
+    seeds = random_unit_vectors(rng, (int(n_seeds),))
+    w = 1.0 + 0.5 * (rng.random(int(n_seeds)) - 0.5) * 2.0  # 0.5 .. 1.5
+    # chord distance to each seed, scaled by the seed's weight: a heavy seed
+    # claims segments further away, so it grows into a larger craton
+    d = np.sqrt(np.maximum(2.0 - 2.0 * (pos @ seeds.T), 0.0)) / w[None, :]
+    kind[np.argsort(d.min(axis=1), kind="stable")[:min(target, M)]] = CONTINENTAL
+    return kind
+
+
+__all__ = ["seed_cratons", "Plates", "cluster_plates", "random_initial_omega", "heat_gradient_3d", "plate_torques", "update_omega", "rotate_segments", "segment_velocities", "tangent_to_cell_components"]

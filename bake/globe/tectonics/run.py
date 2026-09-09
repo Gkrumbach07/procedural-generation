@@ -67,8 +67,9 @@ from .collision import (
     build_tree,
     cell_area_steradians,
     collide,
-    differentiate,
     crystallise,
+    delaminate,
+    differentiate,
     deposit_density,
     gaussian_smooth,
     grid_cascade,
@@ -86,10 +87,11 @@ from .plates import (
     plate_torques,
     random_initial_omega,
     rotate_segments,
+    seed_cratons,
     tangent_to_cell_components,
     update_omega,
 )
-from .segments import Segments, best_candidate_sphere, mean_spacing
+from .segments import CONTINENTAL, OCEANIC, Segments, best_candidate_sphere, mean_spacing
 
 OUTPUTS = ["bedrock", "uplift", "hardness", "plate_id", "plate_vel"]
 
@@ -135,7 +137,11 @@ class TectonicSim:
         self.idx = None
         self.dist = None
         # mass bookkeeping: total segment mass == initial + spawned + crystallised (collisions/relaxation conserve)
-        self.ledger = {"initial": seg.total_mass(), "spawned": 0.0, "crystallised": 0.0, "collision_drift": 0.0}
+        # `subducted` is a real sink, not a drift term: an oceanic slab hands the
+        # overriding plate only `arc_accretion` of itself and the rest goes back
+        # to the mantle. It used to be zero to within rounding, because
+        # collisions transferred 100 %.
+        self.ledger = {"initial": seg.total_mass(), "spawned": 0.0, "crystallised": 0.0, "subducted": 0.0, "delaminated": 0.0}
         # fixed points in the mantle frame; plates drift over them and come
         # out with a track of thickened crust (see tectonics/intraplate.py)
         self.hotspot_pos = intraplate.seed_hotspots(int(self.tp.hotspots), self.params.rng("tectonics", 7))
@@ -197,10 +203,12 @@ class TectonicSim:
         # 2. collisions
         tree = build_tree(seg)
         alive = np.ones(seg.M, dtype=bool)
-        losers, survivors = collide(seg, tree, self.r_coll, plates.omega, alive, tp.overlap_fraction)
+        losers, survivors = collide(seg, tree, self.r_coll, plates.omega, alive, tp.overlap_fraction,
+                                    float(tp.arc_accretion), float(tp.arc_birth), self.params.rng("tectonics", 7, k))
         n_coll = int(losers.size)
         if n_coll:
-            spread_collisions(seg, tree, losers, survivors, alive, tp.belt_width_factor * self.spacing)
+            spread_collisions(seg, tree, losers, survivors, alive, tp.belt_width_factor * self.spacing,
+                              accretion=float(tp.arc_accretion))
             # crust that has been through a collision comes out lighter: the
             # light melt stays, the dense residue goes to the mantle.  This is
             # what separates continental from oceanic crust, and so what makes
@@ -217,7 +225,7 @@ class TectonicSim:
             tree = build_tree(seg)
         if tp.relax_rate > 0:
             relax_segments(seg, tree, tp.relax_rate, tp.relax_threshold, self.spacing, int(tp.relax_knn))
-        self.ledger["collision_drift"] += seg.total_mass() - mass0
+        self.ledger["subducted"] += seg.total_mass() - mass0
 
         # 3. label map, areas, gaps
         n_gap = 0
@@ -225,7 +233,7 @@ class TectonicSim:
         if k % max(1, int(tp.label_every)) == 0 or self.idx is None:
             idx, dist = label_map_fast(seg, grid, self.r_cap, tree)
             accumulate_area(seg, idx, self.area_sr, tp.area_blend)
-            new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.new_thickness, tp.deposit_density, omega=plates.omega)
+            new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega)
             n_gap = int(gap.sum())
             n_new = new.M
             if n_new and tp.gap_cooling > 0:
@@ -235,11 +243,14 @@ class TectonicSim:
                 seg.append(new)
             self.idx, self.dist = idx, dist
 
-        # 4. crystallisation
+        # 4. crystallisation, then delamination of over-thickened roots
         T = self.heat_at(seg.pos)
         mass1 = seg.total_mass()
         crystallise(seg, T, tp.growth, tp.density_base, tp.deposit_density, tp.dissolution_factor, tp.max_thickness)
         self.ledger["crystallised"] += seg.total_mass() - mass1
+        if tp.max_crust_thickness > 0 and tp.delamination > 0:
+            self.ledger["delaminated"] -= delaminate(
+                seg, float(tp.max_crust_thickness), float(tp.delamination))
 
         # 5. heat diffusion + slow relaxation towards the background field
         if tp.heat_relax > 0:
@@ -298,6 +309,29 @@ class TectonicSim:
 
 
 
+def ridge_buoyancy(seg, tp) -> np.ndarray:
+    """Thermal buoyancy of young oceanic crust, in bedrock units.
+
+    Half-space cooling: the ocean floor subsides as the square root of its
+    age, ~2500 m at a ridge crest deepening to ~5500 m by 80 My and then
+    flattening.  That 3000 m ramp is most of the ocean's hypsometric range,
+    and reproducing it is the difference between an abyssal plain and a
+    uniform shelf -- measured without it, our seafloor spanned 1846 m
+    where Earth's spans ~3000.
+
+    ``max(0, 1 - sqrt(age / ridge_age))`` rather than the exponential this
+    used to be, for two reasons: it is the actual half-space result, and it
+    reaches zero at a finite age instead of asymptotically, so `ridge_age`
+    means "the age at which subsidence is done" and can be read off the
+    seafloor's measured lifetime.  Applied to oceanic crust only --
+    continental crust is in isostatic equilibrium and does not subside with
+    age; giving it a ridge term put a spurious 0.15 on every young craton.
+    """
+    tau = max(float(tp.ridge_age), 1.0)
+    b = float(tp.ridge_height) * np.maximum(0.0, 1.0 - np.sqrt(np.maximum(seg.age, 0.0) / tau))
+    return np.where(seg.kind == OCEANIC, b, 0.0)
+
+
 def frame_bed(sim) -> np.ndarray:
     """The current crust as a sea-levelled bed on the tect grid.
 
@@ -310,7 +344,7 @@ def frame_bed(sim) -> np.ndarray:
     tp, grid = sim.tp, sim.grid
     tree = build_tree(sim.seg)
     blend = SmoothSplat(tree, grid, tp.splat_sigma_factor * sim.spacing, int(tp.splat_knn))
-    buoy = tp.ridge_height * np.exp(-sim.seg.age / max(float(tp.ridge_age), 1.0))
+    buoy = ridge_buoyancy(sim.seg, tp)
     bed = _smooth_field(grid, blend(sim.seg.height() + buoy), tp, cascade=True).interior
     sea = float(np.quantile(bed, 1.0 - sim.params.world.land_fraction))
     return bed - sea
@@ -362,16 +396,23 @@ def initialise(params: WorldParams, log=print) -> TectonicSim:
     lo, hi = float(noise.min()), float(noise.max())
     heat = FaceField(hgrid, (noise - lo) / max(hi - lo, 1e-9), name="heat")
     heat.exchange_halos()
-    T0 = np.clip(heat.sample_sphere(pos).astype(np.float64), 0.0, 1.0)
-    density = np.clip(deposit_density(T0, tp.deposit_density), 0.2, 0.95)
-    thickness = tp.initial_thickness * (1.0 + 0.2 * (rng.random(M) - 0.5))
+    kind = seed_cratons(pos, float(tp.continental_fraction), int(tp.cratons), rng)
+    cont = kind == CONTINENTAL
+    thickness = np.where(cont, tp.continental_thickness, tp.oceanic_thickness) * (1.0 + 0.2 * (rng.random(M) - 0.5))
+    density = np.where(cont, tp.continental_density, tp.oceanic_density)
     plate_id = cluster_plates(pos, int(tp.initial_plates), rng, size_jitter=float(tp.plate_size_jitter))
-    seg = Segments(pos, thickness, density, 0.0, plate_id, 4.0 * math.pi / M)
+    seg = Segments(pos, thickness, density, 0.0, plate_id, 4.0 * math.pi / M, kind=kind)
     plates = Plates(int(tp.initial_plates))
     plates.update_stats(seg)
     random_initial_omega(plates, rng, tp.initial_speed * spacing)
     sim = TectonicSim(params, grid, seg, plates, heat, spacing)
     if log is not None:
+        log(
+            f"[tectonics] crust: {int(cont.sum())} continental / {M} segments "
+            f"({cont.mean() * 100:.1f} %) in {int(tp.cratons)} cratons; "
+            f"h_cont={tp.continental_thickness * (1.0 - tp.continental_density):.3f} "
+            f"h_ocean={tp.oceanic_thickness * (1.0 - tp.oceanic_density):.3f} bedrock units"
+        )
         log(
             f"[tectonics] {grid.describe()}; M={M} segments, spacing={spacing:.4f} rad "
             f"({spacing * grid.N / (math.pi / 2):.1f} tect cells), plates={plates.n_alive()}, "
@@ -445,9 +486,9 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     blend = SmoothSplat(tree, grid, tp.splat_sigma_factor * sim.spacing, int(tp.splat_knn))
     # thermal buoyancy of young crust: ridges at rifts, subsidence with age
     elapsed = float(sim.step_index - sim.ref_step)
-    tau = max(float(tp.ridge_age), 1.0)
-    buoy = tp.ridge_height * np.exp(-seg.age / tau)
-    buoy_ref = tp.ridge_height * np.exp(-np.maximum(seg.age - elapsed, 0.0) / tau)
+    buoy = ridge_buoyancy(seg, tp)
+    ref = Segments(seg.pos, seg.thickness, seg.density, np.maximum(seg.age - elapsed, 0.0), seg.plate_id, seg.area, kind=seg.kind)
+    buoy_ref = ridge_buoyancy(ref, tp)
     h = seg.height() + buoy
     bed_t = _smooth_field(grid, blend(h), tp, cascade=True)
     dh_t = _smooth_field(grid, blend(seg.height() - seg.h_ref + buoy - buoy_ref), tp, cascade=True)

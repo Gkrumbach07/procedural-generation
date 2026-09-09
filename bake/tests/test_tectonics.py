@@ -134,12 +134,19 @@ def test_collisions_conserve_mass_and_kill_denser():
 # --------------------------------------------------------------------------
 # simulation bookkeeping
 # --------------------------------------------------------------------------
-def test_mass_changes_only_through_crystallisation_and_spawning(tiny_sim):
+def test_mass_ledger_closes_and_subduction_is_a_sink(tiny_sim):
     sim = tiny_sim
     L = sim.ledger
-    expected = L["initial"] + L["spawned"] + L["crystallised"]
+    expected = L["initial"] + L["spawned"] + L["crystallised"] + L["subducted"] + L["delaminated"]
     assert sim.seg.total_mass() == pytest.approx(expected, rel=1e-9)
-    assert abs(L["collision_drift"]) < 1e-9 * expected
+    # subduction and delamination are sinks, never sources: crust returns to
+    # the mantle at a trench and under an over-thickened root, and nothing in
+    # either path can add mass.  A positive value here means a kernel is
+    # spreading more than was transferred, which is how the first crust-type
+    # implementation leaked (spread_collisions handed neighbours the whole
+    # slab while only arc_accretion of it had been accreted).
+    assert L["subducted"] <= 1e-9 * expected
+    assert L["delaminated"] <= 1e-9 * expected
     assert np.allclose(sim.seg.mass, sim.seg.thickness * sim.seg.density)
     assert np.allclose(np.linalg.norm(sim.seg.pos, axis=1), 1.0, atol=1e-12)
     assert (sim.seg.thickness > 0).all() and (sim.seg.density > 0).all() and (sim.seg.density <= 1).all()
@@ -211,7 +218,24 @@ def test_relief_follows_the_tectonic_spacing(tiny_out):
     assert info["land_slope_p90"] == pytest.approx(float(np.percentile(slope, 90)))
     hard = p.erosion.talus_slope_hard
     assert info["land_slope_median"] < 0.5 * hard, info  # not already at the talus angle
-    assert info["land_above_talus_fraction"] < 0.1, info
+    # The tail is checked on `small` below, not here.  `tiny` is 300 segments
+    # on a 32-cell grid -- 4.2 cells of segment spacing, and 17.6 % of its land
+    # is coastline against 7.0 % on `small` -- so the continent/ocean contact,
+    # which crust types made a real step, lands on nearly every land cell.
+    # Measured: 11.0 % of tiny's land above the talus angle against 0.10 % of
+    # small's.  That is the toy geometry, not the relief scaling.
+    assert info["land_above_talus_fraction"] < 0.2, info
+
+
+def test_relief_stays_under_the_talus_angle_at_a_resolved_preset():
+    """The tail `test_relief_follows_the_tectonic_spacing` cannot check.
+
+    Land above the talus angle is the failure the relief scaling exists to
+    prevent, and it needs a preset whose segment spacing is resolved by the
+    coarse grid before the number means anything."""
+    p = WorldParams.small_world()
+    out = tect.finalise(tect.simulate(p, log=None))
+    assert out["_land_slope"]["land_above_talus_fraction"] < 0.02, out["_land_slope"]
 
 
 def test_plate_vel_is_rigid_rotation_of_each_plate(tiny_sim, tiny_out):

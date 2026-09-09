@@ -98,6 +98,25 @@ class TectonicsParams:
     hotspots: int = 0  # fixed points in the mantle frame that thicken crust drifting over them (0 = none)
     hotspot_rate: float = 0.0  # thickness added per step at a hotspot centre, tapering to 0 at its rim
     hotspot_radius_factor: float = 3.0  # × mean segment spacing: hotspot radius
+    # --- crust types (globe/tectonics/segments.py) -----------------------
+    # Earth's hypsometry is bimodal -- continental shelf and abyssal plain
+    # ~4.5 km apart -- because it carries two kinds of crust with different
+    # *fates*, not merely different numbers.  Continental crust cannot
+    # subduct, so it survives and thickens; oceanic crust always can, so it
+    # is born thin at a ridge and destroyed at a trench without ever
+    # thickening.  Measured with one crust type, our height distribution was
+    # a single broad hump (thickness a continuum 0.18-8.3, density 0.20-0.96)
+    # and the ocean spanned 1846 m against Earth's ~3000.
+    continental_fraction: float = 0.35  # fraction of the initial crust seeded continental, as clustered proto-cratons (Earth's continental crust including shelves is ~40 % of the surface)
+    cratons: int = 12  # number of proto-craton seeds the initial continental crust is grown from; fewer/larger gives a supercontinent, more/smaller a scatter of microcontinents
+    continental_thickness: float = 1.0  # initial thickness of continental crust (Earth ~35 km)
+    continental_density: float = 0.82  # normalised to mantle = 1, so Airy height = t(1-rho) = 0.18
+    oceanic_thickness: float = 0.20  # initial thickness of oceanic crust (Earth ~7 km, i.e. 1/5 of continental)
+    oceanic_density: float = 0.88  # Airy height 0.024 -- the ~7.5x gap that makes the histogram bimodal
+    arc_accretion: float = 0.15  # fraction of a subducting *oceanic* slab welded onto the overriding plate as an arc; the rest returns to the mantle. 1.0 (the old behaviour) makes the crust a monotone accumulator
+    max_crust_thickness: float = 3.0  # continental thickness (× the 1.0 initial) above which the root delaminates; 0 = no limit. Earth saturates near 2x normal even under Tibet. Unlimited, a few segments stacked to 8.3x and squashed the vertical scale everyone else shares
+    delamination: float = 0.05  # fraction of the excess over max_crust_thickness shed to the mantle per step
+    arc_birth: float = 0.02  # probability that an ocean-on-ocean subduction converts the survivor to continental crust (island arcs -- how continents are actually born). 0 freezes the continental area at the initial seeding
     differentiation: float = 0.0  # fraction of the gap to `density_continental` a survivor closes per collision (0 = off). Collision alone only averages density, so the elevation histogram stays one narrow spike; Earth is bimodal because thickened crust partially melts, the light granitic fraction stays and the dense residue is lost to the mantle
     density_continental: float = 0.30  # density floor differentiation drives collided crust toward: granitic continental crust, which floats high
     animate_frames: int = 0  # capture this many animation frames DURING the run and write quicklook/tectonics.webp (0 = off). Re-simulating for an animation afterwards costs a second full run -- 39 minutes at Earth scale
@@ -133,8 +152,8 @@ class TectonicsParams:
     initial_speed: float = 0.1  # speed of the random initial plate rotations, spacings per step
     initial_thickness: float = 0.4  # crust thickness at t = 0
     max_thickness: float = 1.0  # crystallisation growth is faded by exp(-thickness / max_thickness)
-    ridge_height: float = 0.15  # thermal buoyancy of new crust, bedrock units (ridges at rifts; decays with age)
-    ridge_age: float = 150.0  # e-folding age (steps) of the buoyancy
+    ridge_height: float = 0.15  # thermal buoyancy of young *oceanic* crust, bedrock units: half-space cooling, buoy = ridge_height * max(0, 1 - sqrt(age / ridge_age)), so a ridge crest stands this high above crust of age >= ridge_age. Earth's ridge-to-abyssal step is ~3000 m
+    ridge_age: float = 400.0  # age (steps) at which oceanic crust has finished subsiding. Must be comparable to the seafloor's actual lifetime or the term is dead: measured at 150 against a median crust age of 1500 it carried 0.1 % of the height variance
     new_thickness: float = 0.05  # thickness of crust spawned at divergent boundaries
     gap_cooling: float = 0.05  # peak heat removed (Gaussian blob, 1 spacing wide) per segment of new crust spawned at a rift
     subduction_heating: float = 0.01  # peak heat added (Gaussian blob, 1 spacing wide) per subducted segment

@@ -15,7 +15,7 @@ from scipy.spatial import cKDTree
 
 from ..cubesphere import Grid, from_sphere_v
 from ..field import FaceField
-from .segments import Segments, _hash_insert, _voxel_coord, _voxel_resolution, greedy_accept
+from .segments import CONTINENTAL, OCEANIC, Segments, _hash_insert, _voxel_coord, _voxel_resolution, greedy_accept
 
 
 # --------------------------------------------------------------------------
@@ -184,7 +184,14 @@ def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float
     logarithmically with age instead of linearly forever); negative -> dissolve
     ``dissolution_factor * |G|`` at the segment's own density (never more
     than half its thickness).  Mass changes only here (and in
-    :func:`spawn_segments`); ``age += 1`` (steps)."""
+    :func:`spawn_segments`); ``age += 1`` (steps).
+
+    **Continental crust only.**  Oceanic crust ages but does not grow: real
+    ocean floor is the same ~7 km thick when it subducts as when it was
+    erupted, because it is a chilled melt layer rather than an accreting
+    pile.  Letting it crystallise was what made the height distribution one
+    continuum -- every segment integrating the heat it drifted through, with
+    nothing to hold the seafloor down at its birth thickness."""
     T = np.clip(np.asarray(T, dtype=np.float64), 0.0, 1.0)
     G = growth * (1.0 - T) * (1.0 - T - density_base)
     D = deposit_density(T, k_D)
@@ -195,6 +202,7 @@ def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float
     dth = np.where(grow, G, dissolution_factor * G)
     dth = np.maximum(dth, -0.5 * seg.thickness)
     dth = np.maximum(dth, min_thickness - seg.thickness)
+    dth = np.where(seg.kind == CONTINENTAL, dth, 0.0)
     dm = np.where(grow, dth * D, dth * seg.density)
     seg.mass += dm
     seg.thickness += dth
@@ -206,7 +214,7 @@ def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float
 # --------------------------------------------------------------------------
 # gaps -> new crust (PLAN 6.2.4)
 # --------------------------------------------------------------------------
-def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, k_D: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None) -> tuple[Segments, np.ndarray]:
+def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, oceanic_density: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None) -> tuple[Segments, np.ndarray]:
     """Cells farther than ``gap_radius`` from every segment are divergent
     boundaries — provided the nearest segment is moving *away* from the
     cell (``omega`` (P, 3) rad/step given; holes left by subduction at a
@@ -214,8 +222,15 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
     filled with new crust).  Their (jittered) centres are candidate
     positions, walked in a random order and accepted greedily with minimum
     spacing ``r_min`` (also against the existing segments).  New segments
-    are thin (``new_thickness``), have age 0, the deposit density of the
-    local heat and the plate of the nearest existing segment.
+    are thin (``new_thickness``), have age 0, the plate of the nearest
+    existing segment, and are always **oceanic** at ``oceanic_density``.
+
+    New crust at a divergent boundary is mid-ocean-ridge basalt: dense,
+    compositionally uniform, and the same everywhere.  It used to be given
+    ``deposit_density(T)``, which reads the local heat -- so crust born at a
+    ridge, where the heat is by construction highest, came out *light* and
+    therefore buoyant.  That is backwards, and it meant the model had no way
+    to make ocean floor at all.
 
     Returns ``(new_segments, gap_mask)``; the caller appends the segments
     and cools the heat field under ``gap_mask``."""
@@ -243,10 +258,8 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
     acc = greedy_accept(cands, seg.pos, r_min)
     pos = cands[acc]
     plate = seg.plate_id[idx.ravel()[cells[acc]]]
-    T = np.clip(heat.sample_sphere(pos).astype(np.float64), 0.0, 1.0)
-    dens = np.clip(deposit_density(T, k_D), 0.05, 1.0)
     mean_area = float(seg.area.mean()) if seg.M else 0.0
-    new = Segments(pos, new_thickness, dens, 0.0, plate, mean_area)
+    new = Segments(pos, new_thickness, oceanic_density, 0.0, plate, mean_area, kind=OCEANIC)
     return new, gap
 
 
@@ -311,8 +324,14 @@ def differentiate(seg: Segments, survivors: np.ndarray, rate: float, floor: floa
     return lost
 
 
+# numba closes over module globals as compile-time constants; the int8 typing
+# has to match ``Segments.kind`` for the comparisons inside the kernel
+OCEANIC_K = np.int8(OCEANIC)
+CONTINENTAL_K = np.int8(CONTINENTAL)
+
+
 @njit(cache=True)
-def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, alive, overlap2):
+def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, kind, alive, overlap2, accretion, arc_birth, birth_draw):
     n = pairs.shape[0]
     losers = np.empty(n, dtype=np.int64)
     survivors = np.empty(n, dtype=np.int64)
@@ -340,17 +359,45 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
             # receding / sliding past: only collide once they overlap deeply
             if dx * dx + dy * dy + dz * dz > overlap2:
                 continue
-        if density[i] > density[j]:
+        # Who goes down.  Crust type first: a continent cannot be subducted
+        # under ocean floor at any density, which is the irreversibility that
+        # separates the two populations.  Within a type, the denser (older,
+        # colder) slab sinks, as before.
+        if kind[i] != kind[j]:
+            if kind[i] == OCEANIC_K:
+                lo, su = i, j
+            else:
+                lo, su = j, i
+        elif density[i] > density[j]:
             lo, su = i, j
         elif density[j] > density[i]:
             lo, su = j, i
         else:
             lo, su = (j, i) if j > i else (i, j)
-        mass[su] += mass[lo]
-        thickness[su] += thickness[lo]
+
+        # How much of the slab stays at the surface.  Ocean floor going down a
+        # trench mostly leaves the system: its sediment and a melt fraction are
+        # welded onto the overriding plate as an arc, the rest returns to the
+        # mantle.  Handing over 100 %, as this did, made the crust a monotone
+        # accumulator -- 1500 steps of it drove thickness to 8.3 against an
+        # initial 0.4, and every collision zone toward the same saturated
+        # height.  Continent-on-continent keeps everything: nothing subducts,
+        # the crust doubles, and that is what a Tibet is.
+        f = 1.0 if kind[lo] == CONTINENTAL_K else accretion
+        mass[su] += f * mass[lo]
+        thickness[su] += f * thickness[lo]
         density[su] = mass[su] / thickness[su]
-        if age[lo] > age[su]:
+        # the survivor's age is the older of the two only when it keeps the
+        # whole slab; an arc is new crust welded to old, not old crust
+        if f >= 1.0 and age[lo] > age[su]:
             age[su] = age[lo]
+        # Island arcs: repeated ocean-on-ocean subduction is how continental
+        # crust is *born* (the Japans, the Aleutians, the Andean margin before
+        # it was a margin).  Without a birth channel the continental area can
+        # only shrink from whatever the initial condition seeded, and the
+        # supercontinent cycle runs down.
+        if kind[su] == OCEANIC_K and kind[lo] == OCEANIC_K and birth_draw[e] < arc_birth:
+            kind[su] = CONTINENTAL_K
         alive[lo] = False
         losers[k] = lo
         survivors[k] = su
@@ -358,14 +405,19 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
     return losers[:k], survivors[:k]
 
 
-def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, alive: np.ndarray, overlap_fraction: float = 0.5):
+def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, alive: np.ndarray, overlap_fraction: float = 0.5, accretion: float = 1.0, arc_birth: float = 0.0, rng: np.random.Generator | None = None):
     """Subduction: for every pair of segments of different plates within
     chord ``radius`` (KD-tree pair query, applied in sorted order) that are
     *approaching* — or closer than ``overlap_fraction * radius`` whatever
     their relative motion, so plates sliding past each other cannot
-    interleave — the denser one subducts: its mass and thickness go to the
-    survivor (density = combined mass / thickness, age = max), it is
-    flagged dead in ``alive`` (in place).  The loser's own arrays keep the
+    interleave — one subducts: the oceanic member of a mixed pair whatever
+    its density, else the denser one.  A fraction ``accretion`` of its mass
+    and thickness goes to the survivor and the rest is lost to the mantle
+    (all of it, and the older age, when the loser is continental — that
+    crust cannot sink, so a continent-continent collision doubles the crust
+    instead of destroying half of it).  With probability ``arc_birth`` an
+    ocean-on-ocean survivor becomes continental.  The loser is flagged dead
+    in ``alive`` (in place).  The loser's own arrays keep the
     transferred amounts until ``seg.compress(alive)``; the total mass of
     live segments is conserved.  Returns ``(losers, survivors)`` index
     arrays (into the current arrays; a survivor may appear several times)."""
@@ -374,11 +426,12 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
         return np.zeros(0, np.int64), np.zeros(0, np.int64)
     pairs = np.sort(pairs, axis=1)
     pairs = pairs[np.lexsort((pairs[:, 1], pairs[:, 0]))]
-    return _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, alive, (float(overlap_fraction) * float(radius)) ** 2)
+    draw = rng.random(pairs.shape[0]) if (rng is not None and arc_birth > 0.0) else np.zeros(pairs.shape[0])
+    return _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.kind, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw))
 
 
 @njit(cache=True)
-def _spread_kernel(losers, survivors, nbrs, pos, plate_id, mass, thickness, density, alive, inv2s2):
+def _spread_kernel(losers, survivors, nbrs, pos, plate_id, kind, mass, thickness, density, alive, inv2s2, accretion):
     K = nbrs.shape[1]
     w = np.empty(K, dtype=np.float64)
     for e in range(losers.shape[0]):
@@ -386,13 +439,17 @@ def _spread_kernel(losers, survivors, nbrs, pos, plate_id, mass, thickness, dens
         lo = losers[e]
         if not alive[su]:
             continue  # the survivor was subducted later in this step; its mass already moved on
-        m = mass[lo]
-        th = thickness[lo]
+        # only what the survivor actually received: an oceanic slab hands over
+        # `accretion` of itself and the rest goes to the mantle, so spreading
+        # the whole slab would create mass that was never accreted
+        f = 1.0 if kind[lo] == CONTINENTAL_K else accretion
+        m = f * mass[lo]
+        th = f * thickness[lo]
         tot = 0.0
         for q in range(K):
             n = nbrs[e, q]
             w[q] = 0.0
-            if n < 0 or not alive[n] or plate_id[n] != plate_id[su]:
+            if n < 0 or not alive[n] or plate_id[n] != plate_id[su] or kind[n] != kind[su]:
                 continue
             dx = pos[n, 0] - pos[su, 0]
             dy = pos[n, 1] - pos[su, 1]
@@ -417,10 +474,10 @@ def _spread_kernel(losers, survivors, nbrs, pos, plate_id, mass, thickness, dens
         density[su] = mass[su] / thickness[su]
 
 
-def spread_collisions(seg: Segments, tree: cKDTree, losers: np.ndarray, survivors: np.ndarray, alive: np.ndarray, sigma: float, knn: int = 12) -> None:
+def spread_collisions(seg: Segments, tree: cKDTree, losers: np.ndarray, survivors: np.ndarray, alive: np.ndarray, sigma: float, knn: int = 12, accretion: float = 1.0) -> None:
     """Belt formation: the mass and thickness a survivor just received from
     a subducted segment are shared, with Gaussian weights ``exp(-d²/2σ²)``,
-    among the survivor and its ``knn`` nearest *live, same-plate* segments
+    among the survivor and its ``knn`` nearest *live, same-plate, same-kind* segments
     (the survivor itself is among them with weight 1), so repeated
     collisions along a boundary build a belt ~2σ wide instead of isolated
     peaks.  Mass conserving.  Must run before ``seg.compress`` (the dead
@@ -430,11 +487,11 @@ def spread_collisions(seg: Segments, tree: cKDTree, losers: np.ndarray, survivor
     kk = min(int(knn), tree.n)
     _, nb = tree.query(seg.pos[survivors], k=kk, workers=-1)
     nb = np.atleast_2d(nb).reshape(survivors.size, kk).astype(np.int64)
-    _spread_kernel(np.ascontiguousarray(losers), np.ascontiguousarray(survivors), np.ascontiguousarray(nb), seg.pos, seg.plate_id, seg.mass, seg.thickness, seg.density, alive, 1.0 / (2.0 * float(sigma) ** 2))
+    _spread_kernel(np.ascontiguousarray(losers), np.ascontiguousarray(survivors), np.ascontiguousarray(nb), seg.pos, seg.plate_id, seg.kind, seg.mass, seg.thickness, seg.density, alive, 1.0 / (2.0 * float(sigma) ** 2), float(accretion))
 
 
 @njit(cache=True)
-def _segment_cascade(order, nbrs, thickness, mass, density, alive, rate, thr):
+def _segment_cascade(order, nbrs, kind, thickness, mass, density, alive, rate, thr):
     K = nbrs.shape[1]
     for e in range(order.shape[0]):
         s = order[e]
@@ -442,7 +499,7 @@ def _segment_cascade(order, nbrs, thickness, mass, density, alive, rate, thr):
             continue
         for q in range(K):
             n = nbrs[e, q]
-            if n == s or n < 0 or not alive[n]:
+            if n == s or n < 0 or not alive[n] or kind[n] != kind[s]:
                 continue
             ds = density[s]
             hs = thickness[s] * (1.0 - ds)
@@ -452,6 +509,8 @@ def _segment_cascade(order, nbrs, thickness, mass, density, alive, rate, thr):
                 continue
             dh = rate * (delta - thr) * 0.5 / K
             dth = dh / (1.0 - ds)
+            if dth > 0.5 * thickness[s]:
+                dth = 0.5 * thickness[s]  # oceanic crust is thin; unclamped this went negative
             thickness[s] -= dth
             mass[s] -= dth * ds
             thickness[n] += dth
@@ -470,16 +529,16 @@ def segment_cascade(seg: Segments, tree: cKDTree, survivors: np.ndarray, alive: 
     order = np.unique(survivors)
     _, nb = tree.query(seg.pos[order], k=min(knn + 1, tree.n), workers=-1)
     nb = np.atleast_2d(nb).astype(np.int64)
-    _segment_cascade(order, np.ascontiguousarray(nb), seg.thickness, seg.mass, seg.density, alive, float(rate), float(threshold))
+    _segment_cascade(order, np.ascontiguousarray(nb), seg.kind, seg.thickness, seg.mass, seg.density, alive, float(rate), float(threshold))
 
 
 @njit(cache=True)
-def _relax_kernel(nbrs, pos, thickness, mass, density, rate, thr_per_rad):
+def _relax_kernel(nbrs, pos, kind, thickness, mass, density, rate, thr_per_rad):
     M, K = nbrs.shape
     for s in range(M):
         for q in range(K):
             n = nbrs[s, q]
-            if n == s or n < 0:
+            if n == s or n < 0 or kind[n] != kind[s]:
                 continue
             ds = density[s]
             if ds >= 0.999:
@@ -507,18 +566,57 @@ def _relax_kernel(nbrs, pos, thickness, mass, density, rate, thr_per_rad):
 
 def relax_segments(seg: Segments, tree: cKDTree, rate: float, threshold_per_spacing: float, spacing: float, knn: int = 8) -> None:
     """PLAN 6.4 cascade applied to the segment cloud every step: for every
-    segment (index order) and each of its ``knn`` nearest neighbours whose
-    bedrock height is lower by more than ``threshold_per_spacing`` × their
+    segment (index order) and each of its ``knn`` nearest *same-kind*
+    neighbours whose bedrock height is lower by more than
+    ``threshold_per_spacing`` × their
     distance (in spacings), move ``rate * (Δh - thr) / 2 / knn`` of height
     downhill as thickness at the giver's density (mass conserving).  Turns
     stacked collision peaks into belts with foothills; the threshold is
-    the maximum stable slope in bedrock units per spacing."""
+    the maximum stable slope in bedrock units per spacing.
+
+    Restricted to same-kind pairs because the continent-ocean contact is a
+    ~4 km step in bedrock height, far above any plausible threshold, so an
+    unrestricted cascade drains every coastal continental segment into the
+    seafloor beside it -- exactly the leak that closes the gap the crust
+    types exist to open."""
     if seg.M < 2:
         return
     kk = min(int(knn) + 1, tree.n)
     _, nb = tree.query(seg.pos, k=kk, workers=-1)
     nb = np.atleast_2d(nb).reshape(seg.M, kk).astype(np.int64)
-    _relax_kernel(np.ascontiguousarray(nb), seg.pos, seg.thickness, seg.mass, seg.density, float(rate), float(threshold_per_spacing) / float(spacing))
+    _relax_kernel(np.ascontiguousarray(nb), seg.pos, seg.kind, seg.thickness, seg.mass, seg.density, float(rate), float(threshold_per_spacing) / float(spacing))
+
+
+def delaminate(seg: Segments, limit: float, rate: float) -> float:
+    """Shed the root of over-thickened crust; returns the mass lost.
+
+    Continent-on-continent collision stacks crust with nothing to stop it:
+    every orogeny doubles the survivor, so measured over 1500 steps a
+    handful of segments reached thickness 8.3 against a continental median
+    of 2.2.  That tail is not harmless -- the vertical scale in
+    :func:`~globe.tectonics.run.finalise` is pinned to a high percentile of
+    land, so a few runaway spikes squash the whole map beneath them (the
+    land/ocean gap came out at 400 m, worse than before crust types
+    existed).
+
+    Earth does not do this: crustal thickness saturates near 70 km, about
+    twice normal, even under Tibet after 50 My of the largest collision
+    going.  The reason is that a thick root is pushed into the eclogite
+    field, becomes denser than the mantle it sits in, and founders.  So
+    thickness above ``limit`` decays toward it at ``rate`` per step, and the
+    mass goes to the mantle rather than to a neighbour -- delamination is a
+    loss, not a transfer.
+    """
+    if limit <= 0.0 or rate <= 0.0:
+        return 0.0
+    over = seg.thickness > limit
+    if not over.any():
+        return 0.0
+    excess = (seg.thickness[over] - limit) * float(rate)
+    lost = float((excess * seg.density[over]).sum())
+    seg.thickness[over] -= excess
+    seg.mass[over] = seg.thickness[over] * seg.density[over]
+    return lost
 
 
 # --------------------------------------------------------------------------
