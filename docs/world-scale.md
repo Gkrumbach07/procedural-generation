@@ -91,7 +91,11 @@ thing to then measure properly, not as a result already in hand.
 1. Set `world.cell_size_m` for the planet size you want — free.
 2. Set `tectonics.relief_m` explicitly (~9000 for Earth-like) — mandatory
    once the world is large, or relief scales into the hundreds of km.
-3. Raise `tectonics.initial_plates` (16 → ~48) for Earth-like hypsometry.
+3. Plate structure is a real defect but **not yet a recipe.** The near-uniform
+   plate sizes are established and worth fixing via `tectonics.plate_size_jitter`
+   (~0.8 for an Earth-like span); what that does to hypsometry is not measured
+   yet, and plate *count* is the wrong knob — the differences it produced were
+   inside seed noise.
 
 Untested at the time of writing: whether the erosion parameters, which are
 tuned in cell units at 50 m cells, still behave at kilometre cells. Talus
