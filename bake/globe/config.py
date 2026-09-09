@@ -90,6 +90,14 @@ class TectonicsParams:
     dissolution_factor: float = 0.05  # ★
     deposit_density: float = 0.5  # k_D
     plate_size_jitter: float = 0.35  # spread of initial plate sizes: per-plate distance weights are 1 ± this, so 0 tiles the sphere evenly and ~0.8 reproduces Earth's hierarchy (a few plates covering most of the surface, microplates between). Earth spans ~94x largest:smallest with its top 7 plates over 92% of the globe; 0.35 gives a near-uniform 3.2x, which leaves every landmass a single collision zone
+    # --- intraplate relief (globe/tectonics/intraplate.py) ---------------
+    reorganise_every: int = 0  # steps between plate reorganisations (0 = never). Earth's interiors are former boundaries; with a fixed configuration an interior is never a boundary and so is never uplifted (measured: 6 m of local relief over 107 km across 88 % of land)
+    reorganise_plates: int = 0  # plate count to re-cluster into (0 = keep initial_plates)
+    rift_every: int = 0  # steps between rifting one plate in two (0 = never); opens new boundaries inside old interiors
+    rift_speed_factor: float = 1.0  # × convection: separation speed of the two halves of a rifted plate
+    hotspots: int = 0  # fixed points in the mantle frame that thicken crust drifting over them (0 = none)
+    hotspot_rate: float = 0.0  # thickness added per step at a hotspot centre, tapering to 0 at its rim
+    hotspot_radius_factor: float = 3.0  # × mean segment spacing: hotspot radius
     collision_radius_factor: float = 1.0  # × spacing: segments of different plates closer than this collide
     gap_radius_factor: float = 1.0  # × spacing: cells farther than this from every segment are divergent gaps
     overlap_fraction: float = 0.5  # segments of different plates closer than this × collision radius collide even when not approaching (no interleaving along transform boundaries)

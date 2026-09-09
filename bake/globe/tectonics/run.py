@@ -58,6 +58,7 @@ from ..cubesphere import Grid, from_sphere_v
 from ..field import FaceField
 from ..io.world_store import WorldStore
 from ..stubs import fbm_noise
+from . import intraplate
 from .collision import (
     CellTree,
     SmoothSplat,
@@ -134,6 +135,10 @@ class TectonicSim:
         self.dist = None
         # mass bookkeeping: total segment mass == initial + spawned + crystallised (collisions/relaxation conserve)
         self.ledger = {"initial": seg.total_mass(), "spawned": 0.0, "crystallised": 0.0, "collision_drift": 0.0}
+        # fixed points in the mantle frame; plates drift over them and come
+        # out with a track of thickened crust (see tectonics/intraplate.py)
+        self.hotspot_pos = intraplate.seed_hotspots(int(self.tp.hotspots), self.params.rng("tectonics", 7))
+        self.events: list = []
 
     # -- helpers ------------------------------------------------------------
     def heat_at(self, pos: np.ndarray) -> np.ndarray:
@@ -162,6 +167,24 @@ class TectonicSim:
         seg, plates, grid = self.seg, self.plates, self.grid
         k = self.step_index
         rng = self.params.rng("tectonics", 1, k)
+
+        # --- intraplate relief: reorganisation, rifting, hotspots --------
+        # Run before the plates move so the new poles take effect this step.
+        # Each draws its own rng stream keyed on the step, so enabling one
+        # does not shift the others' randomness.
+        self.events = []
+        if tp.reorganise_every > 0 and k > 0 and k % int(tp.reorganise_every) == 0:
+            n = int(tp.reorganise_plates) or int(tp.initial_plates)
+            self.events.append(intraplate.reorganise(self, n, self.params.rng("tectonics", 5, k)))
+            plates = self.plates
+        if tp.rift_every > 0 and k > 0 and k % int(tp.rift_every) == 0:
+            self.events.append(intraplate.rift(self, self.params.rng("tectonics", 6, k)))
+            plates = self.plates
+        if self.hotspot_pos.shape[0] and tp.hotspot_rate > 0:
+            self.events.append(intraplate.apply_hotspots(
+                self, self.hotspot_pos, float(tp.hotspot_rate),
+                float(tp.hotspot_radius_factor) * self.spacing))
+
         if k == self.ref_step:
             seg.h_ref = seg.height()
             self.subduction_pts = []
