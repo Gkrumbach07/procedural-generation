@@ -12,9 +12,12 @@ Measured on the shipped `final512` world (fine grid, 12.5 m cells):
 
 | metric | ours | real landscapes |
 |--------|------|-----------------|
-| spectral slope β (P ~ k⁻ᵝ, 60–600 m) | **4–6** | ~2 |
-| drainage density | **1.89 km/km²** | 2–20; humid temperate 4–8 |
-| median hillslope length | **403 m** (p90 898 m) | 50–200 m |
+| spectral slope β (P ~ k⁻ᵝ, 60–600 m) | **4.7** | ~2 |
+| drainage density | **1.02 km/km²** | 2–20; humid temperate 4–8 |
+| median hillslope length | **475 m** | 50–200 m |
+
+p99 slope is 0.65, well under the talus angle, so we are *not* slope-limited —
+there is headroom to cut valleys, and we are not using it.
 
 β is fitted over the band where valleys, ridges and tributary junctions live.
 The estimator was checked against synthetic fBm of known slope and is accurate
@@ -73,25 +76,55 @@ redundant smoothers — removing either one alone barely moves β:
 | 0.5 | 0.0 | 1.2/2.0 | 4.40 | 1.91 (62°) |
 | **0.0** | **0.0** | — | **2.86** | **5.68 (80°)** |
 
-## The trap
+## The trap, and a correction
 
-Turning both off gets β to 2.86 — but at 80° slopes, which is precisely the
-jagged, deep-ridged failure McDonald describes in his Criticism 1 and which
+Turning both off gets β to 2.86 — but at 80° slopes, precisely the jagged,
+deep-ridged failure McDonald describes in his Criticism 1 and which
 avalanching exists to prevent. Heights are stored in cell units and
 `height_unit == cell_size`, so those slope figures are true tangents; 5.68 is
 vertical rock.
 
-So the mass-wasting rate is a **symptom knob**, not the cause. It trades β
-against slope realism along a single axis, and neither end of that axis is
-right. Real terrain achieves β ≈ 2 *while* keeping slopes below the angle of
-repose, because its variance comes from a branching valley network rather than
-from steepening individual cells.
+**An earlier draft of this file concluded from that table that the fix was to
+lower diffusion and raise erodibility together, moving √(D/K). That was
+wrong, and a better metric refuted it.** The drainage-density figure it rested
+on was computed as "cells above the 90th percentile of discharge", which marks
+10 % of cells by construction and therefore reported an identical 2.00 km/km²
+for every configuration — it could not see the quantity it was named after.
+With a support-area threshold instead, the direction reverses: **less
+diffusion gives *fewer*, larger channels and *longer* hillslopes** (0.53 →
+0.32 km/km², 391 → 502 m). The β gain from removing diffusion is small-scale
+noise, not finer dissection.
 
-The prescription that follows is to move D and K *together* — lower the
-diffusion and raise `erodibility` in step — so hillslopes shorten and new
-channel heads form, instead of the existing slopes simply getting steeper.
-That is the experiment to run next, with the three metrics above as the
-objective and `p99 slope < 1.2` (the talus angle) as the constraint.
+## Every erosion knob is a null result
+
+With the corrected metric, drainage density does not respond to erosion
+parameters at all. `scripts/sweep_dissection.sh` reproduces these:
+
+| knob | range tried | drainage density |
+|------|-------------|------------------|
+| `particles_per_cell` | 0.25 → 1.0 (4×) | 0.42 → 0.42 |
+| `disc_saturation` (channel initiation) | 32 → 2 (16×) | 0.42 → 0.42 |
+| `thermal_rate` / `creep_rate` / talus | full off → default | 0.32 – 0.53 |
+| initial noise amplitude | 0.5 → 12 (24×) | 0.52 → 0.31 (*wrong way*) |
+
+Nothing reaches even 1 km/km², against a 4–8 target. The only knob that moves
+the network is the amplitude of the *initial* terrain, and it moves it the
+wrong way: more noise concentrates drainage into fewer, larger paths.
+
+## What that means
+
+The deficit is **structural, not a tuning problem**. The pattern — erosion
+parameters inert, initial-terrain spectrum decisive — is what you would see if
+the kernel only ever *deepens* the valley network implied by its input and
+never subdivides it. Our input is a smooth, low-frequency tectonic field, so
+the network it implies is coarse, and no amount of erosion refines it.
+
+That is the thing to test next, and it is a question about the kernel rather
+than about parameters: does a channel head ever migrate or a new tributary
+ever appear, or is the network topology fixed from iteration 1? Instrument the
+drainage network's topology over iterations and count new channel heads. If
+the count is zero, no parameter will ever fix this and the work belongs in
+channel initiation.
 
 A second, independent ceiling sits downstream: `refine/basin_job.py`'s
 `block_drift` subtracts every per-coarse-cell mean from the refined surface,
