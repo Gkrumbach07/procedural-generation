@@ -45,6 +45,47 @@ as a fraction so a gentle region is not penalised for being gentle. A landscape
 with valleys nested at every scale sits at 0.4–0.7. Ours is a smooth swell with
 shallow scratches on it.
 
+## The cause: erosion inherits a spectrum it cannot fix
+
+Measured on the coarse grid of `final512`, over 200-1600 m:
+
+| field | β |
+|-------|---|
+| bedrock leaving **tectonics** (erosion's input) | **10.68** |
+| after erosion | 4.65 |
+| fractal noise (what McDonald's sims start from) | 3.83 |
+
+Erosion is doing real work — it pulls 10.7 down to 4.6 — but it cannot
+manufacture variance that was never in its input, which is exactly why every
+erosion parameter measured inert. McDonald starts from fractal noise, which
+has roughly the right slope by construction. We start from a tectonic field
+that is almost pure long-wavelength swell.
+
+Tested directly on the `small` preset, same tectonics, same climate, same 60
+iterations, changing only the erosion input
+(`scripts/inject_bedrock_detail.py`):
+
+| erosion input | β (200-1600 m) | relief |
+|---------------|----------------|--------|
+| tectonics as-is | 3.71 | 324 m |
+| tectonics, glaciers and lakes **off** | 3.61 | 322 m |
+| tectonics **+ fBm detail** | **1.84** | 298 m |
+
+Two results there. Dropping our own additions is a no-op — they were never
+the problem. Giving the bedrock a realistic spectrum moves β onto the
+real-topography target in one step, at unchanged relief.
+
+This is also the cheapest possible place to fix it: a field operation on the
+coarse grid, `O(C)`, feeding a stage that already costs 6 s
+(docs/pipeline-cost.md). It is not an architecture problem — running erosion
+per-basin, in chunks, or globally makes no difference to it.
+
+Before it can become a stage: the noise must be generated seam-aware on the
+sphere (the test is per-face and will show cube edges), the amplitude and
+low-frequency cutoff need tuning (0.15 overshot to β 0.30 at 800-6400 m), and
+it perturbs the mass budget `hold_datum` balances (land fraction moved
+14.4 % -> 14.0 %).
+
 ## What is right, and must not be "fixed"
 
 Measured with slope–area analysis, the standard threshold-free way to locate
