@@ -49,16 +49,15 @@ ahead of him: he deleted them and still calls dynamic lakes unsolved, while we
 have glacial carving producing real ones.
 
 **Not compute starvation.** Quadrupling `particles_per_cell` (0.25 → 1.0)
-changed nothing: β 4.86 → 4.90, drainage density 2.00 → 2.00 km/km²,
-hillslope 200 → 180 m. The network is not particle-limited, so throwing more
-work at it will not help.
+changed nothing: β 4.86 → 4.90, drainage density 0.42 → 0.42 km/km². The
+network is not particle-limited, so throwing more work at it will not help —
+which is also why running this on a bigger machine does not help.
 
-## What actually sets it
+## The diffusion story, and why it is wrong
 
-Dissection wavelength in a landscape-evolution model scales as √(D/K) —
-hillslope diffusivity against fluvial erodibility. Diffusion sets how far a
-channel head can be from its neighbour, because it suppresses channel
-initiation. We have two diffusive passes, both applied every iteration:
+The obvious suspect is diffusion, since dissection wavelength in a
+landscape-evolution model scales as √(D/K) — hillslope diffusivity against
+fluvial erodibility — and we have two diffusive passes, both every iteration:
 
 * `thermal_rate` (0.5) — mass wasting above the talus angle. Our slopes ride
   that angle, so it is active over much of the map, not just on cliffs.
@@ -66,7 +65,8 @@ initiation. We have two diffusive passes, both applied every iteration:
   linear diffusion on every cell.
 
 Sweeping them (case b, 120 iterations, everything else fixed) shows they are
-redundant smoothers — removing either one alone barely moves β:
+redundant smoothers as far as β goes — removing either one alone barely moves
+it, and only removing both does anything:
 
 | thermal | creep | talus | β | p99 slope |
 |---------|-------|-------|---|-----------|
