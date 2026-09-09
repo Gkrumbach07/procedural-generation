@@ -262,11 +262,23 @@ class TectonicSim:
         self.stats.append(info)
         return info
 
-    def run(self, steps: int | None = None, log=print, log_every: int = 50) -> "TectonicSim":
+    def run(self, steps: int | None = None, log=print, log_every: int = 50, on_frame=None, frames: int = 0) -> "TectonicSim":
+        """Advance `steps` steps.
+
+        With `frames > 0`, `on_frame(sim, index)` is called `frames` times at
+        even intervals (and once at the end), so an animation can be captured
+        during the run instead of re-simulating for it afterwards -- which
+        costs a second full simulation, 39 minutes at Earth scale.
+        """
         steps = int(self.tp.steps) if steps is None else int(steps)
+        every = max(1, steps // max(1, frames)) if frames > 0 else 0
+        if every:
+            on_frame(self, 0)
         t0 = time.time()
-        for _ in range(steps):
+        for i in range(steps):
             info = self.step()
+            if every and ((i + 1) % every == 0 or i == steps - 1):
+                on_frame(self, i + 1)
             if log is not None and log_every and (self.step_index % log_every == 0 or self.step_index == steps):
                 log(
                     f"[tectonics] step {self.step_index}/{steps}: M={info['M']} plates={info['plates']} "
@@ -275,6 +287,45 @@ class TectonicSim:
                     f"({time.time() - t0:.1f}s)"
                 )
         return self
+
+
+
+def frame_bed(sim) -> np.ndarray:
+    """The current crust as a sea-levelled bed on the tect grid.
+
+    Shared by the in-simulation animation capture and `scripts/animate.py`,
+    so a frame drawn during the run is identical to one drawn by re-running
+    the sim afterwards.
+    """
+    from .collision import SmoothSplat, build_tree
+
+    tp, grid = sim.tp, sim.grid
+    tree = build_tree(sim.seg)
+    blend = SmoothSplat(tree, grid, tp.splat_sigma_factor * sim.spacing, int(tp.splat_knn))
+    buoy = tp.ridge_height * np.exp(-sim.seg.age / max(float(tp.ridge_age), 1.0))
+    bed = _smooth_field(grid, blend(sim.seg.height() + buoy), tp, cascade=True).interior
+    sea = float(np.quantile(bed, 1.0 - sim.params.world.land_fraction))
+    return bed - sea
+
+
+def frame_image(sim, width: int = 900):
+    """One animation frame: the unfolded cube net, as a PIL image.
+
+    The palette is deliberately re-derived per frame rather than pinned.
+    The crust is still being created, so its relief grows by orders of
+    magnitude and a scale fixed at step 0 would flatten everything after --
+    at the cost that step 0, where relief is still near zero, gets its ramp
+    stretched and paints all land as high ground.
+    """
+    from PIL import Image
+
+    from ..viz import quicklook as ql
+
+    img = ql.render_height(frame_bed(sim), cell_size=sim.grid.cell_size_m)
+    im = Image.fromarray(np.ascontiguousarray(ql.to_net(img)))
+    if im.width != width:
+        im = im.resize((width, max(1, round(im.height * width / im.width))), Image.LANCZOS)
+    return im
 
 
 def heat_grid(params: WorldParams) -> Grid:
@@ -490,8 +541,26 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
 # --------------------------------------------------------------------------
 def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     t0 = time.time()
-    sim = simulate(params, log)
+    tp = params.tectonics
+    frames: list = []
+    if int(tp.animate_frames) > 0:
+        sim = initialise(params, log)
+        sim.run(int(tp.steps), log=log,
+                on_frame=lambda s, i: frames.append(frame_image(s, int(tp.animate_width))),
+                frames=int(tp.animate_frames))
+    else:
+        sim = simulate(params, log)
     t_sim = time.time() - t0
+    if frames:
+        out_path = store.root / "quicklook" / "tectonics.webp"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        step_ms = max(20, int(round(1000.0 / max(float(tp.animate_fps), 0.1))))
+        # hold the last frame: the loop is not cyclic, so a hard cut from a
+        # finished world back to bare crust reads as a glitch
+        dur = [step_ms] * (len(frames) - 1) + [max(step_ms, 1500)]
+        frames[0].save(str(out_path), save_all=True, append_images=frames[1:],
+                       duration=dur, loop=0, format="WEBP", quality=88, method=4)
+        log(f"[tectonics] animation -> {out_path} ({len(frames)} frames, {out_path.stat().st_size / 1e6:.1f} MB)")
     out = finalise(sim)
     for name in OUTPUTS:
         store.save_field(out[name])

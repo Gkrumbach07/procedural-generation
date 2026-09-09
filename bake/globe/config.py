@@ -98,6 +98,9 @@ class TectonicsParams:
     hotspots: int = 0  # fixed points in the mantle frame that thicken crust drifting over them (0 = none)
     hotspot_rate: float = 0.0  # thickness added per step at a hotspot centre, tapering to 0 at its rim
     hotspot_radius_factor: float = 3.0  # × mean segment spacing: hotspot radius
+    animate_frames: int = 0  # capture this many animation frames DURING the run and write quicklook/tectonics.webp (0 = off). Re-simulating for an animation afterwards costs a second full run -- 39 minutes at Earth scale
+    animate_width: int = 900  # animation frame width in pixels
+    animate_fps: float = 12.0  # animation playback rate
     collision_radius_factor: float = 1.0  # × spacing: segments of different plates closer than this collide
     gap_radius_factor: float = 1.0  # × spacing: cells farther than this from every segment are divergent gaps
     overlap_fraction: float = 0.5  # segments of different plates closer than this × collision radius collide even when not approaching (no interleaving along transform boundaries)

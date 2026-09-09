@@ -15,6 +15,12 @@ world than the one on disk.
 
 Output is an animated WebP (Pillow; no ffmpeg needed).  ``--gif`` writes a
 GIF instead, which every viewer plays but quantises to 256 colours.
+
+For tectonics, prefer ``--set tectonics.animate_frames=N`` on the bake
+itself: it captures frames *during* the run and writes
+``quicklook/tectonics.webp``, where this script has to simulate the whole
+stage a second time (39 minutes at Earth scale).  Both use the same
+``globe.tectonics.run.frame_image``, so the output is identical.
 """
 from __future__ import annotations
 
@@ -55,24 +61,17 @@ def tectonic_frames(params: WorldParams, frames: int, width: int, log=print):
     (the crust is still growing, so a fixed datum would drown or beach the
     early steps).
     """
-    from globe.tectonics.run import initialise, _smooth_field
-    from globe.tectonics.collision import SmoothSplat, build_tree
+    from globe.tectonics.run import frame_image, initialise
 
     sim = initialise(params, log=lambda *a: None)
-    tp, grid = sim.tp, sim.grid
-    total = int(tp.steps)
+    total = int(sim.tp.steps)
     every = max(1, total // max(1, frames))
     done = 0
     while True:
-        tree = build_tree(sim.seg)
-        blend = SmoothSplat(tree, grid, tp.splat_sigma_factor * sim.spacing, int(tp.splat_knn))
-        buoy = tp.ridge_height * np.exp(-sim.seg.age / max(float(tp.ridge_age), 1.0))
-        bed = _smooth_field(grid, blend(sim.seg.height() + buoy), tp, cascade=True).interior
-        sea = float(np.quantile(bed, 1.0 - params.world.land_fraction))
-        # Unlike erosion, the palette is deliberately *not* pinned here: the
-        # crust is still being created, so its relief grows by orders of
-        # magnitude and a scale fixed at step 0 would flatten everything after.
-        yield _net(ql.render_height(bed - sea, cell_size=grid.cell_size_m), width), done
+        # same frame function the in-simulation capture uses
+        # (tectonics.animate_frames), so a frame drawn here and one drawn
+        # during the run are identical
+        yield frame_image(sim, width), done
         if done >= total:
             return
         n = min(every, total - done)
