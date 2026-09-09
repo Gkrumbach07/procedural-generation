@@ -169,3 +169,59 @@ to ocean-ocean collisions:
 Raising `arc_birth` alone is a weak lever because the process is
 self-limiting: more continent means more continent-continent collisions to
 consume it. The seed has to be higher too.
+
+## Sea level cannot be placed by surface area
+
+The fix above -- seed more continental crust so `land_fraction` cuts inside
+the hump -- works on the seed it was tuned on and fails on the next one.
+Three seeds of one otherwise identical Earth-scale configuration, at a fixed
+`land_fraction = 0.25`:
+
+| | seed 0 | seed 1 | seed 2 | Earth |
+|---|---|---|---|---|
+| continental fraction at step 1500 | 0.351 | 0.462 | **0.260** | ~0.40 |
+| land under 1 km | 78.0 % | 75.6 % | **17.4 %** | 71 % |
+| ocean median | −3672 m | −3573 m | **−1555 m** | −3700 m |
+
+Seed 2's margin over `land_fraction` was 0.01, so its quantile landed in the
+trough between the humps and every continent read as a plateau again. **No
+value of the knob fixes this**: an area quantile has to cut a hump whose
+size varies by ±0.1 between seeds, and the knob is a constant.
+
+`tectonics.shelf_fraction` measures against the thing that varies instead --
+drown that fraction of the *continental* crust and let the land area fall
+out. That is what sea level physically is: Earth's oceans hold just enough
+water to cover the shelves, ~27 % of the continental crust, leaving 29 % of
+the globe dry. Same three seeds, `shelf_fraction = 0.275`:
+
+| metric | area quantile | **shelf mode** | Earth |
+|---|---|---|---|
+| land under 1 km | 57.0 ± **28.0** | **75.6 ± 3.7** | 71 |
+| ocean median | −2933 ± **976** | **−3703 ± 21** | −3700 |
+| land median | 989 ± **1031** | **276 ± 36** | ~300 |
+| land/ocean gap | 3923 ± 109 | **3979 ± 56** | ~4000 |
+
+Ocean-depth scatter falls from ±976 m to ±21 m. Land *area* is now an output
+(23.6 ± 5.5 %) rather than a forced constant, which is the trade: the shape
+of the hypsometry is stable and the amount of land varies with how much
+continental crust the run happened to keep.
+
+## One number is calibrated, not derived
+
+`height_scale_m` ships at **26400**, not the 35354 the isostasy above gives.
+
+Earth's crustal densities predict a 5510 m continent-to-abyssal step; Earth's
+observed step is ~4000 m. The 34 % discrepancy is real -- water loading of
+the ocean basins accounts for roughly 1.2 km of it, and the rest is that
+"continental crust" is 35 km at ρ = 2.7 only as a global average. So the
+derivation fixes the *ratio* between the two crust types, which is what
+makes the histogram bimodal, and the absolute scale is calibrated against
+Earth's measured hypsometry. Do not present 26400 as falling out of the
+physics; it does not.
+
+## Configuration
+
+`PRESETS["earth"]` carries all of it. Tectonics only -- erosion is
+calibrated in cell units at ~50 m cells and does not transfer to the 9.8 km
+cells an Earth-radius world needs (docs/world-scale.md section 4), so run it
+with `--to tectonics` until that is settled.

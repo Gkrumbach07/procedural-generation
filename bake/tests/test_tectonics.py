@@ -238,6 +238,33 @@ def test_relief_stays_under_the_talus_angle_at_a_resolved_preset():
     assert out["_land_slope"]["land_above_talus_fraction"] < 0.02, out["_land_slope"]
 
 
+def test_shelf_sea_level_cuts_the_continental_crust():
+    """Sea level must land *inside* the continental hump, not in the trough.
+
+    `world.land_fraction` places it by surface area, which cannot do this
+    reliably once the hypsometry is bimodal: the continental fraction at the
+    end of a run varies by about +-0.1 between seeds, so an area quantile
+    that clears the hump on one seed falls into the near-empty gap between
+    the humps on another.  Measured across three seeds of one Earth-scale
+    configuration, land under 1 km came out 78.0 / 75.6 / 17.4 % -- the
+    third is the miss, and it moved the ocean median from -3672 m to
+    -1555 m.  `shelf_fraction` measures against the continental crust
+    instead, so it cannot miss.
+    """
+    p = WorldParams.tiny_world().with_overrides(tectonics={"shelf_fraction": 0.275})
+    sim = tect.simulate(p, log=None)
+    bed = tect.finalise(sim)["bedrock"].interior
+    cont = sim.seg.kind == 1
+    assert cont.any() and (~cont).any(), "both crust types must survive the run"
+    # the requested fraction of continental crust is drowned, and the land
+    # area is whatever falls out of that rather than a forced constant
+    land = bed > 0
+    assert 0.05 < land.mean() < 0.60, land.mean()
+    # and the two populations are still separated in the finalised bed: the
+    # median land cell sits well above the median ocean cell
+    assert np.median(bed[land]) - np.median(bed[~land]) > 0.5 * np.ptp(bed[~land])
+
+
 def test_plate_vel_is_rigid_rotation_of_each_plate(tiny_sim, tiny_out):
     grid = WorldParams.tiny_world().coarse_grid()
     pv = tiny_out["plate_vel"].interior

@@ -516,6 +516,53 @@ class WorldParams:
         return p
 
     @classmethod
+    def earth_world(cls, seed: int = 0) -> "WorldParams":
+        """An Earth-radius planet with Earth-like hypsometry.
+
+        Tectonics only -- the erosion stage is calibrated in cell units at
+        ~50 m cells and does not transfer to the 9.8 km cells an Earth-radius
+        world needs (docs/world-scale.md section 4), so run this with
+        ``--to tectonics`` until that is settled.
+
+        Radius is derived: ``N_c * cell_size_m * 4 / 2pi`` = 6371 km.
+
+        Every value below was measured rather than picked.  Across three
+        seeds this gives land under 1 km of 75.6 +- 3.7 % (Earth 71 %),
+        ocean median -3703 +- 21 m (Earth -3700) and a land/ocean gap of
+        3979 +- 56 m (Earth ~4000).  See docs/crust-types.md.
+        """
+        p = cls()
+        p.world = WorldGroup(seed=seed, N_c=1024, cell_size_m=9773.0, R=2, T=64, land_fraction=0.3)
+        p.tectonics = dataclasses.replace(
+            p.tectonics,
+            N_tect=256, segments=20000, initial_plates=8, steps=1500,
+            # crust types: seed high and let collisions consume it down to the
+            # arc-birth equilibrium (0.70 -> ~0.35-0.46 by step 1500)
+            continental_fraction=0.70, arc_birth=0.20,
+            # continental crust changes by tectonics, not by crystallising out
+            # of the mantle everywhere: growth 0.05 inflated the median
+            # thickness to 2.0x its birth value over a run
+            growth=0.0,
+            # Tibet is 70 km on a 35 km normal crust
+            max_crust_thickness=2.0,
+            # Earth's 3.0 km ridge-to-abyssal step over 35.4 km per bedrock
+            # unit; ridge_age must be comparable to the seafloor's lifetime or
+            # the term is dead (at 150 it carried 0.1 % of the height variance)
+            ridge_height=0.085, ridge_age=400.0,
+            # sea level against the continental crust, not the surface area:
+            # an area quantile has to cut a hump whose size varies +-0.1
+            # between seeds, and when it misses, land under 1 km collapses
+            # from 78 % to 17 %
+            shelf_fraction=0.275,
+            # the vertical scale is not free -- the height law is Airy
+            # isostasy, so it has a physical metres-per-unit.  Earth's crustal
+            # densities give 35354; its *observed* land/ocean gap needs 26400.
+            # The shipped value is the empirical one.
+            relief_m=0.0, relief_spacings=0.0, height_scale_m=26400.0,
+        )
+        return p
+
+    @classmethod
     def tiny_world(cls, seed: int = 0) -> "WorldParams":
         """Even smaller profile for unit tests (seconds)."""
         p = cls.small_world(seed)
@@ -540,4 +587,4 @@ def _json_default(o):
     raise TypeError(f"not JSON serialisable: {type(o)}")
 
 
-PRESETS = {"default": WorldParams, "small": WorldParams.small_world, "tiny": WorldParams.tiny_world}
+PRESETS = {"default": WorldParams, "small": WorldParams.small_world, "tiny": WorldParams.tiny_world, "earth": WorldParams.earth_world}
