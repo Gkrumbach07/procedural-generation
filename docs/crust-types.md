@@ -102,3 +102,70 @@ Recorded because two of them were mass-conservation bugs that the
    existed**. Earth saturates near 70 km even under Tibet, because a thick
    root enters the eclogite field, becomes denser than the mantle around
    it, and founders. `delaminate` sheds the excess to the mantle.
+
+## The vertical scale is derivable, not a knob
+
+Our height law `h = t(1 − ρ)` **is** Airy isostasy with ρ normalised to
+mantle = 1, so it already has a physical metres-per-unit. Work it out from
+Earth both ways:
+
+```
+continental: 35 km crust, ρ = 2.7/3.3  ->  H = 6.36 km   vs our h = 0.180
+oceanic:      7 km crust, ρ = 2.9/3.3  ->  H = 0.848 km  vs our h = 0.024
+             ratio 7.5                             ratio 7.5
+=> 1 bedrock unit = 35.4 km, from either population
+```
+
+The ratio matches to two digits, which is the check that
+`continental_density` / `oceanic_density` were chosen consistently. And
+because both sides agree, the scale is not free:
+
+| quantity | Earth | bedrock units |
+|---|---|---|
+| ridge thermal buoyancy | 3.0 km | **0.085** (`ridge_height`) |
+| Tibet, 70 km crust | 12.7 km | 0.360 (so `max_crust_thickness` = 2.0) |
+| abyssal → Everest | 11.9 km | 0.335 |
+
+So an Earth-radius world should set `relief_m = 0`, `relief_spacings = 0`
+and `height_scale_m = 35354` rather than rescaling to a target relief.
+`relief_spacings` remains right for the small presets, where the point is to
+keep relief proportional to a 4–32 km body — see docs/world-scale.md.
+
+Measured, switching an Earth-scale run from `relief_m = 9000` to the
+isostatic scale moved the land/ocean gap from **2398 m to 4581 m** against
+Earth's 4540. Pinning a percentile of land was letting a handful of runaway
+orogen spikes set the scale for everything beneath them.
+
+## `land_fraction` has to cut *inside* the continental population
+
+This is the largest error left, and it is a configuration mistake rather
+than a missing mechanism.
+
+On Earth continental crust including the drowned shelves is ~40 % of the
+surface while land is 29 %: sea level sits **within** the continental hump,
+so normal continent is only ~100 m above water and the shelves are under it.
+
+Ours ends a 1500-step run at 19–23 % continental against
+`world.land_fraction = 0.30`. To expose 30 % of the surface, sea level must
+therefore drop *below* the continental base and into the ocean floor — and
+every continent then stands its full 0.18 units, **6.4 km**, clear of it:
+
+| | land p50 | land < 1 km |
+|---|---|---|
+| ours (cont. fraction 0.19, land fraction 0.30) | 3283 m | 37.9 % |
+| Earth | ~300 m | 71 % |
+
+So `continental_fraction` must *end* above `land_fraction`, not start there.
+It decays over a run — collisions consume continental segments, `arc_birth`
+makes new ones — toward an equilibrium set by the ratio of continent-continent
+to ocean-ocean collisions:
+
+| `arc_birth` | continental fraction at step 1500 (from 0.35) |
+|---|---|
+| 0.02 | 0.186 |
+| 0.08 | 0.199 |
+| 0.20 | 0.226, and nearly flat over the last 500 steps |
+
+Raising `arc_birth` alone is a weak lever because the process is
+self-limiting: more continent means more continent-continent collisions to
+consume it. The seed has to be higher too.
