@@ -253,6 +253,64 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
 # --------------------------------------------------------------------------
 # collisions (PLAN 6.2.5)
 # --------------------------------------------------------------------------
+def differentiate(seg: Segments, survivors: np.ndarray, rate: float, floor: float) -> float:
+    """Make collided crust lighter -- the process that builds continents.
+
+    Earth's surface is famously bimodal: a peak at the continental shelf and
+    another on the abyssal plain, with little between, because it carries two
+    kinds of crust. Oceanic crust is basaltic, dense and thin; continental
+    crust is granitic, light and thick, and floats about 4 km higher.
+
+    Collision alone cannot produce that split. Merging two segments averages
+    their mass and thickness, so density only ever moves toward the mean and
+    the elevation histogram stays a single narrow spike (measured: land mean
+    324 m and ocean mean -189 m, against Earth's 840 m and -3700 m).
+
+    What separates the two populations on Earth is *differentiation*. Crust
+    thickened at an arc partially melts; the light granitic fraction rises
+    and stays, while the dense residue delaminates and is lost to the mantle.
+    Crust that has been through a collision therefore comes out lighter than
+    it went in, and repeated orogeny ratchets it toward continental.
+
+    So this pulls each survivor's density a fraction `rate` toward `floor`,
+    keeping thickness and dropping mass. The lost mass is returned so the
+    caller can book it: it has left the crust for the mantle, which is
+    physical rather than a leak.
+
+    **Measured: this alone does not produce the bimodality.** Sweeping
+    `differentiation` 0 -> 0.04 -> 0.10 moved the land/ocean mean gap
+    1723 -> 1171 -> 1472 m, against Earth's 4540 m, with ocean mean depth
+    stuck near -300 m rather than -3700 m. Making continents lighter also
+    lifts the sea-level quantile they are measured against, and
+    `relief_m` then rescales the whole field, so the ratio barely moves.
+    Raising `deposit_density` (denser new oceanic crust) is likewise only
+    marginal: 0.5 -> 0.9 took ocean-depth-over-land-relief from 0.03 to
+    0.06, where Earth is 0.42.
+
+    The deeper obstacle is that our ocean floor is not a basin. It spans
+    about 400 m (-600 to -190) hugging sea level, where Earth's spans 3000
+    (-5500 to -2500) and is *separated* from the shelf by a steep, narrow
+    slope. Earth is bimodal because it carries two discrete crust
+    populations with a sharp margin between them; a smooth splat of a
+    continuously-varying thickness gives one continuum, and no amount of
+    density tuning turns a continuum into two peaks. Kept because the
+    mechanism is real and may matter alongside a genuine crust-type split,
+    but it is not the lever on its own.
+    """
+    if rate <= 0.0 or survivors.size == 0:
+        return 0.0
+    su = np.unique(survivors)
+    su = su[(su >= 0) & (su < seg.M)]
+    if su.size == 0:
+        return 0.0
+    d0 = seg.density[su]
+    d1 = np.maximum(d0 - rate * (d0 - float(floor)), float(floor))
+    lost = float(((d0 - d1) * seg.thickness[su]).sum())
+    seg.density[su] = d1
+    seg.mass[su] = seg.thickness[su] * d1
+    return lost
+
+
 @njit(cache=True)
 def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, alive, overlap2):
     n = pairs.shape[0]

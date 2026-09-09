@@ -98,6 +98,8 @@ class TectonicsParams:
     hotspots: int = 0  # fixed points in the mantle frame that thicken crust drifting over them (0 = none)
     hotspot_rate: float = 0.0  # thickness added per step at a hotspot centre, tapering to 0 at its rim
     hotspot_radius_factor: float = 3.0  # × mean segment spacing: hotspot radius
+    differentiation: float = 0.0  # fraction of the gap to `density_continental` a survivor closes per collision (0 = off). Collision alone only averages density, so the elevation histogram stays one narrow spike; Earth is bimodal because thickened crust partially melts, the light granitic fraction stays and the dense residue is lost to the mantle
+    density_continental: float = 0.30  # density floor differentiation drives collided crust toward: granitic continental crust, which floats high
     animate_frames: int = 0  # capture this many animation frames DURING the run and write quicklook/tectonics.webp (0 = off). Re-simulating for an animation afterwards costs a second full run -- 39 minutes at Earth scale
     animate_width: int = 900  # animation frame width in pixels
     animate_fps: float = 12.0  # animation playback rate

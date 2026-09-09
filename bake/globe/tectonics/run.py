@@ -67,6 +67,7 @@ from .collision import (
     build_tree,
     cell_area_steradians,
     collide,
+    differentiate,
     crystallise,
     deposit_density,
     gaussian_smooth,
@@ -200,6 +201,13 @@ class TectonicSim:
         n_coll = int(losers.size)
         if n_coll:
             spread_collisions(seg, tree, losers, survivors, alive, tp.belt_width_factor * self.spacing)
+            # crust that has been through a collision comes out lighter: the
+            # light melt stays, the dense residue goes to the mantle.  This is
+            # what separates continental from oceanic crust, and so what makes
+            # the elevation histogram bimodal instead of one spike.
+            if tp.differentiation > 0.0:
+                self.ledger["differentiated"] = self.ledger.get("differentiated", 0.0) + differentiate(
+                    seg, survivors, float(tp.differentiation), float(tp.density_continental))
             pts = seg.pos[losers].copy()
             if k >= self.ref_step:
                 self.subduction_pts.append(pts)
