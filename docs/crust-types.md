@@ -331,3 +331,27 @@ Note what rifting costs in every row: land area falls ~5 points and land
 under 1 km falls ~15. Without rifting the model overshoots low ground
 (80–86 % against Earth's 71 %); with it, it undershoots (65–69 %). Neither
 is right, and 24/400 is simply the closest.
+
+## Rifting was a global reorganisation in disguise
+
+Two defects, both visible in the animation as the whole map coming apart on
+a schedule rather than as individual rifts opening.
+
+**It re-drew every plate's Euler pole.** `rift` shared `_rebuild` with
+`reorganise`, whose whole job *is* to hand the planet a new convection
+pattern -- so a single split every `rift_every` steps scrambled the motion
+of all 8-15 plates with it. `_rebuild` now takes the existing poles and
+gives new ones only to plates beyond them; verified directly, a rift that
+splits plates 0 and 6 of 8 leaves the other six poles bit-identical.
+
+**It always split the largest plate.** `argmax` made the event deterministic
+given the configuration, so the same supercontinent got sliced again and
+again along a fresh plane. Targets are now drawn at random *weighted by
+area*, which keeps the physics that motivated `argmax` -- a large plate
+insulates the mantle beneath it and is the most likely to fail, which is the
+supercontinent cycle -- as a tendency rather than a certainty. `rift_plates`
+caps how many go per event and the actual count is 1 or 2, so the events are
+not all the same size either.
+
+The Atlantic opened while the Pacific plates carried on untouched; that is
+the behaviour being restored.

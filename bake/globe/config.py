@@ -94,6 +94,7 @@ class TectonicsParams:
     reorganise_every: int = 0  # steps between plate reorganisations (0 = never). Earth's interiors are former boundaries; with a fixed configuration an interior is never a boundary and so is never uplifted (measured: 6 m of local relief over 107 km across 88 % of land)
     reorganise_plates: int = 0  # plate count to re-cluster into (0 = keep initial_plates)
     rift_every: int = 0  # steps between rifting one plate in two (0 = never); opens new boundaries inside old interiors
+    rift_plates: int = 2  # at most this many plates rift per event; the actual number is 1..this, and the targets are drawn at random weighted by area rather than always being the largest. Deterministic argmax targeting sliced the same supercontinent every event, which reads as the whole map coming apart on a schedule
     rift_speed_factor: float = 1.0  # × convection: separation speed of the two halves of a rifted plate
     hotspots: int = 0  # fixed points in the mantle frame that thicken crust drifting over them (0 = none)
     hotspot_rate: float = 0.0  # thickness added per step at a hotspot centre, tapering to 0 at its rim

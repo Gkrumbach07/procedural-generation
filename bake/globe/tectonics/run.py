@@ -185,7 +185,7 @@ class TectonicSim:
             self.events.append(intraplate.reorganise(self, n, self.params.rng("tectonics", 5, k)))
             plates = self.plates
         if tp.rift_every > 0 and k > 0 and k % int(tp.rift_every) == 0:
-            self.events.append(intraplate.rift(self, self.params.rng("tectonics", 6, k)))
+            self.events.append(intraplate.rift(self, self.params.rng("tectonics", 6, k), int(tp.rift_plates)))
             plates = self.plates
         if self.hotspot_pos.shape[0] and tp.hotspot_rate > 0:
             self.events.append(intraplate.apply_hotspots(

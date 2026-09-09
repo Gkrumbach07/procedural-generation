@@ -47,12 +47,28 @@ import numpy as np
 from .plates import Plates, cluster_plates, random_unit_vectors
 
 
-def _rebuild(seg, plate_id: np.ndarray, n_plates: int, rng, speed: float) -> Plates:
-    """A fresh :class:`Plates` for an existing crust, with new Euler poles."""
+def _rebuild(seg, plate_id: np.ndarray, n_plates: int, rng, speed: float, keep: np.ndarray | None = None) -> Plates:
+    """A fresh :class:`Plates` for an existing crust.
+
+    With `keep` given, those Euler poles carry over and only the plates
+    beyond them get new random ones. :func:`reorganise` wants the opposite
+    -- a whole new convection pattern -- and passes nothing.
+
+    Rifting has to keep them. Sharing the re-randomising path meant one rift
+    event re-drew the pole of *every* plate on the planet, so a single split
+    every `rift_every` steps scrambled all the plate motions with it: not a
+    rift but a global reorganisation wearing one.
+    """
     seg.plate_id = np.ascontiguousarray(plate_id, dtype=np.int32)
     plates = Plates(int(n_plates))
     plates.update_stats(seg)
-    plates.omega[:] = random_unit_vectors(rng, (plates.P,)) * float(speed)
+    if keep is None:
+        plates.omega[:] = random_unit_vectors(rng, (plates.P,)) * float(speed)
+    else:
+        k = min(int(keep.shape[0]), plates.P)
+        plates.omega[:k] = keep[:k]
+        if plates.P > k:
+            plates.omega[k:] = random_unit_vectors(rng, (plates.P - k,)) * float(speed)
     plates.omega[~plates.alive] = 0.0
     return plates
 
@@ -70,17 +86,9 @@ def reorganise(sim, n_plates: int, rng) -> dict:
     return {"event": "reorganise", "plates": int(sim.plates.n_alive())}
 
 
-def rift(sim, rng) -> dict:
-    """Split the largest plate along a plane through its centre of mass.
-
-    The two halves get poles that separate them, so the new boundary opens
-    rather than closing -- a rift, not another collision. Everything the
-    plate had already accumulated is untouched on both sides.
-    """
+def _rift_one(sim, target: int, rng) -> dict:
+    """Split plate `target` along a plane through its centre of mass."""
     seg, plates = sim.seg, sim.plates
-    if plates.n_alive() < 1:
-        return {"event": "rift", "split": -1}
-    target = int(np.argmax(np.where(plates.alive, plates.count, -1)))
     sel = seg.plate_id == target
     if int(sel.sum()) < 8:
         return {"event": "rift", "split": -1}
@@ -106,7 +114,7 @@ def rift(sim, rng) -> dict:
     pid = seg.plate_id.copy()
     idx = np.flatnonzero(sel)
     pid[idx[side]] = P  # the far half becomes a brand-new plate
-    new = _rebuild(seg, pid, P + 1, rng, sim.tp.convection * sim.spacing)
+    new = _rebuild(seg, pid, P + 1, rng, sim.tp.convection * sim.spacing, keep=plates.omega)
     # override the two halves so they actually diverge across the new cut
     sep = float(sim.tp.convection) * sim.spacing * float(sim.tp.rift_speed_factor)
     new.omega[target] = -n * sep
@@ -114,6 +122,41 @@ def rift(sim, rng) -> dict:
     new.omega[~new.alive] = 0.0
     sim.plates = new
     return {"event": "rift", "split": target, "moved": int(side.sum()), "plates": int(new.n_alive())}
+
+
+def rift(sim, rng, max_plates: int = 1) -> dict:
+    """Rift one or two plates, chosen at random, weighted by area.
+
+    Not the largest one every time. Targeting `argmax` made the event
+    deterministic given the configuration, so the same plate -- usually the
+    supercontinent -- got sliced again and again along a fresh plane, which
+    reads as the whole map coming apart on a schedule rather than as
+    individual rifts opening. Real rifting picks its moment and its place:
+    the Atlantic opened while the Pacific plates carried on untouched.
+
+    Area weighting keeps the physics that motivated `argmax` in the first
+    place -- a large plate insulates the mantle beneath it and is the one
+    most likely to fail, which is the supercontinent cycle -- while leaving
+    it a *tendency* rather than a certainty. The count is 1 or 2 so an event
+    is not always the same size either.
+    """
+    plates = sim.plates
+    alive = np.flatnonzero(plates.alive & (plates.count >= 8))
+    if alive.size == 0:
+        return {"event": "rift", "split": -1}
+    n = 1 + int(rng.integers(0, max(1, int(max_plates))))
+    n = min(n, alive.size)
+    w = plates.count[alive].astype(np.float64)
+    w = w / w.sum() if w.sum() > 0 else None
+    targets = rng.choice(alive, size=n, replace=False, p=w)
+    out = []
+    for t in np.atleast_1d(targets):
+        # plate ids are stable across a split (the new half is appended), so
+        # an earlier split in this event cannot invalidate a later target
+        out.append(_rift_one(sim, int(t), rng))
+    split = [r["split"] for r in out if r["split"] >= 0]
+    return {"event": "rift", "split": split, "plates": int(sim.plates.n_alive()),
+            "moved": sum(r.get("moved", 0) for r in out)}
 
 
 def seed_hotspots(count: int, rng) -> np.ndarray:
