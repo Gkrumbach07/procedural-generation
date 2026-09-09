@@ -226,26 +226,26 @@ class ErosionParams:
     ema: float = 0.1  # ★ map lerp
     thermal_rate: float = 0.5
     creep_rate: float = 0.1  # hillslope creep: a second thermal pass with talus 0 at this rate (linear diffusion of the surface; submerged cells are inert); 0 = off.  Without it every particle path incises its own rill (drainage density saturates at one channel per ~3 cells, parallel micro-rills instead of a trunk network); 0.3 over-smooths the divides (docs/erosion-tuning.md)
-    thermal_max: float = 1.0  # cap on the material a cell sheds per thermal pass (cell units): a tectonic cliff relaxes at a bounded rate instead of collapsing in one iteration
+    thermal_max: float = 50.0  # cap on the material a cell sheds per thermal pass (cell units): a tectonic cliff relaxes at a bounded rate instead of collapsing in one iteration
     talus_slope_soft: float = 0.6  # rise/run
     talus_slope_hard: float = 1.2
-    min_volume: float = 0.01  # ★
+    min_volume: float = 0.5  # ★
     max_steps: int = 0  # 0 -> 2 * N
     checkpoint_every: int = 50
     quicklook_every: int = 50
     slope_gain: float = 2.0  # multiplies the gravity force in the particle direction update
     slope_saturation: float = 0.0  # > 0: gravity = slope_gain * s / sqrt(s^2 + slope_saturation^2) along the downhill direction (terminal-velocity flow; gentle slopes still steer); 0 = tangential surface normal (McDonald)
     erodibility: float = 0.2  # c_eq = erodibility * dh * (1 + k_disc * f(q)), f set by disc_exponent below; 1.0 = McDonald 2022
-    cover_depth: float = 0.1  # alluvial cover scale (cell units): sediment this thick fully shields the bedrock below, and a thinner film shields it in proportion (Sklar & Dietrich cover effect), so erodibility blends from 1 (sediment) to (1 - hardness) (bare rock).  0 = the bare-rock-only gate, under which hardness reached 0.1 % of land cells (half the land carries < 40 cm of sediment, but any film counted as full cover) and every continent eroded at the same rate
+    cover_depth: float = 5.0  # alluvial cover scale (cell units): sediment this thick fully shields the bedrock below, and a thinner film shields it in proportion (Sklar & Dietrich cover effect), so erodibility blends from 1 (sediment) to (1 - hardness) (bare rock).  0 = the bare-rock-only gate, under which hardness reached 0.1 % of land cells (half the land carries < 40 cm of sediment, but any film counted as full cover) and every continent eroded at the same rate
     height_unit_m: float = 0.0  # kernel heights are in cell units (height_m / cell_size_m): every cap, talus slope and gravity term is defined in them; 0 or 1 (= cell_size_m) are the only accepted values, anything else raises
     disc_saturation: float = 32.0  # discharge scale (volume units ~ upstream cells) of the entrainment term: erf(q/disc_saturation) when disc_exponent is 0, (q/disc_saturation)^disc_exponent otherwise
     disc_exponent: float = 0.5  # > 0: unsaturated power-law entrainment c_eq = erodibility*dh*(1 + k_disc*(q/disc_saturation)^disc_exponent) (stream-power concavity theta = 0.5: a trunk river carries its load at a gentler slope than a rill, so long profiles are concave, valleys widen downstream and a channel survives on a floodplain); 0 = the saturating erf law, under which every plain became an alluvial fan and no channel could meander
-    max_erode: float = 0.25  # cap on terrain removed per particle-step (cell units) at trace time (against the chunk-start terrain)
-    iter_erode: float = 0.5  # net erosion a cell may receive per iteration (cell units), enforced against the live terrain in apply order; the shortfall cancels the particle's later deposits (erosion/particle.py apply_changes)
-    iter_deposit: float = 1.0  # net deposition a cell may receive per iteration (cell units); the excess moves back up the particle's path, the remainder waits in the per-cell `pending` stockpile (released at this rate)
+    max_erode: float = 12.5  # cap on terrain removed per particle-step (cell units) at trace time (against the chunk-start terrain)
+    iter_erode: float = 25.0  # net erosion a cell may receive per iteration (cell units), enforced against the live terrain in apply order; the shortfall cancels the particle's later deposits (erosion/particle.py apply_changes)
+    iter_deposit: float = 50.0  # net deposition a cell may receive per iteration (cell units); the excess moves back up the particle's path, the remainder waits in the per-cell `pending` stockpile (released at this rate)
     ocean_deposition_rate: float = 0.3  # a particle that reaches the sea keeps walking downslope on the seafloor, deposit-only, dropping this fraction of its load per step (submarine fan); no erosion, no discharge track below sea level
     ocean_steps: int = 64  # at most this many seafloor steps (then the rest waits in the cell's pending stockpile, re-injected next iteration)
-    fan_room: float = 1.0  # a seafloor step may settle at most this much (cell units) on a flat sea floor per particle-step (the drop to the previous cell when larger); the sea-level ceiling, the fan_slope descent and iter_deposit still bound the pile in apply_changes.  0.02 (= DEP_FLOOR) throttled offshore dispersal to ~1 cell unit per stockpile and iteration, so river mouths parked most of their load in `pending`
+    fan_room: float = 50.0  # a seafloor step may settle at most this much (cell units) on a flat sea floor per particle-step (the drop to the previous cell when larger); the sea-level ceiling, the fan_slope descent and iter_deposit still bound the pile in apply_changes.  0.02 (= DEP_FLOOR) throttled offshore dispersal to ~1 cell unit per stockpile and iteration, so river mouths parked most of their load in `pending`
     fan_slope: float = 0.05  # a submarine fan descends at least this much per cell away from its source (cell units per cell): the deposit ceiling of a seafloor step is the previous path cell minus this, and never above -DEP_FLOOR
     glacial_every: int = 10  # run the glacial pass (erosion/glacial.py) every k iterations; 0 = off.  Ice is where the mean annual temperature is at or below freezing (evap <= 0), which at the defaults is ~9 % of land, close to Earth's glaciated fraction
     ice_evap: float = 0.0  # ice forms where the climate field `evap` is at or below this.  `evap` is k_evap*max(T,0), so 0 is exactly the freezing line and a positive value is a warmer equilibrium-line altitude (more of the world glaciated).  This is the FIRST-ORDER control on lakes: measured across three seeds, lake area swung 5x with the seed (0.14 %, 0.31 %, 0.74 % of land) but at most 43 % with glacial_from/glacial_every, and one seed had no land below +1.6 C at all, so no ice and no glacial lakes were possible however the other knobs were set
@@ -260,6 +260,32 @@ class ErosionParams:
     pit_steps: int = 16  # kill a particle after this many consecutive uphill steps (stuck in a pit)
     chunk: int = 2048  # particles per parallel chunk (change-list capacity = chunk*(max_steps+16) entries of 24 B, ~100 MB at N_c=1024); terrain is frozen within a chunk.  2048 traces ~20 % faster than 512 (fewer parallel launches, less tail imbalance) with the same morphology on the single-face tests (docs/erosion-tuning.md)
     backend: str = "cpu"
+
+
+# --------------------------------------------------------------------------
+# cell-size dependence
+# --------------------------------------------------------------------------
+#: Erosion parameters that are physical *lengths*.  The kernel works in cell
+#: units (``height_unit_m == cell_size_m``), so a length written straight into
+#: it means "this many cell widths" and silently rescales with the grid: the
+#: shipped 0.1 of ``cover_depth`` is 5 m of alluvium at the 50 m cells these
+#: were tuned on and **1.0 km** at the 9.8 km cells an Earth-radius world
+#: needs.  Same for the per-iteration caps, which become kilometres and stop
+#: capping anything.
+#:
+#: So these are declared in **metres** on `ErosionParams` and divided by the
+#: cell size here.  Their defaults are the values they were tuned at (the old
+#: cell-unit number x 50 m), so a 50 m world is unchanged and every other cell
+#: size now means the same physical thing.  Slopes (``talus_slope_*``,
+#: ``fan_slope``), rates and ratios are genuinely dimensionless and carry over
+#: untouched.
+LENGTH_PARAMS_M = ("cover_depth", "max_erode", "iter_erode", "iter_deposit",
+                   "thermal_max", "fan_room", "min_volume")
+
+
+def cell_units(ep: "ErosionParams", name: str, cell_size_m: float) -> float:
+    """One length parameter (metres) in the kernel's cell units at this grid."""
+    return float(getattr(ep, name)) / float(cell_size_m)
 
 
 @dataclass
@@ -570,7 +596,7 @@ class WorldParams:
             # Across three seeds this gives a largest landmass of 26.0 +- 7.0 %
             # -- better than ~35 on average, but seed-dependent: on one of the
             # three it achieved almost nothing (35.8 against a base of 37.5).
-            rift_every=400, plate_size_jitter=0.80,
+            rift_every=400, plate_size_jitter=0.80, cratons=24,
         )
         return p
 

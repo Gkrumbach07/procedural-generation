@@ -488,7 +488,12 @@ def test_run_iteration_stats_and_height_units():
 
 def _striped_hardness_run(cover: float, N: int = 96, iters: int = 60, period: int = 16):
     """Tilted window whose hardness alternates in bands *across* the regional
-    slope.  Returns (surface in soft bands, surface in hard bands)."""
+    slope.  Returns (surface in soft bands, surface in hard bands).
+
+    ``cover`` is metres, like `erosion.cover_depth` itself -- the length
+    parameters are declared in metres and divided by the cell size, so that
+    the same physical alluvial thickness means the same thing on a 50 m grid
+    and on a 9.8 km one."""
     p = WorldParams.small_world(0).with_overrides(erosion={"cover_depth": cover})
     st = make_window(N, "tilt", p, iters=iters)
     H = p.world.halo
@@ -514,7 +519,7 @@ def test_alluvial_cover_lets_hardness_shape_the_landscape():
     which is what gives a landscape its structural grain.
     """
     soft_off, hard_off = _striped_hardness_run(0.0)
-    soft_on, hard_on = _striped_hardness_run(0.1)
+    soft_on, hard_on = _striped_hardness_run(5.0)  # 0.1 cell units at the 50 m cells this runs on
     relief_off = hard_off - soft_off  # measured -0.003 cell units: no response at all
     relief_on = hard_on - soft_on  # measured +0.139
     assert relief_on > 2.0 * relief_off, (relief_off, relief_on)

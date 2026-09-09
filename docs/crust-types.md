@@ -252,6 +252,9 @@ Three things worth keeping:
   supercontinent than 12, not a more fragmented one. Seeding more separate
   continents does not produce more continents, because without a way to
   split, crust only ever merges -- so more seeds simply merge sooner.
+  **RETRACTED** -- see the grid below. That row came from a sweep whose
+  base preset never applied `shelf_fraction`, so it measured the old
+  defaults rather than this configuration.
 * **Rifting alone at 400 wrecks the planet** (continental fraction 0.235,
   land under 1 km 14.6 %): it consumes continental crust faster than
   `arc_birth` replaces it. Paired with `plate_size_jitter = 0.8` it does
@@ -290,3 +293,41 @@ Note also that straight coastlines are **not** an artifact: each cube face
 is a gnomonic projection, on which great circles are exactly straight lines,
 so a plate boundary near a great circle has to render straight. Real rifted
 margins look like this too.
+
+## cratons and rifting together
+
+Earth has both: several separate continental masses *and* active rifting.
+The sweeps above tested them as alternatives, which was the wrong framing --
+and the row that said `cratons` runs backwards was measured on a broken
+sweep whose base preset left `shelf_fraction` at 0, so it described the old
+defaults and not this model at all.
+
+The grid, three seeds per cell, everything else the `earth` preset
+(`biggest` is the share of all land in the largest connected mass):
+
+| cratons | `rift_every` | biggest % | cont. frac | land % | land <1 km | gap m |
+|---|---|---|---|---|---|---|
+| 12 | 0 | 31.3 ± 5.4 | 0.4 | 29.3 | 80.2 | 4002 ± 140 |
+| 12 | 400 | 30.9 ± 8.0 | 0.4 | 24.4 | 64.6 | 3945 ± 125 |
+| 24 | 0 | 27.5 ± 3.2 | 0.5 | 36.1 | 85.7 | 4062 ± 57 |
+| **24** | **400** | **27.0 ± 6.1** | **0.4** | **29.1** | **69.1** | **3972 ± 36** |
+| 36 | 0 | 28.3 ± 0.4 | 0.5 | 31.2 | 81.7 | 3920 ± 203 |
+| 36 | 400 | **23.2 ± 5.6** | 0.4 | 25.3 | 65.5 | 3870 ± 65 |
+| **Earth** | | **20.3** | **0.40** | **29.0** | **71.0** | **4000** |
+
+More cratons *does* fragment the land (31.3 → 27.5 at rift 0), and rifting
+improves every craton count, so the two are complementary rather than
+competing. The effects are small against the seed spread — 12/0 against
+36/400 is 31.3 vs 23.2 with per-cell sd ~5.5, so roughly 1.8σ on three
+seeds — but the trend is monotone across the grid, which is worth more than
+any single cell.
+
+**24 cratons with `rift_every = 400` is the best all-round cell** and is
+what the preset ships: land 29.1 % against Earth's 29.0, land under 1 km
+69.1 % against 71, land/ocean gap 3972 m against 4000. 36 cratons fragments
+more (23.2 %) but drops land area to 25.3 % and low ground to 65.5 %.
+
+Note what rifting costs in every row: land area falls ~5 points and land
+under 1 km falls ~15. Without rifting the model overshoots low ground
+(80–86 % against Earth's 71 %); with it, it undershoots (65–69 %). Neither
+is right, and 24/400 is simply the closest.

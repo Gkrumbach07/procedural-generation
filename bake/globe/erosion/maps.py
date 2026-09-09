@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from numba import get_num_threads, parallel_chunksize
 
-from ..config import ErosionParams, WorldParams
+from ..config import cell_units, ErosionParams, WorldParams
 from ..cubesphere import Grid
 from ..field import FaceField
 from . import glacial
@@ -466,16 +466,16 @@ def run_iteration(
                 float(ep.slope_gain),
                 float(ep.slope_saturation),
                 float(ep.erodibility),
-                float(ep.cover_depth),
-                float(ep.min_volume),
+                cell_units(ep, "cover_depth", state.height_unit_m),
+                cell_units(ep, "min_volume", state.height_unit_m),
                 int(max_steps),
-                float(ep.max_erode),
+                cell_units(ep, "max_erode", state.height_unit_m),
                 float(chunk / (volume0 * P)),
                 int(ep.pit_steps),
                 bool(state.deposit_on_exit),
                 float(ep.ocean_deposition_rate),
                 int(ep.ocean_steps),
-                float(ep.fan_room),
+                cell_units(ep, "fan_room", state.height_unit_m),
                 cl_cell,
                 cl_delta,
                 cl_vol,
@@ -489,7 +489,9 @@ def run_iteration(
         nc, tp, lo, lo_off = pk.apply_changes(
             cl_cell, cl_delta, cl_vol, cl_mom, cl_count[:m], cap,
             state.height, state.sediment, state.acc, state.pending, state.samp, state.disch_track, state.mom_track, state.mask,
-            float(ep.iter_erode), float(ep.iter_deposit), float(ep.fan_slope), state.route is not None,
+            cell_units(ep, "iter_erode", state.height_unit_m),
+            cell_units(ep, "iter_deposit", state.height_unit_m),
+            float(ep.fan_slope), state.route is not None,
         )
         n_clamp += int(nc)
         to_pending += tp
@@ -529,7 +531,7 @@ def thermal_erosion(state: ErosionState, params) -> None:
     (parallel micro-rills, no coherent trunk network)."""
     ep = _eparams(params)
     talus = (ep.talus_slope_soft + (ep.talus_slope_hard - ep.talus_slope_soft) * state.hardness).astype(np.float64)
-    _mass_wasting_pass(state, talus, float(ep.thermal_rate), float(ep.thermal_max))
+    _mass_wasting_pass(state, talus, float(ep.thermal_rate), cell_units(ep, "thermal_max", state.height_unit_m))
     if ep.creep_rate > 0.0:
         # hillslope creep: the same conservative pass with talus 0 (every
         # lower neighbour receives creep_rate/2 of the height difference).
@@ -537,7 +539,7 @@ def thermal_erosion(state: ErosionState, params) -> None:
         # creep is a hillslope process, it must not diffuse the coast into
         # the sea (the talus pass still lets sea cliffs collapse).
         cmask = np.where(state.height + state.sediment < 0.0, np.uint8(pk.MASK_FROZEN), state.mask).astype(np.uint8)
-        _mass_wasting_pass(state, np.zeros_like(talus), float(ep.creep_rate), float(ep.thermal_max), cmask)
+        _mass_wasting_pass(state, np.zeros_like(talus), float(ep.creep_rate), cell_units(ep, "thermal_max", state.height_unit_m), cmask)
 
 
 def _mass_wasting_pass(state: ErosionState, talus: np.ndarray, rate: float, cap: float, mask: np.ndarray | None = None) -> None:

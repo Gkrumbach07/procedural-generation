@@ -41,6 +41,8 @@ it does not add or remove any.
 """
 from __future__ import annotations
 
+from ..config import cell_units
+
 import numpy as np
 
 from . import particle as pk
@@ -170,7 +172,7 @@ def carve(state, params) -> dict:
         wsum = float(w[interior].sum())
         if wsum > 0.0:
             add = (w / wsum) * (carved * frac)
-            placed = np.minimum(add, float(ep.iter_deposit))
+            placed = np.minimum(add, cell_units(ep, "iter_deposit", state.height_unit_m))
             state.sediment += placed
             state.pending += add - placed
             parked = float((add - placed)[interior].sum())
