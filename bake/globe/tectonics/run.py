@@ -332,6 +332,38 @@ def ridge_buoyancy(seg, tp) -> np.ndarray:
     return np.where(seg.kind == OCEANIC, b, 0.0)
 
 
+def sea_level(bed, area, continental, params) -> float:
+    """Where the water stops, in bedrock units.
+
+    Two placements. The default is a quantile of *area*: put
+    ``world.land_fraction`` of the surface above the waterline. That works
+    when height is a single continuum, and stops working the moment it is
+    not -- with two humps ~4 km apart, an area quantile that misses the
+    continental hump lands in the near-empty trough between them, and every
+    continent then reads as a plateau standing its full crustal buoyancy
+    above the sea.
+
+    Measured across three seeds of an otherwise identical Earth-scale
+    configuration, the continental fraction at step 1500 came out 0.351,
+    0.462 and 0.260. Against a fixed ``land_fraction = 0.25`` the first two
+    give land under 1 km of 78.0 % and 75.6 % (Earth: 71 %) and the third
+    gives **17.4 %** -- its margin was 0.01, so the quantile fell into the
+    trough. The knob cannot be tuned around that: the thing it has to cut
+    is a different size every seed.
+
+    So with ``tectonics.shelf_fraction > 0`` sea level is instead a quantile
+    of the *continental* crust: drown that fraction of it and let the land
+    area fall out. That is what sea level physically is -- Earth's oceans
+    hold just enough water to cover the shelves, ~27 % of the continental
+    crust, leaving 29 % of the globe dry -- and it self-corrects, because
+    the quantity it is measured against is the one that varies.
+    """
+    f = float(params.tectonics.shelf_fraction)
+    if f > 0.0 and continental is not None and continental.any():
+        return float(weighted_quantile(bed[continental], area[continental], f))
+    return float(weighted_quantile(bed, area, 1.0 - params.world.land_fraction))
+
+
 def frame_bed(sim) -> np.ndarray:
     """The current crust as a sea-levelled bed on the tect grid.
 
@@ -346,7 +378,8 @@ def frame_bed(sim) -> np.ndarray:
     blend = SmoothSplat(tree, grid, tp.splat_sigma_factor * sim.spacing, int(tp.splat_knn))
     buoy = ridge_buoyancy(sim.seg, tp)
     bed = _smooth_field(grid, blend(sim.seg.height() + buoy), tp, cascade=True).interior
-    sea = float(np.quantile(bed, 1.0 - sim.params.world.land_fraction))
+    cont = blend(sim.seg.kind.astype(np.float64)) > 0.5 if tp.shelf_fraction > 0 else None
+    sea = sea_level(bed, grid.interior_cell_area.astype(np.float64), cont, sim.params)
     return bed - sea
 
 
@@ -495,7 +528,11 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     bed = _resample(bed_t).astype(np.float64)
     dh = _resample(dh_t).astype(np.float64)
     area = coarse.interior_cell_area.astype(np.float64)
-    q = weighted_quantile(bed, area, 1.0 - params.world.land_fraction)
+    cont_c = None
+    if tp.shelf_fraction > 0:
+        cont_t = FaceField.from_interior(grid, blend(seg.kind.astype(np.float64)), exchange=True)
+        cont_c = _resample(cont_t).astype(np.float64) > 0.5
+    q = sea_level(bed, area, cont_c, params)
     bed -= q
     land = bed > 0
     # vertical scale: tie the relief to the *horizontal* scale of the
