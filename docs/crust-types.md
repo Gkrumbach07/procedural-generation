@@ -225,3 +225,68 @@ physics; it does not.
 calibrated in cell units at ~50 m cells and does not transfer to the 9.8 km
 cells an Earth-radius world needs (docs/world-scale.md section 4), so run it
 with `--to tectonics` until that is settled.
+
+## Continent shape: what moves it, measured
+
+The hypsometry knobs above are settled. These decide whether the land comes
+out as one blob or as several plausible continents, and they **interact** --
+sweeping them one at a time is misleading.
+
+Single seed, otherwise the `earth` configuration, at 1500 steps
+(`biggest` is the share of all land in the largest connected mass; Earth's
+largest is Afro-Eurasia at ~20 %):
+
+| config | biggest | cont. frac | land % | ocean p50 | land <1 km |
+|---|---|---|---|---|---|
+| base | 32.9 % | 0.351 | 23.3 | −3713 | 77.2 % |
+| `cratons` 28 | **37.8 %** | 0.466 | 30.6 | −3397 | 79.6 % |
+| `plate_size_jitter` 0.8 | 25.4 % | 0.541 | 35.9 | −3815 | 85.4 % |
+| `rift_every` 600 | 22.9 % | 0.350 | 23.2 | −3445 | 65.9 % |
+| `rift_every` 400 | 22.7 % | **0.235** | 16.9 | **−1834** | **14.6 %** |
+| `rift_every` 400 + jitter 0.8 | 19.7 % | 0.417 | 27.0 | −3646 | 62.5 % |
+| **Earth** | **20.3 %** | **0.40** | **29.0** | **−3700** | **71 %** |
+
+Three things worth keeping:
+
+* **`cratons` runs backwards.** 28 seeds gave a *more* concentrated
+  supercontinent than 12, not a more fragmented one. Seeding more separate
+  continents does not produce more continents, because without a way to
+  split, crust only ever merges -- so more seeds simply merge sooner.
+* **Rifting alone at 400 wrecks the planet** (continental fraction 0.235,
+  land under 1 km 14.6 %): it consumes continental crust faster than
+  `arc_birth` replaces it. Paired with `plate_size_jitter = 0.8` it does
+  not, because larger plates carry less boundary per unit area and so fewer
+  destructive collisions. Neither knob is usable alone at that rate.
+* **The single-seed result did not hold.** `rift 400 + jitter 0.8` reading
+  19.7 % against Earth's 20.3 % looked like a near-exact match. Across three
+  seeds it is **26.0 ± 7.0 %**, and on one of them rifting achieved
+  essentially nothing (35.8 % against a base of 37.5 %).
+
+What *is* stable under rifting is everything the crust types fixed --
+land/ocean gap 4000 ± 127 m, continental fraction 0.40 ± 0.05, ocean median
+−3491 ± 112 m -- so rifting buys fragmentation on average without
+disturbing the hypsometry. It costs a little low ground: 61.8 % of land
+under 1 km against the base's ~78 %, where Earth is 71 % (comparable error,
+opposite sign).
+
+## The land texture is the segment cloud
+
+Local relief on land, measured on the coarse grid:
+
+| | 49 km window | 166 km window |
+|---|---|---|
+| 20,000 segments | 96 m | 363 m |
+| 200,000 segments | **181 m** | 503 m |
+
+The amplitude is plausible for continental interiors, but it **rises with
+segment count**, which is the signature of the point cloud rather than of
+resolved geology: the splat sigma is a fraction of the segment spacing, so
+more segments means finer *and stronger* packing noise, never less. It is
+Poisson-disc texture with no drainage structure and no orientation, sitting
+exactly where erosion would otherwise organise relief. Not worth chasing
+inside the tectonics stage.
+
+Note also that straight coastlines are **not** an artifact: each cube face
+is a gnomonic projection, on which great circles are exactly straight lines,
+so a plate boundary near a great circle has to render straight. Real rifted
+margins look like this too.

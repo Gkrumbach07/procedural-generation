@@ -559,6 +559,18 @@ class WorldParams:
             # densities give 35354; its *observed* land/ocean gap needs 26400.
             # The shipped value is the empirical one.
             relief_m=0.0, relief_spacings=0.0, height_scale_m=26400.0,
+            # Break the supercontinent up.  Without rifting the crust only
+            # ever merges -- there is no other way for a continent to split --
+            # and the largest landmass holds ~35 % of all land against Earth's
+            # 20 %.  Rifting alone at this rate is destructive (continental
+            # fraction collapses to 0.235 and land under 1 km to 14.6 %,
+            # because it consumes crust faster than arc birth replaces it);
+            # paired with a wide plate-size spread it is not, because larger
+            # plates carry less boundary per unit area and so destroy less.
+            # Across three seeds this gives a largest landmass of 26.0 +- 7.0 %
+            # -- better than ~35 on average, but seed-dependent: on one of the
+            # three it achieved almost nothing (35.8 against a base of 37.5).
+            rift_every=400, plate_size_jitter=0.80,
         )
         return p
 
