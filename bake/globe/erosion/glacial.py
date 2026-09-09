@@ -46,10 +46,18 @@ import numpy as np
 from . import particle as pk
 
 
-def ice_mask(state) -> np.ndarray:
-    """Extended-array bool: active land whose mean annual temperature is at
-    or below freezing (``evap <= 0``).  Halos are exchanged by the caller."""
-    return (state.mask == pk.MASK_ACTIVE) & (state.evap <= 0.0) & (state.surface() > 0.0)
+def ice_mask(state, ice_evap: float = 0.0) -> np.ndarray:
+    """Extended-array bool: active land cold enough to hold ice.
+
+    ``evap`` is ``k_evap * max(T, 0)``, so ``ice_evap = 0`` is exactly the
+    freezing line and a positive threshold is a warmer equilibrium-line
+    altitude.  It is worth having as a knob rather than a constant: whether
+    a world can have glacial lakes at all is decided here, and a world whose
+    continents all land in warm latitudes has no land below freezing (seed
+    22 of the small preset bottoms out at +1.64 C), so no setting of the
+    other glacial parameters can give it a single lake.
+    """
+    return (state.mask == pk.MASK_ACTIVE) & (state.evap <= float(ice_evap)) & (state.surface() > 0.0)
 
 
 def ice_depth(state, ice: np.ndarray, ramp: int) -> np.ndarray:
@@ -118,7 +126,7 @@ def carve(state, params) -> dict:
     if rate <= 0.0:
         return stats
 
-    ice = ice_mask(state)
+    ice = ice_mask(state, float(ep.ice_evap))
     if not ice.any():
         return stats
     # halo exchange so a margin across a face edge is seen; the mask is

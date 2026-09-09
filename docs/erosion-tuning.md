@@ -94,3 +94,41 @@ sediment per iteration to shelves that were never deeper than 0.07 cells; a shel
 > 1 % of the mass). Now a load that a seafloor walk cannot place is *lost offshore* (deep ocean, as PLAN 8.2's
 `into ocean: break`), reported as `lost_offshore`; `pending` remains for land pits (conservation on a closed window unchanged).
 `fan_room` (1.0) lets a seafloor step settle up to 1 cell unit where there is depth (was DEP_FLOOR = 0.02).
+
+
+## Glacial parameters (`glacial_from`, `glacial_every`, `ice_evap`)
+
+Sweeps on the small preset at `N_c=256`, 200 iterations, each config reusing
+one template's tectonics + climate so only the glaciation differs.
+
+**`glacial_rate` saturates.** Across 0.5/0.75/0.9 x 1.0/3.0/8.0 there is no
+monotonic gain from a harder cut — rate 8.0 gave shallower lakes than rate
+1.0 (the carve hits the sea-level floor and the moraine cap). Rate is not
+the lever.
+
+**Later and more frequent is better, on one seed.** Sweeping
+`glacial_from` x `glacial_every` on seed 0, the best was `from 0.9,
+every 1` at 226 lake cells / 0.206 % of land / 2.9 m mean depth, against
+158 / 0.144 % / 1.7 m for the shipped `from 0.75, every 10`.
+
+**But the seed dominates the parameters, so those defaults were not
+changed.** The same three configs on two fresh seeds:
+
+| seed | control | best-area | best-depth | lake area |
+|---|---|---|---|---|
+| 0  | 158 cells | 226 | 203 | 0.144 % |
+| 11 | 817 cells | 773 | 820 | 0.736 % |
+| 22 | 348 cells | 348 | 348 | 0.314 % |
+
+Seed swings lake area 5x; the parameters swing it at most 43 %, and on seed
+11 the three configs are within noise of each other. Seed 22's three runs
+are *byte-identical* because its coldest land is +1.64 C: it has no ice at
+all, so no setting of `glacial_from` or `glacial_every` can give it a lake.
+
+**`ice_evap` is the first-order control.** It is the equilibrium-line
+altitude: `evap` is `k_evap * max(T, 0)`, so 0 is the freezing line and a
+positive value glaciates a warmer world. On seed 22 (0 % ice at the
+default) raising it to 0.35 glaciates 3.3 % of land and gives 139 coarse
+lakes / 0.359 % area / 27 m deepest, against 116 / 0.314 % / 9.4 m — with
+rivers, channel fraction and land fraction unchanged. If a world looks
+lake-poor, this is the knob, not the cadence.
