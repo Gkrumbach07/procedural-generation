@@ -86,6 +86,38 @@ low-frequency cutoff need tuning (0.15 overshot to β 0.30 at 800-6400 m), and
 it perturbs the mass budget `hold_datum` balances (land fraction moved
 14.4 % -> 14.0 %).
 
+### Does it survive erosion, and does it seed valleys?
+
+Two follow-ups, both run at production length (400 iterations) on the `small`
+preset, then through refine:
+
+**It survives.** The improvement is not washed out by a long run, though
+erosion does eat some of it — the gap narrows from 1.87 at 60 iterations to
+1.24 at 400:
+
+| coarse, 400 iterations | 200-1600 m | 400-3200 m | relief |
+|---|---|---|---|
+| tectonics | 3.88 | 3.44 | 819 m |
+| tectonics + fBm | **2.64** | **2.61** | 813 m |
+
+**But it does not create channels.** Slope-area on the *fine* grid (25 m
+cells, so a finer channel head was resolvable — the bins run down to 1.3
+cells):
+
+| fine grid | β (200-1600 m) | channel head |
+|---|---|---|
+| tectonics | 5.49 | 14,821 m² → 122 m |
+| tectonics + fBm | **3.69** | 14,821 m² → 122 m |
+
+Identical channel head. The added octaves put texture *between* the existing
+channels; they do not seed new tributaries, and the drainage network is
+unchanged.
+
+So this fixes one kind of blandness and not the other. If the complaint is
+"the surfaces are featureless", it is addressed and it lasts. If the
+complaint is "every basin drains the same boring way", it is not — that is
+network topology, and nothing measured so far moves it.
+
 ## What is right, and must not be "fixed"
 
 Measured with slope–area analysis, the standard threshold-free way to locate
