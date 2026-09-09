@@ -89,6 +89,7 @@ class TectonicsParams:
     growth: float = 0.05  # ★ k_G (thickness units per step)
     dissolution_factor: float = 0.05  # ★
     deposit_density: float = 0.5  # k_D
+    plate_size_jitter: float = 0.35  # spread of initial plate sizes: per-plate distance weights are 1 ± this, so 0 tiles the sphere evenly and ~0.8 reproduces Earth's hierarchy (a few plates covering most of the surface, microplates between). Earth spans ~94x largest:smallest with its top 7 plates over 92% of the globe; 0.35 gives a near-uniform 3.2x, which leaves every landmass a single collision zone
     collision_radius_factor: float = 1.0  # × spacing: segments of different plates closer than this collide
     gap_radius_factor: float = 1.0  # × spacing: cells farther than this from every segment are divergent gaps
     overlap_fraction: float = 0.5  # segments of different plates closer than this × collision radius collide even when not approaching (no interleaving along transform boundaries)

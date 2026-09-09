@@ -44,34 +44,47 @@ less than this formula gives.
 `relief_m = 9000` an Earth-radius world comes out at 8995 m of land relief and
 30.6 % land, against Earth's 8850 m and 29 %.
 
-## 3. The real cause of "one mountain ridge": hypsometry
+## 3. Plate structure: what is established, and what is not
 
-Scale fixed, the continents still looked wrong, and hypsometry says why.
-Distribution of land elevation, Earth-radius worlds, `relief_m = 9000`:
+**Established (a structural fact about the model, measured from
+`cluster_plates` directly).** Our plates are near-uniform in size at any
+count, where Earth's span two orders of magnitude:
 
-| land elevation | 16 plates | 48 plates | **Earth** |
-|----------------|-----------|-----------|-----------|
-| 0–200 m | 13.2 % | 34.0 % | 28 % |
-| 200–500 m | 13.5 % | 19.4 % | 24 % |
-| 500–1000 m | 17.5 % | 18.3 % | 19 % |
-| 1000–2000 m | 24.9 % | 19.3 % | 17 % |
-| 2000–4000 m | 22.3 % | 5.5 % | 10 % |
-| above 4000 m | 8.6 % | 3.5 % | 2 % |
-| **under 1000 m** | **44.2 %** | **71.8 %** | **~71 %** |
+| | largest plate | top 7 cover | smallest | span |
+|---|---|---|---|---|
+| **Earth** (7 major, 8 minor, dozens of micro) | 20.3 % | **92 %** | 0.22 % | **94×** |
+| ours, 16 plates | 10.4 % | 56 % | 3.23 % | **3.2×** |
+| ours, 48 plates | 3.6 % | 21 % | 1.14 % | **3.2×** |
 
-At the shipped 16 plates, only 44 % of land is below 1 km and 31 % is above
-2 km. The continents *are* the mountain belts: land exists where collision
-thickened the crust, and there is no low-lying platform around it. That is
-exactly the "one ridge per continent" symptom — the ridge is not on the
-continent, it *is* the continent.
+Earth's seven largest plates cover 92 % of the globe. That is what creates
+vast interiors far from any boundary — stable platform — with microplates
+scattered between. A uniform tiling cannot do both at once: raising the plate
+count shrinks every plate rather than adding small ones beside big ones.
 
-At 48 plates the hypsometry lands on Earth's almost exactly. More, smaller
-plates give more collision zones, each thickening less, so the land that
-emerges includes broad low ground as well as ridges.
+The cause is `plate_size_jitter` (was a hardcoded 0.35 in `cluster_plates`,
+now exposed in `TectonicsParams`). It sets per-plate distance weights of
+1 ± jitter, so 0.35 gives a 3.2× span. Measured, ~0.8 reaches Earth's ~94×.
 
-Worth noting: judged by eye the 48-plate net looks *blobbier* and less
-dramatic than the 16-plate one, which is the opposite of what the numbers say.
-The eye is drawn to the ridges; hypsometry counts the ground.
+**NOT established: that any of this improves hypsometry.** An earlier
+revision of this file claimed 48 plates reproduced Earth's land-elevation
+distribution almost exactly (71.8 % of land under 1 km against Earth's 71 %).
+That was one seed. Across seeds:
+
+| config | per-seed % of land under 1 km | mean ± sd |
+|--------|------------------------------|-----------|
+| 16 plates, jitter 0.35 | 50.2, 84.6 | 67.4 ± 17.2 |
+| 16 plates, jitter 0.60 | 50.0, 55.8 | 52.9 ± 2.9 |
+| 48 plates, jitter 0.35 | 45.8, 66.3 | 56.0 ± 10.2 |
+
+The seed-to-seed spread (±10–17 points) is larger than the gaps between
+configurations, so none of these differences is real on this evidence. The
+single 71.8 % that looked like a match was the top of its own range.
+
+At `N_c = 128` with 16 plates the sample is tiny — a handful of plates over
+six faces — so one lucky arrangement moves the whole statistic. Settling
+whether the hierarchy actually helps needs many seeds, a larger world, or
+both. Treat the plate-size span as the thing to fix and hypsometry as the
+thing to then measure properly, not as a result already in hand.
 
 ## What to change
 

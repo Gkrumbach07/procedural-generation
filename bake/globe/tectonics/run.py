@@ -283,7 +283,7 @@ def initialise(params: WorldParams, log=print) -> TectonicSim:
     T0 = np.clip(heat.sample_sphere(pos).astype(np.float64), 0.0, 1.0)
     density = np.clip(deposit_density(T0, tp.deposit_density), 0.2, 0.95)
     thickness = tp.initial_thickness * (1.0 + 0.2 * (rng.random(M) - 0.5))
-    plate_id = cluster_plates(pos, int(tp.initial_plates), rng)
+    plate_id = cluster_plates(pos, int(tp.initial_plates), rng, size_jitter=float(tp.plate_size_jitter))
     seg = Segments(pos, thickness, density, 0.0, plate_id, 4.0 * math.pi / M)
     plates = Plates(int(tp.initial_plates))
     plates.update_stats(seg)
