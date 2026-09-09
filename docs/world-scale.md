@@ -71,14 +71,19 @@ distribution almost exactly (71.8 % of land under 1 km against Earth's 71 %).
 That was one seed. Across seeds:
 
 | config | per-seed % of land under 1 km | mean ± sd |
-|--------|------------------------------|-----------|
-| 16 plates, jitter 0.35 | 50.2, 84.6 | 67.4 ± 17.2 |
-| 16 plates, jitter 0.60 | 50.0, 55.8 | 52.9 ± 2.9 |
-| 48 plates, jitter 0.35 | 45.8, 66.3 | 56.0 ± 10.2 |
+|--------|-------------------------------|-----------|
+| 16 plates, jitter 0.35 (default) | 50.2, 84.6, 80.1 | **71.6 ± 15.3** |
+| 16 plates, jitter 0.60 | 50.0, 55.8, 37.0 | 47.6 ± 7.8 |
+| 48 plates, jitter 0.35 | 45.8, 66.3, 57.8 | 56.6 ± 8.4 |
 
-The seed-to-seed spread (±10–17 points) is larger than the gaps between
+The seed-to-seed spread (±8–15 points) is larger than the gaps between
 configurations, so none of these differences is real on this evidence. The
 single 71.8 % that looked like a match was the top of its own range.
+
+Note how unstable the ranking is: on two seeds the default averaged 67.4 and
+looked worse than 48 plates; the third seed moved it to 71.6, the closest of
+the three to Earth, and made raising the jitter look actively harmful. Any
+ordering drawn from a handful of seeds here is noise.
 
 At `N_c = 128` with 16 plates the sample is tiny — a handful of plates over
 six faces — so one lucky arrangement moves the whole statistic. Settling
