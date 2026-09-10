@@ -214,7 +214,7 @@ def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float
 # --------------------------------------------------------------------------
 # gaps -> new crust (PLAN 6.2.4)
 # --------------------------------------------------------------------------
-def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, oceanic_density: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None) -> tuple[Segments, np.ndarray]:
+def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, oceanic_density: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None, tree: cKDTree | None = None) -> tuple[Segments, np.ndarray]:
     """Cells farther than ``gap_radius`` from every segment are divergent
     boundaries — provided the nearest segment is moving *away* from the
     cell (``omega`` (P, 3) rad/step given; holes left by subduction at a
@@ -222,8 +222,18 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
     filled with new crust).  Their (jittered) centres are candidate
     positions, walked in a random order and accepted greedily with minimum
     spacing ``r_min`` (also against the existing segments).  New segments
-    are thin (``new_thickness``), have age 0, the plate of the nearest
-    existing segment, and are always **oceanic** at ``oceanic_density``.
+    are thin (``new_thickness``), have age 0 and the plate of the nearest
+    existing segment.
+
+    New crust is oceanic **only where the gap is a real divergent boundary**,
+    meaning the segments around it belong to more than one plate. A gap whose
+    neighbours are all one plate is not a rift: it is a void that opened in
+    the point cloud as the plate rotated and its segments were nudged about,
+    and filling it with ocean floor punches a hole through the middle of a
+    continent. Measured before this rule, 6.2 % of land area at 20k segments
+    and 17.7 % at 60k -- worse with more segments, which is the signature of
+    a cloud artifact rather than a resolution limit. Such a gap is filled
+    with crust continuing its surroundings instead.
 
     New crust at a divergent boundary is mid-ocean-ridge basalt: dense,
     compositionally uniform, and the same everywhere.  It used to be given
@@ -259,7 +269,23 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
     pos = cands[acc]
     plate = seg.plate_id[idx.ravel()[cells[acc]]]
     mean_area = float(seg.area.mean()) if seg.M else 0.0
-    new = Segments(pos, new_thickness, oceanic_density, 0.0, plate, mean_area, kind=OCEANIC)
+    if tree is not None and pos.shape[0] and seg.M > 1:
+        kk = min(6, tree.n)
+        _, nb = tree.query(pos, k=kk, workers=-1)
+        nb = np.atleast_2d(nb).reshape(pos.shape[0], kk)
+        pl = seg.plate_id[nb]
+        boundary = (pl != pl[:, :1]).any(axis=1)          # >1 plate -> a real rift
+        kinds = seg.kind[nb]
+        interior_cont = (~boundary) & ((kinds == CONTINENTAL).mean(axis=1) > 0.5)
+        kind = np.where(interior_cont, CONTINENTAL, OCEANIC).astype(np.int8)
+        # a void inside a continent is filled with crust that continues it,
+        # at the local thickness and density rather than as new ocean floor
+        th = np.where(interior_cont, seg.thickness[nb].mean(axis=1), new_thickness)
+        de = np.where(interior_cont, seg.density[nb].mean(axis=1), oceanic_density)
+        cr = np.where(interior_cont, seg.craton[nb][np.arange(pos.shape[0]), 0], 0).astype(np.int8)
+        new = Segments(pos, th, de, 0.0, plate, mean_area, kind=kind, craton=cr)
+    else:
+        new = Segments(pos, new_thickness, oceanic_density, 0.0, plate, mean_area, kind=OCEANIC)
     return new, gap
 
 

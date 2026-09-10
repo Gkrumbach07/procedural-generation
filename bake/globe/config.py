@@ -122,6 +122,9 @@ class TectonicsParams:
     craton_fraction: float = 0.45  # fraction of the continental crust that is Archean craton -- old, thick, strong nuclei welded together by weaker mobile belts. Rifting is steered around them (see intraplate.rift), which is why Gondwana split between Amazonia, West Africa, Congo and Kalahari rather than through them
     supercontinent_roughness: float = 0.45  # spherical-noise perturbation of the initial continent's margin, radians. 0 gives a circular cap; this gives embayments and promontories
     cratons: int = 24  # number of proto-craton seeds the initial continental crust is grown from; fewer/larger gives a supercontinent, more/smaller a scatter of microcontinents
+    craton_thickness: float = 1.20  # x continental_thickness for Archean cores: thick, old, buoyant. Earth's crust runs 25-45 km and ours was a spike (height spread 0.033 against Earth's 0.102), so sea level cut at a percentile of it landed inside the splat noise and mottled the whole continent
+    belt_thickness: float = 0.86  # x continental_thickness for the mobile belts between cratons: younger, thinner, and the first thing an epicontinental sea floods -- which is where interior seaways sit on Earth
+    continental_spread: float = 0.10  # relative fbm variation on continental thickness, so the distribution has width rather than two spikes
     continental_thickness: float = 1.0  # initial thickness of continental crust (Earth ~35 km)
     continental_density: float = 0.82  # normalised to mantle = 1, so Airy height = t(1-rho) = 0.18
     oceanic_thickness: float = 0.20  # initial thickness of oceanic crust (Earth ~7 km, i.e. 1/5 of continental)

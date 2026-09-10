@@ -58,7 +58,7 @@ from ..config import WorldParams
 from ..cubesphere import Grid, from_sphere_v
 from ..field import FaceField
 from ..io.world_store import WorldStore
-from ..stubs import fbm_noise
+from ..stubs import fbm_at, fbm_noise
 from . import intraplate
 from .collision import (
     CellTree,
@@ -236,7 +236,7 @@ class TectonicSim:
         if k % max(1, int(tp.label_every)) == 0 or self.idx is None:
             idx, dist = label_map_fast(seg, grid, self.r_cap, tree)
             accumulate_area(seg, idx, self.area_sr, tp.area_blend)
-            new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega)
+            new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega, tree=tree)
             n_gap = int(gap.sum())
             n_new = new.M
             if n_new and tp.gap_cooling > 0:
@@ -435,13 +435,18 @@ def initialise(params: WorldParams, log=print) -> TectonicSim:
         pos, float(tp.continental_fraction), float(tp.craton_fraction), int(tp.cratons), rng,
         float(tp.supercontinent_roughness))
     cont = kind == CONTINENTAL
-    thickness = np.where(cont, tp.continental_thickness, tp.oceanic_thickness) * (1.0 + 0.2 * (rng.random(M) - 0.5))
+    # Continental crust is not one thickness. Cratons are thick and old; the
+    # mobile belts welded between them are younger and thinner, and are what
+    # an epicontinental sea floods first. Without that spread the continental
+    # height distribution is a spike, and sea level -- placed at a percentile
+    # of it by `shelf_fraction` -- cuts inside the splat noise and mottles the
+    # whole interior into a chequerboard of land and sea.
+    cont_t = np.where(craton > 0, tp.craton_thickness, tp.belt_thickness) * tp.continental_thickness
+    cont_t = cont_t * (1.0 + float(tp.continental_spread) * fbm_at(pos, rng, octaves=4, base_freq=3.0))
+    thickness = np.where(cont, cont_t, tp.oceanic_thickness * (1.0 + 0.2 * (rng.random(M) - 0.5)))
     density = np.where(cont, tp.continental_density, tp.oceanic_density)
     plate_id = supercontinent_plates(pos, kind, int(tp.initial_plates), rng,
                                      size_jitter=float(tp.plate_size_jitter))
-    # cratons start thicker and older than the belts around them: they are
-    # the crust that survived every previous cycle
-    thickness = np.where(craton == 1, thickness * 1.15, thickness)
     seg = Segments(pos, thickness, density, 0.0, plate_id, 4.0 * math.pi / M, kind=kind, craton=craton)
     snap_cratons(seg)          # a boundary goes around a craton, not through it
     plates = Plates(int(tp.initial_plates))
