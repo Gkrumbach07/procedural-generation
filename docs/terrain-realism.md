@@ -250,3 +250,71 @@ cell may change per iteration), `dt` and `friction` (the particle step),
 and the number of iterations itself. Not `disc_saturation`, `thermal_rate`,
 `creep_rate` or `particles_per_cell`, all of which are already measured
 inert.
+
+
+## Every erosion parameter is inert against the spectrum
+
+The sweeps are now comprehensive enough to state this flatly. Nothing in
+`ErosionParams` moves β meaningfully.
+
+Previously measured inert: `particles_per_cell` (4x), `disc_saturation`
+(16x), `thermal_rate`, `creep_rate`, talus angles. Now also measured, on a
+**fixed** analysis window (chosen once on the baseline and reused, so every
+row is literally the same ground):
+
+| config | β 400–3200 | β 200–1600 | relief | lr@2000 |
+|---|---|---|---|---|
+| base | 7.30 | **6.24** | 639 m | 0.757 |
+| `iter_erode` ×4 (100 m) | 7.27 | **6.25** | 639 m | 0.757 |
+| `iter_erode` ×0.25 (6.25 m) | 7.53 | **6.27** | 645 m | 0.754 |
+| `dt` 1.2 → 0.6 | 7.40 | 6.32 | 640 m | 0.756 |
+| `friction` ×2.4 | 7.20 | 6.16 | 638 m | 0.758 |
+| 900 iterations (3x) | 8.05 | 5.88 | **359 m** | 0.696 |
+
+A **16x range on `iter_erode` moves β by 0.03**. Tripling the iterations
+moves it by 0.36 and destroys 44 % of the relief on the way — it planes the
+landscape rather than dissecting it. β ≈ 6.2 is a fixed point that no knob
+reaches.
+
+### What the run logs say instead
+
+    mean particle steps before death   20
+    particles dying at the ocean       99 %
+    largest landmass                   137 cells across
+    needed for an order 7-8 network    500-1000 cells
+
+A particle crosses about 20 cells of land on a landmass 137 wide. There is
+no room for a nested hierarchy: one or two Strahler orders where a real
+landscape has seven. That is a coherent account of the whole inert-knob
+history — **no parameter can manufacture scale range the domain does not
+contain** — and of why the network *topology* measures correct (channel
+head and concavity both in published ranges) while the spectrum does not: a
+small network is still a correct small network.
+
+It also supersedes the "erosion converges to β ≈ 6 regardless of input"
+framing in the section above. That observation stands, but calling it an
+attractor of the *kernel* was the wrong noun; it behaves like an attractor
+of the *domain*.
+
+**Not yet established**, and deliberately not claimed here: that domain size
+*causes* the floor. The obvious test — double `N_c` at fixed cell size — is
+confounded, see below.
+
+## `relief_spacings` makes world size and steepness the same knob
+
+Doubling `N_c` at fixed `cell_size_m` doubles the planet radius, and with
+the default `relief_spacings` relief is a fixed fraction of radius, so the
+bigger world is also **twice as steep** over any given window. Measured:
+
+| N_c | land across | relief | β 200–1600 | β 400–3200 |
+|---|---|---|---|---|
+| 256 | 137 cells | 639 m | 6.24 | 7.30 |
+| 512 | 276 cells | **1301 m** | 6.35 | 5.89 |
+
+β at 200–1600 m moved the *wrong* way and β at 400–3200 m improved, and
+neither is interpretable: the two worlds differ in slope as well as extent.
+
+docs/world-scale.md records this coupling as a scaling issue. It is also an
+experimental hazard: **any experiment that varies `N_c` must pin
+`tectonics.relief_m` and set `relief_spacings = 0`**, or it is comparing two
+things at once.
