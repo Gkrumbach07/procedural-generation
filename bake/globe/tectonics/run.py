@@ -437,20 +437,25 @@ def initialise(params: WorldParams, log=print) -> TectonicSim:
     lo, hi = float(noise.min()), float(noise.max())
     heat = FaceField(hgrid, (noise - lo) / max(hi - lo, 1e-9), name="heat")
     heat.exchange_halos()
-    kind, craton = seed_supercontinent(
+    kind, craton, taper = seed_supercontinent(
         pos, float(tp.continental_fraction), float(tp.craton_fraction), int(tp.cratons), rng,
-        float(tp.supercontinent_roughness))
+        float(tp.supercontinent_roughness), float(tp.craton_roughness),
+        float(tp.margin_taper), float(tp.margin_thinning))
     cont = kind == CONTINENTAL
-    # Continental crust is not one thickness. Cratons are thick and old; the
-    # mobile belts welded between them are younger and thinner, and are what
-    # an epicontinental sea floods first. Without that spread the continental
-    # height distribution is a spike, and sea level -- placed at a percentile
-    # of it by `shelf_fraction` -- cuts inside the splat noise and mottles the
-    # whole interior into a chequerboard of land and sea.
-    cont_t = np.where(craton > 0, tp.craton_thickness, tp.belt_thickness) * tp.continental_thickness
+    # Continental crust is not one thickness or one density. Cratons carry
+    # 40-45 km of crust against 30-35 for the mobile belts welded between
+    # them, but they are also *denser* (a mafic granulite lower crust), and
+    # on Earth the two very nearly cancel: shields are thick and low, not
+    # high. Height comes from the margin taper -- crust stretched thin at a
+    # rifted edge, which is what a shelf is -- and from orogeny thickening
+    # crust in the present, not from age.
+    is_cr = craton > 0
+    cont_t = np.where(is_cr, tp.craton_thickness, tp.belt_thickness) * tp.continental_thickness
+    cont_t = cont_t * taper
     cont_t = cont_t * (1.0 + float(tp.continental_spread) * fbm_at(pos, rng, octaves=4, base_freq=3.0))
     thickness = np.where(cont, cont_t, tp.oceanic_thickness * (1.0 + 0.2 * (rng.random(M) - 0.5)))
-    density = np.where(cont, tp.continental_density, tp.oceanic_density)
+    cont_rho = np.where(is_cr, tp.craton_density, tp.continental_density)
+    density = np.where(cont, cont_rho, tp.oceanic_density)
     plate_id = supercontinent_plates(pos, kind, int(tp.initial_plates), rng,
                                      size_jitter=float(tp.plate_size_jitter))
     seg = Segments(pos, thickness, density, 0.0, plate_id, 4.0 * math.pi / M, kind=kind, craton=craton)
@@ -465,7 +470,8 @@ def initialise(params: WorldParams, log=print) -> TectonicSim:
             f"({cont.mean() * 100:.1f} %) as one supercontinent, "
             f"{int((craton > 0).sum())} craton segments "
             f"({(craton > 0).sum() / max(cont.sum(), 1) * 100:.0f} % of it) in {len(np.unique(craton[craton > 0]))} nuclei; "
-            f"h_cont={tp.continental_thickness * (1.0 - tp.continental_density):.3f} "
+            f"h_craton={tp.craton_thickness * (1.0 - tp.craton_density):.3f} "
+            f"h_belt={tp.belt_thickness * (1.0 - tp.continental_density):.3f} "
             f"h_ocean={tp.oceanic_thickness * (1.0 - tp.oceanic_density):.3f} bedrock units"
         )
         log(

@@ -355,3 +355,104 @@ not all the same size either.
 
 The Atlantic opened while the Pacific plates carried on untouched; that is
 the behaviour being restored.
+
+## Cratons are thick and *low*
+
+Three defects, all visible in the same rendered globe: circular cratons,
+cratons as the only land, and far too much shallow sea.
+
+### Height should not come from age
+
+A craton was given 1.20 × the continental thickness at the same density, so
+Airy handed it the full buoyancy of the extra crust: **1.6 km above the
+mobile belts**. Sea level is a quantile of continental height, so the belts
+drowned and the cratons did not. Measured at step 1500 of the Earth preset:
+
+| | share of globe | drowned | share of all land | z p50 |
+|---|---|---|---|---|
+| craton | 30.6 % | **0.1 %** | **69.8 %** | 1391 m |
+| belt | 29.8 % | **55.7 %** | 30.2 % | −108 m |
+
+That is the whole of the "cratons are the only land" complaint, and it is
+backwards geologically. Earth's shields are thick *and low*: the Canadian
+Shield averages ~300 m, the Baltic ~200 m, the West African ~300 m, all with
+40-45 km of crust beneath them. Cratonic crust is thicker but also **denser**
+— it carries a mafic granulite lower crust that younger crust does not — and
+in real isostasy the two very nearly cancel. 40 km at ρ 2.85 over mantle 3.3
+floats at 5.45 km of buoyancy; 35 km at ρ 2.78 floats at 5.52 km. The same
+height.
+
+So `craton_density` (0.856) is set against `craton_thickness` (1.25) to give
+exactly the height of `belt_thickness` (0.92) at `continental_density`
+(0.804): 0.180 bedrock units either way. Thickness still buys everything it
+bought before — the rigid-indenter rule in `_apply_collisions` keys on
+`craton`, not on height, and `max_crust_thickness` still governs
+delamination — it just no longer buys elevation. **Elevation comes from
+crust being thickened now (Tibet, the Andes) or recently (the Urals, the
+Appalachians), not from being old.**
+
+### A shelf is stretched crust, not a different rock
+
+Removing the craton/belt height contrast removes the only spatial structure
+the continental height field had, which is the failure this contrast was
+introduced to fix: a flat continent means sea level cuts inside the splat
+noise and mottles the interior. The structure has to come from somewhere
+real, and it does — `margin_taper` thins the crust over the outermost 35 %
+of the continent to `margin_thinning` (0.45 ×), which is what a rifted
+margin is: crust stretched from ~35 km to ~10 km over a few hundred
+kilometres, sitting lower because it is thinner. It runs on the rank of the
+*already noise-perturbed* distance from the continental centre, so the
+drowned rim inherits the margin's embayments for free.
+
+The waterline now falls in that ramp, so the sea is around the edge of a
+continent rather than scattered through its middle.
+
+### A weighted Voronoi with no noise is a disc
+
+Craton blobs came from a plain weighted Voronoi on chord distance. A
+nucleus whose neighbours are far away has nothing to bend its edge, so it
+comes out an actual circle. Measured as the coefficient of variation of the
+centroid-to-boundary radius (a disc is 0; Kaapvaal, Amazonia and Superior
+run 0.25-0.45): **mean 0.152 over 22 nuclei, 13 of them under 0.15**.
+
+A single shared noise field does not help — it scales every column of the
+distance matrix alike, so `argmin` is unchanged and only the outer threshold
+moves. Each nucleus needs its *own* field, which bends the bisectors too.
+Swept at 20 000 segments:
+
+| `craton_roughness` | octaves/freq | radial CV | round (<0.15) | largest component |
+|---|---|---|---|---|
+| 0.0 | — | 0.152 | 13/22 | 1.00 |
+| 0.5 | 3 / 12 | 0.187 | 9/21 | 0.99 |
+| **0.8** | **2 / 16** | **0.321** | **1/23** | **0.95** (min 0.73) |
+| 1.2 | 2 / 16 | 0.994 | 0/22 | 0.73 (min 0.54) |
+
+0.8 lands inside the real range without tearing nuclei apart; 1.2 shreds
+them, and a craton has to stay one body for `snap_cratons` and the rift
+rule to mean anything. Frequency matters as much as amplitude: at
+`octaves=4, base_freq=5` the crenulating octaves carry 7 % of the weight and
+the noise translates a blob rather than roughening it (0.152 → 0.153 at
+amplitude 0.35 — no effect at all).
+
+### There was simply too much continent
+
+`continental_fraction` was 0.70 against Earth's ~0.40 of the surface, so
+even a correct `shelf_fraction` left 43.8 % of the globe dry and the rest of
+the continental crust as shallow interior sea. Collision thickening consumes
+continental *area*, and the loss scales with the perimeter-to-area ratio
+(measured over 1500 steps: 0.70 → 0.60, but 0.55 → 0.36), so the starting
+value has to sit above the target. 0.60 lands at **28.5 % land** against
+Earth's 29.2 %.
+
+### Together
+
+Earth preset, step 1500, on the coarse grid:
+
+| | before | after | Earth |
+|---|---|---|---|
+| land | 43.8 % | **28.5 %** | 29.2 % |
+| land p50 | 1369 m | **560 m** | ~800 m |
+| craton share of land | 69.8 % | **49.0 %** | — |
+| craton / belt drowned | 0.1 / 55.7 % | **18.0 / 34.9 %** | — |
+| within ±50 m of sea level | 6.2 % | **2.7 %** | ~1-2 % |
+| land components | speckle | **15, none under 20 cells** | — |

@@ -257,15 +257,18 @@ def tangent_to_cell_components(grid, face, u, v, v3: np.ndarray) -> np.ndarray:
 
 
 def seed_supercontinent(pos: np.ndarray, continental_fraction: float, craton_fraction: float,
-                        n_cratons: int, rng, roughness: float = 0.45) -> tuple[np.ndarray, np.ndarray]:
+                        n_cratons: int, rng, roughness: float = 0.45, craton_roughness: float = 0.35,
+                        margin_taper: float = 0.35, margin_thinning: float = 0.45,
+                        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """One assembled supercontinent with cratons inside it.
 
-    Returns ``(kind, craton)``: an (M,) int8 of :data:`OCEANIC` /
-    :data:`CONTINENTAL`, and an (M,) int8 naming the Archean core each
-    segment belongs to (0 = none, 1..n = which nucleus). The *index* matters
-    rather than a bare flag: a rift has to keep each craton whole, which
-    means knowing which craton a segment is part of, not merely that it is
-    in one.
+    Returns ``(kind, craton, taper)``: an (M,) int8 of :data:`OCEANIC` /
+    :data:`CONTINENTAL`, an (M,) int8 naming the Archean core each segment
+    belongs to (0 = none, 1..n = which nucleus), and an (M,) float of
+    crustal-thickness multipliers in ``[margin_thinning, 1]`` that thin the
+    crust towards the continental edge. The craton *index* matters rather
+    than a bare flag: a rift has to keep each craton whole, which means
+    knowing which craton a segment is part of, not merely that it is in one.
 
     Scattering continental crust as independent blobs -- what this used to
     do -- starts the world mid-dispersal and, since the model has no force
@@ -282,33 +285,65 @@ def seed_supercontinent(pos: np.ndarray, continental_fraction: float, craton_fra
     The cratons are grown inside that continent as weighted-Voronoi blobs,
     the way the Gondwana reconstruction looks: Amazonia, West Africa, Congo,
     Kalahari and the rest as discrete old nuclei, separated and surrounded
-    by the younger mobile-belt crust that welded them together.
+    by the younger mobile-belt crust that welded them together. Each craton's
+    distance field carries its *own* noise field: a plain weighted Voronoi
+    gives a craton whose neighbours are far away a perfect disc (measured
+    over 24 nuclei: mean circularity 0.75, with five at 0.98-1.12 -- actual
+    circles), because nothing but a neighbouring seed can bend its edge.
+    Independent per-craton noise bends the bisectors as well as the outer
+    boundary, so an isolated nucleus is as ragged as a crowded one.
+
+    The taper is what a continental shelf physically *is*. Crust at a rifted
+    margin has been stretched from ~35 km to ~10 km over a few hundred
+    kilometres; it is the same rock as the interior, sitting lower because
+    it is thinner. Without it the only structure in the continental height
+    field is whatever the craton/belt contrast supplies, so sea level -- a
+    quantile of continental height -- drowns crust *by class* rather than by
+    position, and the result is a scatter of dry cratons in a sea of drowned
+    belt rather than a continent with a coastline. The taper runs on the
+    rank of the already noise-perturbed distance from the continental
+    centre, so the drowned rim inherits the margin's embayments for free.
     """
     M = pos.shape[0]
     kind = np.zeros(M, dtype=np.int8)
     craton = np.zeros(M, dtype=np.int8)
+    taper = np.ones(M, dtype=np.float64)
     target = int(round(float(continental_fraction) * M))
     if target <= 0:
-        return kind, craton
+        return kind, craton, taper
 
     c = random_unit_vectors(rng, (1,))[0]
     d = np.arccos(np.clip(pos @ c, -1.0, 1.0))                 # angular distance
     if roughness > 0.0:
         d = d + roughness * fbm_at(pos, rng, octaves=4, base_freq=2.0)
-    cont = np.argsort(d, kind="stable")[:min(target, M)]
+    order = np.argsort(d, kind="stable")
+    cont = order[:min(target, M)]
     kind[cont] = CONTINENTAL
+
+    # stretched margin: rank 0 is the continental interior, rank 1 the coast
+    t_frac, t_min = float(margin_taper), float(margin_thinning)
+    if t_frac > 0.0 and t_min < 1.0:
+        rank = np.linspace(0.0, 1.0, cont.size, endpoint=True)
+        x = np.clip((rank - (1.0 - t_frac)) / max(t_frac, 1e-9), 0.0, 1.0)
+        taper[cont] = 1.0 + (t_min - 1.0) * x * x               # flat inland, steep at the edge
 
     n = int(n_cratons)
     k_target = int(round(float(craton_fraction) * cont.size))
     if n <= 0 or k_target <= 0:
-        return kind, craton
+        return kind, craton, taper
     # seeds drawn from the continent itself, so no craton lands in the ocean
     seeds = pos[rng.choice(cont, size=min(n, cont.size), replace=False)]
     w = 1.0 + 0.5 * (rng.random(seeds.shape[0]) - 0.5) * 2.0   # 0.5 .. 1.5 sizes
     dc = np.sqrt(np.maximum(2.0 - 2.0 * (pos[cont] @ seeds.T), 0.0)) / w[None, :]
+    if craton_roughness > 0.0:
+        # one *independent* field per nucleus: a single shared field scales
+        # every column alike, so argmin is untouched and only the outermost
+        # edge moves -- the bisectors, and with them the disc, survive.
+        for k in range(seeds.shape[0]):
+            dc[:, k] *= 1.0 + craton_roughness * fbm_at(pos[cont], rng, octaves=2, base_freq=16.0)
     take = np.argsort(dc.min(axis=1), kind="stable")[:k_target]
     craton[cont[take]] = (np.argmin(dc[take], axis=1) + 1).astype(np.int8)
-    return kind, craton
+    return kind, craton, taper
 
 
 def snap_cratons(seg) -> int:
