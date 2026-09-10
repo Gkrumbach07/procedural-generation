@@ -261,7 +261,11 @@ def seed_supercontinent(pos: np.ndarray, continental_fraction: float, craton_fra
     """One assembled supercontinent with cratons inside it.
 
     Returns ``(kind, craton)``: an (M,) int8 of :data:`OCEANIC` /
-    :data:`CONTINENTAL`, and an (M,) int8 flagging the Archean cores.
+    :data:`CONTINENTAL`, and an (M,) int8 naming the Archean core each
+    segment belongs to (0 = none, 1..n = which nucleus). The *index* matters
+    rather than a bare flag: a rift has to keep each craton whole, which
+    means knowing which craton a segment is part of, not merely that it is
+    in one.
 
     Scattering continental crust as independent blobs -- what this used to
     do -- starts the world mid-dispersal and, since the model has no force
@@ -302,8 +306,33 @@ def seed_supercontinent(pos: np.ndarray, continental_fraction: float, craton_fra
     seeds = pos[rng.choice(cont, size=min(n, cont.size), replace=False)]
     w = 1.0 + 0.5 * (rng.random(seeds.shape[0]) - 0.5) * 2.0   # 0.5 .. 1.5 sizes
     dc = np.sqrt(np.maximum(2.0 - 2.0 * (pos[cont] @ seeds.T), 0.0)) / w[None, :]
-    craton[cont[np.argsort(dc.min(axis=1), kind="stable")[:k_target]]] = 1
+    take = np.argsort(dc.min(axis=1), kind="stable")[:k_target]
+    craton[cont[take]] = (np.argmin(dc[take], axis=1) + 1).astype(np.int8)
     return kind, craton
 
 
-__all__ = ["seed_supercontinent", "Plates", "cluster_plates", "random_initial_omega", "heat_gradient_3d", "plate_torques", "update_omega", "rotate_segments", "segment_velocities", "tangent_to_cell_components"]
+def snap_cratons(seg) -> int:
+    """Give every craton wholly to the plate that holds most of it.
+
+    Plate boundaries follow weak lithosphere. A craton is the opposite of
+    that -- thick, cold, depleted, and strong enough that it has survived
+    every cycle since the Archean -- so a boundary generally goes around one
+    rather than through it. `cluster_plates` knows nothing about cratons and
+    was leaving 11 of 24 straddling a boundary at step 0, which then breaks
+    them up as the plates diverge.
+
+    Returns the number of cratons that had to be re-assigned. Mutates
+    `seg.plate_id` in place.
+    """
+    cr, pid = seg.craton, seg.plate_id
+    moved = 0
+    for c in np.unique(cr[cr > 0]):
+        m = cr == c
+        ids, counts = np.unique(pid[m], return_counts=True)
+        if ids.size > 1:
+            pid[m] = ids[np.argmax(counts)]
+            moved += 1
+    return moved
+
+
+__all__ = ["seed_supercontinent", "snap_cratons", "Plates", "cluster_plates", "random_initial_omega", "heat_gradient_3d", "plate_torques", "update_omega", "rotate_segments", "segment_velocities", "tangent_to_cell_components"]

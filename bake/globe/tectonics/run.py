@@ -89,6 +89,7 @@ from .plates import (
     random_initial_omega,
     rotate_segments,
     seed_supercontinent,
+    snap_cratons,
     tangent_to_cell_components,
     update_omega,
 )
@@ -440,6 +441,7 @@ def initialise(params: WorldParams, log=print) -> TectonicSim:
     # the crust that survived every previous cycle
     thickness = np.where(craton == 1, thickness * 1.15, thickness)
     seg = Segments(pos, thickness, density, 0.0, plate_id, 4.0 * math.pi / M, kind=kind, craton=craton)
+    snap_cratons(seg)          # a boundary goes around a craton, not through it
     plates = Plates(int(tp.initial_plates))
     plates.update_stats(seg)
     random_initial_omega(plates, rng, tp.initial_speed * spacing)

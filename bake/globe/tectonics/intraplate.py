@@ -44,7 +44,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from .plates import Plates, cluster_plates, random_unit_vectors
+from ..stubs import fbm_at
+from .plates import Plates, cluster_plates, random_unit_vectors, snap_cratons
 
 
 def _rebuild(seg, plate_id: np.ndarray, n_plates: int, rng, speed: float, keep: np.ndarray | None = None) -> Plates:
@@ -60,6 +61,7 @@ def _rebuild(seg, plate_id: np.ndarray, n_plates: int, rng, speed: float, keep: 
     rift but a global reorganisation wearing one.
     """
     seg.plate_id = np.ascontiguousarray(plate_id, dtype=np.int32)
+    snap_cratons(seg)          # a boundary goes around a craton, not through it
     plates = Plates(int(n_plates))
     plates.update_stats(seg)
     if keep is None:
@@ -87,8 +89,28 @@ def reorganise(sim, n_plates: int, rng) -> dict:
 
 
 def _rift_one(sim, target: int, rng) -> dict:
-    """Split plate `target` along a plane through its centre of mass."""
-    seg, plates = sim.seg, sim.plates
+    """Open a rift through plate `target`, threading between its cratons.
+
+    A rift is not a straight cut. Two things shape where it goes:
+
+    * **It is segmented.** A spreading centre is a zig-zag of ridge
+      segments offset by transform faults, because the plate cannot pull
+      apart along one smooth arc -- the Mid-Atlantic Ridge is a staircase,
+      not a line. Spherical noise added to the cut plane reproduces that at
+      the scale the model resolves.
+    * **It avoids cratons.** Archean nuclei are thick, cold and strong;
+      extension localises in the weaker mobile belts welded between them.
+      Gondwana split *between* Amazonia, West Africa, Congo and Kalahari,
+      leaving each craton intact on one side or the other, which is why the
+      same nuclei are still recognisable on both sides of the Atlantic.
+      Each craton is therefore assigned whole, by majority vote, to
+      whichever side most of it fell on.
+
+    A straight plane through the centre of mass -- what this did before --
+    cuts cratons in half as readily as anything else, which is the one thing
+    a real rift does not do.
+    """
+    seg, plates, tp = sim.seg, sim.plates, sim.tp
     sel = seg.plate_id == target
     if int(sel.sum()) < 8:
         return {"event": "rift", "split": -1}
@@ -106,7 +128,24 @@ def _rift_one(sim, target: int, rng) -> dict:
         return {"event": "rift", "split": -1}
     n /= ln
 
-    side = (seg.pos[sel] @ n) > 0.0
+    # signed distance from the plane, made a staircase by spherical noise
+    d = seg.pos[sel] @ n
+    zig = float(tp.rift_zigzag)
+    if zig > 0.0:
+        d = d + zig * fbm_at(seg.pos[sel], rng, octaves=3, base_freq=float(tp.rift_zigzag_freq))
+    side = d > 0.0
+    if side.all() or not side.any():
+        return {"event": "rift", "split": -1}
+
+    # keep every craton whole: whichever side holds most of it takes all of it
+    cr = seg.craton[sel]
+    intact = 0
+    for c in np.unique(cr[cr > 0]):
+        m = cr == c
+        maj = bool(side[m].mean() > 0.5)
+        if side[m].mean() not in (0.0, 1.0):
+            intact += 1
+        side[m] = maj
     if side.all() or not side.any():
         return {"event": "rift", "split": -1}
 
@@ -114,14 +153,15 @@ def _rift_one(sim, target: int, rng) -> dict:
     pid = seg.plate_id.copy()
     idx = np.flatnonzero(sel)
     pid[idx[side]] = P  # the far half becomes a brand-new plate
-    new = _rebuild(seg, pid, P + 1, rng, sim.tp.convection * sim.spacing, keep=plates.omega)
+    new = _rebuild(seg, pid, P + 1, rng, tp.convection * sim.spacing, keep=plates.omega)
     # override the two halves so they actually diverge across the new cut
-    sep = float(sim.tp.convection) * sim.spacing * float(sim.tp.rift_speed_factor)
+    sep = float(tp.convection) * sim.spacing * float(tp.rift_speed_factor)
     new.omega[target] = -n * sep
     new.omega[P] = n * sep
     new.omega[~new.alive] = 0.0
     sim.plates = new
-    return {"event": "rift", "split": target, "moved": int(side.sum()), "plates": int(new.n_alive())}
+    return {"event": "rift", "split": target, "moved": int(side.sum()),
+            "cratons_spared": intact, "plates": int(new.n_alive())}
 
 
 def rift(sim, rng, max_plates: int = 1) -> dict:
