@@ -91,7 +91,7 @@ class TectonicsParams:
 
     N_tect: int = 256
     segments: int = 20000
-    initial_plates: int = 8
+    initial_plates: int = 8  # plates at step 0: ONE for the assembled supercontinent, the rest tiling the ocean. A supercontinent is a single rigid block -- nothing inside it collides until it breaks up -- so rifting is what raises this count, which is the right causal order
     steps: int = 1500
     convection: float = 10.0  # ★
     growth: float = 0.0  # ★ k_G (thickness units per step).  0: continental crust changes by tectonics, not by crystallising out of the mantle everywhere -- 0.05 inflated the median thickness to 2x its birth value over a run
@@ -554,7 +554,12 @@ class WorldParams:
         p.world = WorldGroup(seed=seed, N_c=128, cell_size_m=50.0, R=2, T=64, land_fraction=0.3)
         # A 4 km body, so none of the Earth-scale settings apply. Relief goes
         # back to following the tectonic pattern's own horizontal scale;
-        # rifting is off because 300 steps is too few for it to mean anything;
+        # rifting is *required*, not optional: a supercontinent that never
+        # rifts is one rigid plate where nothing happens, so crust age,
+        # density and boundary proximity all stay uniform and the hardness
+        # field goes flat (measured land-spread 0.053 at rift_every 0 against
+        # 0.107 at 100). Three rifts over 300 steps is enough to give the
+        # world some internal structure to test against;
         # and `shelf_fraction` is off because sea level measured against the
         # continental crust is the right model for a planet that *has*
         # continents, which a 4 km body does not -- while the tests need
@@ -562,7 +567,7 @@ class WorldParams:
         # area an output.
         p.tectonics = dataclasses.replace(
             p.tectonics, N_tect=64, segments=1500, initial_plates=8, steps=300,
-            relief_spacings=1.5, height_scale_m=4000.0, shelf_fraction=0.0, rift_every=0)
+            relief_spacings=1.5, height_scale_m=4000.0, shelf_fraction=0.0, rift_every=100)
         p.climate = dataclasses.replace(p.climate, n_advect=0)  # auto: sweep until stationary (cap 4*N)
         p.erosion = dataclasses.replace(p.erosion, iterations=60, checkpoint_every=30, quicklook_every=30)
         p.watersheds = WatershedParams(basin_max_cells=48 * 48, basin_min_cells=8 * 8)
@@ -574,7 +579,9 @@ class WorldParams:
         """Even smaller profile for unit tests (seconds)."""
         p = cls.small_world(seed)
         p.world = WorldGroup(seed=seed, N_c=32, cell_size_m=50.0, R=2, T=16, land_fraction=0.3)
-        p.tectonics = dataclasses.replace(p.tectonics, N_tect=32, segments=300, initial_plates=5, steps=60)  # inherits small_world's toy-body scale
+        # 60 steps, so it needs its own rift interval to see any at all
+        p.tectonics = dataclasses.replace(p.tectonics, N_tect=32, segments=300, initial_plates=5, steps=60,
+                                          rift_every=20)  # inherits small_world's toy-body scale
         p.climate = dataclasses.replace(p.climate, n_advect=0)
         p.erosion = dataclasses.replace(p.erosion, iterations=10, checkpoint_every=5, quicklook_every=5)
         p.watersheds = WatershedParams(basin_max_cells=12 * 12, basin_min_cells=3 * 3)

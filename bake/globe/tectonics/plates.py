@@ -335,4 +335,29 @@ def snap_cratons(seg) -> int:
     return moved
 
 
-__all__ = ["seed_supercontinent", "snap_cratons", "Plates", "cluster_plates", "random_initial_omega", "heat_gradient_3d", "plate_torques", "update_omega", "rotate_segments", "segment_velocities", "tangent_to_cell_components"]
+def supercontinent_plates(pos: np.ndarray, kind: np.ndarray, n_plates: int, rng,
+                          size_jitter: float = 0.35) -> np.ndarray:
+    """Plate 0 is the whole assembled continent; the rest tile the ocean.
+
+    A supercontinent is *one plate*. Pangaea sat in Panthalassa as a single
+    rigid block, and that is the point of it: nothing inside a supercontinent
+    collides, so there is no orogeny in its interior until it breaks up and
+    the pieces converge again. Partitioning every segment with
+    `cluster_plates` instead spread the continent over seven plates at step
+    0, including craton-sized slivers as plates of their own, which starts
+    the world mid-collision and mid-dispersal at once.
+
+    Rifting is what raises the plate count from here (see
+    :func:`~globe.tectonics.intraplate.rift`), which is the right causal
+    order: one continent, then breakup, then a crowd of plates.
+    """
+    M = pos.shape[0]
+    pid = np.zeros(M, dtype=np.int32)
+    sea = kind != CONTINENTAL
+    n_ocean = max(1, int(n_plates) - 1)
+    if sea.any():
+        pid[sea] = cluster_plates(pos[sea], n_ocean, rng, size_jitter=size_jitter) + 1
+    return pid
+
+
+__all__ = ["seed_supercontinent", "supercontinent_plates", "snap_cratons", "Plates", "cluster_plates", "random_initial_omega", "heat_gradient_3d", "plate_torques", "update_omega", "rotate_segments", "segment_velocities", "tangent_to_cell_components"]

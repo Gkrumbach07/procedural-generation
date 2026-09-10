@@ -90,6 +90,7 @@ from .plates import (
     rotate_segments,
     seed_supercontinent,
     snap_cratons,
+    supercontinent_plates,
     tangent_to_cell_components,
     update_omega,
 )
@@ -436,7 +437,8 @@ def initialise(params: WorldParams, log=print) -> TectonicSim:
     cont = kind == CONTINENTAL
     thickness = np.where(cont, tp.continental_thickness, tp.oceanic_thickness) * (1.0 + 0.2 * (rng.random(M) - 0.5))
     density = np.where(cont, tp.continental_density, tp.oceanic_density)
-    plate_id = cluster_plates(pos, int(tp.initial_plates), rng, size_jitter=float(tp.plate_size_jitter))
+    plate_id = supercontinent_plates(pos, kind, int(tp.initial_plates), rng,
+                                     size_jitter=float(tp.plate_size_jitter))
     # cratons start thicker and older than the belts around them: they are
     # the crust that survived every previous cycle
     thickness = np.where(craton == 1, thickness * 1.15, thickness)

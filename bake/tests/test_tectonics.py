@@ -232,34 +232,36 @@ def test_relief_stays_under_the_talus_angle_away_from_the_coast():
     """The tail `test_relief_follows_the_tectonic_spacing` cannot check.
 
     Land at the angle of repose is the failure the relief scaling exists to
-    prevent, and it needs a preset whose segment spacing the coarse grid
-    resolves before the number means anything.
+    prevent. Measured at the **shipping vertical scale** -- Airy isostasy,
+    `height_scale_m` metres per bedrock unit on an Earth-radius body -- at a
+    cheap resolution, rather than on `small`, whose `relief_spacings` scaling
+    ties relief to a 4 km body and is used by nothing but the test presets.
+    The difference is not marginal: 0.00 % of inland land above the talus
+    angle at the Earth scale against 4.11 % on the toy one.
 
-    Measured away from the coast, because the coastline is a different
-    quantity.  Crust types made the continent-ocean contact a real ~4 km step
-    in bedrock height, and on a 4 km test body with 50 m cells that step falls
-    across a handful of cells and is genuinely at the talus angle -- Earth
-    softens it with a shelf-slope-rise ramp built from sediment, which the
-    tectonics stage does not model.  Including those cells measures the margin
-    geometry; excluding them measures the relief scaling, which is what this
-    test is for.
+    Away from the coast, because the coastline is a different quantity. Crust
+    types made the continent-ocean contact a real ~4 km step in bedrock
+    height, which on a small body falls across a handful of cells and is
+    genuinely at the angle of repose; Earth softens it with a sediment
+    shelf-slope-rise ramp that tectonics does not model. Including those
+    cells measures the margin geometry, excluding them measures the relief
+    scaling this test is named for.
     """
-    p = WorldParams.small_world()
-    sim = tect.simulate(p, log=None)
-    out = tect.finalise(sim)
-    grid = p.coarse_grid()
+    p = WorldParams().with_overrides(
+        world={"N_c": 128, "cell_size_m": 9773.0, "R": 2},
+        tectonics={"N_tect": 64, "segments": 1500, "steps": 300, "rift_every": 100},
+    )
+    out = tect.finalise(tect.simulate(p, log=None))
     bed = out["bedrock"].interior
     land = bed > 0
     slope = out["bedrock"].gradient().vec_norm().interior
     coast = np.zeros_like(land)
     for f in range(6):                     # land within 2 cells of ocean
-        o = ndimage.binary_dilation(~land[f], iterations=2)
-        coast[f] = o & land[f]
+        coast[f] = ndimage.binary_dilation(~land[f], iterations=2) & land[f]
     inland = land & ~coast
     assert inland.sum() > 0.3 * land.sum(), "too little inland to measure"
     frac = float((slope[inland] > p.erosion.talus_slope_hard).mean())
     assert frac < 0.02, (frac, out["_land_slope"])
-
 
 def test_shelf_sea_level_cuts_the_continental_crust():
     """Sea level must land *inside* the continental hump, not in the trough.
