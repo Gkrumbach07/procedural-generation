@@ -77,23 +77,35 @@ Glacial carving costs about 4 s/iteration on top of the ~7 s base, and takes
 the maximum elevation down 7300 → 4900 in fifty iterations. Whether that is
 too strong is the open question above.
 
-## The continental shelf is arithmetically excluded from deposition
+## Offshore sediment: a mild bias, and a hypothesis that failed
 
-Where eroded material ends up, at the end of the run:
+Where eroded material ends up at the end of the run, **normalised by the
+area of each zone** — which is the only way to read it:
 
-```
-deep water (< −200 m)   86.4 %
-shelf (−200..0)          4.9 %
-coast (0..50)            0.4 %
-land (> 50)              8.7 %
-```
+| zone | % of globe | % of sediment | concentration |
+|---|---|---|---|
+| deep (< −200 m) | 65.08 | 86.4 | **1.33×** |
+| shelf (−200..0) | 8.33 | 4.9 | **0.59×** |
+| coast (0..50) | 1.89 | 0.5 | 0.26× |
+| land (> 50) | 24.70 | 8.2 | 0.33× |
 
-On Earth the shelves and slopes trap the great majority of terrigenous
-sediment and the abyssal plains get comparatively little. Here it is close
-to inverted, and the cause looks structural rather than a matter of tuning.
+Sediment is about **2.3× more concentrated in deep water than on the
+shelf**. On Earth the shelves and slopes are the *more* concentrated of the
+two, so this is a real bias and worth chasing eventually — but a mild one.
 
-In `erosion/particle.py` the deposition ceiling on the seafloor is defined
-*relative to the previous cell on the particle's path*:
+**Read the raw shares and you will overstate this badly.** "86 % goes to the
+abyss and 5 % to the shelf" invites the conclusion that the margins are
+being bypassed wholesale; in fact deep water is 65 % of the globe, so 86 %
+is a 1.33× concentration. The shelf is 8.33 % of the surface here, squarely
+inside Earth's 7–8 %, so it is not unusually narrow either. The session that
+produced these numbers built three rounds of analysis, a proposed fix and a
+hand-off note on the un-normalised version before catching it.
+
+### `fan_slope` is not the cause — tested and refuted
+
+The proposed mechanism was structural. In `erosion/particle.py` the
+deposition ceiling on the seafloor is defined *relative to the previous cell
+on the particle's path*:
 
 ```python
 ceil = hflat[ref] + sflat[ref] + aflat[ref] + DEP_FLOOR
@@ -102,22 +114,29 @@ if s_c < 0.0 and is_step:
 ```
 
 `fan_slope` is a genuine dimensionless gradient (height in cell units, per
-cell), so the shipped 0.05 is a **5 % slope** — continental-slope steep,
-where real submarine fans run 0.1–1 %. At 9773 m cells that is 489 m of
-descent per cell: one cell offshore the ceiling is at −489 m, two cells at
-−978 m. A shelf is ~200 m deep, so `lim = ceil - s_c` is negative there and
-**no particle can unload on a shelf at all**. It walks — up to
-`ocean_steps = 64`, a 626 km runout over which the ceiling falls 31 km —
-until the real seafloor drops below that staircase, which is deep water.
+cell), so the shipped 0.05 is a 5 % slope where real submarine fans run
+0.1–1 %. At 9773 m cells that is 489 m of descent per cell, which appeared
+to put the ceiling below any shelf within one cell and make `lim = ceil -
+s_c` negative there — i.e. deposition on a shelf would be arithmetically
+impossible.
 
-Something near `fan_slope = 0.002` would let a fan run its full 64 cells and
-descend ~1.25 km, which is a fan rather than a cliff. **Untested**; the
-prediction is that shelf share rises well above 5 %.
+Forking the erosion state at iteration 800 and running 25 iterations at each
+value says otherwise:
 
-Why it matters beyond realism: sediment that leaves the continental margin
-can never backfill a valley or build a coastal plain, so base level is never
-locally raised and incision never slows. It is a plausible contributor to
-the land-planing seen in the pre-glacial regime.
+| | shelf share | deep share | land median |
+|---|---|---|---|
+| `fan_slope = 0.05` | 4.92 → 4.89 | 86.37 → 86.73 | 585 → 540 |
+| `fan_slope = 0.002` | 4.92 → 4.86 | 86.37 → **86.80** | 585 → 540 |
+
+A 25× reduction changes nothing; every figure matches to two decimals. The
+ceiling is not the binding constraint. Candidates not yet eliminated: the
+`is_step` gate may mean most seafloor deposition never takes that branch;
+`iter_deposit`, `fan_room` or the fill-to-just-below-sea-level clamp may
+bind first; or the distribution may be set by where particles *die*
+(`DEATH_OCEAN` after `ocean_steps = 64`) rather than by any ceiling.
+
+The harness is `maps.step` on a forked `ErosionState` — cheap, ~7 minutes
+for both arms — and is the right shape for testing the remaining candidates.
 
 ## Refine is not runnable as a pre-bake, confirmed at Earth scale
 
@@ -140,8 +159,9 @@ this stage completing.
    after). Re-run tectonics alone at 0.004 and 0.002 to isolate the first;
    vary `glacial_rate` / `glacial_max` on a checkpoint at iteration 600 to
    isolate the second. Do not tune both at once.
-2. **Test `fan_slope`.** Fork the erosion state at iteration 800 and run ~25
-   iterations at 0.05 and 0.002, comparing the sediment split. Prediction:
-   shelf share rises well above 5 %.
+2. **Offshore sediment**, if it is worth the time: shelf concentration is
+   0.59× against deep water's 1.33×, a 2.3× bias. `fan_slope` is ruled out
+   (above). Instrument where particles die before proposing another
+   mechanism.
 3. **Ocean depth** (−2142 m against −3700) — check whether it is sediment
    fill from (2), or the ridge-buoyancy / oceanic-thickness pair.
