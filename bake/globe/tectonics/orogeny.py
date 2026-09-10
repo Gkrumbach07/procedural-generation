@@ -155,7 +155,7 @@ def relax_orogens(seg, baseline_m: float, floor_m: float, height_unit_m: float,
     ledger. Keying on *height* rather than thickness is what keeps a craton
     safe: a craton is thick but floats at the baseline, so its excess is zero
     and it never decays, while a belt at Tibetan thickness is 5 km above it
-    and comes down. The floor is :data:`TYPES`\ ``["ural"].crest_m`` -- a
+    and comes down. The floor is ``TYPES["ural"].crest_m`` -- a
     dead belt settles at the height of a dead belt, not at zero.
 
     An active belt is fed faster than this takes it away, so the two need no
