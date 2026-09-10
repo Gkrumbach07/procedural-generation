@@ -78,13 +78,21 @@ def render(z, river, cell, style="neutral", px=1000, sea=0.0):
     return img.resize((px, px), Image.LANCZOS)
 
 
-def load(world: Path):
+def load(world: Path, level: str = "auto"):
+    """The finest surface the world has, with its cell size.
+
+    A world baked only `--to erosion` has no `fine/`, so fall back to the
+    coarse grid rather than failing -- comparing erosion-stage output across
+    configurations is most of what this gets used for.
+    """
     m = json.loads((world / "manifest.json").read_text())
     R = int(m["params"]["world"]["R"])
-    cell = float(m["params"]["world"]["cell_size_m"]) / R
-    h = np.stack([np.load(world / "fine" / f"height.f{f}.npy") for f in range(6)]).astype(np.float64)
-    rp = world / "fine" / "river_mask.f0.npy"
-    riv = (np.stack([np.load(world / "fine" / f"river_mask.f{f}.npy") for f in range(6)]).astype(bool)
+    cs = float(m["params"]["world"]["cell_size_m"])
+    use_fine = (world / "fine" / "height.f0.npy").exists() if level == "auto" else (level == "fine")
+    d, cell = (("fine", cs / R) if use_fine else ("coarse", cs))
+    h = np.stack([np.load(world / d / f"height.f{f}.npy") for f in range(6)]).astype(np.float64)
+    rp = world / d / "river_mask.f0.npy"
+    riv = (np.stack([np.load(world / d / f"river_mask.f{f}.npy") for f in range(6)]).astype(bool)
            if rp.exists() else np.zeros(h.shape, bool))
     return h, riv, cell
 
@@ -114,8 +122,9 @@ def main() -> int:
     ap.add_argument("--style", choices=("neutral", "natural"), default="neutral")
     ap.add_argument("--px", type=int, default=1000)
     ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--level", choices=("auto", "fine", "coarse"), default="auto")
     a = ap.parse_args()
-    h, riv, cell = load(a.world)
+    h, riv, cell = load(a.world, a.level)
     side = min(h.shape[1], int(round(a.km * 1000.0 / cell)))
     b = best_patch(h, riv, side)
     if b is None:
