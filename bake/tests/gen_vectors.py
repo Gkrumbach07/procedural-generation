@@ -1,4 +1,4 @@
-"""Generate tests/data/cubesphere_vectors.bin (shared with gdextension/tests).
+"""Generate tests/data/cubesphere_vectors.bin.
 
 Format (little endian): magic b"CSV2", int32 K, then K records packed as
 ``'<idddddidd'`` (64 bytes):

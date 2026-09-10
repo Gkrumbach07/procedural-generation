@@ -2,6 +2,33 @@
 Procedurally generate a finite, globe-shaped world by simulating plate tectonics, climate, and particle-based hydraulic erosion (after Nick McDonald / weigert's work), partition the result into watersheds, refine each watershed in parallel, and bake everything to tiles that a Godot 4 project streams and renders.
 This document is written to be handed to a coding agent. Everything in **Decisions** is locked; everything else is the recommended route with reasons, and the agent should push back in a PR description if it finds a materially better approach rather than silently diverging.
 ---
+## Status — what has changed since this plan was written
+
+This document is the original design and its locked decisions. Most of it
+still holds for `bake/`, but the runtime half has been deliberately dropped.
+Read this block before trusting §0's goals, the repository tree, or §12.
+
+* **`gdextension/` and `game/` are gone.** The in-engine Godot integration
+  (goal 2, §12, and the C++ GDExtension) was cut. What replaced it is
+  `bake/scripts/export_godot.py`: a standalone Godot project that shows the
+  baked world as a globe you can orbit, generated from the coarse grid. It
+  needs neither the refine stage nor the tile pyramid.
+* **"Visible planetary curvature" is no longer a non-goal.** Quicklooks
+  render orthographic globes (`viz/quicklook.py: to_globe`), and the export
+  is a displaced sphere.
+* **"Everything is precomputed" no longer holds for refine.** Measured at
+  Earth scale, the refine stage is 9684 basins at ~109 s each — 6 to 73
+  hours (docs/pipeline-cost.md). Basins are to be refined ahead of the
+  camera, not pre-baked. The coarse global bake is still precomputed.
+* **The `earth` preset is the default**: 1024² faces, 9773 m cells,
+  1500 tectonic steps, 800 erosion iterations.
+* **Crust is typed.** Oceanic vs continental, cratons vs mobile belts, and
+  orogens with real cross-sections — none of which §5 anticipated. See
+  docs/crust-types.md.
+* Results and open defects from the first complete Earth-scale run are in
+  **docs/earth-bake.md**.
+
+---
 ## 0. Goals, non-goals, decisions
 ### Goals
 1. A deterministic offline **bake tool** (`bake/`) that turns `(seed, params)` into a complete world on disk: heights, water, rock/soil, climate, a drainage graph, and a watershed partition, at two resolutions (coarse global and fine per-tile).

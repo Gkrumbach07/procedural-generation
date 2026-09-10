@@ -199,3 +199,29 @@ predictably, but neither is cheap to iterate on.
 2. **Stop spending on particle count.** `particles_per_cell` is a linear
    cost with a measured null effect. If erosion needs to get more expensive,
    it should be in iterations or in the kernel, not in particles.
+
+## Measured at Earth scale (the first complete run)
+
+The cost model above is borne out. On 4 cores, `earth` preset, 1024² faces:
+
+| stage | wall clock | share |
+|---|---|---|
+| tectonics | 247 s | 3.3 % |
+| climate | 56 s | 0.8 % |
+| **erosion** | **7038 s** | **94.9 %** |
+| hydro | 3.7 s | 0.05 % |
+| watersheds | 3.9 s | 0.05 % |
+| refine | *stopped* | — |
+
+Erosion is 800 iterations at ~7 s each pre-glaciation and ~11 s each after
+iteration 600, when the glacial pass switches on and adds ~4 s/iteration.
+
+**Refine, measured rather than modelled.** 9684 basins, 4 workers, and the
+first basin took 109 s (53482 cells, 752² window, 150 iterations, 7.9 M
+particles). At that rate the stage is **~73 hours**; even assuming that
+basin is among the largest and the mean is ten times cheaper, 6–7 hours.
+
+This confirms the architectural conclusion at the scale that matters:
+**do not pre-bake the tile pyramid.** Refine basins ahead of the camera.
+`export_godot.py` reads the coarse grid, so the globe export does not depend
+on refine or tiles at all.

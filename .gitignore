@@ -2,18 +2,11 @@ __pycache__/
 *.pyc
 *.egg-info/
 .pytest_cache/
+.ruff_cache/
 .numba_cache/
-worlds/
-!bake/tests/data/
-game/data/worlds/*
-!game/data/worlds/.gitkeep
-gdextension/bin/
-gdextension/.sconsign.dblite
-gdextension/src/*.o
-gdextension/src/*.os
-game/.godot/
-*.import
 build/
 dist/
-gdextension/tests/test_cubesphere
+# baked worlds: large, reproducible from a seed, never committed
+worlds/
 bake/erosion_runs/
+!bake/tests/data/
