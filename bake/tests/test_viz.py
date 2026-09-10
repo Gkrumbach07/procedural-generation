@@ -130,10 +130,69 @@ def test_terrain_scale_pins_the_palette_across_frames():
     a = FaceField.from_function(g, lambda p: 800 * p[..., 2], dtype=np.float32, name="a")
     b = a.copy()
     b.data[0] += 4000.0  # one face grows a plateau; the other five are untouched
-    keep = (slice(1, 6),)
+    # The interiors of the untouched faces, one cell in: shading is now
+    # seamless, so raising face 0 legitimately changes the shared edge ring of
+    # every face that touches it. That is the fix for the cube seam, not a
+    # regression — what must not change is the *tint* away from the join.
+    keep = (slice(1, 6), slice(1, -1), slice(1, -1))
     auto_a, auto_b = ql.render_height(a)[keep], ql.render_height(b)[keep]
     assert not np.array_equal(auto_a, auto_b)  # the untouched faces re-tint
     sc = ql.terrain_scale(a)
     fix_a, fix_b = ql.render_height(a, **sc)[keep], ql.render_height(b, **sc)[keep]
     assert np.array_equal(fix_a, fix_b)  # pinned: untouched faces render identically
     assert set(sc) == {"z_factor", "hmax", "hmin"}
+
+
+def test_globe_render_is_seamless_and_correctly_oriented():
+    """A field that varies only with latitude must render as horizontal bands.
+
+    Two bugs this catches, both invisible on the unfolded net and both
+    obvious on a globe:
+
+    * `Grid.uv_cell` maps u -> i and v -> j. Sampling the other way round
+      transposes every face, so a latitude ramp comes out as vertical
+      stripes that look like bad data rather than bad indexing.
+    * hillshading each face in its own (i, j) frame gives every face its own
+      light direction, so the tone steps at each cube edge. The shading has
+      to come from a world-space normal.
+
+    Three things the measurement has to avoid, each of which produced a
+    false failure while this was being written: a single light varies along
+    a line of latitude by design (so orientation is checked unshaded); the
+    ocean-to-shore tint step is a real discontinuity (so the seam check uses
+    an all-land field); and near the limb many cells fall in one pixel, so
+    steps there are projection compression rather than seams (so it checks
+    the inner disc).
+    """
+    from globe.cubesphere import get_grid
+    from globe.viz import quicklook as ql
+
+    g = get_grid(96, 1)
+    z = g.interior_centers[..., 1] * 1000.0          # smooth: depends only on latitude
+    size = 256
+    yy, xx = np.mgrid[0:size, 0:size]
+    c = (size - 1) / 2.0
+
+    def disc_of(rr):
+        return ((xx - c) ** 2 + (yy - c) ** 2) < (rr * size / 2) ** 2
+
+    # -- orientation: unshaded, away from the poles, per channel -----------
+    flat = ql.to_globe(ql.render_height(z, cell_size=g.cell_size_m, shade_strength=0.0),
+                       size=size, two=False, lat0=0.0).astype(np.float64)
+    d86 = disc_of(0.86)
+    span = flat[..., 1][d86].max() - flat[..., 1][d86].min()
+    # screen y = sin(latitude), so a row near a pole spans a wide latitude range
+    band = [i for i in range(size) if d86[i].sum() > 20 and abs(i - c) < 0.55 * size / 2]
+    rows = np.array([flat[i][d86[i]].std(axis=0).mean() for i in band])
+    assert rows.mean() < 0.06 * span, (rows.mean(), span)
+
+    # -- seams: shaded, all land, inner disc -------------------------------
+    shaded = ql.to_globe(ql.render_height(z + 3000.0, cell_size=g.cell_size_m),
+                         size=size, two=False, lat0=0.0).astype(np.float64)
+    d = disc_of(0.7)
+    inner = d[1:-1, 1:-1] & d[:-2, 1:-1] & d[2:, 1:-1] & d[1:-1, :-2] & d[1:-1, 2:]
+    step = np.maximum(np.abs(shaded[1:-1, 1:-1] - shaded[:-2, 1:-1]).max(-1),
+                      np.abs(shaded[1:-1, 1:-1] - shaded[1:-1, :-2]).max(-1))
+    # measured 4 with the world-space normal; the per-face bug drew a line of
+    # tens of levels, so 12 separates them with room to spare
+    assert step[inner].max() < 12.0, step[inner].max()

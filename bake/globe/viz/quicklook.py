@@ -62,10 +62,57 @@ def _terrain_cmap(h: np.ndarray, sea_level: float = 0.0, hmax: float | None = No
     return out
 
 
+def _ring(h: np.ndarray) -> np.ndarray:
+    """(6, N, N) -> (6, N+2, N+2) with one ring of true neighbour values.
+
+    Without it the outermost row and column of every face get a one-sided
+    (here: zero) gradient, so each face is rimmed with flat shading. On the
+    unfolded net that reads as a faint border; on a globe it is a dark seam
+    tracing the cube, which is the one shape the render exists to hide.
+    """
+    from ..cubesphere import get_grid
+    from ..field import FaceField
+
+    return FaceField.from_interior(get_grid(h.shape[-1], 1), h, exchange=True).data
+
+
 def hillshade(h: np.ndarray, cell_size: float = 1.0, azimuth_deg: float = 315.0, altitude_deg: float = 45.0, z_factor: float = 1.0) -> np.ndarray:
     """Lambertian hillshade of a (…, N, N) height array indexed [i, j]
-    (i = x/east, j = y/south in image terms). Returns [0, 1] floats."""
+    (i = x/east, j = y/south in image terms). Returns [0, 1] floats.
+
+    A (6, N, N) array is shaded as a **sphere**: the surface normal is built
+    in world space from the cell's own 3-D tangent frame and lit by a single
+    fixed direction. Shading per face in face-local (i, j) instead gives each
+    face its own idea of where the light is, so the tone jumps at every cube
+    edge — invisible on the unfolded net, and on a globe a hard seam tracing
+    the cube, which is the one shape the render exists to hide. (The gradients
+    also need a halo, or each face is rimmed with flat shading.)
+    """
     h = np.asarray(h, dtype=np.float64) * z_factor
+    if h.ndim == 3 and h.shape[0] == 6:
+        from ..cubesphere import get_grid
+
+        g = get_grid(h.shape[-1], 1)
+        p = g.centers.astype(np.float64)          # (6, N+2, N+2, 3) unit vectors
+        q = _ring(h)
+        r = p[:, 1:-1, 1:-1]
+        ti = p[:, 2:, 1:-1] - p[:, :-2, 1:-1]
+        tj = p[:, 1:-1, 2:] - p[:, 1:-1, :-2]
+
+        def ortho(t):
+            t = t - r * np.sum(t * r, axis=-1, keepdims=True)
+            return t / np.maximum(np.linalg.norm(t, axis=-1, keepdims=True), 1e-12)
+
+        xh, yh = ortho(ti), ortho(tj)
+        dhx = (q[:, 2:, 1:-1] - q[:, :-2, 1:-1]) / (2.0 * cell_size)
+        dhy = (q[:, 1:-1, 2:] - q[:, 1:-1, :-2]) / (2.0 * cell_size)
+        n = r - dhx[..., None] * xh - dhy[..., None] * yh
+        n = n / np.maximum(np.linalg.norm(n, axis=-1, keepdims=True), 1e-12)
+        az, alt = np.deg2rad(azimuth_deg), np.deg2rad(altitude_deg)
+        # a fixed world-space light: up-ish, from the -z/+x quarter
+        L = np.array([np.cos(alt) * np.sin(az), np.sin(alt), np.cos(alt) * np.cos(az)])
+        L = L / np.linalg.norm(L)
+        return np.clip(np.sum(n * L, axis=-1) * 0.5 + 0.5, 0.0, 1.0)
     dx = np.zeros_like(h)
     dy = np.zeros_like(h)
     dx[..., 1:-1, :] = (h[..., 2:, :] - h[..., :-2, :]) / (2 * cell_size)
@@ -194,13 +241,75 @@ def to_net(img_fij: np.ndarray) -> np.ndarray:
     return unfold([face_image(img_fij[f]) for f in range(6)])
 
 
-def save_image(path: str | Path, img: np.ndarray, net: bool = True, max_size: int = 4096) -> Path:
-    """Save a (6, N, N, 3) [f, i, j] image as an unfolded net PNG (or a
-    row of faces if ``net=False``).  Down-samples if wider than max_size."""
+def to_globe(img_fij: np.ndarray, size: int = 1024, lon0: float = 0.0, lat0: float = 20.0,
+             two: bool = True, bg: int = 12) -> np.ndarray:
+    """(6, N, N[, C]) [f, i, j] -> orthographic globe(s).
+
+    The unfolded net is a debugging view: it shows all six faces at once at
+    the cost of showing a shape the world does not have, and every quantity
+    that matters here (how a continent is shaped, where a rift runs, whether
+    an orogen is a belt or a blob) is distorted differently on each face.
+    A globe is the thing itself.
+
+    With `two`, draws the far side beside the near one, so a whole world is
+    visible in a single image -- otherwise half of every world is
+    permanently behind the camera.
+    """
+    from ..cubesphere import from_sphere_v
+
+    def hemisphere(lon_c, lat_c):
+        y, x = np.mgrid[0:size, 0:size]
+        # unit disc, y up
+        xs = (x - size / 2.0 + 0.5) / (size / 2.0 - 1.0)
+        ys = -(y - size / 2.0 + 0.5) / (size / 2.0 - 1.0)
+        r2 = xs * xs + ys * ys
+        on = r2 <= 1.0
+        zs = np.sqrt(np.clip(1.0 - r2, 0.0, None))
+        la, lo = np.radians(lat_c), np.radians(lon_c)
+        # rotate the disc's (x, y, z) into world coordinates
+        ex = np.array([np.cos(lo), 0.0, -np.sin(lo)])
+        ey = np.array([-np.sin(la) * np.sin(lo), np.cos(la), -np.sin(la) * np.cos(lo)])
+        ez = np.array([np.cos(la) * np.sin(lo), np.sin(la), np.cos(la) * np.cos(lo)])
+        p = (xs[..., None] * ex + ys[..., None] * ey + zs[..., None] * ez)
+        n = np.linalg.norm(p, axis=-1, keepdims=True)
+        p = p / np.maximum(n, 1e-12)
+        f, u, v = from_sphere_v(np.ascontiguousarray(p.reshape(-1, 3)))
+        N = img_fij.shape[1]
+        # Grid.uv_cell maps u -> i and v -> j; swapping them transposes every
+        # face, which on a globe reads as the data being wrong rather than the
+        # indexing
+        i = np.clip((u * N).astype(np.int64), 0, N - 1)
+        j = np.clip((v * N).astype(np.int64), 0, N - 1)
+        out = img_fij[f, i, j].reshape(size, size, -1) if img_fij.ndim == 4 else \
+              img_fij[f, i, j].reshape(size, size, 1)
+        out = np.where(on[..., None], out, np.uint8(bg))
+        return out.astype(np.uint8)
+
+    near = hemisphere(lon0, lat0)
+    if not two:
+        return near[..., 0] if near.shape[-1] == 1 else near
+    far = hemisphere(lon0 + 180.0, lat0)
+    gap = np.full((size, max(8, size // 64), near.shape[-1]), np.uint8(bg))
+    out = np.concatenate([near, gap, far], axis=1)
+    return out[..., 0] if out.shape[-1] == 1 else out
+
+
+def save_image(path: str | Path, img: np.ndarray, net: bool = True, max_size: int = 4096,
+               view: str = "globe", globe_size: int = 1024) -> Path:
+    """Save a (6, N, N, 3) [f, i, j] image.
+
+    `view` is "globe" (two orthographic hemispheres, the default), "net"
+    (the unfolded cube, for debugging face seams and indexing) or "row".
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if img.ndim == 4 and img.shape[0] == 6:
-        out = to_net(img) if net else np.concatenate([face_image(img[f]) for f in range(6)], axis=1)
+        if view == "globe":
+            out = to_globe(img, size=globe_size)
+        elif view == "row" or not net:
+            out = np.concatenate([face_image(img[f]) for f in range(6)], axis=1)
+        else:
+            out = to_net(img)
     else:
         out = img
     im = Image.fromarray(np.ascontiguousarray(out))

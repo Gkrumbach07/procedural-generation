@@ -397,7 +397,7 @@ def frame_image(sim, width: int = 900):
     from ..viz import quicklook as ql
 
     img = ql.render_height(frame_bed(sim), cell_size=sim.grid.cell_size_m)
-    im = Image.fromarray(np.ascontiguousarray(ql.to_net(img)))
+    im = Image.fromarray(np.ascontiguousarray(ql.to_globe(img, size=max(256, width // 2))))
     if im.width != width:
         im = im.resize((width, max(1, round(im.height * width / im.width))), Image.LANCZOS)
     return im
