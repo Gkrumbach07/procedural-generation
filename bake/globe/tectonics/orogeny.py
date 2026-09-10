@@ -63,12 +63,23 @@ class Orogen:
     def crest_m(self) -> float:
         return max(z[2] for z in self.zones)
 
-    def profile(self, x_km: np.ndarray) -> np.ndarray:
-        """Height (m) at signed cross-belt distance `x_km`.
+    @property
+    def lead_km(self) -> float:
+        """How far the profile reaches onto the *down-going* plate."""
+        return self.zones[0][1]
 
-        `x` runs from the down-going side (negative, the trench or the
-        foreland) through the range to the far side. Outside the belt the
-        profile is 0, so a segment beyond it is untouched.
+    @property
+    def reach_km(self) -> float:
+        """How far it reaches onto the *overriding* plate."""
+        return self.width_km - self.zones[0][1]
+
+    def profile(self, x_km: np.ndarray) -> np.ndarray:
+        """Height (m) at signed cross-belt distance `x_km` from the suture.
+
+        `x` runs from the down-going side (negative: the trench, or the
+        foreland basin flexed down under the thrust load) through the range
+        and out the far side. Outside the belt the profile is 0, so a
+        segment beyond it is untouched.
         """
         edges = np.cumsum([0.0] + [z[1] for z in self.zones]) - self.zones[0][1]
         heights = np.array([0.0] + [z[2] for z in self.zones], dtype=np.float64)
@@ -124,76 +135,180 @@ def classify(kind_lo: int, kind_su: int, craton_su: int, flat_slab: bool, contin
     return "andean"
 
 
-def age_to_ural(h: np.ndarray, ages: np.ndarray, half_life: float) -> np.ndarray:
-    """Relax an orogen's relief toward the `ural` profile as it ages.
+def relax_orogens(seg, baseline_m: float, floor_m: float, height_unit_m: float,
+                  rate: float, continental: int) -> float:
+    """Wear active orogens down into former ones. Returns the mass shed.
 
-    An orogen is only high while it is being built. Once convergence stops
-    the range decays -- erosion strips it, the thickened root relaxes -- and
-    what survives is a low welt with a deep crustal root under it, which is
-    what the Urals and the Appalachians are. Without this, every belt a
-    world ever built stays at full height forever and the continents end up
-    a mess of ranges of every age at the same elevation.
+    An orogen is only high while it is being built. Once convergence moves
+    elsewhere the range comes down -- erosion strips it, the thickened root
+    delaminates -- and what survives is a low welt with its root still under
+    it: the Urals, the Appalachians, the Caledonides, the belts that make a
+    continental interior interesting rather than flat.
+
+    Without this every belt a world ever built stays at full height forever.
+    Measured on the Earth preset at step 1500 with the profile belts in and
+    no decay, **31.2 %** of the land stood above 2 km against Earth's ~11 %:
+    not one Tibet but fifty, because nothing had ever taken one down.
+
+    Height above ``baseline_m + floor_m`` decays at ``rate`` per step and the
+    crust goes back to the mantle, so it is a real sink and shows in the
+    ledger. Keying on *height* rather than thickness is what keeps a craton
+    safe: a craton is thick but floats at the baseline, so its excess is zero
+    and it never decays, while a belt at Tibetan thickness is 5 km above it
+    and comes down. The floor is :data:`TYPES`\ ``["ural"].crest_m`` -- a
+    dead belt settles at the height of a dead belt, not at zero.
+
+    An active belt is fed faster than this takes it away, so the two need no
+    coordination and no per-segment clock: convergence keeps a range up, and
+    the moment it stops the range starts down.
     """
-    return h * np.exp(-np.asarray(ages, dtype=np.float64) / max(float(half_life), 1e-6))
+    if rate <= 0.0:
+        return 0.0
+    buoy = np.maximum(1.0 - seg.density, 1e-3) * height_unit_m
+    excess = seg.thickness * buoy - (baseline_m + floor_m)
+    hot = (seg.kind == continental) & (excess > 0.0)
+    if not hot.any():
+        return 0.0
+    dth = float(rate) * excess[hot] / buoy[hot]
+    shed = float((dth * seg.density[hot]).sum())
+    seg.thickness[hot] -= dth
+    seg.mass[hot] = seg.thickness[hot] * seg.density[hot]
+    return shed
 
 
 def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet_m: float,
-               height_unit_m: float, strength: float, continental: int, knn: int = 48) -> float:
-    """Give each collision belt its cross-section. Returns the mass moved.
+               height_unit_m: float, strength: float, continental: int, accretion: float = 1.0,
+               flat_slab_age: float = 0.0, along_strike: float = 1.5) -> float:
+    """Build each collision belt with a cross-section. Returns thickness moved.
 
-    Runs *after* the mass-conserving share in
-    :func:`~globe.tectonics.collision.spread_collisions`, and only
-    redistributes what is already there: thickness is moved from the
-    foreland side into the range, following the type's profile. So the belt
-    keeps the mass the collision gave it, and gains a shape -- a moat in
-    front, a crest, a back slope -- that a symmetric Gaussian cannot have.
+    This *replaces* :func:`~globe.tectonics.collision.spread_collisions` for
+    the events it handles: the accreted crust is shared out along the
+    orogen's profile instead of a Gaussian, so the belt gets its shape from
+    the same mass that gives it its height. Two transfers, each conserving
+    mass on its own:
 
-    The cross-belt axis comes from the collision itself: the direction from
-    the subducted segment to the survivor is the convergence direction, so
-    distance measured along it is exactly the profile's `x`.
+    **Accretion.** The survivor holds what the collision just handed it --
+    all of a continental partner, ``accretion`` of an oceanic slab, the rest
+    having gone back to the mantle. That is taken off the survivor and shared
+    over the belt footprint weighted by the *positive* part of the profile,
+    so it lands as a range with a plateau rather than as a bump.
+
+    **Fold and thrust.** The down-going plate's upper crust is peeled off
+    along the décollement and stacked into the range, which leaves the
+    foreland lower and loads it into a flexural moat. That is a zero-sum
+    transfer from the negative part of the profile into the positive part,
+    relaxing toward the target depth.
+
+    Four things this has to get right, all of which a first cut got wrong.
+    Measured with one collision on a lattice of production-spaced segments,
+    against the ``himalayan`` profile's −1500 m moat and +5500 m crest:
+
+    **Where the profile is anchored.** ``x = 0`` is the *suture* -- the
+    midpoint of the colliding pair -- not the survivor. Anchored on the
+    survivor, the moat lands on the overriding plate and the range is pushed
+    a zone too far inland; on Earth the Ganges foreland is on India, the
+    down-going plate, and Tibet is on Asia, the overriding one.
+
+    **How far it reaches.** A fixed ``knn`` disc is a fixed *radius*, and the
+    belts are 500-1750 km wide, so 48 neighbours (624 km at 160 km spacing)
+    truncated every profile: the measured crest sat at the disc edge, 636 km
+    out, with the plateau and back slope simply missing. The footprint is now
+    a ball query at the type's own reach, so ``ural`` costs what ``ural``
+    needs.
+
+    **Along strike.** One collision is one *point* on a belt, but a ball
+    query is a disc, so an isolated event would paint a 3300 km circle of
+    plateau. The profile fades out of the plane of its own collision over
+    ``along_strike`` spacings; neighbouring events fill the belt in.
+
+    **What sets the amplitude.** A belt cannot be built by robbing its own
+    foreland. Sharing the moat's donation out over the positive part makes
+    the crest a function of *footprint geometry* -- a sliver of moat against
+    a disc of plateau -- rather than of the profile: measured, a 353 m moat
+    and a 230 m crest against an intended 1500 and 5500. Rescaling the two
+    sides to balance only moved that to 1066 and 271. The height has to come
+    from the accreted crust, which is where it comes from on Earth.
     """
-    if losers.size == 0 or strength <= 0.0:
+    if losers.size == 0:
         return 0.0
-    kk = min(int(knn), tree.n)
-    _, nb = tree.query(seg.pos[survivors], k=kk, workers=-1)
-    nb = np.atleast_2d(nb).reshape(survivors.size, kk)
-    moved = 0.0
     km_per_rad = R_planet_m / 1000.0
+    sigma_km = float(along_strike) * spacing_rad * km_per_rad
+    moved = 0.0
     for e in range(losers.size):
         su, lo = int(survivors[e]), int(losers[e])
         if not alive[su]:
+            continue  # subducted later in this step; its mass has already moved on
+        # belt frame at the suture: `c` up, `d` across (convergence), `t` along strike
+        c = seg.pos[su] + seg.pos[lo]
+        nc = float(np.linalg.norm(c))
+        if nc < 1e-12:
             continue
+        c /= nc
         d = seg.pos[su] - seg.pos[lo]
-        d = d - seg.pos[su] * float(d @ seg.pos[su])       # tangential
-        n = float(np.linalg.norm(d))
-        if n < 1e-12:
+        d = d - c * float(d @ c)
+        nd = float(np.linalg.norm(d))
+        if nd < 1e-12:
             continue
-        d /= n
-        typ = TYPES[classify(int(seg.kind[lo]), int(seg.kind[su]), int(seg.craton[su]), False, continental)]
-        idx = nb[e]
-        idx = idx[alive[idx]]
-        if idx.size < 4:
+        d /= nd
+        t = np.cross(c, d)
+        flat = flat_slab_age > 0.0 and float(seg.age[lo]) < flat_slab_age
+        typ = TYPES[classify(int(seg.kind[lo]), int(seg.kind[su]), int(seg.craton[su]), flat, continental)]
+
+        theta = max(typ.reach_km, typ.lead_km) / km_per_rad
+        idx = np.asarray(tree.query_ball_point(c, r=2.0 * np.sin(0.5 * theta)), dtype=np.int64)
+        if idx.size == 0:
             continue
-        # signed cross-belt distance in km, measured from the survivor
-        x = ((seg.pos[idx] - seg.pos[su]) @ d) * km_per_rad
-        w = typ.profile(x) / max(typ.crest_m, 1.0)         # -1 .. 1 shape
-        if not np.any(w > 0):
+        # a belt is built on the overriding plate, out of its own kind of crust
+        idx = idx[alive[idx] & (seg.plate_id[idx] == seg.plate_id[su]) & (seg.kind[idx] == seg.kind[su])]
+        if idx.size < 3:
             continue
-        # zero-sum: take from the moat, give to the range, scaled by what the
-        # belt already carries so a young belt is shaped gently
-        pos_w = np.clip(w, 0.0, None)
-        neg_w = np.clip(-w, 0.0, None)
-        take = strength * seg.thickness[idx] * neg_w
-        take = np.minimum(take, 0.4 * seg.thickness[idx])
-        pot = float(take.sum())
-        if pot <= 0.0 or pos_w.sum() <= 0.0:
+        rel = seg.pos[idx] - c
+        x = (rel @ d) * km_per_rad
+        y = (rel @ t) * km_per_rad
+        prof = typ.profile(x) * np.exp(-0.5 * (y / sigma_km) ** 2)
+        up = prof > 0.0
+        if not up.any():
             continue
-        give = pot * pos_w / pos_w.sum()
-        dth = give - take
-        seg.thickness[idx] = np.maximum(seg.thickness[idx] + dth, 1e-3)
-        seg.mass[idx] = seg.thickness[idx] * seg.density[idx]
-        moved += pot
+        share = prof[up] / prof[up].sum()
+
+        # 1. accretion: what the collision handed the survivor, laid out as a range
+        f = 1.0 if int(seg.kind[lo]) == continental else float(accretion)
+        th_in, m_in = f * float(seg.thickness[lo]), f * float(seg.mass[lo])
+        # never hand out more than the survivor is holding: clamping the
+        # thickness afterwards would conjure the shortfall out of nothing
+        if th_in > float(seg.thickness[su]) - 1e-3:
+            g = max(float(seg.thickness[su]) - 1e-3, 0.0) / max(th_in, 1e-12)
+            th_in, m_in = th_in * g, m_in * g
+        if th_in > 0.0:
+            seg.thickness[su] -= th_in
+            seg.mass[su] -= m_in
+            np.add.at(seg.thickness, idx[up], th_in * share)
+            np.add.at(seg.mass, idx[up], m_in * share)
+            moved += th_in
+
+        # 2. fold and thrust: peel the foreland into the range, zero sum
+        low = prof < -1.0
+        if strength > 0.0 and low.any():
+            buoy = np.maximum(1.0 - seg.density[idx], 1e-3) * height_unit_m  # m per thickness unit
+            h = seg.thickness[idx] * buoy
+            # measure the moat against the *undeformed* crust around the belt,
+            # not against the footprint mean: the range is inside that mean and
+            # drags it up, so a growing range shuts its own foreland basin off
+            ref = h[np.abs(prof) < 50.0]
+            base = float(np.median(ref if ref.size >= 3 else h))
+            take = np.zeros(idx.size, dtype=np.float64)
+            take[low] = strength * (h[low] - (base + prof[low])) / buoy[low]
+            take = np.clip(take, 0.0, 0.4 * seg.thickness[idx])
+            pot = float((take * seg.density[idx]).sum())
+            if pot > 0.0:
+                seg.thickness[idx] -= take
+                seg.mass[idx] -= take * seg.density[idx]
+                np.add.at(seg.thickness, idx[up], take.sum() * share)
+                np.add.at(seg.mass, idx[up], pot * share)
+                moved += float(take.sum())
+        seg.density[idx] = seg.mass[idx] / np.maximum(seg.thickness[idx], 1e-9)
+        seg.density[su] = seg.mass[su] / max(seg.thickness[su], 1e-9)
     return moved
 
 
-__all__ = ["Orogen", "TYPES", "classify", "age_to_ural", "shape_belt"]
+__all__ = ["Orogen", "TYPES", "classify", "relax_orogens", "shape_belt"]

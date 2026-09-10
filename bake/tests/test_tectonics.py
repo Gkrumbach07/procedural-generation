@@ -138,7 +138,10 @@ def test_collisions_conserve_mass_and_kill_denser():
 def test_mass_ledger_closes_and_subduction_is_a_sink(tiny_sim):
     sim = tiny_sim
     L = sim.ledger
-    expected = L["initial"] + L["spawned"] + L["crystallised"] + L["subducted"] + L["delaminated"]
+    # driven off the declared key sets rather than a hand-written list, so a
+    # new ledger term has to be classified as mass or counter to pass
+    assert set(L) <= set(tect.MASS_KEYS) | set(tect.COUNTER_KEYS), sorted(set(L) - set(tect.MASS_KEYS) - set(tect.COUNTER_KEYS))
+    expected = sum(L.get(k, 0.0) for k in tect.MASS_KEYS)
     assert sim.seg.total_mass() == pytest.approx(expected, rel=1e-9)
     # subduction and delamination are sinks, never sources: crust returns to
     # the mantle at a trench and under an over-thickened root, and nothing in
@@ -146,8 +149,8 @@ def test_mass_ledger_closes_and_subduction_is_a_sink(tiny_sim):
     # spreading more than was transferred, which is how the first crust-type
     # implementation leaked (spread_collisions handed neighbours the whole
     # slab while only arc_accretion of it had been accreted).
-    assert L["subducted"] <= 1e-9 * expected
-    assert L["delaminated"] <= 1e-9 * expected
+    for k in tect.SINK_KEYS:
+        assert L.get(k, 0.0) <= 1e-9 * expected, k
     assert np.allclose(sim.seg.mass, sim.seg.thickness * sim.seg.density)
     assert np.allclose(np.linalg.norm(sim.seg.pos, axis=1), 1.0, atol=1e-12)
     assert (sim.seg.thickness > 0).all() and (sim.seg.density > 0).all() and (sim.seg.density <= 1).all()

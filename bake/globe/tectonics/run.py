@@ -103,6 +103,17 @@ OUTPUTS = ["bedrock", "uplift", "hardness", "plate_id", "plate_vel"]
 # --------------------------------------------------------------------------
 # simulation
 # --------------------------------------------------------------------------
+#: Ledger keys that are *mass*: they sum to the segment total, so a new one
+#: has to be added here or the books stop balancing. Sinks are negative by
+#: convention -- crust that went back to the mantle -- and only `initial`,
+#: `spawned` and `crystallised` may be positive.
+MASS_KEYS = ("initial", "spawned", "crystallised", "subducted", "delaminated", "orogen_decayed")
+#: Ledger keys that are *counters*: how much crust a process relocated. They
+#: are diagnostics and must be left out of any mass balance.
+COUNTER_KEYS = ("orogen_shaped", "differentiated")
+SINK_KEYS = ("subducted", "delaminated", "orogen_decayed")
+
+
 class TectonicSim:
     """Tectonic state and stepping.  Construct with :func:`initialise`.
 
@@ -145,7 +156,8 @@ class TectonicSim:
         # overriding plate only `arc_accretion` of itself and the rest goes back
         # to the mantle. It used to be zero to within rounding, because
         # collisions transferred 100 %.
-        self.ledger = {"initial": seg.total_mass(), "spawned": 0.0, "crystallised": 0.0, "subducted": 0.0, "delaminated": 0.0}
+        self.ledger = {k: 0.0 for k in MASS_KEYS}
+        self.ledger["initial"] = seg.total_mass()
         # fixed points in the mantle frame; plates drift over them and come
         # out with a track of thickened crust (see tectonics/intraplate.py)
         self.hotspot_pos = intraplate.seed_hotspots(int(self.tp.hotspots), self.params.rng("tectonics", 7))
@@ -211,13 +223,17 @@ class TectonicSim:
                                     float(tp.arc_accretion), float(tp.arc_birth), self.params.rng("tectonics", 7, k))
         n_coll = int(losers.size)
         if n_coll:
-            spread_collisions(seg, tree, losers, survivors, alive, tp.belt_width_factor * self.spacing,
-                              accretion=float(tp.arc_accretion))
             if tp.orogen_shaping > 0.0:
-                # the belt already has its mass; give it a cross-section
+                # the accreted crust *is* the belt: lay it out along the
+                # orogen's own cross-section rather than as a Gaussian bump
                 self.ledger["orogen_shaped"] = self.ledger.get("orogen_shaped", 0.0) + orogeny.shape_belt(
                     seg, tree, losers, survivors, alive, self.spacing, self.params.R_planet,
-                    1.0, float(tp.orogen_shaping), CONTINENTAL)
+                    float(tp.height_scale_m), float(tp.orogen_shaping), CONTINENTAL,
+                    accretion=float(tp.arc_accretion), flat_slab_age=float(tp.flat_slab_age),
+                    along_strike=float(tp.orogen_along_strike))
+            else:
+                spread_collisions(seg, tree, losers, survivors, alive, tp.belt_width_factor * self.spacing,
+                                  accretion=float(tp.arc_accretion))
             # crust that has been through a collision comes out lighter: the
             # light melt stays, the dense residue goes to the mantle.  This is
             # what separates continental from oceanic crust, and so what makes
@@ -235,6 +251,15 @@ class TectonicSim:
         if tp.relax_rate > 0:
             relax_segments(seg, tree, tp.relax_rate, tp.relax_threshold, self.spacing, int(tp.relax_knn))
         self.ledger["subducted"] += seg.total_mass() - mass0
+
+        # active orogens become former ones: what convergence stops feeding,
+        # erosion and root delamination take back down.  After the `subducted`
+        # accounting above, which attributes every mass change since `mass0`.
+        if tp.orogen_decay > 0.0:
+            self.ledger["orogen_decayed"] -= orogeny.relax_orogens(
+                seg, float(tp.belt_thickness * (1.0 - tp.continental_density) * tp.height_scale_m),
+                float(tp.orogen_floor_m), float(tp.height_scale_m),
+                float(tp.orogen_decay), CONTINENTAL)
 
         # 3. label map, areas, gaps
         n_gap = 0

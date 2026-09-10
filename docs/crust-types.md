@@ -456,3 +456,99 @@ Earth preset, step 1500, on the coarse grid:
 | craton / belt drowned | 0.1 / 55.7 % | **18.0 / 34.9 %** | — |
 | within ±50 m of sea level | 6.2 % | **2.7 %** | ~1-2 % |
 | land components | speckle | **15, none under 20 cells** | — |
+
+## Orogens: a cross-section, and a lifespan
+
+`orogeny.py` encodes four belt types as piecewise-linear cross-sections —
+`andean`, `himalayan`, `laramide`, `ural` — and `shape_belt` lays a
+collision's accreted crust out along the one that fits. It replaces
+`spread_collisions` for the events it handles rather than running after it:
+a belt should get its shape from the same mass that gives it its height.
+
+Four faults in the first cut, all measured with one collision on a lattice
+of production-spaced segments against the `himalayan` profile's −1500 m moat
+and +5500 m crest:
+
+**Anchored on the wrong segment.** `x = 0` was the survivor, not the suture,
+which puts the moat on the overriding plate and pushes the range a zone too
+far inland. On Earth the Ganges foreland is on India, the down-going plate;
+Tibet is on Asia, the overriding one.
+
+**Truncated.** A fixed `knn` disc is a fixed radius. 48 neighbours is 624 km
+at 160 km spacing, and the belts are 500–1750 km wide, so the measured crest
+sat at the disc edge, 636 km out, with the plateau and back slope missing.
+The footprint is a ball query at the type's own reach now.
+
+**Painted a disc.** One collision is one *point* on a belt, but a ball query
+is a disc — an isolated event would lay down a 3300 km circle of plateau.
+The profile fades out of the plane of its own collision over
+`orogen_along_strike` spacings; neighbouring events fill the belt in.
+
+**Starved.** The first cut funded the range by robbing its own foreland,
+which makes the crest a function of *footprint geometry* — a sliver of moat
+against a disc of plateau — rather than of the profile. Measured: a 353 m
+moat and a 230 m crest against an intended 1500 and 5500. Rescaling the two
+sides to balance only moved that to 1066 and 271. The height has to come
+from the accreted crust, which is where it comes from on Earth. The foreland
+transfer survives as what it actually is — the fold-and-thrust belt peeling
+the down-going plate's upper crust into the range — and only digs the moat.
+
+### The moat is measurable
+
+For every peak above 2500 m, take the 250–750 km annulus of land around it
+and ask how far below the regional land median its 5th percentile sits. A
+symmetric Gaussian has no moat; its surroundings *are* the baseline.
+
+| | Gaussian | profile |
+|---|---|---|
+| ring floor below land median, p50 | −362 m | **−662 m** |
+| peaks with a floor >300 m below | 57 % | **67 %** |
+| peaks with a floor >800 m below | **0 %** | **42 %** |
+| land components | 20 | 13 |
+| highest point | 12657 m | 8215 m |
+
+### And they have to come down again
+
+With profile belts and no decay, **31.2 % of the land stood above 2 km**
+against Earth's ~13 %: not one Tibet but fifty, because nothing had ever
+taken one down. `relax_orogens` decays height above `orogen_floor_m` (the
+`ural` crest, 1200 m — a dead belt settles at the height of a dead belt, not
+at zero) back to the mantle at `orogen_decay` per step. Keying on *height*
+rather than thickness is what keeps a craton safe: a craton is thick but
+floats at the baseline, so its excess is zero. An active belt is fed faster
+than this takes it away, so the two need no coordination and no per-segment
+clock — convergence keeps a range up, and the moment it stops it starts down.
+
+Elevation bands as a share of land area, at step 1500:
+
+| band | Earth | none | 0.004 | 0.015 | 0.040 |
+|---|---|---|---|---|---|
+| 0–1 km | 71.6 | 53.2 | 58.0 | 60.9 | 64.8 |
+| 1–2 | 15.4 | 15.6 | 25.1 | 27.1 | 30.4 |
+| 2–3 | 7.5 | 11.4 | 8.9 | **7.5** | 4.1 |
+| 3–4 | 3.8 | 9.5 | 4.4 | 2.9 | 0.7 |
+| 4–5 | 1.7 | 7.7 | 2.2 | 1.2 | 0.0 |
+| >5 | 0.3 | 2.5 | 1.3 | 0.5 | 0.0 |
+| mean | 840 m | 1484 | 1080 | 933 | 763 |
+| max | 8849 m | 8215 | 8003 | 6209 | 4372 |
+
+**These are pre-erosion numbers against a post-erosion curve**, so matching
+them exactly here would be a mistake: erosion has not run yet and it only
+lowers. 0.015 already matches Earth's 2–5 km bands *before* erosion, which
+means it would undershoot after. 0.008 is the shipped value — modestly above
+Earth's curve, on the argument that erosion closes the rest — and the
+comparison that settles it is the one taken after the erosion stage.
+
+The 1–2 km band is too full at every decay rate and the 0–1 km band too
+empty, but that is not an orogen defect: it is the continental *interior*
+sitting at its full Airy buoyancy because nothing has planed it down yet.
+Earth's platforms are at 100–300 m because of 3 Gyr of erosion, not because
+of tectonics.
+
+### Not yet wired
+
+`classify` returns `ural` from no code path — a former orogen is currently
+produced by decaying an active one rather than by being built as one — and
+`flat_slab_age` (which routes a young, buoyant slab to the wide, low
+`laramide` profile) has not been checked against how many belts of each type
+a world actually builds.
