@@ -296,9 +296,8 @@ framing in the section above. That observation stands, but calling it an
 attractor of the *kernel* was the wrong noun; it behaves like an attractor
 of the *domain*.
 
-**Not yet established**, and deliberately not claimed here: that domain size
-*causes* the floor. The obvious test — double `N_c` at fixed cell size — is
-confounded, see below.
+**Domain size is real but far too weak to be the cause** — measured below,
+with the relief confound controlled.
 
 ## `relief_spacings` makes world size and steepness the same knob
 
@@ -318,3 +317,42 @@ docs/world-scale.md records this coupling as a scaling issue. It is also an
 experimental hazard: **any experiment that varies `N_c` must pin
 `tectonics.relief_m` and set `relief_spacings = 0`**, or it is comparing two
 things at once.
+
+
+## Domain size: measured, real, and not enough
+
+With relief pinned (`relief_m = 700`, `relief_spacings = 0`) so the domain
+is the only variable, and the same 50 m cells and 3.2 km analysis window:
+
+| N_c | landmass across | relief | β 200–1600 | β 400–3200 | mean particle steps |
+|---|---|---|---|---|---|
+| 256 | 138 cells (6.9 km) | 794 m | 6.29 | 7.25 | 21 |
+| 512 | 271 cells (13.6 km) | 816 m | **6.02** | **6.56** | **35** |
+
+The effect is real: both bands improve, monotonically, and the mechanism is
+visible in the particle statistics — flow paths lengthen from 21 steps to
+35. It is also **far too small**. One doubling buys 0.27–0.69 of β and the
+gap to real topography is 4.0. Extrapolating the two bands disagrees by a
+factor of 500 (15,000 vs 7.8 million cells across), so a two-point
+log-linear fit is not worth trusting.
+
+What the exercise does establish is more useful than the extrapolation:
+
+**Every β measurement in this project has been made on a toy planet.** The
+presets are 4–33 km bodies and the largest landmass in these tests is
+**13.6 km across** — an island. Real continents are thousands of km. The
+400–3200 m band extrapolates to wanting ~750 km of landmass, which is not
+an exotic requirement; it is an ordinary continent.
+
+So "our terrain is bland" has been measured almost entirely in a regime no
+real landscape occupies, and the β ≈ 6 floor may be as much an artifact of
+island-sized test worlds as a property of the erosion kernel. The two
+cannot be separated on a 16 km planet.
+
+**This is the argument for the basin architecture**, arrived at from a
+different direction than the cost analysis in docs/world-scale.md: take the
+regional trend from an Earth-scale tectonic field, where landmasses are
+genuinely continental, and run erosion per basin at 25 m where the local
+domain is the 500–1000 cells a drainage network needs. Neither the global
+coarse grid (9.8 km cells, no fluvial process) nor a toy planet (13.6 km
+landmasses, no scale range) can produce a landscape on its own.
