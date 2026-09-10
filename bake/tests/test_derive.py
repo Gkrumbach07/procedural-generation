@@ -625,7 +625,10 @@ def test_quicklook(tiny, tmp_path):
     from PIL import Image
 
     im = Image.open(p)
-    assert im.size[0] == 4 * im.size[1] // 3
+    # two orthographic hemispheres side by side with a gap between them:
+    # a bit wider than 2:1, never the 4:3 of the old unfolded cube net
+    w, h = im.size
+    assert 2.0 < w / h < 2.2, im.size
 
 
 def test_runtime_small(scratch):

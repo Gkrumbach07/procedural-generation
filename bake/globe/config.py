@@ -116,7 +116,9 @@ class TectonicsParams:
     # thickening.  Measured with one crust type, our height distribution was
     # a single broad hump (thickness a continuum 0.18-8.3, density 0.20-0.96)
     # and the ocean spanned 1846 m against Earth's ~3000.
-    continental_fraction: float = 0.70  # fraction of the initial crust seeded continental, as clustered proto-cratons (Earth's continental crust including shelves is ~40 % of the surface)
+    continental_fraction: float = 0.70  # fraction of the initial crust seeded continental, as one assembled supercontinent (Earth's continental crust including shelves is ~40 % of the surface)
+    craton_fraction: float = 0.45  # fraction of the continental crust that is Archean craton -- old, thick, strong nuclei welded together by weaker mobile belts. Rifting is steered around them (see intraplate.rift), which is why Gondwana split between Amazonia, West Africa, Congo and Kalahari rather than through them
+    supercontinent_roughness: float = 0.45  # spherical-noise perturbation of the initial continent's margin, radians. 0 gives a circular cap; this gives embayments and promontories
     cratons: int = 24  # number of proto-craton seeds the initial continental crust is grown from; fewer/larger gives a supercontinent, more/smaller a scatter of microcontinents
     continental_thickness: float = 1.0  # initial thickness of continental crust (Earth ~35 km)
     continental_density: float = 0.82  # normalised to mantle = 1, so Airy height = t(1-rho) = 0.18

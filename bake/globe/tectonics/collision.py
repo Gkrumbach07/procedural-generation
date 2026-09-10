@@ -331,7 +331,7 @@ CONTINENTAL_K = np.int8(CONTINENTAL)
 
 
 @njit(cache=True)
-def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, kind, alive, overlap2, accretion, arc_birth, birth_draw):
+def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, kind, craton, alive, overlap2, accretion, arc_birth, birth_draw):
     n = pairs.shape[0]
     losers = np.empty(n, dtype=np.int64)
     survivors = np.empty(n, dtype=np.int64)
@@ -368,6 +368,17 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
                 lo, su = i, j
             else:
                 lo, su = j, i
+        elif kind[i] == CONTINENTAL_K and craton[i] != craton[j]:
+            # A craton against a mobile belt: the belt deforms. Cratons are
+            # cold, thick and depleted, so they behave as rigid indenters --
+            # which is why the same Archean nuclei have survived every cycle
+            # while the crust welded between them has been reworked
+            # repeatedly. Without this a craton is just another continental
+            # segment and gets consumed at the same rate as its surroundings.
+            if craton[i] == 0:
+                lo, su = i, j
+            else:
+                lo, su = j, i
         elif density[i] > density[j]:
             lo, su = i, j
         elif density[j] > density[i]:
@@ -397,7 +408,7 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
         # only shrink from whatever the initial condition seeded, and the
         # supercontinent cycle runs down.
         if kind[su] == OCEANIC_K and kind[lo] == OCEANIC_K and birth_draw[e] < arc_birth:
-            kind[su] = CONTINENTAL_K
+            kind[su] = CONTINENTAL_K            # island arc -> new continental crust, not craton
         alive[lo] = False
         losers[k] = lo
         survivors[k] = su
@@ -427,7 +438,7 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     pairs = np.sort(pairs, axis=1)
     pairs = pairs[np.lexsort((pairs[:, 1], pairs[:, 0]))]
     draw = rng.random(pairs.shape[0]) if (rng is not None and arc_birth > 0.0) else np.zeros(pairs.shape[0])
-    return _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.kind, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw))
+    return _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.kind, seg.craton, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw))
 
 
 @njit(cache=True)

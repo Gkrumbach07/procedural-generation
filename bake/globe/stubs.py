@@ -11,12 +11,16 @@ from .field import FaceField, rotation_field
 from .io.world_store import WorldStore
 
 
-def fbm_noise(grid, rng: np.random.Generator, octaves: int = 5, base_freq: float = 2.0, seed_dims: int = 3) -> np.ndarray:
-    """Smooth value noise on the sphere evaluated at extended cell centres:
-    sum of octaves of random 3-D lattices, trilinearly interpolated.
-    Returns (6, NE, NE) float32 in roughly [-1, 1]."""
-    p = grid.centers
-    out = np.zeros(p.shape[:3], dtype=np.float64)
+def fbm_at(p: np.ndarray, rng: np.random.Generator, octaves: int = 5, base_freq: float = 2.0) -> np.ndarray:
+    """Smooth value noise sampled at arbitrary unit vectors ``p`` (..., 3).
+
+    Sum of octaves of random 3-D lattices, trilinearly interpolated. Because
+    the lattice lives in space rather than on a face, the result is
+    continuous across cube edges by construction -- which is what makes it
+    usable for anything that has to look right on the sphere rather than on
+    the net.
+    """
+    out = np.zeros(p.shape[:-1], dtype=np.float64)
     amp = 1.0
     total = 0.0
     for o in range(octaves):
@@ -37,7 +41,12 @@ def fbm_noise(grid, rng: np.random.Generator, octaves: int = 5, base_freq: float
         out += amp * (acc * 2 - 1)
         total += amp
         amp *= 0.5
-    return (out / total).astype(np.float32)
+    return out / total
+
+
+def fbm_noise(grid, rng: np.random.Generator, octaves: int = 5, base_freq: float = 2.0, seed_dims: int = 3) -> np.ndarray:
+    """:func:`fbm_at` at a grid's extended cell centres -> (6, NE, NE) float32."""
+    return fbm_at(grid.centers, rng, octaves, base_freq).astype(np.float32)
 
 
 def _noise_field(grid, rng, name, scale=1.0, offset=0.0, octaves=5, dtype=np.float32):

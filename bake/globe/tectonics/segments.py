@@ -11,6 +11,7 @@ A :class:`Segments` object holds parallel arrays, one entry per segment::
     area       (M,)   float64  steradians claimed on the label map (rolling blend)
     h_ref      (M,)   float64  bedrock height at the uplift reference step
     kind       (M,)   int8     OCEANIC or CONTINENTAL (see below)
+    craton     (M,)   int8     1 inside an Archean craton, 0 otherwise
 
 Crust type
 ----------
@@ -30,6 +31,15 @@ dense enough to sink, so it is created at ridges and destroyed at trenches
 on a ~200 My conveyor and never gets the chance to thicken -- it is 7 km
 thick at birth and 7 km thick when it dies.  The gap between the humps is
 that asymmetry, integrated over time.
+
+**Cratons.** Continental crust is not uniform either. Its cores are Archean
+cratons -- billions of years old, thick, cold, depleted and mechanically
+strong -- welded together by younger mobile belts that are comparatively
+weak. That contrast is why continents break where they do: Gondwana split
+*between* Amazonia, West Africa, Congo and Kalahari, threading the belts
+between the cratons rather than cutting across them, and the same cratons
+survive on both sides of the Atlantic today. ``craton`` carries the flag so
+rifting can be steered by it.
 
 So ``kind`` gates the laws rather than merely labelling the result:
 crystallisation grows continental crust only, spawned crust is always
@@ -222,9 +232,9 @@ class Segments:
     """Structure-of-arrays segment store (see module docstring).  All
     mutating methods keep the parallel arrays aligned."""
 
-    FIELDS = ("pos", "mass", "thickness", "density", "age", "plate_id", "area", "h_ref", "kind")
+    FIELDS = ("pos", "mass", "thickness", "density", "age", "plate_id", "area", "h_ref", "kind", "craton")
 
-    def __init__(self, pos, thickness, density, age, plate_id, area, h_ref=None, mass=None, kind=OCEANIC):
+    def __init__(self, pos, thickness, density, age, plate_id, area, h_ref=None, mass=None, kind=OCEANIC, craton=0):
         self.pos = np.ascontiguousarray(pos, dtype=np.float64).reshape(-1, 3)
         M = self.pos.shape[0]
         self.thickness = np.array(np.broadcast_to(np.asarray(thickness, dtype=np.float64), (M,)), dtype=np.float64)
@@ -235,6 +245,7 @@ class Segments:
         self.area = np.array(np.broadcast_to(np.asarray(area, dtype=np.float64), (M,)), dtype=np.float64)
         self.h_ref = self.height() if h_ref is None else np.array(np.broadcast_to(np.asarray(h_ref, dtype=np.float64), (M,)), dtype=np.float64)
         self.kind = np.array(np.broadcast_to(np.asarray(kind, dtype=np.int8), (M,)), dtype=np.int8)
+        self.craton = np.array(np.broadcast_to(np.asarray(craton, dtype=np.int8), (M,)), dtype=np.int8)
 
     @property
     def M(self) -> int:
@@ -265,7 +276,7 @@ class Segments:
             setattr(self, name, np.ascontiguousarray(np.concatenate([getattr(self, name), getattr(other, name)])))
 
     def copy(self) -> "Segments":
-        return Segments(self.pos.copy(), self.thickness.copy(), self.density.copy(), self.age.copy(), self.plate_id.copy(), self.area.copy(), self.h_ref.copy(), self.mass.copy(), self.kind.copy())
+        return Segments(self.pos.copy(), self.thickness.copy(), self.density.copy(), self.age.copy(), self.plate_id.copy(), self.area.copy(), self.h_ref.copy(), self.mass.copy(), self.kind.copy(), self.craton.copy())
 
     def renormalise(self) -> None:
         self.pos /= np.linalg.norm(self.pos, axis=1, keepdims=True)

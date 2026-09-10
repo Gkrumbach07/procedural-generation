@@ -88,7 +88,7 @@ from .plates import (
     plate_torques,
     random_initial_omega,
     rotate_segments,
-    seed_cratons,
+    seed_supercontinent,
     tangent_to_cell_components,
     update_omega,
 )
@@ -429,12 +429,17 @@ def initialise(params: WorldParams, log=print) -> TectonicSim:
     lo, hi = float(noise.min()), float(noise.max())
     heat = FaceField(hgrid, (noise - lo) / max(hi - lo, 1e-9), name="heat")
     heat.exchange_halos()
-    kind = seed_cratons(pos, float(tp.continental_fraction), int(tp.cratons), rng)
+    kind, craton = seed_supercontinent(
+        pos, float(tp.continental_fraction), float(tp.craton_fraction), int(tp.cratons), rng,
+        float(tp.supercontinent_roughness))
     cont = kind == CONTINENTAL
     thickness = np.where(cont, tp.continental_thickness, tp.oceanic_thickness) * (1.0 + 0.2 * (rng.random(M) - 0.5))
     density = np.where(cont, tp.continental_density, tp.oceanic_density)
     plate_id = cluster_plates(pos, int(tp.initial_plates), rng, size_jitter=float(tp.plate_size_jitter))
-    seg = Segments(pos, thickness, density, 0.0, plate_id, 4.0 * math.pi / M, kind=kind)
+    # cratons start thicker and older than the belts around them: they are
+    # the crust that survived every previous cycle
+    thickness = np.where(craton == 1, thickness * 1.15, thickness)
+    seg = Segments(pos, thickness, density, 0.0, plate_id, 4.0 * math.pi / M, kind=kind, craton=craton)
     plates = Plates(int(tp.initial_plates))
     plates.update_stats(seg)
     random_initial_omega(plates, rng, tp.initial_speed * spacing)
@@ -442,7 +447,9 @@ def initialise(params: WorldParams, log=print) -> TectonicSim:
     if log is not None:
         log(
             f"[tectonics] crust: {int(cont.sum())} continental / {M} segments "
-            f"({cont.mean() * 100:.1f} %) in {int(tp.cratons)} cratons; "
+            f"({cont.mean() * 100:.1f} %) as one supercontinent, "
+            f"{int((craton == 1).sum())} craton segments "
+            f"({(craton == 1).sum() / max(cont.sum(), 1) * 100:.0f} % of it) in {int(tp.cratons)} nuclei; "
             f"h_cont={tp.continental_thickness * (1.0 - tp.continental_density):.3f} "
             f"h_ocean={tp.oceanic_thickness * (1.0 - tp.oceanic_density):.3f} bedrock units"
         )
