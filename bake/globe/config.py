@@ -139,7 +139,7 @@ class TectonicsParams:
     collision_radius_factor: float = 1.0  # × spacing: segments of different plates closer than this collide
     gap_radius_factor: float = 1.0  # × spacing: cells farther than this from every segment are divergent gaps
     overlap_fraction: float = 0.5  # segments of different plates closer than this × collision radius collide even when not approaching (no interleaving along transform boundaries)
-    splat_sigma_factor: float = 0.5  # sigma (× spacing) of the Gaussian blend of the nearest segments when splatting segment values to the tect grid
+    splat_sigma_factor: float = 1.0  # sigma (x mean segment spacing) of the Gaussian blend used to reconstruct the tect grid from the segment cloud. Must be >= the spacing: a reconstruction kernel narrower than its samples resolves the samples, and Poisson-disc packing has a characteristic length, so the bedrock came out covered in worms. Measured at Earth defaults, 0.5 gave 84 m of relief at the segment scale and 1.0 gives 42 m, saturating past 1.5 -- and once erosion drops the land median to ~40 m those worms *are* the coastline, which is where the lacy shorelines came from
     splat_knn: int = 12
     cascade_rate: float = 0.3  # ★
     cascade_threshold: float = 0.05  # bedrock units (thickness·(1−density)) per cell of neighbour distance on the tect grid
