@@ -65,11 +65,19 @@ RUNTIME_KNOBS: dict[str, Any] = {
 
 @dataclass
 class WorldGroup:
+    """The default world is Earth: radius is derived as
+    ``N_c * cell_size_m * 4 / 2pi``, so 1024 cells of 9773 m give 6371 km.
+
+    `land_fraction` is honoured exactly only while `tectonics.shelf_fraction`
+    is 0; with shelf mode on (the default) sea level is measured against the
+    continental crust instead and the land area falls out of it. See
+    docs/crust-types.md."""
+
     seed: int = 0
     N_c: int = 1024
-    cell_size_m: float = 50.0
-    R: int = 4  # refinement factor
-    T: int = 256  # tile edge (fine cells)
+    cell_size_m: float = 9773.0  # -> R_planet 6371 km
+    R: int = 2  # refinement factor
+    T: int = 64  # tile edge (fine cells)
     land_fraction: float = 0.30
     halo: int = 4
 
@@ -81,19 +89,19 @@ class TectonicsParams:
     so every *_factor knob is resolution independent.  Time is measured in
     tectonic steps (age, diffusion, speeds); there is no separate dt."""
 
-    N_tect: int = 512
+    N_tect: int = 256
     segments: int = 20000
-    initial_plates: int = 16
+    initial_plates: int = 8
     steps: int = 1500
     convection: float = 10.0  # ★
-    growth: float = 0.05  # ★ k_G (thickness units per step)
+    growth: float = 0.0  # ★ k_G (thickness units per step).  0: continental crust changes by tectonics, not by crystallising out of the mantle everywhere -- 0.05 inflated the median thickness to 2x its birth value over a run
     dissolution_factor: float = 0.05  # ★
     deposit_density: float = 0.5  # k_D
-    plate_size_jitter: float = 0.35  # spread of initial plate sizes: per-plate distance weights are 1 ± this, so 0 tiles the sphere evenly and ~0.8 reproduces Earth's hierarchy (a few plates covering most of the surface, microplates between). Earth spans ~94x largest:smallest with its top 7 plates over 92% of the globe; 0.35 gives a near-uniform 3.2x, which leaves every landmass a single collision zone
+    plate_size_jitter: float = 0.80  # spread of initial plate sizes: per-plate distance weights are 1 ± this, so 0 tiles the sphere evenly and ~0.8 reproduces Earth's hierarchy (a few plates covering most of the surface, microplates between). Earth spans ~94x largest:smallest with its top 7 plates over 92% of the globe; 0.35 gives a near-uniform 3.2x, which leaves every landmass a single collision zone
     # --- intraplate relief (globe/tectonics/intraplate.py) ---------------
     reorganise_every: int = 0  # steps between plate reorganisations (0 = never). Earth's interiors are former boundaries; with a fixed configuration an interior is never a boundary and so is never uplifted (measured: 6 m of local relief over 107 km across 88 % of land)
     reorganise_plates: int = 0  # plate count to re-cluster into (0 = keep initial_plates)
-    rift_every: int = 0  # steps between rifting one plate in two (0 = never); opens new boundaries inside old interiors
+    rift_every: int = 400  # steps between rifting one plate in two (0 = never); opens new boundaries inside old interiors
     rift_plates: int = 2  # at most this many plates rift per event; the actual number is 1..this, and the targets are drawn at random weighted by area rather than always being the largest. Deterministic argmax targeting sliced the same supercontinent every event, which reads as the whole map coming apart on a schedule
     rift_speed_factor: float = 1.0  # × convection: separation speed of the two halves of a rifted plate
     hotspots: int = 0  # fixed points in the mantle frame that thicken crust drifting over them (0 = none)
@@ -108,17 +116,17 @@ class TectonicsParams:
     # thickening.  Measured with one crust type, our height distribution was
     # a single broad hump (thickness a continuum 0.18-8.3, density 0.20-0.96)
     # and the ocean spanned 1846 m against Earth's ~3000.
-    continental_fraction: float = 0.35  # fraction of the initial crust seeded continental, as clustered proto-cratons (Earth's continental crust including shelves is ~40 % of the surface)
-    cratons: int = 12  # number of proto-craton seeds the initial continental crust is grown from; fewer/larger gives a supercontinent, more/smaller a scatter of microcontinents
+    continental_fraction: float = 0.70  # fraction of the initial crust seeded continental, as clustered proto-cratons (Earth's continental crust including shelves is ~40 % of the surface)
+    cratons: int = 24  # number of proto-craton seeds the initial continental crust is grown from; fewer/larger gives a supercontinent, more/smaller a scatter of microcontinents
     continental_thickness: float = 1.0  # initial thickness of continental crust (Earth ~35 km)
     continental_density: float = 0.82  # normalised to mantle = 1, so Airy height = t(1-rho) = 0.18
     oceanic_thickness: float = 0.20  # initial thickness of oceanic crust (Earth ~7 km, i.e. 1/5 of continental)
     oceanic_density: float = 0.88  # Airy height 0.024 -- the ~7.5x gap that makes the histogram bimodal
     arc_accretion: float = 0.15  # fraction of a subducting *oceanic* slab welded onto the overriding plate as an arc; the rest returns to the mantle. 1.0 (the old behaviour) makes the crust a monotone accumulator
-    shelf_fraction: float = 0.0  # if > 0, sea level drowns this fraction of the CONTINENTAL crust and the land area falls out, instead of `world.land_fraction` of the surface being forced dry. Earth is ~0.275 (continental crust incl. shelves ~40 % of the globe, land 29 %). Required once the hypsometry is bimodal: an area quantile has to cut a hump whose size varies +-0.1 between seeds, and when it misses it lands in the trough (measured: land under 1 km of 78.0 / 75.6 / 17.4 % across three seeds of one configuration)
-    max_crust_thickness: float = 3.0  # continental thickness (× the 1.0 initial) above which the root delaminates; 0 = no limit. Earth saturates near 2x normal even under Tibet. Unlimited, a few segments stacked to 8.3x and squashed the vertical scale everyone else shares
+    shelf_fraction: float = 0.275  # if > 0, sea level drowns this fraction of the CONTINENTAL crust and the land area falls out, instead of `world.land_fraction` of the surface being forced dry. Earth is ~0.275 (continental crust incl. shelves ~40 % of the globe, land 29 %). Required once the hypsometry is bimodal: an area quantile has to cut a hump whose size varies +-0.1 between seeds, and when it misses it lands in the trough (measured: land under 1 km of 78.0 / 75.6 / 17.4 % across three seeds of one configuration)
+    max_crust_thickness: float = 2.0  # continental thickness (× the 1.0 initial) above which the root delaminates; 0 = no limit. Earth saturates near 2x normal even under Tibet. Unlimited, a few segments stacked to 8.3x and squashed the vertical scale everyone else shares
     delamination: float = 0.05  # fraction of the excess over max_crust_thickness shed to the mantle per step
-    arc_birth: float = 0.02  # probability that an ocean-on-ocean subduction converts the survivor to continental crust (island arcs -- how continents are actually born). 0 freezes the continental area at the initial seeding
+    arc_birth: float = 0.20  # probability that an ocean-on-ocean subduction converts the survivor to continental crust (island arcs -- how continents are actually born). 0 freezes the continental area at the initial seeding
     differentiation: float = 0.0  # fraction of the gap to `density_continental` a survivor closes per collision (0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion)). Collision alone only averages density, so the elevation histogram stays one narrow spike; Earth is bimodal because thickened crust partially melts, the light granitic fraction stays and the dense residue is lost to the mantle
     density_continental: float = 0.30  # density floor differentiation drives collided crust toward: granitic continental crust, which floats high
     animate_frames: int = 0  # capture this many animation frames DURING the run and write quicklook/tectonics.webp (0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion)). Re-simulating for an animation afterwards costs a second full run -- 39 minutes at Earth scale
@@ -144,9 +152,9 @@ class TectonicsParams:
     heat_noise_freq: float = 1.5  # base lattice frequency of the initial heat noise (features ~ 1/freq of the diameter)
     damping: float = 0.05  # omega *= (1 - damping) per step
     density_base: float = 0.5  # d_b in the growth term
-    height_scale_m: float = 4000.0  # metres per bedrock unit when both relief_m and relief_spacings are 0
+    height_scale_m: float = 26400.0  # metres per bedrock unit when both relief_m and relief_spacings are 0
     relief_m: float = 0.0  # explicit override, metres: if > 0, scale bedrock so the 99.9th percentile of land sits at this height
-    relief_spacings: float = 1.5  # when relief_m == 0: that percentile sits at this many mean segment spacings (metres), so the vertical scale follows the horizontal one at every preset (0 = use height_scale_m)
+    relief_spacings: float = 0.0  # when relief_m == 0: that percentile sits at this many mean segment spacings (metres), so the vertical scale follows the horizontal one at every preset (0 = use height_scale_m)
     # --- fractal detail (globe/tectonics/run.py inject_detail) -----------
     detail_amp: float = 0.0  # detail added to the bedrock, as a fraction of the LOCAL relief over detail_relief_cells. Erosion reworks the spectrum it is handed but cannot add variance that was never there: measured beta 12.99 leaving tectonics, 6.47 after erosion and 6.0-6.3 after refine at any R, where real topography is ~2. 0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion)
     detail_cells: float = 16.0  # coarse cells in the longest injected wavelength; shorter octaves follow. Wavelengths above this belong to tectonics and injecting them would fight the plate-scale relief
@@ -159,7 +167,7 @@ class TectonicsParams:
     initial_speed: float = 0.1  # speed of the random initial plate rotations, spacings per step
     initial_thickness: float = 0.4  # crust thickness at t = 0
     max_thickness: float = 1.0  # crystallisation growth is faded by exp(-thickness / max_thickness)
-    ridge_height: float = 0.15  # thermal buoyancy of young *oceanic* crust, bedrock units: half-space cooling, buoy = ridge_height * max(0, 1 - sqrt(age / ridge_age)), so a ridge crest stands this high above crust of age >= ridge_age. Earth's ridge-to-abyssal step is ~3000 m
+    ridge_height: float = 0.085  # thermal buoyancy of young *oceanic* crust, bedrock units: half-space cooling, buoy = ridge_height * max(0, 1 - sqrt(age / ridge_age)), so a ridge crest stands this high above crust of age >= ridge_age. Earth's ridge-to-abyssal step is ~3000 m
     ridge_age: float = 400.0  # age (steps) at which oceanic crust has finished subsiding. Must be comparable to the seafloor's actual lifetime or the term is dead: measured at 150 against a median crust age of 1500 it carried 0.1 % of the height variance
     new_thickness: float = 0.05  # thickness of crust spawned at divergent boundaries
     gap_cooling: float = 0.05  # peak heat removed (Gaussian blob, 1 spacing wide) per segment of new crust spawned at a rift
@@ -540,7 +548,17 @@ class WorldParams:
         """PLAN section 15 test profile: the whole pipeline in ~1 minute."""
         p = cls()
         p.world = WorldGroup(seed=seed, N_c=128, cell_size_m=50.0, R=2, T=64, land_fraction=0.3)
-        p.tectonics = dataclasses.replace(p.tectonics, N_tect=64, segments=1500, initial_plates=8, steps=300)
+        # A 4 km body, so none of the Earth-scale settings apply. Relief goes
+        # back to following the tectonic pattern's own horizontal scale;
+        # rifting is off because 300 steps is too few for it to mean anything;
+        # and `shelf_fraction` is off because sea level measured against the
+        # continental crust is the right model for a planet that *has*
+        # continents, which a 4 km body does not -- while the tests need
+        # `land_fraction` as a hard guarantee, and shelf mode makes the land
+        # area an output.
+        p.tectonics = dataclasses.replace(
+            p.tectonics, N_tect=64, segments=1500, initial_plates=8, steps=300,
+            relief_spacings=1.5, height_scale_m=4000.0, shelf_fraction=0.0, rift_every=0)
         p.climate = dataclasses.replace(p.climate, n_advect=0)  # auto: sweep until stationary (cap 4*N)
         p.erosion = dataclasses.replace(p.erosion, iterations=60, checkpoint_every=30, quicklook_every=30)
         p.watersheds = WatershedParams(basin_max_cells=48 * 48, basin_min_cells=8 * 8)
@@ -548,70 +566,11 @@ class WorldParams:
         return p
 
     @classmethod
-    def earth_world(cls, seed: int = 0) -> "WorldParams":
-        """An Earth-radius planet with Earth-like hypsometry.
-
-        Tectonics only -- the erosion stage is calibrated in cell units at
-        ~50 m cells and does not transfer to the 9.8 km cells an Earth-radius
-        world needs (docs/world-scale.md section 4), so run this with
-        ``--to tectonics`` until that is settled.
-
-        Radius is derived: ``N_c * cell_size_m * 4 / 2pi`` = 6371 km.
-
-        Every value below was measured rather than picked.  Across three
-        seeds this gives land under 1 km of 75.6 +- 3.7 % (Earth 71 %),
-        ocean median -3703 +- 21 m (Earth -3700) and a land/ocean gap of
-        3979 +- 56 m (Earth ~4000).  See docs/crust-types.md.
-        """
-        p = cls()
-        p.world = WorldGroup(seed=seed, N_c=1024, cell_size_m=9773.0, R=2, T=64, land_fraction=0.3)
-        p.tectonics = dataclasses.replace(
-            p.tectonics,
-            N_tect=256, segments=20000, initial_plates=8, steps=1500,
-            # crust types: seed high and let collisions consume it down to the
-            # arc-birth equilibrium (0.70 -> ~0.35-0.46 by step 1500)
-            continental_fraction=0.70, arc_birth=0.20,
-            # continental crust changes by tectonics, not by crystallising out
-            # of the mantle everywhere: growth 0.05 inflated the median
-            # thickness to 2.0x its birth value over a run
-            growth=0.0,
-            # Tibet is 70 km on a 35 km normal crust
-            max_crust_thickness=2.0,
-            # Earth's 3.0 km ridge-to-abyssal step over 35.4 km per bedrock
-            # unit; ridge_age must be comparable to the seafloor's lifetime or
-            # the term is dead (at 150 it carried 0.1 % of the height variance)
-            ridge_height=0.085, ridge_age=400.0,
-            # sea level against the continental crust, not the surface area:
-            # an area quantile has to cut a hump whose size varies +-0.1
-            # between seeds, and when it misses, land under 1 km collapses
-            # from 78 % to 17 %
-            shelf_fraction=0.275,
-            # the vertical scale is not free -- the height law is Airy
-            # isostasy, so it has a physical metres-per-unit.  Earth's crustal
-            # densities give 35354; its *observed* land/ocean gap needs 26400.
-            # The shipped value is the empirical one.
-            relief_m=0.0, relief_spacings=0.0, height_scale_m=26400.0,
-            # Break the supercontinent up.  Without rifting the crust only
-            # ever merges -- there is no other way for a continent to split --
-            # and the largest landmass holds ~35 % of all land against Earth's
-            # 20 %.  Rifting alone at this rate is destructive (continental
-            # fraction collapses to 0.235 and land under 1 km to 14.6 %,
-            # because it consumes crust faster than arc birth replaces it);
-            # paired with a wide plate-size spread it is not, because larger
-            # plates carry less boundary per unit area and so destroy less.
-            # Across three seeds this gives a largest landmass of 26.0 +- 7.0 %
-            # -- better than ~35 on average, but seed-dependent: on one of the
-            # three it achieved almost nothing (35.8 against a base of 37.5).
-            rift_every=400, plate_size_jitter=0.80, cratons=24,
-        )
-        return p
-
-    @classmethod
     def tiny_world(cls, seed: int = 0) -> "WorldParams":
         """Even smaller profile for unit tests (seconds)."""
         p = cls.small_world(seed)
         p.world = WorldGroup(seed=seed, N_c=32, cell_size_m=50.0, R=2, T=16, land_fraction=0.3)
-        p.tectonics = dataclasses.replace(p.tectonics, N_tect=32, segments=300, initial_plates=5, steps=60)
+        p.tectonics = dataclasses.replace(p.tectonics, N_tect=32, segments=300, initial_plates=5, steps=60)  # inherits small_world's toy-body scale
         p.climate = dataclasses.replace(p.climate, n_advect=0)
         p.erosion = dataclasses.replace(p.erosion, iterations=10, checkpoint_every=5, quicklook_every=5)
         p.watersheds = WatershedParams(basin_max_cells=12 * 12, basin_min_cells=3 * 3)
@@ -631,4 +590,8 @@ def _json_default(o):
     raise TypeError(f"not JSON serialisable: {type(o)}")
 
 
-PRESETS = {"default": WorldParams, "small": WorldParams.small_world, "tiny": WorldParams.tiny_world, "earth": WorldParams.earth_world}
+#: `default` is Earth (see `WorldGroup`); `small` and `tiny` are toy bodies for
+#: tests and quick plumbing checks, not for judging terrain -- their landmasses
+#: are a few km across, which is far too small for a drainage network to
+#: develop any scale range (docs/terrain-realism.md).
+PRESETS = {"default": WorldParams, "earth": WorldParams, "small": WorldParams.small_world, "tiny": WorldParams.tiny_world}

@@ -6,6 +6,7 @@ from __future__ import annotations
 import time
 
 import numpy as np
+from scipy import ndimage
 import pytest
 
 from globe.config import WorldParams
@@ -227,15 +228,37 @@ def test_relief_follows_the_tectonic_spacing(tiny_out):
     assert info["land_above_talus_fraction"] < 0.2, info
 
 
-def test_relief_stays_under_the_talus_angle_at_a_resolved_preset():
+def test_relief_stays_under_the_talus_angle_away_from_the_coast():
     """The tail `test_relief_follows_the_tectonic_spacing` cannot check.
 
-    Land above the talus angle is the failure the relief scaling exists to
-    prevent, and it needs a preset whose segment spacing is resolved by the
-    coarse grid before the number means anything."""
+    Land at the angle of repose is the failure the relief scaling exists to
+    prevent, and it needs a preset whose segment spacing the coarse grid
+    resolves before the number means anything.
+
+    Measured away from the coast, because the coastline is a different
+    quantity.  Crust types made the continent-ocean contact a real ~4 km step
+    in bedrock height, and on a 4 km test body with 50 m cells that step falls
+    across a handful of cells and is genuinely at the talus angle -- Earth
+    softens it with a shelf-slope-rise ramp built from sediment, which the
+    tectonics stage does not model.  Including those cells measures the margin
+    geometry; excluding them measures the relief scaling, which is what this
+    test is for.
+    """
     p = WorldParams.small_world()
-    out = tect.finalise(tect.simulate(p, log=None))
-    assert out["_land_slope"]["land_above_talus_fraction"] < 0.02, out["_land_slope"]
+    sim = tect.simulate(p, log=None)
+    out = tect.finalise(sim)
+    grid = p.coarse_grid()
+    bed = out["bedrock"].interior
+    land = bed > 0
+    slope = out["bedrock"].gradient().vec_norm().interior
+    coast = np.zeros_like(land)
+    for f in range(6):                     # land within 2 cells of ocean
+        o = ndimage.binary_dilation(~land[f], iterations=2)
+        coast[f] = o & land[f]
+    inland = land & ~coast
+    assert inland.sum() > 0.3 * land.sum(), "too little inland to measure"
+    frac = float((slope[inland] > p.erosion.talus_slope_hard).mean())
+    assert frac < 0.02, (frac, out["_land_slope"])
 
 
 def test_shelf_sea_level_cuts_the_continental_crust():
@@ -326,19 +349,35 @@ def test_strata_fabric_gives_hardness_structure_at_basin_scale():
     a basin's width away, so rock strength has no structure for drainage to
     organise around and every continent develops the same radial network.
     The fabric both widens the contrast and shortens the correlation length.
+
+    Measured **on land, at `small`**. On `tiny` the face is 32 cells, so a
+    lag of 8 is a quarter of the world and the autocorrelation is noise
+    around zero in both arms; and over the whole field the continental /
+    oceanic density contrast that crust types introduced dominates the
+    statistics — a real signal, but not one drainage ever sees. Land is
+    where rock strength matters.
     """
-    p = WorldParams.tiny_world(0)
-    flat = tect.finalise(tect.simulate(p.with_overrides(tectonics={"strata_amp": 0.0}), log=lambda *a: None))["hardness"].interior
-    band = tect.finalise(tect.simulate(p, log=lambda *a: None))["hardness"].interior
+    p = WorldParams.small_world(0)
 
-    def spread(a):
-        return float(np.percentile(a, 90) - np.percentile(a, 10))
+    def measure(**ov):
+        out = tect.finalise(tect.simulate(p.with_overrides(tectonics=ov), log=None))
+        h = out["hardness"].interior
+        land = out["bedrock"].interior > 0
+        spread = float(np.percentile(h[land], 90) - np.percentile(h[land], 10))
+        per_face = []
+        for f in range(6):
+            m = land[f]
+            if m.sum() < 50:
+                continue
+            x = np.where(m, h[f].astype(np.float64), np.nan)
+            x = x - np.nanmean(x)
+            per_face.append(np.nanmean(x[:, :-8] * x[:, 8:]) / max(np.nanmean(x * x), 1e-12))
+        return spread, float(np.mean(per_face)), h
 
-    def autocorr(a, lag):
-        x = a[1].astype(np.float64)
-        x = x - x.mean()
-        return float((x[:-lag] * x[lag:]).mean() / max((x * x).mean(), 1e-12))
+    flat_spread, flat_ac, _ = measure(strata_amp=0.0)
+    band_spread, band_ac, band = measure()
 
-    assert spread(band) > 1.5 * spread(flat), (spread(flat), spread(band))
-    assert autocorr(band, 8) < 0.6 * autocorr(flat, 8), (autocorr(flat, 8), autocorr(band, 8))
+    assert band_spread > 1.5 * flat_spread, (flat_spread, band_spread)
+    assert band_ac < 0.6 * flat_ac, (flat_ac, band_ac)
     assert float(band.min()) >= 0.0 and float(band.max()) <= 1.0
+
