@@ -4,15 +4,11 @@ How the ★ defaults of `ErosionParams` (globe/config.py) were chosen: the sweep
 settled `creep_rate`, `disc_exponent`, `chunk` and `fan_room`, against PLAN 8.4's
 acceptance criteria (dendritic networks, valleys that widen downstream, meanders).
 
-Reproduce a row with the committed harness:
-
-    cd bake
-    python3 scripts/erosion_face_experiment.py --case a --tag mine --iters 300 \
-        --out /tmp/erosion_tuning --set erosion.creep_rate=0.1
-
-It writes `<out>/runs/<tag>/iter0300.png` (hillshade + discharge) and `metrics.json`;
-the `image` column below names that file for each run.  The images themselves are
-not in the repository — re-run the case to look at one.
+The harness that produced these rows (`scripts/erosion_face_experiment.py`)
+was removed with the rest of the one-off tooling; recover it from git at
+`5daf256` if a row needs re-deriving. The table is kept because it is the
+only record of *why* the starred defaults are what they are, and re-running
+the sweep costs more than reading it.
 
 Harness: single face, N=256, cell 50 m, mask 1 inside, 1-cell frozen rim, mask-0 halo.
 Cases: **a** tilted plane (8 cells over the face) + noise ±3 cells, uniform uplift 5 cells/300 it, ocean strip i<6 (base level, no uplift);

@@ -2,8 +2,7 @@
 
 The recurring complaint is that this world's features are smooth and samey.
 This is the measurement behind it. Metrics live in
-`bake/scripts/terrain_stats.py`; `bake/scripts/sweep_dissection.sh` reproduces
-the parameter sweeps.
+`bake/scripts/terrain_stats.py` and `bake/scripts/slope_area.py`.
 
 Read the history section at the end before trusting any number quoted in
 conversation: three separate metrics gave confident, wrong answers here before
@@ -63,7 +62,7 @@ that is almost pure long-wavelength swell.
 
 Tested directly on the `small` preset, same tectonics, same climate, same 60
 iterations, changing only the erosion input
-(`scripts/inject_bedrock_detail.py`):
+(now `tectonics.detail_amp`):
 
 | erosion input | β (200-1600 m) | relief |
 |---------------|----------------|--------|
@@ -204,7 +203,7 @@ This section supersedes "The cause: erosion inherits a spectrum it cannot
 fix" above, which is **wrong** as an account of the operative limit.
 
 `tectonics.detail_amp` (`inject_detail` in `globe/tectonics/run.py`) is the
-shippable version of `scripts/inject_bedrock_detail.py`: seam-free 3-D
+shippable form of that experiment: seam-free 3-D
 noise on the sphere, amplitude following *local* relief so plains stay
 flat, and sea level re-derived afterwards so the land fraction holds
 (25.1 % → 25.0 %, against the prototype's 14.4 % → 14.0 % drift).

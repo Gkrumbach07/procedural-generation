@@ -368,9 +368,8 @@ def sea_level(bed, area, continental, params) -> float:
 def frame_bed(sim) -> np.ndarray:
     """The current crust as a sea-levelled bed on the tect grid.
 
-    Shared by the in-simulation animation capture and `scripts/animate.py`,
-    so a frame drawn during the run is identical to one drawn by re-running
-    the sim afterwards.
+    Shared by the in-simulation animation capture and the quicklook, so a
+    frame drawn during the run is identical to the finished map.
     """
     from .collision import SmoothSplat, build_tree
 
@@ -519,8 +518,7 @@ def inject_detail(bed: np.ndarray, coarse: Grid, tp, rng) -> np.ndarray:
     the coarse grid, so refine only adds detail *below* it, and R makes no
     difference (6.22 / 6.26 / 5.97 at R = 2 / 4 / 8).  Real topography sits
     near 2.  The deficit is inherited from here, so here is where it has to
-    be fixed; `scripts/inject_bedrock_detail.py` measured the payoff as
-    beta 3.71 -> 1.84 on the `small` preset at unchanged relief.
+    be fixed.
 
     Three things that experiment left unsolved, and how this handles them:
 

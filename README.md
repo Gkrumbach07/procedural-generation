@@ -1,14 +1,18 @@
 # Globe Terrain Generation
 
-Procedurally generated, finite, globe-shaped worlds: plate tectonics → climate →
-particle hydraulic erosion → hydrology → watershed refinement → tiles, streamed
-and rendered by a Godot 4 project.  See [PLAN.md](PLAN.md) for the full design.
+Procedurally generated, Earth-scale globe worlds: plate tectonics → climate →
+particle hydraulic erosion → hydrology → watershed refinement → a tile pyramid.
+See [PLAN.md](PLAN.md) for the design and `docs/` for what has been measured.
 
 ```
 bake/          Python bake tool (numpy + numba)          python -m pytest bake/tests
-gdextension/   C++ GDExtension (tile decode, cube-sphere, drainage graph)
-game/          Godot 4 project (streaming, gnomonic tile renderer, debug overlay)
+docs/          measurements, and the null results worth not repeating
 ```
+
+The bake writes a tile pyramid; `scripts/export_godot.py` turns a baked world
+into a standalone Godot project for viewing it. The engine-side streaming
+runtime (a C++ GDExtension and a playable project) was removed — the goal is
+to *export* worlds, not to play them here.
 
 ## Bake
 
@@ -91,7 +95,7 @@ erosion defaults; re-run any row of it with
   pools 3×3 vertex neighbourhoods across face edges (PLAN 10.3 says 2×2
   box filtering): heights are strided LOD-0 vertices, water/river mask
   max, ids/biome mode, other bytes mean.  `tiles/index.json` lists the
-  LODs for the Godot loader (see `globe/io/tiles.py`, `globe/refine/lod.py`,
+  LODs for a viewer (see `globe/io/tiles.py`, `globe/refine/lod.py`,
   docs/DEVELOPING.md).
 * Climate writes an extra coarse field `evap`: the dimensionless
   evaporation multiplier `k_evap·max(T,0)` (~1 at `T_eq`) that erosion
@@ -106,31 +110,6 @@ erosion defaults; re-run any row of it with
   Particle transitions use the exact `transfer_vector` rotation rather than
   PLAN 2.6's approximate re-expression.  PLAN 2.5's upwind gradient is
   deferred to the erosion stage.
-* Collision uses a `ConcavePolygonShape3D` built from the tile's own
-  projected vertices instead of PLAN 12.3's `HeightMapShape3D`: a
-  gnomonically projected tile is a skewed quadrilateral and physics shapes
-  cannot be skewed (the error was ~100 m on the small test planet).  Only
-  LOD-0 tiles within `physics_radius_m` get a body; they are rebuilt on
-  re-anchor, synchronously (collision must never lag the anchor frame).
-  The faces come from `CubeSphere.build_collision_faces` (an extra
-  GDExtension entry point beyond PLAN 12.1) and the body and its shape are
-  reused in place; the GDScript fallback caches the anchor-independent
-  unit-sphere direction of each vertex.  At `T = 64` that is 0.1 ms of
-  projection plus ~5 ms of `ConcavePolygonShape3D.set_faces` per tile
-  (was ~20 ms), i.e. ~24 ms for a 4-body re-anchor; the remainder is
-  Godot's own shape upload and scales with `T²`, so a large `T` still
-  costs a visible hitch every `reanchor_distance_tiles` of travel.
-* `WorldRoot.effective_view_distance()` caps `view_distance_m` at
-  `0.5 · R_planet` (0.5 rad of arc).  PLAN 12.2's flat gnomonic frame only
-  holds near the anchor and `gnomonic_local` clamps `dot(Q, A)` at 0.05
-  instead of rejecting far points, so without the cap a small planet
-  streams the back hemisphere and smears it across the sky (on the `small`
-  preset, `R_planet = 4074 m`: 57 tiles, vertices down to
-  `dot(vertex, anchor) = -0.98` and 20× `R_planet` from the origin;
-  with it 13 tiles, 0.56 and 1.5×).  It is a no-op on PLAN's default
-  world (`R_planet ≈ 32.6 km` ≥ 2 × the 8 km default).  The sea-level
-  plane keeps the raw `view_distance_m`: it is flat, so covering the
-  horizon beyond the streamed tiles costs nothing.
 * Debug mode 1 (F3) tints by the **global** basin id: each tile uploads
   its `meta["basins"]` map as the `basin_ids` uniform, since `flow.G` is
   only a tile-local index (a basin that crosses a tile edge has a
@@ -167,30 +146,17 @@ erosion defaults; re-run any row of it with
   records the hash of its own parameter group so a resume detects upstream
   parameter drift.
 
-## Godot runtime (`game/`, `gdextension/`)
+## Viewing a world
 
 ```sh
-# 1. bake a world and make it visible to the project
-(cd bake && python scripts/bake.py --world demo --preset small)   # -> bake/worlds/demo
-ln -s "$PWD/bake/worlds/demo" game/data/worlds/demo      # or copy; also set globe/world_dir in project.godot
-
-# 2. (optional but recommended) build the GDExtension for fast tile decode
-git submodule update --init                              # godot-cpp (godot-4.4-stable)
-(cd gdextension && scons platform=linux target=template_debug)  # -> game/addons/globe/bin
-
-# 3. run
-godot --path game                                        # WASD/QE move, Shift sprint, Esc mouse, F fly/walk, F3 debug
-
-# headless tests
-godot --headless --path game -s tests/test_stream.gd -- --world=/abs/path/to/world
-make -C gdextension/tests test                           # C++ cube-sphere vs Python vector file
+cd bake
+python scripts/export_godot.py --world worlds/demo --out /tmp/globe_viewer
+godot --path /tmp/globe_viewer      # drag to orbit, wheel to zoom
 ```
 
-Without the compiled extension the project still runs: `TileSource` falls
-back to a pure-GDScript 16-bit PNG decoder (slower loads, same output).
+Exports the baked tiles plus a minimal Godot project: a textured globe with an
+orbit camera. No streaming, no player, no gameplay — it is there to look at a
+world, and to be the starting point for a project that does more.
 
-Rendering model (PLAN 12): tiles are flat `(T+1)²` grids; the vertex shader
-maps `(i, j)` → face `(u, v)` → unit sphere (EAC) → gnomonic projection into
-the anchor's tangent frame (`globe_e1/n/e2` shader globals), so wrap-around
-and cube-edge crossing need no special cases.  `WorldRoot` re-anchors when
-the player is more than one tile from the anchor.
+`scripts/render_terrain.py` renders a patch to an image without Godot at all,
+which is usually the faster way to judge a bake.
