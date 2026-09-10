@@ -183,6 +183,7 @@ class TectonicsParams:
     relax_rate: float = 0.1  # per-step segment height cascade rate (0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion)); moves rate*(Δh-thr)/2/knn to each lower neighbour
     relax_threshold: float = 0.15  # maximum stable slope, bedrock units per spacing
     relax_knn: int = 8
+    orogen_shaping: float = 0.25  # how strongly a collision belt is pulled into its type's cross-section (0 = the old symmetric Gaussian bump). A real orogen is asymmetric and digs a foreland moat in front of itself; a Gaussian can represent neither. See globe/tectonics/orogeny.py
     belt_width_factor: float = 1.0  # sigma (× spacing) of the Gaussian that shares subducted mass among the survivor's same-plate neighbours (mountain belt width)
     boundary_width_factor: float = 3.0  # hardness: boundary_proximity falls to 0 at this × spacing from a foreign plate
     collision_zone_factor: float = 2.0  # uplift clamped >= 0 within this × spacing of a subduction of the uplift window

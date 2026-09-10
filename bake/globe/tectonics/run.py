@@ -60,6 +60,7 @@ from ..field import FaceField
 from ..io.world_store import WorldStore
 from ..stubs import fbm_at, fbm_noise
 from . import intraplate
+from . import orogeny
 from .collision import (
     CellTree,
     SmoothSplat,
@@ -212,6 +213,11 @@ class TectonicSim:
         if n_coll:
             spread_collisions(seg, tree, losers, survivors, alive, tp.belt_width_factor * self.spacing,
                               accretion=float(tp.arc_accretion))
+            if tp.orogen_shaping > 0.0:
+                # the belt already has its mass; give it a cross-section
+                self.ledger["orogen_shaped"] = self.ledger.get("orogen_shaped", 0.0) + orogeny.shape_belt(
+                    seg, tree, losers, survivors, alive, self.spacing, self.params.R_planet,
+                    1.0, float(tp.orogen_shaping), CONTINENTAL)
             # crust that has been through a collision comes out lighter: the
             # light melt stays, the dense residue goes to the mantle.  This is
             # what separates continental from oceanic crust, and so what makes
@@ -457,8 +463,8 @@ def initialise(params: WorldParams, log=print) -> TectonicSim:
         log(
             f"[tectonics] crust: {int(cont.sum())} continental / {M} segments "
             f"({cont.mean() * 100:.1f} %) as one supercontinent, "
-            f"{int((craton == 1).sum())} craton segments "
-            f"({(craton == 1).sum() / max(cont.sum(), 1) * 100:.0f} % of it) in {int(tp.cratons)} nuclei; "
+            f"{int((craton > 0).sum())} craton segments "
+            f"({(craton > 0).sum() / max(cont.sum(), 1) * 100:.0f} % of it) in {len(np.unique(craton[craton > 0]))} nuclei; "
             f"h_cont={tp.continental_thickness * (1.0 - tp.continental_density):.3f} "
             f"h_ocean={tp.oceanic_thickness * (1.0 - tp.oceanic_density):.3f} bedrock units"
         )
