@@ -52,6 +52,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from scipy import ndimage
 
 from ..config import WorldParams
 from ..cubesphere import Grid, from_sphere_v
@@ -503,6 +504,61 @@ def _land_slope_info(coarse: Grid, bed_m: np.ndarray, params: WorldParams) -> di
     }
 
 
+def inject_detail(bed: np.ndarray, coarse: Grid, tp, rng) -> np.ndarray:
+    """Give the bedrock the fractal detail erosion cannot manufacture.
+
+    Erosion reworks the spectrum it is handed; it cannot add variance that
+    was never there.  Measured through the whole chain on one world, over
+    200-1600 m:
+
+        bedrock leaving tectonics   beta 12.99
+        after coarse erosion        beta  6.47
+        after refine (R = 2, 4, 8)  beta  6.0 - 6.3
+
+    Refinement does not touch that band -- the band is already resolved on
+    the coarse grid, so refine only adds detail *below* it, and R makes no
+    difference (6.22 / 6.26 / 5.97 at R = 2 / 4 / 8).  Real topography sits
+    near 2.  The deficit is inherited from here, so here is where it has to
+    be fixed; `scripts/inject_bedrock_detail.py` measured the payoff as
+    beta 3.71 -> 1.84 on the `small` preset at unchanged relief.
+
+    Three things that experiment left unsolved, and how this handles them:
+
+    * **Seams.** It generated noise per face, so every cube edge showed.
+      :func:`~globe.stubs.fbm_noise` evaluates a 3-D lattice at the cell
+      centres *on the sphere*, so it is continuous across faces by
+      construction -- the same generator the heat field already uses.
+    * **Amplitude.** A flat fraction of global relief roughens plains as
+      hard as mountains.  The amplitude here follows the *local* relief
+      (max - min over `detail_relief_cells`), the way the refine stage
+      scales its own detail by local slope and relief, so a craton stays a
+      craton.
+    * **The mass budget.** Injecting detail moves the land fraction (14.4 %
+      -> 14.0 % in the experiment) because sea level was fixed before the
+      noise went in.  The caller re-derives sea level afterwards.
+
+    `bed` is in bedrock units, already sea-levelled; the return is the same
+    array with detail added.
+    """
+    if tp.detail_amp <= 0.0 or tp.detail_octaves <= 0:
+        return bed
+    # coarsest injected octave ~= `detail_cells` coarse cells.  A 3-D lattice
+    # of frequency f has wavelength 2/f in the [-1, 1] cube, i.e. ~2/f radians
+    # on the unit sphere, and a coarse cell subtends (pi/2)/N.
+    k = max(2.0, float(tp.detail_cells))
+    freq = 4.0 * coarse.N / (k * math.pi)
+    noise = fbm_noise(coarse, rng, int(tp.detail_octaves), freq)
+    noise = FaceField(coarse, noise, name="detail").interior.astype(np.float64)
+    n = noise.std()
+    if n > 0:
+        noise /= n
+    # local relief, so plains stay flat and mountains get rough
+    r = max(1, int(tp.detail_relief_cells))
+    hi = ndimage.maximum_filter(bed, size=(1, r, r), mode="nearest")
+    lo = ndimage.minimum_filter(bed, size=(1, r, r), mode="nearest")
+    return bed + float(tp.detail_amp) * (hi - lo) * noise
+
+
 def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     """Coarse-grid outputs (docs/DEVELOPING.md): ``bedrock`` (m), ``uplift``
     (m per erosion iteration), ``hardness`` [0, 1], ``plate_id`` (int16),
@@ -534,6 +590,11 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
         cont_c = _resample(cont_t).astype(np.float64) > 0.5
     q = sea_level(bed, area, cont_c, params)
     bed -= q
+    # fractal detail, then sea level again: the noise shifts how much of the
+    # surface is above water, so the quantile has to be re-derived or the
+    # land fraction drifts (measured 14.4 % -> 14.0 % when it was not)
+    bed = inject_detail(bed, coarse, tp, params.rng("tectonics", 8))
+    bed -= sea_level(bed, area, cont_c, params)
     land = bed > 0
     # vertical scale: tie the relief to the *horizontal* scale of the
     # tectonic pattern (the mean segment spacing, in metres) unless an

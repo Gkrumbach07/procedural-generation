@@ -196,3 +196,57 @@ reversed a conclusion.
 
 The lesson worth keeping: a terrain metric that returns a suspiciously stable
 number across configurations that plainly differ is broken, not insensitive.
+
+
+## The input spectrum is not the constraint — erosion's attractor is
+
+This section supersedes "The cause: erosion inherits a spectrum it cannot
+fix" above, which is **wrong** as an account of the operative limit.
+
+`tectonics.detail_amp` (`inject_detail` in `globe/tectonics/run.py`) is the
+shippable version of `scripts/inject_bedrock_detail.py`: seam-free 3-D
+noise on the sphere, amplitude following *local* relief so plains stay
+flat, and sea level re-derived afterwards so the land fraction holds
+(25.1 % → 25.0 %, against the prototype's 14.4 % → 14.0 % drift).
+
+Measured end to end at `N_c = 256`, 300 erosion iterations, R = 4,
+β over 200–1600 m at three points in the chain:
+
+| `detail_amp` | bedrock | **after erosion** | after refine | relief | lr@1000 |
+|---|---|---|---|---|---|
+| 0.00 | 13.09 | **6.21** | 6.26 | 627 m | 0.488 |
+| 0.25 | **4.70** | **6.03** | 6.04 | 605 m | 0.495 |
+| 0.50 | 5.04 | 4.69 | 4.82 | 648 m | **0.168** |
+
+The injection does exactly what it is meant to — bedrock β falls from 13.09
+to 4.70 — **and erosion removes it again.** A 8.4-point improvement in the
+input becomes a 0.18-point improvement in the output. Turning the amplitude
+up to 0.5 finally moves the eroded field (4.69), but at the cost of the
+valley structure: the 1 km local-relief ratio collapses from 0.488 to
+0.168, i.e. the nesting that made it a landscape is gone.
+
+So the erosion stage **converges to β ≈ 6 from either side** — down from
+13.09, and back up from 4.70. That is an attractor of the kernel and its
+parameters, not a deficit inherited from tectonics. Feeding it a better
+spectrum cannot fix it, which is also why every erosion parameter measured
+inert against drainage density: the knobs that were swept are not the ones
+that set where the attractor sits.
+
+`detail_amp` therefore defaults to **0**. It is kept, working and
+documented, because it is the correct implementation of an idea worth
+having on file, and because a *low* setting is free — 0.25 costs nothing
+and leaves the bedrock in better shape for anything downstream that reads
+it directly.
+
+Caveat on the measurement: the analysis window is chosen per world as the
+highest-relief all-land patch, so the three rows are not the same ground.
+Land fraction and total relief agree closely across them (25.0–25.3 %,
+605–648 m), so the comparison is fair, but a same-window version would be
+better.
+
+**Where to look next**, given the attractor: the quantities that could set
+it are the ones never swept — `iter_erode` / `iter_deposit` (how much a
+cell may change per iteration), `dt` and `friction` (the particle step),
+and the number of iterations itself. Not `disc_saturation`, `thermal_rate`,
+`creep_rate` or `particles_per_cell`, all of which are already measured
+inert.

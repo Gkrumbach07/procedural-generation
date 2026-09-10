@@ -119,9 +119,9 @@ class TectonicsParams:
     max_crust_thickness: float = 3.0  # continental thickness (× the 1.0 initial) above which the root delaminates; 0 = no limit. Earth saturates near 2x normal even under Tibet. Unlimited, a few segments stacked to 8.3x and squashed the vertical scale everyone else shares
     delamination: float = 0.05  # fraction of the excess over max_crust_thickness shed to the mantle per step
     arc_birth: float = 0.02  # probability that an ocean-on-ocean subduction converts the survivor to continental crust (island arcs -- how continents are actually born). 0 freezes the continental area at the initial seeding
-    differentiation: float = 0.0  # fraction of the gap to `density_continental` a survivor closes per collision (0 = off). Collision alone only averages density, so the elevation histogram stays one narrow spike; Earth is bimodal because thickened crust partially melts, the light granitic fraction stays and the dense residue is lost to the mantle
+    differentiation: float = 0.0  # fraction of the gap to `density_continental` a survivor closes per collision (0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion)). Collision alone only averages density, so the elevation histogram stays one narrow spike; Earth is bimodal because thickened crust partially melts, the light granitic fraction stays and the dense residue is lost to the mantle
     density_continental: float = 0.30  # density floor differentiation drives collided crust toward: granitic continental crust, which floats high
-    animate_frames: int = 0  # capture this many animation frames DURING the run and write quicklook/tectonics.webp (0 = off). Re-simulating for an animation afterwards costs a second full run -- 39 minutes at Earth scale
+    animate_frames: int = 0  # capture this many animation frames DURING the run and write quicklook/tectonics.webp (0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion)). Re-simulating for an animation afterwards costs a second full run -- 39 minutes at Earth scale
     animate_width: int = 900  # animation frame width in pixels
     animate_fps: float = 12.0  # animation playback rate
     collision_radius_factor: float = 1.0  # × spacing: segments of different plates closer than this collide
@@ -147,6 +147,11 @@ class TectonicsParams:
     height_scale_m: float = 4000.0  # metres per bedrock unit when both relief_m and relief_spacings are 0
     relief_m: float = 0.0  # explicit override, metres: if > 0, scale bedrock so the 99.9th percentile of land sits at this height
     relief_spacings: float = 1.5  # when relief_m == 0: that percentile sits at this many mean segment spacings (metres), so the vertical scale follows the horizontal one at every preset (0 = use height_scale_m)
+    # --- fractal detail (globe/tectonics/run.py inject_detail) -----------
+    detail_amp: float = 0.0  # detail added to the bedrock, as a fraction of the LOCAL relief over detail_relief_cells. Erosion reworks the spectrum it is handed but cannot add variance that was never there: measured beta 12.99 leaving tectonics, 6.47 after erosion and 6.0-6.3 after refine at any R, where real topography is ~2. 0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion)
+    detail_cells: float = 16.0  # coarse cells in the longest injected wavelength; shorter octaves follow. Wavelengths above this belong to tectonics and injecting them would fight the plate-scale relief
+    detail_octaves: int = 5  # octaves below detail_cells (5 reaches half a cell)
+    detail_relief_cells: int = 9  # window (coarse cells) the local relief is measured over, so plains stay flat and mountains get rough
     smooth_sigma: float = 1.0  # final Gaussian on the tect grid (tect cells); resampling to the coarse grid is cubic
     # -- sphere-specific knobs (see globe/tectonics/plates.py for the force model) --
     force_scale: float = 3e-4  # plate angular acceleration in spacings/step² per unit (convection × |∇heat| [heat per radian] / mass per area)
@@ -160,7 +165,7 @@ class TectonicsParams:
     gap_cooling: float = 0.05  # peak heat removed (Gaussian blob, 1 spacing wide) per segment of new crust spawned at a rift
     subduction_heating: float = 0.01  # peak heat added (Gaussian blob, 1 spacing wide) per subducted segment
     spawn_spacing_factor: float = 0.85  # min spacing of new segments, × spacing
-    relax_rate: float = 0.1  # per-step segment height cascade rate (0 = off); moves rate*(Δh-thr)/2/knn to each lower neighbour
+    relax_rate: float = 0.1  # per-step segment height cascade rate (0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion)); moves rate*(Δh-thr)/2/knn to each lower neighbour
     relax_threshold: float = 0.15  # maximum stable slope, bedrock units per spacing
     relax_knn: int = 8
     belt_width_factor: float = 1.0  # sigma (× spacing) of the Gaussian that shares subducted mass among the survivor's same-plate neighbours (mountain belt width)
@@ -226,7 +231,7 @@ class ErosionParams:
     k_disc: float = 1.0
     ema: float = 0.1  # ★ map lerp
     thermal_rate: float = 0.5
-    creep_rate: float = 0.1  # hillslope creep: a second thermal pass with talus 0 at this rate (linear diffusion of the surface; submerged cells are inert); 0 = off.  Without it every particle path incises its own rill (drainage density saturates at one channel per ~3 cells, parallel micro-rills instead of a trunk network); 0.3 over-smooths the divides (docs/erosion-tuning.md)
+    creep_rate: float = 0.1  # hillslope creep: a second thermal pass with talus 0 at this rate (linear diffusion of the surface; submerged cells are inert); 0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion).  Without it every particle path incises its own rill (drainage density saturates at one channel per ~3 cells, parallel micro-rills instead of a trunk network); 0.3 over-smooths the divides (docs/erosion-tuning.md)
     thermal_max: float = 50.0  # cap on the material a cell sheds per thermal pass (cell units): a tectonic cliff relaxes at a bounded rate instead of collapsing in one iteration
     talus_slope_soft: float = 0.6  # rise/run
     talus_slope_hard: float = 1.2
@@ -248,7 +253,7 @@ class ErosionParams:
     ocean_steps: int = 64  # at most this many seafloor steps (then the rest waits in the cell's pending stockpile, re-injected next iteration)
     fan_room: float = 50.0  # a seafloor step may settle at most this much (cell units) on a flat sea floor per particle-step (the drop to the previous cell when larger); the sea-level ceiling, the fan_slope descent and iter_deposit still bound the pile in apply_changes.  0.02 (= DEP_FLOOR) throttled offshore dispersal to ~1 cell unit per stockpile and iteration, so river mouths parked most of their load in `pending`
     fan_slope: float = 0.05  # a submarine fan descends at least this much per cell away from its source (cell units per cell): the deposit ceiling of a seafloor step is the previous path cell minus this, and never above -DEP_FLOOR
-    glacial_every: int = 10  # run the glacial pass (erosion/glacial.py) every k iterations; 0 = off.  Ice is where the mean annual temperature is at or below freezing (evap <= 0), which at the defaults is ~9 % of land, close to Earth's glaciated fraction
+    glacial_every: int = 10  # run the glacial pass (erosion/glacial.py) every k iterations; 0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion).  Ice is where the mean annual temperature is at or below freezing (evap <= 0), which at the defaults is ~9 % of land, close to Earth's glaciated fraction
     ice_evap: float = 0.0  # ice forms where the climate field `evap` is at or below this.  `evap` is k_evap*max(T,0), so 0 is exactly the freezing line and a positive value is a warmer equilibrium-line altitude (more of the world glaciated).  This is the FIRST-ORDER control on lakes: measured across three seeds, lake area swung 5x with the seed (0.14 %, 0.31 %, 0.74 % of land) but at most 43 % with glacial_from/glacial_every, and one seed had no land below +1.6 C at all, so no ice and no glacial lakes were possible however the other knobs were set
     glacial_from: float = 0.75  # start glaciating this far through the run (fraction of erosion.iterations); 0 = glaciate throughout.  Earth is lake-rich because glaciation was *recent* — the basins ice cut ~10 ka ago have not had time to fill, and lake lifetime is short next to landscape evolution time.  Carving throughout instead gives the fluvial system the whole rest of the run to drain and backfill every basin
     glacial_rate: float = 1.0  # bed lowered per glacial pass (cell units) at the reference ice flux, scaled by sqrt(discharge/disc_saturation) and by (1 - 0.5*hardness).  Unlike every other erosional term this one has NO base-level limit — ice flows uphill out of a basin — which is what leaves the closed depressions that become lakes
@@ -329,7 +334,7 @@ class DeriveParams:
     river_fraction_scale: float = 1.5  # auto mode: a thresholded discharge blob is wider than a 1-cell D8 channel
     river_hysteresis: float = 2.5  # connectivity threshold = the discharge of river_fraction x this fraction of land; low-threshold blobs survive only if they contain a high-threshold cell (1 = off)
     river_fallback_fraction: float = 0.03  # auto mode when the coarse graph has no channels (stub hydro)
-    discharge_smooth_cells: float = 1.0  # Gaussian sigma (fine cells) applied to the discharge before thresholding; 0 = off
+    discharge_smooth_cells: float = 1.0  # Gaussian sigma (fine cells) applied to the discharge before thresholding; 0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion)
     min_river_cells: float = 8.0  # x R^2: smaller discharge blobs are dropped, smaller holes are filled before thinning
     spur_cells: float = 3.0  # x R: skeleton spurs (endpoint -> junction) shorter than this are pruned
     max_width_cells: float = 24.0  # cap on the river width (fine cells)
