@@ -1,13 +1,14 @@
 # Where the 3.5 km of missing relief went
 
 `docs/earth-bake.md` ended the first complete Earth-scale bake with one big
-defect: after erosion nothing on the planet stands above 5 km (Earth: 8849 m)
-and every band above 2 km is about half of Earth's. Two contributors were
-named and not separated — `tectonics.orogen_decay = 0.008`, which left
-tectonics at a 6619 m maximum, and the glacial pass, which took the maximum
-from 7300 m to 4900 m in fifty iterations.
+defect: after erosion the >5 km band holds 0.0 % of the land, the highest
+point on the planet is 5355 m against Earth's 8849, and every band above
+2 km is about half of Earth's. Two contributors were named and not
+separated — `tectonics.orogen_decay = 0.008`, which left tectonics at a
+6619 m maximum, and the glacial pass, which took the maximum from 7300 m to
+4900 m in fifty iterations.
 
-They are separated here, one at a time, and the split is lopsided.
+They are separated here, one at a time. Neither is the largest term.
 
 ## Tectonics is not the problem: it is already on Earth's curve
 
@@ -113,7 +114,12 @@ checkpoint and carving once at each setting:
 | **1.0 / 0.4** (shipped) | 508,938 | **3909 m** (= the cap) | **848 m** |
 | 0.2 / 0.08 | 508,938 | 782 m | 373 m |
 | 0.05 / 0.02 | 508,938 | 195 m | 131 m |
+| 0.015 / 0.006 | 508,938 | 59 m | 39 m |
 | 0.005116 / 0.002046 (= 50 m / 20 m) | 508,938 | 20 m | 13 m |
+
+The same 508,938 cells glaciate at every setting, which is `ice_evap`'s
+doing and not this knob's: 8.1 % of the globe, about 27 % of the land —
+Last-Glacial-Maximum coverage rather than today's.
 
 **One pass at the shipped settings takes 848 m off the average glaciated
 cell and the full 3909 m cap off the deepest, and there are 20 passes.**
