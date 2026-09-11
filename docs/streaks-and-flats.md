@@ -569,6 +569,18 @@ The earlier forks without isostasy said the same (`metres` against
 4.4 % above 2 km in both). The per-pass value is not what the world is
 sensitive to; the units were.
 
+V6 run on to 800 holds that, and is slightly better at the waterline:
+
+| iteration 800 | V5, 147 / 59 m a pass | V6, 50 / 20 m (shipped) |
+|---|---|---|
+| bedrock bands 0–1 / 1–2 / 2–3 / 3–4 / 4–5 / >5 km, % of land | 68.4 / 17.3 / 6.3 / 4.1 / 2.0 / 1.98 | 69.3 / 16.8 / 6.1 / 4.0 / 2.0 / 1.94 |
+| land above 2 km | 13.32 % | 13.09 % |
+| globe within ±50 m of sea level | 3.97 % | 3.84 % |
+| cells straddling the waterline | 1.46 % | 1.05 % |
+| sea-level change per 1 % of land fraction | 48 m | 94 m |
+| routing surface above terrain, p90 | 12 m | 8 m |
+| lowest / highest bedrock | −8588 / 12,973 m | −8472 / 12,910 m |
+
 **The small preset takes isostasy and sticky ice without trouble.** Its
 worlds are spherical too, so the two defaults reach them. Baked through
 `scripts/bake.py --preset small --to erosion`, the eroded surface
