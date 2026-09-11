@@ -129,6 +129,18 @@ def carve(state, params) -> dict:
         return stats
 
     ice = ice_mask(state, float(ep.ice_evap))
+    sticky = bool(getattr(ep, "glacial_sticky", False))
+    prev = getattr(state, "ice_prev", None) if sticky else None
+    if prev is not None:
+        # A glacier does not stop being one because it has cut its bed below
+        # the sea.  Without this, `ice_mask`'s "surface > 0" makes the ice
+        # margin *the coastline* in cold lowlands; every pass carves the
+        # outer steps below sea level, they drop out of the mask, and the
+        # margin -- and the next pass's taper -- jumps inland, printing a
+        # land/sea band per pass (docs/streaks-and-flats.md).  Sticky: a
+        # cell glaciated before stays glaciated while it is still cold.
+        cold = (state.mask == pk.MASK_ACTIVE) & (state.evap <= float(ep.ice_evap))
+        ice = ice | (prev & cold)
     if not ice.any():
         return stats
     # halo exchange so a margin across a face edge is seen; the mask is
@@ -138,6 +150,8 @@ def carve(state, params) -> dict:
     state.exchange_halos()
     ice = state.mask == 200
     state.mask[...] = tmp
+    if sticky:
+        state.ice_prev = ice.copy()
 
     sat = max(float(ep.disc_saturation), 1e-9)
     q = np.maximum(state.discharge, 0.0) / sat

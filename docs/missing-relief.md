@@ -302,6 +302,29 @@ The complete corrected world therefore costs 200 iterations rather than 800.
 > below. A clean corrected-glacial world has to fork from a checkpoint
 > *before* 600 (any ≤ 590; 550 is used there), and that result supersedes
 > the table in this section.
+>
+> **The clean fork, on the re-baked world** (`worlds/w-base`, forked from
+> iteration 550 so no shipped pass ever runs; only the glacial values
+> differ), at iteration 800:
+>
+> | | shipped | glacial units corrected | Earth |
+> |---|---|---|---|
+> | highest point | 5192 m | **10,096 m** | 8849 m |
+> | land above 2 km (bedrock) | 5.2 % | 6.1 % | 13.3 % |
+> | 0–1 km band | 74.5 % | 85.0 % | 71.6 % |
+> | land median (bedrock) | 575 m | 226 m | ~350 m |
+> | globe within ±50 m of sea level | 6.40 % | 11.45 % | 1–2 % |
+> | sea-level change per 1 % of land | 37 m | 2.6 m | — |
+> | ocean median | −1927 m | −2525 m | −3700 m |
+>
+> The conclusion survives the correction and its numbers change: the
+> highest point recovers completely — and now *overshoots* Earth, because
+> once nothing carves four kilometres a pass the active belts keep building
+> — while the lowland distribution gets worse, exactly the two-errors
+> result below. Two things are new. The ocean is 600 m deeper, so part of
+> the shallow-ocean defect was the shipped glacial pass's spoil going
+> offshore. And the tidal flat is *worse* with the units corrected, which is
+> what the missing isostatic response predicts: docs/streaks-and-flats.md.
 
 `earthlike` (0.015 / 0.006 — 147 m and 59 m per pass at this grid) run out
 to iteration 800, against the shipped run and Earth:

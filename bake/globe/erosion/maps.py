@@ -742,7 +742,7 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
     ep = _eparams(params)
     t0 = time.time()
     if ep.flood_every > 0 and (state.route is None or state.iteration % ep.flood_every == 0):
-        state.refresh_route(ep.route_eps)
+        state.refresh_route(cell_units(ep, "route_eps", state.height_unit_m))
     tr = time.time() - t0
     iso = state.spherical and float(getattr(ep, "isostasy", 0.0)) > 0.0
     if iso:

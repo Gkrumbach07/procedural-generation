@@ -66,6 +66,8 @@ def write_checkpoint(out: Path, state, label: str, forked_from: str, overrides) 
         arrays["route"] = state.route
     if getattr(state, "iso_acc", None) is not None:
         arrays["iso_acc"] = state.iso_acc
+    if getattr(state, "ice_prev", None) is not None:
+        arrays["ice_prev"] = state.ice_prev.astype(np.uint8)
     with open(p, "wb") as fh:
         np.savez(fh, **arrays)
     p.with_suffix(".json").write_text(json.dumps(

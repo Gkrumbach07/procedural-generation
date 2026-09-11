@@ -635,6 +635,25 @@ def test_alluvial_cover_lets_hardness_shape_the_landscape():
     assert relief_on > 0.08, relief_on  # soft rock really is carved down
 
 
+def test_sticky_ice_keeps_a_cell_carved_below_sea_level_glaciated(scratch):
+    """With erosion.glacial_sticky, a cold cell that was ice stays ice after
+    its bed drops below sea level; without it, it leaves the mask (and the
+    margin migrates).  Off by default, and then no state is kept at all."""
+    for sticky in (False, True):
+        p = WorldParams.tiny_world(2).with_overrides(erosion={"glacial_sticky": sticky})
+        st = erosion_run.build_state(_stub_world(scratch, f"sticky{int(sticky)}", p), p)
+        st.evap[...] = 0.0                                   # everything cold
+        glacial.carve(st, p)
+        if not sticky:
+            assert getattr(st, "ice_prev", None) is None
+            continue
+        was = st.ice_prev.copy()
+        cell = tuple(np.argwhere(was[:, st.H:-st.H, st.H:-st.H])[0] + np.array([0, st.H, st.H]))
+        st.height[cell] = -0.05 - st.sediment[cell]         # carved below the sea
+        glacial.carve(st, p)
+        assert st.ice_prev[cell]                              # still glaciated
+
+
 def test_glacial_carving_makes_closed_basins_and_conserves_mass():
     """Glacial carving is the only pass that can leave a lake.
 

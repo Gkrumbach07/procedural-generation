@@ -89,6 +89,8 @@ def save_checkpoint(store: WorldStore, state: ErosionState, params: WorldParams)
         arrays["route"] = state.route
     if getattr(state, "iso_acc", None) is not None:  # rebound not yet applied: part of the state
         arrays["iso_acc"] = state.iso_acc
+    if getattr(state, "ice_prev", None) is not None:  # sticky ice: part of the state
+        arrays["ice_prev"] = state.ice_prev.astype(np.uint8)
     with open(tmp, "wb") as fh:
         np.savez(fh, **arrays)
     tmp.replace(p)
@@ -164,6 +166,7 @@ def load_checkpoint(state: ErosionState, path: Path, meta: dict) -> None:
         state.pending[...] = z["pending"] if "pending" in z.files else 0.0
         state.route = np.ascontiguousarray(z["route"]) if "route" in z.files else None
         state.iso_acc = np.array(z["iso_acc"]) if "iso_acc" in z.files else None
+        state.ice_prev = np.array(z["ice_prev"]).astype(bool) if "ice_prev" in z.files else None
     state.iteration = int(meta["iteration"])
 
 

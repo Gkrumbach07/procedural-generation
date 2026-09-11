@@ -294,13 +294,14 @@ class ErosionParams:
     glacial_rate: float = 1.0  # bed lowered per glacial pass (cell units) at the reference ice flux, scaled by sqrt(discharge/disc_saturation) and by (1 - 0.5*hardness).  Unlike every other erosional term this one has NO base-level limit — ice flows uphill out of a basin — which is what leaves the closed depressions that become lakes
     glacial_ramp: int = 4  # cells over which the carve ramps up from the ice margin inward.  Erosion that only scales with ice flux deepens a valley monotonically downstream, which drains; tapering it to zero at the snout leaves a rock lip with the deepest point inside the ice, i.e. a closed basin
     glacial_max: float = 0.4  # cap on the bed a cell loses in one glacial pass (cell units); see the scale defect noted on `glacial_rate`
+    glacial_sticky: bool = False  # a cell glaciated in one pass stays glaciated while it is still cold, even once its bed is carved below sea level.  Off, the ice margin is the coastline in cold lowlands and it migrates inland pass by pass as the carve drowns the outer steps, printing land/sea bands and concentric arcs (docs/streaks-and-flats.md).  Persisted in checkpoints
     moraine_frac: float = 1.0  # fraction of the excavated rock deposited on the ice margin as moraine (the rest is lost); 1.0 keeps the pass mass-conserving, and the moraine dams valleys leaving an ice field, which is the second way ice makes lakes
     isostasy: float = 0.0  # Airy compensation of the mass surface processes move: an eroded column rebounds by this fraction of the rock removed, a loaded one subsides by it.  0.8 = continental crust over mantle (tectonics.continental_density 0.804), i.e. eroding 1 km of rock lowers the surface ~200 m.  Without it erosion lowers the surface one-for-one and planes a continent to base level (docs/missing-relief.md).  0 = off
     flexure_km: float = 60.0  # the rebound is regional, not per cell: Gaussian sigma of the flexural response (a ~30 km elastic plate).  A locally-rebounding valley could never be incised; a flexural one lifts the peaks around it.  In metres, so it means the same thing at every cell size
     isostasy_every: int = 20  # apply the accumulated rebound every k iterations: the flexural smoothing is ~250 monotone diffusion steps at the earth preset (~16 s), so this keeps it near +0.8 s per iteration
     resume: bool = True  # resume from checkpoints/ whose parameter + upstream + kernel-version hash matches; False recomputes from bedrock
     flood_every: int = 10  # recompute the particle routing surface (epsilon priority flood, erosion/route.py) every k iterations; 0 = steer on the raw terrain
-    route_eps: float = 1e-3  # minimum drop per cell (cell units) of the routing surface across lakes
+    route_eps: float = 0.05  # minimum drop per cell of the epsilon-filled routing surface particles steer on (metres; LENGTH_PARAMS_M).  Its job is to let a particle cross a *lake* towards the outlet.  It was 1e-3 in cell units -- 5 cm per cell at the 50 m cells it was tuned on, but 9.77 m per cell at the earth preset, which raised the routing surface above the terrain over 93 % of the land and up to 2.6 km above it, and drew the radial streaks (docs/streaks-and-flats.md)
     pit_steps: int = 16  # kill a particle after this many consecutive uphill steps (stuck in a pit)
     chunk: int = 2048  # particles per parallel chunk (change-list capacity = chunk*(max_steps+16) entries of 24 B, ~100 MB at N_c=1024); terrain is frozen within a chunk.  2048 traces ~20 % faster than 512 (fewer parallel launches, less tail imbalance) with the same morphology on the single-face tests (docs/erosion-tuning.md)
     backend: str = "cpu"
@@ -324,7 +325,7 @@ class ErosionParams:
 #: ``fan_slope``), rates and ratios are genuinely dimensionless and carry over
 #: untouched.
 LENGTH_PARAMS_M = ("cover_depth", "max_erode", "iter_erode", "iter_deposit",
-                   "thermal_max", "fan_room", "min_volume")
+                   "thermal_max", "fan_room", "min_volume", "route_eps")
 
 
 def cell_units(ep: "ErosionParams", name: str, cell_size_m: float) -> float:
