@@ -350,3 +350,82 @@ it means `hotspot_rate` cannot be read off a target height.
 Large igneous provinces are genuinely absent: nothing in the model produces
 the short, enormous burst at plume initiation that makes a Deccan or a
 Siberian Traps, and a LIP is not a slow track with the rate turned up.
+
+### Where they die, normalised
+
+50 iterations from the iteration-600 checkpoint at the shipped settings.
+Concentration is the share of the thing divided by the zone's share of the
+globe — the normalisation `docs/earth-bake.md` had to learn the hard way:
+
+| zone | % of globe | deaths | conc. | new sediment | conc. |
+|---|---|---|---|---|---|
+| land (> 0) | 31.1 | 11.6 % | 0.37× | 42.3 % | 1.36× |
+| coast (−50..0) | 5.0 | **39.7 %** | **7.9×** | **0.00 %** | **0.00×** |
+| shelf (−200..−50) | **0.7** | 22.2 % | **31.9×** | 0.20 % | **0.29×** |
+| slope (−1000..−200) | 2.2 | 13.8 % | 6.3× | 28.5 % | **13.1×** |
+| deep (< −1000) | 61.0 | 12.7 % | 0.21× | 29.0 % | 0.47× |
+
+The picture is the opposite of "particles bypass the margin". **Only 12.7 %
+of particles die in deep water and 62 % die at or above −200 m** — they
+stop on the margin in enormous numbers, 32× over-represented on the shelf.
+And they leave nothing there: the coast gains **0.00×** and the shelf
+0.29×, while the slope takes 13×. They pile up on the margin and their load
+goes over the edge.
+
+### Why: the sea-level clamp is a length in cell units
+
+`particle.DEP_FLOOR = 0.02` cell units is the margin the kernel keeps
+between a deposit and sea level — *particles never turn sea into land*. At
+the 50 m cells the erosion model was tuned on that is **1 m of water**. At
+the `earth` preset's 9773 m cells it is **195.5 m**.
+
+In `apply_changes` an ocean cell's deposit is capped at
+`lim = -DEP_FLOOR - s_c`, which is *negative* for any cell shallower than
+`DEP_FLOOR`, and `d_act` is then clamped to zero. So at Earth scale nothing
+can be deposited anywhere in the top 195 m of the water column.
+
+Read from the code that is a confident inference, and this document's
+predecessor records a confident reading of this same kernel being refuted
+by a seven-minute experiment. So: one call to `run_iteration` — the
+particle pass alone, no thermal, no glacial, no datum hold — on the real
+iteration-600 state, with the sediment change binned by the depth each cell
+had going in:
+
+| submerged band | cells | cells that gained anything |
+|---|---|---|
+| exactly 0.00 m | 298,753 | 1,629 |
+| −50..−100 m | 17,685 | **0** |
+| −100..−150 m | 13,807 | **0** |
+| −150..−190 m | 9,863 | **0** |
+| −190..−196 m | 1,445 | 13 |
+| −196..−210 m | 3,315 | 651 |
+| −210..−300 m | 19,967 | 4,350 |
+| deeper | 3,976,243 | 35,846 |
+
+**Zero of the 41,355 cells between −50 m and −190 m received any sediment**,
+and the boundary falls exactly at −195.5 m. The 1,629 exceptions are all at
+*precisely* 0.00 m — the waterline band `hold_datum` leaves behind — where
+`if s_c < 0.0` is false and the clamp never runs at all. The rule is
+exactly as written, with one sharp edge, and it took the experiment to find
+that edge.
+
+The same constant governs mass wasting (`thermal_erosion` gives a submerged
+cell "room below `-DEP_FLOOR`"), so the band is a **one-way valve**: it can
+lose material and can never receive any. Over the 50-iteration fork the
+0 to −195 m band lost 4.56 million metres of sediment while everything
+deeper gained 25.5 million.
+
+That is the offshore-sediment defect, and it is the third length in this
+codebase tuned at 50 m cells and consumed in cell units — with
+`glacial_rate` and `glacial_max`, docs/missing-relief.md.
+`docs/earth-bake.md` listed it among the candidates it had not eliminated
+("the fill-to-just-below-sea-level clamp may bind first"), and it does;
+`fan_slope` was correctly ruled out because it is not the binding
+constraint.
+
+The consequences are structural rather than cosmetic. No delta, no coastal
+plain and no shelf wedge can ever build, because the only water shallow
+enough to build one in is the water sediment may not enter. It also
+explains the shelf's shape from the tectonics section above: the −200..−50 m
+band is **0.7 % of the globe** against Earth's ~7 %, and it cannot grow,
+because growing is the one thing that band is forbidden to do.
