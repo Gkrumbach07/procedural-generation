@@ -142,6 +142,34 @@ outright. The costs are a longer particle phase and, possibly, pit-fill
 artifacts of their own; the render at iteration 100 shows none, and the
 800-iteration run is the check.
 
+**At iteration 800 the fix holds.** Both runs carry the shipped glacial
+pass, so they differ only in `route_eps`:
+
+| iteration 800 | shipped (9.77 m/cell) | 5 cm/cell |
+|---|---|---|
+| routing surface above terrain, median over land | 113 m | **11 m** |
+| … p90 | 1317 m | **25 m** |
+| land median | 484 m | 565 m |
+| land above 2 km | 4.80 % | 5.45 % |
+| highest point | 5192 m | 5220 m |
+| globe within ±50 m of sea level | 6.40 % | 7.16 % |
+| sea-level change per 1 % of land fraction | 37 m | 43 m |
+
+The phantom surface stays gone for the whole run, and the hypsometry and
+the waterline move by less than a point: the routing fix is neutral on
+everything but the streaks.
+
+The render at 800, in the window where the shipped routing surface stands
+highest (face 3, cells 692–947 × 484–739, a mean 2125 m above a plateau), is
+the iteration-100 picture again. Shipped: the routing fill flagged over
+100 % of the window as one smooth pyramid, a discharge sheet of parallel
+rays cut by a straight diagonal where two branches of the flood tree meet,
+and one uniform momentum direction. With the epsilon at 5 cm: a dendritic
+network with two meandering trunk rivers and converging tributaries, a
+routing fill that follows the valleys, and sediment laid along the channels
+and in fans rather than in sheets. The pit-fill artifacts the one-pass
+death count warned about do not appear.
+
 ## The continent-sized tidal flat
 
 ### It is made in one step, by the first glacial pass
@@ -292,7 +320,28 @@ from under a thick plateau, and a glacial buzzsaw that works at the
 snowline. The corrected glacial pass is the only candidate for the second;
 its effect at 800 is in the comparison below.
 
-The first has a hook already. Tectonics caps continental crust at
+**Isostasy must not ship without the glacial units fixed.** The same run,
+carried on past 600 with the shipped glacial pass:
+
+| bedrock, min / max | 600 | 700 | 800 |
+|---|---|---|---|
+| shipped | −3709 / 9790 | −6309 / 5086 | −8889 / 5192 |
+| glacial units fixed, no isostasy | −3873 / 9812 | −3845 / 10,021 | −3862 / 10,096 |
+| isostasy + shipped glacial | −7603 / 12,014 | −12,405 / 19,567 | **−17,525 / 22,833** |
+
+Both ends run away, and neither is a numerical spike. The highest cell sits
+in a 225-cell block standing at 19–22 km that rose about 3 km in a hundred
+iterations while the glacial pass cut its edge down from 13–19 km to 5–9 km.
+Carving up to 3909 m a pass off the flanks unloads the plate, and the
+rebound lifts the whole block, uncarved centre included. The lowest cell is
+a glacial pit with its bedrock at −17.5 km under 18.3 km of sediment: the
+shipped pass has no base level, so it digs the same hole every pass and
+deposition keeps refilling it (the shipped run digs one to −8.9 km without
+isostasy). With the glacial units corrected and no isostasy, both ends stay
+put. The two fixes are coupled: with the shipped glacial scale, isostasy
+cannot be switched on.
+
+The first of Earth's two missing caps has a hook already. Tectonics caps continental crust at
 `max_crust_thickness` (2× normal, the root delaminating above it), but the
 erosion stage receives `uplift` as a fixed metres-per-iteration field and
 applies it for all 800 iterations whatever the range has become. With the
