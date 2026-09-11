@@ -165,7 +165,7 @@ def classify(kind_lo: int, kind_su: int, flat_slab: bool, continental: int) -> s
     classified into existence.
 
     ``island_arc`` is the branch that really was missing. Measured on an
-    Earth-scale run of 101,105 classified collisions, **40 % were ocean on
+    Earth-scale run of 93,092 classified collisions, **44 % were ocean on
     ocean** and every one of them built an ``andean`` or ``laramide``
     cross-section -- a 6000 m or 3500 m plateau, 1050 to 1750 km wide, out
     of ocean floor. Those profiles describe an arc standing on thick

@@ -184,5 +184,5 @@ supercontinent cycle **does** happen — split at step ~400, reassembly by
 ~600, a second split from ~1200 — but the oceans it opens are only 176 to
 256 km wide, so the cycle is invisible to any measurement that calls
 anything within 256 km one landmass. And `classify` was building Andean
-plateaus out of ocean floor for 40 % of all collisions; it now has an
+plateaus out of ocean floor for 44 % of all collisions; it now has an
 `island_arc` branch.

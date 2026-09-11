@@ -11,23 +11,23 @@ and the instruments are in `bake/scripts/` so they can be re-run.
 
 `orogeny.shape_belt` now takes an optional `census` dict and records what
 `classify` decided for every collision. `scripts/supercontinent.py` prints
-it. The whole 1500-step run, 101,105 classified collisions:
+it. The whole 1500-step run, **93,092** classified collisions:
 
 | | count | share |
 |---|---|---|
-| `laramide` | 53,328 | **52.7 %** |
-| `andean` | 32,308 | 32.0 |
-| `himalayan` | 7,456 | 7.4 |
+| `laramide` | 53,328 | **57.3 %** |
+| `andean` | 32,308 | 34.7 |
+| `himalayan` | 7,456 | 8.0 |
 | `ural` | 0 | 0 |
-| ocean under ocean (`pair_oo`) | 40,866 | **40.4 %** |
-| ocean under continent (`pair_oc`) | 44,770 | 44.3 |
-| continent into continent (`pair_cc`) | 7,456 | 7.4 |
+| ocean under ocean (`pair_oo`) | 40,866 | **43.9 %** |
+| ocean under continent (`pair_oc`) | 44,770 | 48.1 |
+| continent into continent (`pair_cc`) | 7,456 | 8.0 |
 | continent under ocean (`pair_co`) | **0** | 0 |
 
 `pair_co = 0` is the one number that comes out exactly right by
 construction: a continent never subducts under ocean floor at any density,
 which is the irreversibility `docs/crust-types.md` built the whole crust-type
-model around. It holds over 101,105 events.
+model around. It holds over 93,092 events.
 
 Every other row in the table is a defect.
 
@@ -49,7 +49,7 @@ so, so the next reader does not re-open this.
 
 ### `island_arc` is the branch that really was missing
 
-**40 % of all collisions are ocean on ocean**, and every one of them was
+**44 % of all collisions are ocean on ocean**, and every one of them was
 building an `andean` or `laramide` cross-section: a 6000 m or 3500 m
 plateau, 1050 to 1750 km wide, laid out over *ocean floor*. Both of those
 profiles describe an arc standing on thick continental crust — the Andes are
@@ -64,22 +64,24 @@ overriding plate is oceanic — checked *before* `flat_slab`, which was
 otherwise routing buoyant slabs to a continental profile they had no
 business building here either.
 
-The census after the change, same preset and seed:
+The census after the change, same preset and seed. The totals differ
+because the change alters the simulation, so read the shares:
 
-| | before | after |
+| | before (93,092) | after (109,890) |
 |---|---|---|
-| `laramide` | 53,328 | 26,178 |
-| `andean` | 32,308 | 25,748 |
-| `himalayan` | 7,456 | 7,762 |
-| `island_arc` | — | **50,202** |
+| `laramide` | 53,328 (57.3 %) | 26,178 (23.8 %) |
+| `andean` | 32,308 (34.7 %) | 25,748 (23.4 %) |
+| `himalayan` | 7,456 (8.0 %) | 7,762 (7.1 %) |
+| `island_arc` | — | **50,202 (45.7 %)** |
 
-`andean + laramide` is now exactly `pair_oc` (51,926), which is the
-invariant to check: every continental-margin belt has a continent under it
-and nothing else does.
+`andean + laramide` is now exactly `pair_oc` (51,926) and `island_arc`
+exactly `pair_oo` (50,202), which is the invariant to check: every
+continental-margin belt has a continent under it and nothing else does.
+`tests/test_orogeny.py` asserts both.
 
 ### `flat_slab_age` makes the exception the rule
 
-`laramide` is 53,328 belts against `andean`'s 32,308: **62 % of every
+`laramide` is 53,328 belts against `andean`'s 32,308: **62.3 % of every
 ocean-consuming collision is classified flat-slab.** On Earth flat-slab
 subduction is the exception — the Peruvian and Chilean segments, the
 Farallon slab that built the Rockies — perhaps a tenth of convergent margin
@@ -90,7 +92,7 @@ steps against `ridge_age = 400` (the age at which sea floor has finished
 subsiding, ~80 My on Earth) makes the threshold ~12 My, which is a
 defensible buoyancy limit. But the age histogram of subducting slabs is:
 
-| slab age at subduction (steps) | count | share |
+| slab age at subduction (steps) | events | share of the 85,636 oceanic slabs |
 |---|---|---|
 | 0–15 | 35,030 | **40.9 %** |
 | 15–30 | 8,940 | 10.4 |
@@ -102,7 +104,8 @@ defensible buoyancy limit. But the age histogram of subducting slabs is:
 
 (`island_arc` takes the ocean-on-ocean events out of this comparison but
 does not change the ratio it is about: after the fix `laramide` is 26,178
-against `andean`'s 25,748, still **50 % of every continental-margin arc**.)
+against `andean`'s 25,748, still **50.4 % of every continental-margin
+arc**.)
 
 **Two fifths of all subducted ocean floor is under 15 steps old** — crust
 spawned into a gap and eaten again almost immediately. That is the "froth
