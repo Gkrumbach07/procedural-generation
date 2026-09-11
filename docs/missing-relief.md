@@ -216,3 +216,68 @@ slice off the top at the end, and the ratio of fluvial erosion to uplift
 decides everything in between. It is also the one that cannot be settled by
 a fork — it acts from iteration 1 — so it needs a full re-bake to test and
 is out of scope here.
+
+## The glacial half, measured
+
+Five arms forked from the one iteration-600 checkpoint and run 50 iterations
+(five glacial passes) each, differing only in `glacial_rate` / `glacial_max`.
+Everything before the fork is shared, so nothing but the glacial pass can
+account for a difference. `scripts/fork_erosion.py`; the `base` arm is the
+shipped configuration and reproduces `docs/earth-bake.md`'s iteration-650
+row exactly — **4900 m** maximum, 3.0 % of land above 2 km — which is what
+says the harness is measuring the real run.
+
+At iteration 650:
+
+| arm | deepest carve per pass | max | above 2 km | land median | ±50 m of sea |
+|---|---|---|---|---|---|
+| `off` (rate 0) | — | **7163 m** | 4.2 % | 280 m | 9 % |
+| `metres` (0.005116) | 20 m | 7124 | 4.4 | 309 | 9 |
+| `earthlike` (0.015) | 59 m | 7055 | 4.4 | 320 | 9 |
+| `rate005` (0.05) | 195 m | 6833 | 4.2 | 346 | 5 |
+| **`base`** (1.0, shipped) | **3909 m** | **4900** | **2.9** | 463 | 4 |
+| Earth | | 8849 | 13.3 | ~350 | 1–2 |
+
+**The glacial pass costs 2263 m of peak height in fifty iterations** — 7163
+against 4900 — and 1.3 points of the band above 2 km. Every weaker setting
+recovers essentially all of it: the difference between carving 20 m a pass
+and carving 195 m a pass is 291 m of peak and nothing at all in the bands,
+while the difference between 195 m and 3909 m is 1933 m of peak.
+
+### So the split is
+
+| | above 2 km, % of land |
+|---|---|
+| tectonics hands over | **13.2** |
+| after fluvial erosion and uplift, no glaciation (iter 650) | **4.2** |
+| after the shipped glacial pass (iter 650) | 2.9 |
+| Earth | 13.3 |
+
+Of the 10.3 points of high ground that erosion removes, **the fluvial pass
+and uplift account for 9.0 and the glacial pass for 1.3.** `orogen_decay`
+accounts for none of it: it hands over exactly Earth's figure.
+
+For the *highest point* the weighting is the other way round — uplift keeps
+raising the peaks through the fluvial half (6619 → 7312 by iteration 400)
+and the glacial pass takes 2263 m off them in fifty iterations. Which
+statistic you look at decides which contributor looks dominant, and both
+are worth fixing.
+
+### The prediction held
+
+Written down before these ran: weakening the glacial pass should make the
+lowland bands *worse* while it makes the mountains better, because the
+glacial pass is what carries the lowlands back up from where the fluvial
+pass over-planed them.
+
+It does. Land median runs 280 m at `off`, 309, 320, 346, and 463 at the
+shipped setting — monotone in `glacial_rate` — against Earth's ~350. The
+land within ±50 m of sea level runs 9 % at `off` down to 4 % at the shipped
+setting, against Earth's 1–2 %. **On the lowland statistics the shipped,
+mis-scaled glacial pass is the best of the five arms**, and `rate005` lands
+the median almost exactly on Earth's.
+
+That is not a reason to keep it. It is two errors of opposite sign, and the
+knob that happens to cancel them is a unit bug carving four kilometres a
+pass. Correcting the units exposes the lowland error rather than creating
+it — which is the point of correcting it.
