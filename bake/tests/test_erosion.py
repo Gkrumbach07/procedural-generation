@@ -23,10 +23,11 @@ import pytest
 from scipy import ndimage
 
 from globe.config import WorldParams
+from globe.field import FaceField
 from globe.erosion import glacial
 from globe.erosion import particle as pk
 from globe.erosion import run as erosion_run
-from globe.erosion.maps import ErosionState, apply_uplift, run_iteration, step
+from globe.erosion.maps import ErosionState, apply_isostasy, apply_uplift, run_iteration, step
 from globe.hydro import run as hydro_run
 from globe.io.world_store import WorldStore
 from globe.stubs import stub_climate, stub_tectonics
@@ -472,6 +473,75 @@ def test_uplift_is_mean_free_on_the_sphere(scratch):
     apply_uplift(w)
     up = float(w.uplift[w.interior][w.mask[w.interior] == pk.MASK_ACTIVE].sum())
     assert abs((w.total_mass() - m0) - up) <= 1e-9 * max(abs(m0), 1.0)
+
+
+def _point_load(st, face, i, j, size=4):
+    st.iso_acc = np.zeros_like(st.height)
+    H = st.H
+    st.iso_acc[face, H + i:H + i + size, H + j:H + j + size] = -1.0   # rock removed
+    return size * size
+
+
+def test_isostasy_is_regional_and_mean_free(scratch):
+    """Erosional isostasy (maps.apply_isostasy): a column that lost rock
+    rebounds by ``isostasy`` of it, spread by a flexural Gaussian, and the
+    global mean -- a datum shift, which hold_datum owns -- is removed."""
+    p = WorldParams.tiny_world(5).with_overrides(erosion={"isostasy": 0.8, "flexure_km": 0.2})
+    st = erosion_run.build_state(_stub_world(scratch, "iso", p), p)
+    n = _point_load(st, 0, 14, 14)
+    h0, s0 = st.height.copy(), st.sediment.copy()
+    info = apply_isostasy(st, p)
+    dh = (st.height - h0)[st.interior]
+    assert abs(dh.mean()) < 1e-9 * dh.max()                       # mean-free
+    peak = np.unravel_index(np.argmax(dh), dh.shape)
+    assert peak[0] == 0 and 13 <= peak[1] <= 18 and 13 <= peak[2] <= 18  # over the load
+    assert int((dh > 0.01 * dh.max()).sum()) > 4 * n              # regional, not per cell
+    # the positive part carries the compensated load, k * (rock removed)
+    assert abs((dh - dh.min()).sum() - 0.8 * n) < 0.15 * 0.8 * n
+    assert np.array_equal(st.sediment, s0)                         # rebound is rock, not cover
+    assert not st.iso_acc.any()                                    # the accumulator is spent
+    assert info["diffusion_steps"] > 0
+
+
+def test_isostasy_has_no_seam(scratch):
+    """The flexural smoothing uses the halo-exchanged Laplace-Beltrami
+    operator, so a load at a face edge spreads across it smoothly."""
+    p = WorldParams.tiny_world(5).with_overrides(erosion={"isostasy": 0.8, "flexure_km": 0.2})
+    st = erosion_run.build_state(_stub_world(scratch, "iso_seam", p), p)
+    _point_load(st, 0, 0, 12)                                      # touching face 0's i = 0 edge
+    h0 = st.height.copy()
+    apply_isostasy(st, p)
+    f = FaceField(st.grid, (st.height - h0).astype(np.float32))
+    f.exchange_halos()
+    assert seam_discontinuity(f) < 4.0
+
+
+def test_isostasy_smoother_is_stable_on_white_noise(scratch):
+    """The regression that let the first Earth-scale isostasy run blow up to
+    a 1.7e16 m peak: an explicit step that is safe on a flat grid is not on
+    the cube-sphere.  A smooth point load barely excites the unstable mode,
+    so it has to be white noise -- and a monotone smoother never exceeds
+    the input's extreme (discrete maximum principle)."""
+    p = WorldParams.tiny_world(5).with_overrides(erosion={"isostasy": 0.8, "flexure_km": 0.2})
+    st = erosion_run.build_state(_stub_world(scratch, "iso_noise", p), p)
+    rng = np.random.default_rng(3)
+    st.iso_acc = np.zeros_like(st.height)
+    st.iso_acc[st.interior] = rng.standard_normal(st.iso_acc[st.interior].shape)
+    peak = float(np.abs(st.iso_acc[st.interior]).max())
+    h0 = st.height.copy()
+    info = apply_isostasy(st, p)
+    dh = (st.height - h0)[st.interior]
+    assert np.isfinite(dh).all()
+    assert info["diffusion_steps"] >= 20
+    assert float(np.abs(dh).max()) <= 0.8 * peak * 1.05
+
+
+def test_isostasy_is_off_by_default(scratch):
+    p = WorldParams.tiny_world(5)
+    assert p.erosion.isostasy == 0.0
+    st = erosion_run.build_state(_stub_world(scratch, "iso_off", p), p)
+    step(st, p, 0)
+    assert getattr(st, "iso_acc", None) is None
 
 
 def test_datum_is_held_through_the_run(scratch):

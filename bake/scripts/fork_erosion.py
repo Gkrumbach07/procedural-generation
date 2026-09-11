@@ -54,6 +54,27 @@ from globe.erosion import maps, run as erun  # noqa: E402
 from globe.io.world_store import WorldStore  # noqa: E402
 
 
+def write_checkpoint(out: Path, state, label: str, forked_from: str, overrides) -> Path:
+    """An ordinary checkpoint under ``<out>/checkpoints``, readable by
+    ``hypsometry.py --checkpoints``.  The hash is deliberately not the
+    baseline's: this state is a fork and must never be picked up by
+    ``bake --from erosion`` as a resume point."""
+    p = out / "checkpoints" / f"erosion_iter{state.iteration:04d}.npz"
+    arrays = dict(height=state.height, sediment=state.sediment, discharge=state.discharge,
+                  momentum=state.momentum, pending=state.pending)
+    if state.route is not None:
+        arrays["route"] = state.route
+    if getattr(state, "iso_acc", None) is not None:
+        arrays["iso_acc"] = state.iso_acc
+    with open(p, "wb") as fh:
+        np.savez(fh, **arrays)
+    p.with_suffix(".json").write_text(json.dumps(
+        {"iteration": state.iteration, "params_hash": f"fork:{label}",
+         "height_unit_m": state.height_unit_m, "forked_from": forked_from,
+         "overrides": overrides}, indent=1))
+    return p
+
+
 def pick_checkpoint(store: WorldStore, at: int | None) -> Path:
     """The checkpoint to fork from: exactly ``at`` if given, else the newest.
 
@@ -170,6 +191,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("world")
     ap.add_argument("--at", type=int, default=None, help="fork from this iteration (default: the newest checkpoint)")
+    ap.add_argument("--fresh", action="store_true",
+                    help="start from iteration 0 (the world's own bedrock, no checkpoint): run an erosion "
+                         "variant from scratch on the same tectonics and climate, for changes that act from "
+                         "the first iteration and so cannot be forked mid-run")
     ap.add_argument("--checkpoint", default=None,
                     help="fork from this .npz explicitly, wherever it lives.  `erosion/run.py` keeps only "
                          "the two newest checkpoints per parameter hash, so a fork point well before the "
@@ -181,6 +206,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--set", action="append", default=[], metavar="GROUP.KEY=VALUE")
     ap.add_argument("--every", type=int, default=25, help="log every N iterations")
+    ap.add_argument("--save-every", type=int, default=0,
+                    help="also write a checkpoint every N iterations (default: only the last)")
     ap.add_argument("--deaths", action="store_true",
                     help="also record where particles die and where the iteration's mass moves "
                          "(costs a few seconds an iteration; see `death_zones` in diagnostics.json)")
@@ -188,13 +215,14 @@ def main() -> int:
 
     params = load_params(args)
     store = WorldStore(args.world)
-    ck = Path(args.checkpoint) if args.checkpoint else pick_checkpoint(store, args.at)
-    if not ck.exists():
-        raise SystemExit(f"no such checkpoint: {ck}")
-    meta = json.loads(ck.with_suffix(".json").read_text())
-
     state = erun.build_state(store, params)
-    erun.load_checkpoint(state, ck, meta)
+    if args.fresh:
+        ck = Path("fresh")            # iteration 0: bedrock as tectonics left it
+    else:
+        ck = Path(args.checkpoint) if args.checkpoint else pick_checkpoint(store, args.at)
+        if not ck.exists():
+            raise SystemExit(f"no such checkpoint: {ck}")
+        erun.load_checkpoint(state, ck, json.loads(ck.with_suffix(".json").read_text()))
     start = state.iteration
     end = start + int(args.iterations)
     # `glacial_from` is a *fraction of erosion.iterations*, so the gate in
@@ -248,6 +276,8 @@ def main() -> int:
             "seconds": st.get("seconds_total"),
         }
         hist.append(row)
+        if args.save_every and state.iteration % args.save_every == 0 and state.iteration != end:
+            write_checkpoint(out, state, args.label, ck.name, args.set)
         if args.every and (state.iteration % args.every == 0 or state.iteration == end):
             g = row["glacial"] or {}
             print(f"  iter {state.iteration}: max {row['max_m']:.0f} m  land {row['land_pct']:.1f} %  "
@@ -256,19 +286,7 @@ def main() -> int:
                      f"deepest {g['max_carve'] * state.height_unit_m:.0f} m  " if g.get("ice_cells") else "")
                   + f"({time.time() - t0:.0f}s)", flush=True)
 
-    p = out / "checkpoints" / f"erosion_iter{state.iteration:04d}.npz"
-    arrays = dict(height=state.height, sediment=state.sediment, discharge=state.discharge,
-                  momentum=state.momentum, pending=state.pending)
-    if state.route is not None:
-        arrays["route"] = state.route
-    with open(p, "wb") as fh:
-        np.savez(fh, **arrays)
-    # the hash is deliberately not the baseline's: this state is a fork and
-    # must never be picked up by `bake --from erosion` as a resume point
-    p.with_suffix(".json").write_text(json.dumps(
-        {"iteration": state.iteration, "params_hash": f"fork:{args.label}",
-         "height_unit_m": state.height_unit_m, "forked_from": ck.name,
-         "overrides": args.set}, indent=1))
+    p = write_checkpoint(out, state, args.label, ck.name, args.set)
     diagnostics = {"label": args.label, "forked_from": str(ck), "start": start, "end": end,
                    "overrides": args.set, "deaths": deaths_tot,
                    "lost_offshore_m": lost_offshore * state.height_unit_m,

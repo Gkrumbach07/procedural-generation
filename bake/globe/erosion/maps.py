@@ -602,6 +602,90 @@ def apply_uplift(state: ErosionState) -> None:
     state.height[act] += state.uplift[act] - mean
 
 
+_KAPPA_CACHE: dict = {}
+
+
+def _smoothing_kappa(grid: Grid) -> float:
+    """Largest *monotone* explicit step for the Laplace-Beltrami smoother.
+
+    Explicit Euler on ``u' = L u`` is stable only while ``kappa * lam_max <=
+    2`` and free of ringing only while ``kappa * lam_max <= 1``, where
+    ``lam_max`` is the largest eigenvalue of ``-L`` in cell units.  On a flat
+    5-point grid that is 8, so the textbook 0.25 is safe; on the cube-sphere
+    the metric inflates the stencil and it is not.  Measured at the earth
+    preset: kappa = 0.2 grows unit white noise to 4e12 in 95 steps, and it is
+    what blew the first isostasy run up to a 1.7e16 m peak by iteration 50.
+    So ``lam_max`` is estimated once per grid by power iteration (the
+    Laplacian of noise converges on its highest mode in a few dozen
+    applications) and the step is 0.9 of the monotone bound -- itself half
+    the stability bound, so an estimate that is 2x low is still stable.
+    """
+    key = (grid.N, grid.H, float(grid.cell_size_m))
+    if key not in _KAPPA_CACHE:
+        rng = np.random.default_rng(0)
+        f = FaceField.from_interior(grid, rng.standard_normal((6, grid.N, grid.N)), exchange=True)
+        f.data = f.data.astype(np.float64)
+        H, c2, lam = grid.H, float(grid.cell_size_m) ** 2, 8.0
+        for _ in range(40):
+            f.exchange_halos(linear=True)
+            Lv = f.laplacian().data.astype(np.float64) * c2
+            num = float(np.sqrt((Lv[:, H:-H, H:-H] ** 2).sum()))
+            den = float(np.sqrt((f.interior ** 2).sum()))
+            if num <= 0.0 or den <= 0.0:
+                break
+            lam = num / den
+            f.data = Lv / num
+        _KAPPA_CACHE[key] = 0.9 / max(lam, 1e-6)
+    return _KAPPA_CACHE[key]
+
+
+def apply_isostasy(state: ErosionState, params) -> dict:
+    """Flexural isostatic response to the mass surface processes moved.
+
+    ``state.iso_acc`` holds the net change of ``height + sediment`` that
+    particles, mass wasting and the glacial pass made since the last call.
+    A column that lost rock rebounds by ``isostasy`` of it and one that
+    gained sediment subsides by the same fraction: Airy isostasy, with the
+    densities normalised to the mantle exactly as the tectonics stage uses
+    them (``h = t(1 - rho)``).  Without this the kernel lowers the surface
+    one metre for every metre of rock it removes, where a real continent
+    loses only ``1 - rho`` ~ 0.2 of it, and a continental interior planes
+    straight down to base level (docs/missing-relief.md).
+
+    The response is *regional*: the load is spread by a Gaussian of sigma
+    ``flexure_km`` before it is applied, as a plate with flexural rigidity
+    spreads it.  A per-cell rebound would refill every valley as fast as it
+    was cut; a flexural one lifts the interfluves and peaks around it.  The
+    smoothing is explicit diffusion with the metric-correct, seam-aware
+    Laplace-Beltrami operator, so it has no face seams.  Mean-free over the
+    active interior, like :func:`apply_uplift`: its mean is a datum shift,
+    which :func:`hold_datum` owns.  Global pass only.
+    """
+    ep = _eparams(params)
+    d = state.iso_acc
+    k = float(ep.isostasy)
+    load = (-k * d).astype(np.float64)          # erosion (d < 0) -> rebound up
+    cell = float(state.height_unit_m)
+    sig = float(ep.flexure_km) * 1000.0 / cell
+    sig = min(sig, state.N / 8.0)               # a planet smaller than one plate
+    kappa = _smoothing_kappa(state.grid)
+    n = int(np.ceil(sig * sig / (2.0 * kappa))) if sig >= 0.5 else 0
+    f = FaceField(state.grid, load)
+    for _ in range(n):
+        f.exchange_halos(linear=True)       # monotone halos for a smoother
+        f.data += kappa * f.laplacian().data.astype(np.float64) * (cell * cell)
+    f.exchange_halos(linear=True)
+    act = state.mask == pk.MASK_ACTIVE
+    iact = state.mask[state.interior] == pk.MASK_ACTIVE
+    mean = float(f.data[state.interior][iact].mean()) if iact.any() else 0.0
+    state.height[act] += (f.data[act] - mean).astype(state.height.dtype)
+    moved = float(np.abs(d[state.interior]).sum())
+    state.iso_acc[...] = 0.0
+    return {"sigma_cells": sig, "diffusion_steps": n, "kappa": kappa, "load_abs_cells": moved,
+            "rebound_max": float((f.data[state.interior] - mean).max()),
+            "rebound_min": float((f.data[state.interior] - mean).min())}
+
+
 def hold_datum(state: ErosionState, land_fraction: float) -> float:
     """Hold the planetary datum: shift ``height`` (a rigid global shift, no
     mass moves between cells) so that exactly ``round(land_fraction * M)``
@@ -660,16 +744,31 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
     if ep.flood_every > 0 and (state.route is None or state.iteration % ep.flood_every == 0):
         state.refresh_route(ep.route_eps)
     tr = time.time() - t0
+    iso = state.spherical and float(getattr(ep, "isostasy", 0.0)) > 0.0
+    if iso:
+        if getattr(state, "iso_acc", None) is None:
+            state.iso_acc = np.zeros_like(state.height)
+        s0 = state.height + state.sediment
     st = run_iteration(state, params, iteration_key, log=log, **kw)
     t1 = time.time()
     thermal_erosion(state, params)
+    if iso:
+        # only what surface processes moved: uplift and the datum shift are
+        # not loads, and must not be compensated
+        state.iso_acc += (state.height + state.sediment) - s0
     apply_uplift(state)
     # Glacial carving: the only pass that may leave a closed depression, so
     # the only one that can produce a lake.  Global pass only — a refinement
     # window inherits the coarse result rather than re-carving it.
     if state.spherical and ep.glacial_every > 0 and (state.iteration + 1) % int(ep.glacial_every) == 0 \
             and (state.iteration + 1) >= float(ep.glacial_from) * int(ep.iterations):
+        if iso:
+            s1 = state.height + state.sediment
         st["glacial"] = glacial.carve(state, params)
+        if iso:
+            state.iso_acc += (state.height + state.sediment) - s1
+    if iso and (state.iteration + 1) % max(int(getattr(ep, "isostasy_every", 10)), 1) == 0:
+        st["isostasy"] = apply_isostasy(state, params)
     if state.spherical and isinstance(params, WorldParams):
         st["datum_shift"] = hold_datum(state, params.world.land_fraction)
     state.exchange_halos()
@@ -680,4 +779,4 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
     return st
 
 
-__all__ = ["ErosionState", "run_iteration", "thermal_erosion", "apply_uplift", "hold_datum", "step", "spawn_particles", "height_unit", "max_steps_of"]
+__all__ = ["ErosionState", "run_iteration", "thermal_erosion", "apply_uplift", "apply_isostasy", "hold_datum", "step", "spawn_particles", "height_unit", "max_steps_of"]

@@ -87,6 +87,8 @@ def save_checkpoint(store: WorldStore, state: ErosionState, params: WorldParams)
     arrays = dict(height=state.height, sediment=state.sediment, discharge=state.discharge, momentum=state.momentum, pending=state.pending)
     if state.route is not None:  # the routing surface is refreshed every flood_every iterations: part of the state
         arrays["route"] = state.route
+    if getattr(state, "iso_acc", None) is not None:  # rebound not yet applied: part of the state
+        arrays["iso_acc"] = state.iso_acc
     with open(tmp, "wb") as fh:
         np.savez(fh, **arrays)
     tmp.replace(p)
@@ -161,6 +163,7 @@ def load_checkpoint(state: ErosionState, path: Path, meta: dict) -> None:
         state.momentum[...] = z["momentum"]
         state.pending[...] = z["pending"] if "pending" in z.files else 0.0
         state.route = np.ascontiguousarray(z["route"]) if "route" in z.files else None
+        state.iso_acc = np.array(z["iso_acc"]) if "iso_acc" in z.files else None
     state.iteration = int(meta["iteration"])
 
 
