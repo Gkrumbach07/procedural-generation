@@ -171,6 +171,15 @@ back up to 585 m and the 0–1 km band back to 76.2 %. Two errors of opposite
 sign, and the shipped configuration is the point where they happen to
 cross.
 
+That makes a prediction worth writing down before the glacial arms are
+measured: **weakening the glacial pass should make the lowland bands
+worse** even as it makes the mountains better, because it is the glacial
+pass that is currently carrying the lowlands back up from where the fluvial
+pass over-planed them. If the arms show the land median falling below 585 m
+and the 0–1 km band climbing above 76 % as `glacial_rate` comes down, the
+two-errors reading holds and the fluvial/uplift balance has to be fixed
+too. If they do not, it does not.
+
 **The mountains never stop coming down.** The above-2 km share falls
 monotonically for the whole pre-glacial run — 13.2, 10.1, 9.0, 7.3, 6.9,
 6.4 —
