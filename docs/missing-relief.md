@@ -145,24 +145,35 @@ iteration 200 is gone by iteration 300.
 
 Share of land above 2 km, all from checkpoints of the one baseline run:
 
-| | tectonics | iter 150 | iter 200 | iter 400¹ | iter 500¹ | iter 800¹ |
-|---|---|---|---|---|---|---|
-| above 2 km | **13.3** | 10.1 | **9.0** | 6.9 | 6.4 | **4.1** |
-| land median | 741 m | 356 | 316 | 254 | 226 | 585² |
-| max | 6619 m | 6831 | 6942 | 7312 | ~7300 | 5355² |
+| | tectonics | iter 150 | iter 200 | iter 350 | iter 400 | iter 500¹ | iter 800¹ |
+|---|---|---|---|---|---|---|---|
+| above 2 km | **13.2** | 10.1 | **9.0** | 7.3 | **6.9** | 6.4 | **4.1** |
+| land median | 741 m | 356 | 316 | 267 | 254 | 226 | 585² |
+| max | 6619 m | 6831 | 6942 | 7230 | 7312 | ~7300 | 5355² |
+| 0–1 km band | 59.7 | 72.3 | 75.2 | 80.8 | 82.0 | — | 76.2² |
 
 ¹ from `docs/earth-bake.md`'s table of the same configuration.
 ² after the glacial pass; the median *rises* and the max falls.
 
+Iteration 400 is the overlap between this run and the one
+`docs/earth-bake.md` measured, and it agrees to the digit — 6.9 % above
+2 km, 254 m median, 7312 m maximum — so the baseline reproduces and every
+number here can be read against that document's.
+
 Two things worth separating.
 
-**The lowlands settle almost immediately and land where Earth is.** Land
-median is 316 m at iteration 200 against Earth's ~350, and the 0–1 km band
-is 75.2 % against 71.6. Whatever is wrong, it is not that the fluvial system
-is planing the continents too hard in general.
+**The lowlands settle quickly and then overshoot.** Land median crosses
+Earth's ~350 m at about iteration 155 and keeps going, reaching 254 m by
+400; the 0–1 km band crosses Earth's 71.6 % just before iteration 150 and
+reaches 82.0 % by 400. So the fluvial pass does not stop where Earth is —
+it is the glacial pass, reversing the trend after 600, that puts the median
+back up to 585 m and the 0–1 km band back to 76.2 %. Two errors of opposite
+sign, and the shipped configuration is the point where they happen to
+cross.
 
 **The mountains never stop coming down.** The above-2 km share falls
-monotonically for the whole pre-glacial run — 13.3, 10.1, 9.0, 6.9, 6.4 —
+monotonically for the whole pre-glacial run — 13.2, 10.1, 9.0, 7.3, 6.9,
+6.4 —
 while the single highest peak *rises* (6619 → 6942 → 7312) because uplift is
 concentrated on the collision zones that are still active. So uplift holds a
 handful of peaks up and loses the rest of the high ground: by iteration 500
