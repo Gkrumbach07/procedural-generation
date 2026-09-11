@@ -40,6 +40,8 @@ def main(argv=None) -> int:
     from .pipeline import bake
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(message)s")
+    # numba logs every compiler pass at DEBUG: a million lines on a small bake
+    logging.getLogger("numba").setLevel(logging.INFO)
     from_stage, to_stage = args.from_stage, args.to_stage
     if args.only:
         from_stage = to_stage = args.only
