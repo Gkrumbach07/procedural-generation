@@ -75,6 +75,19 @@ def _rebuild(seg, plate_id: np.ndarray, n_plates: int, rng, speed: float, keep: 
     return plates
 
 
+def _capped(omega: np.ndarray, cap: float) -> np.ndarray:
+    """An angular velocity clamped to ``tectonics.max_speed``.
+
+    Anything that hands a plate a new pole has to respect the same cap the
+    force model does, because the plate *moves* before ``update_omega`` is
+    reached: a step is rotate, collide, then forces.  An over-fast pole is
+    therefore not merely corrected one step later -- it has already teleported
+    the crust.
+    """
+    s = float(np.linalg.norm(omega))
+    return omega * (cap / s) if cap > 0.0 and s > cap else omega
+
+
 def reorganise(sim, n_plates: int, rng) -> dict:
     """Re-partition the crust into `n_plates` new plates, keeping heights.
 
@@ -84,7 +97,7 @@ def reorganise(sim, n_plates: int, rng) -> dict:
     """
     seg = sim.seg
     pid = cluster_plates(seg.pos, int(n_plates), rng, size_jitter=float(sim.tp.plate_size_jitter))
-    sim.plates = _rebuild(seg, pid, int(n_plates), rng, sim.tp.convection * sim.spacing)
+    sim.plates = _rebuild(seg, pid, int(n_plates), rng, float(sim.tp.initial_speed) * sim.spacing)
     return {"event": "reorganise", "plates": int(sim.plates.n_alive())}
 
 
@@ -153,11 +166,29 @@ def _rift_one(sim, target: int, rng) -> dict:
     pid = seg.plate_id.copy()
     idx = np.flatnonzero(sel)
     pid[idx[side]] = P  # the far half becomes a brand-new plate
-    new = _rebuild(seg, pid, P + 1, rng, tp.convection * sim.spacing, keep=plates.omega)
-    # override the two halves so they actually diverge across the new cut
-    sep = float(tp.convection) * sim.spacing * float(tp.rift_speed_factor)
-    new.omega[target] = -n * sep
-    new.omega[P] = n * sep
+    new = _rebuild(seg, pid, P + 1, rng, float(tp.initial_speed) * sim.spacing, keep=plates.omega)
+    # Open the cut.  The Euler pole of a spreading pair lies *on* the rift,
+    # 90 degrees from its middle, so the halves turn about `com x n` in
+    # opposite senses and separate along n.  Turning about n itself -- what
+    # this did -- holds every segment at its own distance from the cut plane
+    # and slides the two halves along it: a transform fault the length of a
+    # continent, not a rift.  With the zig-zag cut the teeth then grind
+    # through each other, and continent-on-continent collisions over the
+    # fifty steps after a rift ran 6-10x the rate over the fifty before it
+    # (64 -> 602 at step 400, 278 -> 1552 at step 1200).
+    axis = np.cross(com, n)
+    ln = float(np.linalg.norm(axis))
+    if ln < 1e-9:
+        return {"event": "rift", "split": -1}
+    axis /= ln
+    # The halves keep the plate's own motion and add the opening to it, at a
+    # plate speed: `rift_speed_factor` multiplies the speed cap, not
+    # `convection` (which is a force gain, 33x the cap -- see config.py).
+    rate = float(sim.max_omega) if sim.max_omega > 0 else float(tp.initial_speed) * sim.spacing
+    sep = float(tp.rift_speed_factor) * rate
+    base = plates.omega[target].copy()
+    new.omega[target] = _capped(base - 0.5 * sep * axis, sim.max_omega)
+    new.omega[P] = _capped(base + 0.5 * sep * axis, sim.max_omega)
     new.omega[~new.alive] = 0.0
     sim.plates = new
     return {"event": "rift", "split": target, "moved": int(side.sum()),
@@ -197,6 +228,78 @@ def rift(sim, rng, max_plates: int = 1) -> dict:
     split = [r["split"] for r in out if r["split"] >= 0]
     return {"event": "rift", "split": split, "plates": int(sim.plates.n_alive()),
             "moved": sum(r.get("moved", 0) for r in out)}
+
+
+def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rng=None) -> dict:
+    """A plate that has been cut in two is two plates.
+
+    Subduction eats a plate from its edges, and where a trench cuts right
+    across one it leaves the remainder in separate pieces.  Nothing here
+    noticed: a plate is a rigid rotation about one pole, and a rigid rotation
+    preserves distances, so the pieces kept their separation for the rest of
+    the run and swept across the planet locked together.  Measured on the
+    Earth preset at step 800, one plate was four pieces of 30 / 24 / 16 / 11 %
+    of its area lying **46 to 83 degrees apart**, another two pieces 97
+    degrees apart; over a run the ocean plates ended up interleaved in
+    ribbons, because a piece of one plate is dragged through its neighbours
+    by a pole it no longer has any physical connection to.
+
+    So every step, the segment cloud of each plate is split into connected
+    components (segments within ``link_factor`` spacings of each other are
+    joined).  The largest component keeps the plate; any other component of
+    at least ``min_segments`` becomes a new plate, starting with its parent's
+    motion and free to diverge from it under the forces afterwards.  Smaller
+    fragments are welded onto whichever neighbouring plate surrounds them --
+    a sliver of crust is part of the plate it is embedded in, not a plate.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    from .collision import build_tree
+
+    seg, plates = sim.seg, sim.plates
+    if seg.M < 2:
+        return {"event": "split", "split": 0}
+    pairs = build_tree(seg).query_pairs(float(link_factor) * sim.spacing, output_type="ndarray")
+    if pairs.shape[0] == 0:
+        return {"event": "split", "split": 0}
+    e = pairs[seg.plate_id[pairs[:, 0]] == seg.plate_id[pairs[:, 1]]]
+    g = coo_matrix((np.ones(e.shape[0], np.int8), (e[:, 0], e[:, 1])), shape=(seg.M, seg.M))
+    _, comp = connected_components(g, directed=False)
+    sizes = np.bincount(comp)
+    pid = seg.plate_id.copy()
+    P = plates.P
+    extra: list[np.ndarray] = []
+    orphans = np.zeros(seg.M, dtype=bool)
+    for p in np.unique(seg.plate_id):
+        cs = np.unique(comp[seg.plate_id == p])
+        if cs.size < 2:
+            continue
+        for c in cs[np.argsort(sizes[cs])[::-1]][1:]:      # every piece but the largest
+            m = comp == c
+            if sizes[c] >= int(min_segments):
+                pid[m] = P + len(extra)
+                extra.append(plates.omega[p].copy())
+            else:
+                orphans |= m
+    if orphans.any():
+        # weld a fragment onto the plate around it: the commonest plate among
+        # the nearest segments that are not part of the fragment itself
+        idx = np.flatnonzero(orphans)
+        k = min(9, seg.M)
+        _, nb = build_tree(seg).query(seg.pos[idx], k=k, workers=-1)
+        nb = np.atleast_2d(nb).reshape(idx.size, k)
+        near = np.where(orphans[nb], -1, pid[nb])
+        for row, i in zip(near, idx):
+            vals = row[row >= 0]
+            if vals.size:
+                pid[i] = np.bincount(vals).argmax()
+    if not extra and not orphans.any():
+        return {"event": "split", "split": 0}
+    keep = np.vstack([plates.omega] + [np.asarray(o)[None, :] for o in extra]) if extra else plates.omega
+    sim.plates = _rebuild(seg, pid, P + len(extra), rng, float(sim.tp.initial_speed) * sim.spacing, keep=keep)
+    return {"event": "split", "split": len(extra), "welded": int(orphans.sum()),
+            "plates": int(sim.plates.n_alive())}
 
 
 def seed_hotspots(count: int, rng) -> np.ndarray:

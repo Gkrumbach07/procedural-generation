@@ -291,6 +291,28 @@ def test_extract_lakes_serpentine_island_is_not_the_polygon():
     assert ij.min() == 2 and ij.max() == 20
 
 
+def test_a_closed_basin_below_sea_level_is_not_ocean():
+    """Being under the waterline does not make a cell sea; being joined to
+    the sea does.  The Caspian is 28 m down and landlocked, and a rift or a
+    trapped piece of ocean floor gives the same thing here -- 504 of them,
+    6.9 M km², were classified as ocean before `open_ocean` existed."""
+    g = get_grid(16, 4, 1000.0)
+    N = g.N
+    surface = np.full((6, N, N), 100.0, np.float32)
+    surface[0] = -500.0                 # face 0: the sea
+    surface[1, 6:10, 6:10] = -300.0     # a walled-in basin on the far face
+
+    ocean = hydro_run.open_ocean(surface, g, 0.02)
+    assert ocean[0].all()
+    assert not ocean[1].any()
+    # the largest body is the sea however small it is, so there is always one
+    assert hydro_run.open_ocean(surface, g, 0.99)[0].all()
+    # and the flood then fills the basin to its rim: a lake, not a gulf
+    filled = priority_flood_sphere(surface, ocean, g).filled
+    assert np.allclose(filled[1, 6:10, 6:10], 100.0)
+    assert np.allclose(filled[0], -500.0)
+
+
 # --------------------------------------------------------------------------
 # the stage on the stub world
 # --------------------------------------------------------------------------
@@ -317,10 +339,14 @@ def test_stage_outputs_and_requantile(tiny_hydro):
     acc = store.load_field("flow_acc", grid)
     assert ws.dtype == np.float32 and fd.dtype == np.uint8 and acc.dtype == np.float32
     surface = (h.interior + sed.interior).astype(np.float32)
-    ocean = surface < 0
+    # the sea is the *connected* ocean, so `surface < 0` is not the mask: a
+    # closed basin below sea level is land with a lake in it (open_ocean)
+    ocean = fd.interior == OCEAN
     M = surface.size
-    # exactly land_fraction (by cell count, +-2 cells of float rounding)
-    assert abs(int((~ocean).sum()) - round(params.world.land_fraction * M)) <= 2
+    assert ocean.sum() <= (surface < 0).sum()
+    assert int(((surface < 0) & ~ocean).sum()) == info["closed_basin_cells"]
+    # sea level still puts exactly land_fraction of the cells above zero
+    assert abs(int((surface >= 0).sum()) - round(params.world.land_fraction * M)) <= 2
     assert (ws.interior[ocean] == 0).all()
     assert (ws.interior[~ocean] >= surface[~ocean]).all()
     assert (fd.interior[ocean] == OCEAN).all() and (fd.interior[~ocean] < 8).all()
@@ -450,7 +476,7 @@ def test_lakes_json(tiny_hydro):
     fd = store.load_field("flow_dir", grid).interior
     surface = (h + sed).astype(np.float32)
     lake = (ws - surface) > params.hydro.lake_min_depth
-    lake &= surface >= 0
+    lake &= fd != OCEAN
     assert sum(l["area_cells"] for l in L) == int(lake.sum())
     down = downstream_table(np.ascontiguousarray(fd), grid.owner, grid.H)
     for l in L:

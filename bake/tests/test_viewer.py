@@ -94,6 +94,19 @@ def test_bake_captures_frames_and_exports_a_viewer(tmp_path):
         assert (tmp_path / "on" / "viewer" / f["file"]).exists()
     assert "plate" in meta["frames"][0]["layers"]
     assert "discharge" in meta["frames"][-1]["layers"]
+    assert "water" in meta["frames"][-1]["layers"]  # what the elevation view colours as water
+
+
+def test_water_code_tells_lakes_from_sea_and_from_closed_basins():
+    """Sea, a closed basin below sea level, dry land, and a lake standing
+    above sea level -- the last two of which `height < 0` cannot see."""
+    surf = np.array([[-3000.0, -200.0, 50.0, 800.0]], np.float32)
+    fd = np.array([[255, 0, 0, 0]], np.uint8)          # hydro: only the first is sea
+    ws = np.array([[0.0, 20.0, 0.0, 900.0]], np.float32)
+    assert list(vw.water_code(surf, fd, ws, 0.5)[0]) == [vw.WATER_OCEAN, vw.WATER_LAKE, vw.WATER_LAND, vw.WATER_LAKE]
+    # without hydro the height sign is all there is: both lakes disappear and
+    # the closed basin reads as ocean
+    assert list(vw.water_code(surf, None, None)[0]) == [vw.WATER_OCEAN, vw.WATER_OCEAN, vw.WATER_LAND, vw.WATER_LAND]
 
 
 def test_resumed_erosion_drops_frames_past_the_resume_point(tmp_path):

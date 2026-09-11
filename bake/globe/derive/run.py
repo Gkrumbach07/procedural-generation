@@ -38,6 +38,7 @@ import numpy as np
 
 from ..climate.temperature import retarget
 from ..field import FaceField
+from ..hydro.d8 import OCEAN
 from . import biomes, soil
 from . import lakes as lakes_mod
 from . import rivers as rivers_mod
@@ -102,6 +103,19 @@ class _FineReader:
         return out
 
 
+def fine_ocean(surface_f: np.ndarray, sea_near_c: np.ndarray, face: int, R: int) -> np.ndarray:
+    """Sea on one fine face: below sea level, *and* in a coarse cell that
+    hydro called ocean or that touches one.
+
+    The coarse mask is the authority on what the sea is connected to (it is
+    the only place the question is answered globally); the fine surface is
+    the authority on where the coastline runs inside a cell.  The one cell of
+    slack is what lets a fine cell just offshore be sea while the floor of a
+    closed basin -- a whole coarse cell away from any ocean -- is not.
+    """
+    return (np.asarray(surface_f) < 0.0) & upsample_nearest(sea_near_c[face], R)
+
+
 class _SurfaceReader:
     """``_FineReader`` of the fine surface (height + sediment)."""
 
@@ -132,12 +146,19 @@ def run(store, params, log=print) -> dict:
     h = store.load_field("height", grid)
     sed = store.load_field("sediment", grid)
     ws = store.load_field("water_surface", grid)
+    fd = store.load_field("flow_dir", grid) if store.has_field("flow_dir") else None
     acc = store.load_field("flow_acc", grid) if store.has_field("flow_acc") else None
     drainage = store.read_json("graph/drainage.json") if store.has("graph/drainage.json") else None
     coarse_lakes = store.read_json("graph/lakes_coarse.json").get("lakes") if store.has("graph/lakes_coarse.json") else None
 
     surface_c = (h.interior + sed.interior).astype(np.float32)
-    land_c = surface_c >= 0.0
+    # The sea is hydro's connected ocean rather than every cell below zero: a
+    # basin the water cannot reach is land with a lake in it, however deep it
+    # sits (globe.hydro.run.open_ocean).  `sea_near_c` carries that verdict to
+    # the fine grid, one coarse cell of slack (see `fine_ocean`).
+    ocean_c = (fd.interior == OCEAN) if fd is not None else (surface_c < 0.0)
+    land_c = ~ocean_c
+    sea_near_c = biomes.near_faces(ocean_c, 1, grid)
     # the stored climate temperature was computed before erosion, on the
     # *bedrock* surface (climate/run.py); erosion then moved that surface by
     # hundreds of metres.  Undo the old lapse term and re-apply it at the
@@ -150,7 +171,7 @@ def run(store, params, log=print) -> dict:
     thr = channel_threshold(store, params, P.interior, land_c, drainage)
     chan_c = ((acc.interior > thr) if acc is not None else np.zeros_like(land_c)) & land_c
     chan_frac = float(chan_c.sum() / max(int(land_c.sum()), 1))
-    lake_c = lakes_mod.lake_mask(surface_c, ws.interior, depth)
+    lake_c = lakes_mod.lake_mask(surface_c, ws.interior, depth, ocean=ocean_c)
     coarse_lab, n_coarse_lakes = lakes_mod.coarse_lake_labels(lake_c, ws.interior, grid)
     surf_field = FaceField.from_interior(grid, surface_c, name="surface")
     slope_c = surf_field.gradient().vec_norm().interior
@@ -158,12 +179,13 @@ def run(store, params, log=print) -> dict:
     alpine_min = biomes.effective_alpine_min(surface_c[land_c], dp)
     river_near_c = biomes.near_faces(chan_c, dp.riparian_cells, grid)
     lake_near_c = biomes.near_faces(lake_c, dp.wetland_cells, grid)
-    biome_c = biomes.classify(T_c, Pcm_c, surface_c, slope_c, lake_c, river_near_c, lake_near_c, dp, cliff_slope, alpine_min)
+    biome_c = biomes.classify(T_c, Pcm_c, surface_c, slope_c, lake_c, river_near_c, lake_near_c, dp, cliff_slope, alpine_min, ocean=ocean_c)
     store.save_field(FaceField.from_interior(grid, biome_c, name="biome", exchange=False))
     hist = np.bincount(biome_c.ravel(), minlength=biomes.N_BIOMES)
     info["coarse_biome_hist"] = {biomes.NAMES[k]: int(hist[k]) for k in range(biomes.N_BIOMES) if hist[k]}
     info["coarse_channel_fraction"] = chan_frac
     info["coarse_lakes"] = int(n_coarse_lakes)
+    info["closed_basin_cells"] = int(((surface_c < 0.0) & land_c).sum())
     info["cliff_slope"] = cliff_slope
     # what the *configured* threshold would have selected: effective_cliff_slope
     # raises it to keep cliffs under cliff_max_fraction, which would otherwise
@@ -189,7 +211,7 @@ def run(store, params, log=print) -> dict:
     n_land = 0
     for f in range(6):
         q_s = rivers_mod.smooth_discharge(_fine_optional(store, "discharge", f, Nf, 0.0), dp.discharge_smooth_cells)
-        land_f = _fine_surface(store, f, Nf) >= 0.0
+        land_f = ~fine_ocean(_fine_surface(store, f, Nf), sea_near_c, f, R)
         c, n = rivers_mod.log_histogram(q_s, land_f)
         counts += c
         n_land += n
@@ -203,7 +225,7 @@ def run(store, params, log=print) -> dict:
     conn = rivers_mod.RiverConnectivity(Nf, int(round(dp.min_river_cells * R * R)))
     for f in range(6):
         q_s = rivers_mod.smooth_discharge(_fine_optional(store, "discharge", f, Nf, 0.0), dp.discharge_smooth_cells)
-        land_f = _fine_surface(store, f, Nf) >= 0.0
+        land_f = ~fine_ocean(_fine_surface(store, f, Nf), sea_near_c, f, R)
         conn.add_face(f, (q_s > q_low) & land_f, (q_s > q_thr) & land_f)
     conn.finalize()
     info["river_fraction"] = frac
@@ -230,7 +252,8 @@ def run(store, params, log=print) -> dict:
         surface_f = _fine_surface(store, f, Nf)
         ws_f = _fine_optional(store, "water_surface", f, Nf, 0.0)
         q_s = rivers_mod.smooth_discharge(_fine_optional(store, "discharge", f, Nf, 0.0), dp.discharge_smooth_cells)
-        land_f = surface_f >= 0.0
+        ocean_f = fine_ocean(surface_f, sea_near_c, f, R)
+        land_f = ~ocean_f
         # rivers
         keep_f = conn.mask(f, (q_s > q_low) & land_f)
         river_mask, rivers, rinfo = rivers_mod.extract_face_rivers(f, q_s, surface_f, land_f, q_thr, dp, R, cs_f, graph_index, q_low=q_low, mask=keep_f)
@@ -245,12 +268,12 @@ def run(store, params, log=print) -> dict:
             rinfo["coarse_channel_coverage"] = float(on[chan_c[f]].mean())
             chan_covered += int(on[chan_c[f]].sum())
         # lakes
-        lake_f = lakes_mod.lake_mask(surface_f, ws_f, depth)
+        lake_f = lakes_mod.lake_mask(surface_f, ws_f, depth, ocean=ocean_f)
         area_f = (upsample_nearest(coarse_face_array(grid, grid.cell_area, f), R) / float(R * R)).astype(np.float32)
         pcs, frame = lakes_mod.face_lake_pieces(f, lake_f, ws_f, surface_f, area_f, coarse_lab[f], R, lake_min_cells, piece_base=len(pieces))
         pieces += pcs
         frames.append(frame)
-        del area_f, ws_f, lake_f, river_mask, surface_f
+        del area_f, ws_f, lake_f, river_mask, surface_f, ocean_f, land_f
         dt = time.time() - t
         fi = {"face": f, "seconds_rivers_lakes": dt, "lake_pieces": len(pcs), **rinfo}
         face_info.append(fi)
@@ -265,11 +288,18 @@ def run(store, params, log=print) -> dict:
     mask_reader = _FineReader(store, "river_mask", 0.0)
     d_rip = int(dp.riparian_cells * R)
     d_wet = int(dp.wetland_cells * R)
+
+    def sea_pad(f2, i2, j2):
+        """The coarse sea-proximity flag under fine cells of any face, so the
+        pads beyond a face edge get the same sea mask as the face itself."""
+        return sea_near_c[f2, i2 // R, j2 // R].astype(np.float32)
+
     for f in range(6):
         t = time.time()
         surface_f = _fine_surface(store, f, Nf)
         ws_f = _fine_optional(store, "water_surface", f, Nf, 0.0)
-        lake_f = lakes_mod.lake_mask(surface_f, ws_f, depth)
+        ocean_f = fine_ocean(surface_f, sea_near_c, f, R)
+        lake_f = lakes_mod.lake_mask(surface_f, ws_f, depth, ocean=ocean_f)
         river_mask = np.asarray(load_face(store, "river_mask", f))
         T_f = retarget(upsample_face(T0_field, f, R, order=1), 0.0, surface_f, params.climate)
         Pcm_f = np.maximum(upsample_face(Pcm_field, f, R, order=1), 0.0)
@@ -279,15 +309,17 @@ def run(store, params, log=print) -> dict:
         if d_wet > 0:
             s_pads = face_pads(surface_reader, Nf, f, d_wet)
             w_pads = face_pads(ws_reader, Nf, f, d_wet)
-            lake_pads = [lakes_mod.lake_mask(a, b, depth) for a, b in zip(s_pads, w_pads)]
-            del s_pads, w_pads
+            o_pads = face_pads(sea_pad, Nf, f, d_wet)
+            lake_pads = [lakes_mod.lake_mask(a, b, depth, ocean=(a < 0.0) & (o > 0.5))
+                         for a, b, o in zip(s_pads, w_pads, o_pads)]
+            del s_pads, w_pads, o_pads
         else:
             lake_pads = None
         lake_near_f = biomes.near_padded(lake_f, lake_pads, d_wet)
-        biome_f = biomes.classify(T_f, Pcm_f, surface_f, slope_f, lake_f, river_near_f, lake_near_f, dp, cliff_slope, alpine_min)
-        land_mask_f = surface_f >= 0.0
+        biome_f = biomes.classify(T_f, Pcm_f, surface_f, slope_f, lake_f, river_near_f, lake_near_f, dp, cliff_slope, alpine_min, ocean=ocean_f)
+        land_mask_f = ~ocean_f
         face_info[f]["T_land_mean"] = float(T_f[land_mask_f].mean()) if land_mask_f.any() else None
-        del T_f, land_mask_f, river_near_f, lake_near_f, river_mask, pads, lake_pads, ws_f, lake_f
+        del T_f, land_mask_f, river_near_f, lake_near_f, river_mask, pads, lake_pads, ws_f, lake_f, ocean_f
         sf = soil.soil_factor(_fine_optional(store, "sediment", f, Nf, 0.0), dp.soil_full_depth_m)
         veg_f = biomes.vegetation(biome_f, Pcm_f, slope_f, sf, dp, cliff_slope)
         write_face(store, "biome", f, biome_f)
@@ -386,7 +418,7 @@ def render_derive(store, params, stride: int | None = None) -> tuple[np.ndarray,
     hs = _shade(surf6, cs * s)
     shade = (0.55 + 0.45 * hs)[..., None]
     img = np.clip(biomes.colorize(biome6).astype(np.float32) * shade * 1.15, 0, 255).astype(np.uint8)
-    ocean = surf6 < 0
+    ocean = biome6 == biomes.OCEAN  # the classified sea, not every cell below zero
     img[ocean] = biomes.PALETTE[biomes.OCEAN]
     # rivers
     if store.has("graph/rivers.json"):

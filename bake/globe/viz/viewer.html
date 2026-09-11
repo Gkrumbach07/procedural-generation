@@ -169,6 +169,9 @@ uniform int uLayer;            // 0 elevation, 1 category, 2 scalar
 uniform sampler2D uLT;         // layer texture
 uniform vec3 uLGeo;            // layer texture (res, pad)
 uniform int uLCh;              // channel 0..2
+uniform sampler2D uWT;         // water mask: 0 land, 1 lake, 2 ocean (final frame only)
+uniform vec3 uWGeo;
+uniform int uWCh, uHasWater;
 uniform int uLKind;            // 0 linear, 1 category
 uniform int uCmap;             // 0 thermal, 1 rain, 2 plates, 3 biome, 4 viridis, 5 sediment
 uniform vec3 uBiome[32];
@@ -227,11 +230,16 @@ vec3 ramp(float t, vec3 c0, vec3 c1, vec3 c2, vec3 c3, vec3 c4){
   if (t < 1.0) return mix(c0, c1, t); if (t < 2.0) return mix(c1, c2, t - 1.0);
   if (t < 3.0) return mix(c2, c3, t - 2.0); return mix(c3, c4, t - 3.0);
 }
-vec3 elevColor(float h){
-  if (h < uSea) {
+// `w` is the water code (0 land, 1 lake, 2 ocean).  Colouring by `h < uSea`
+// instead gets both kinds of water wrong: a lake is a filled depression, so
+// its surface stands at the spill point *above* sea level and comes out as
+// ordinary terrain, while a closed basin below sea level comes out as sea.
+vec3 elevColor(float h, float w){
+  if (w > 1.5) {
     float t = clamp((uSea - h) / max(uSea - uOceanBottom, 1.0), 0.0, 1.0);
     return ramp(pow(t, 0.6), vec3(0.62,0.80,0.86), vec3(0.36,0.62,0.80), vec3(0.18,0.42,0.68), vec3(0.09,0.24,0.50), vec3(0.03,0.09,0.26));
   }
+  if (w > 0.5) return vec3(0.27, 0.51, 0.90);   // lake (derive.biomes' lake colour)
   float t = clamp((h - uSea) / max(uLandTop - uSea, 1.0), 0.0, 1.0);
   return ramp(pow(t, 0.75), vec3(0.30,0.50,0.28), vec3(0.58,0.64,0.38), vec3(0.78,0.70,0.48), vec3(0.58,0.45,0.34), vec3(0.96,0.96,0.97));
 }
@@ -273,7 +281,10 @@ void main(){
   float hN = heightAt(normalize(p + d * n)), hS = heightAt(normalize(p - d * n));
   float scale = 1.0 / (2.0 * d * uRplanet);
   vec2 g = vec2(hE - hW, hN - hS) * scale;
-  bool wet = h < uSea;
+  // hydro's verdict on the final frame; on the timeline frames, which are
+  // captured before hydro has run, the height sign is all there is
+  float wcode = uHasWater == 1 ? byteNearest(uWT, uWGeo, uWCh, p) : (h < uSea ? 2.0 : 0.0);
+  bool wet = wcode > 0.5;
   float ex = uExag * (wet ? 0.35 : 1.0);
   vec3 nrm = normalize(vec3(-g.x * ex, -g.y * ex, 1.0));
   vec3 L = normalize(vec3(-0.6, 0.6, 0.75));
@@ -281,7 +292,7 @@ void main(){
 
   vec3 col;
   if (uLayer == 0) {
-    col = elevColor(h);
+    col = elevColor(h, wcode);
   } else {
     float b = uLKind == 1 ? byteNearest(uLT, uLGeo, uLCh, p) : byteLinear(uLT, uLGeo, uLCh, p);
     if (uLKind == 1) {
@@ -516,6 +527,12 @@ function draw() {
     gl.uniform1i(U.uLayer, 0);
     bindTex(2, tex[a][0], "uLT");
   }
+  // water mask (final frame only; the timeline falls back to the height sign)
+  const wat = (FA.layers || {}).water;
+  bindTex(3, tex[a][wat ? wat[0] : 0], "uWT");
+  gl.uniform3fv(U.uWGeo, geoOf(FA, wat ? wat[0] : 0));
+  gl.uniform1i(U.uWCh, wat ? wat[1] : 0);
+  gl.uniform1i(U.uHasWater, wat ? 1 : 0);
   const riv = FA.layers && FA.layers.discharge;
   gl.uniform1i(U.uRivers, state.rivers && riv && riv[0] === 0 && riv[1] === 2 ? 1 : 0);
   gl.uniform1f(U.uRiverMin, META.river_byte_min ?? 150);

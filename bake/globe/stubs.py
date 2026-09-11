@@ -107,11 +107,15 @@ def stub_hydro(store: WorldStore, params: WorldParams, log=print) -> dict:
     grid = params.coarse_grid()
     h = store.load_field("height", grid)
     sed = store.load_field("sediment", grid)
-    ws = FaceField(grid, np.maximum(h.data + sed.data, 0.0), name="water_surface")
+    # the sea is where the *surface* is under water, as in the real stage:
+    # taking it from `height` alone leaves cells marked ocean whose surface
+    # (height + sediment) is above sea level, and derive believes the mask
+    surface = h.data + sed.data
+    ws = FaceField(grid, np.maximum(surface, 0.0), name="water_surface")
     store.save_field(ws)
     fd = FaceField.zeros(grid, 1, np.uint8, name="flow_dir")
     fd.data[...] = 255
-    fd.data[h.data >= 0] = 0
+    fd.data[surface >= 0] = 0
     store.save_field(fd)
     store.save_field(FaceField(grid, np.maximum(h.data, 0) * 0.1, name="flow_acc"))
     store.write_json("graph/drainage.json", {"nodes": [], "edges": [], "stub": True})

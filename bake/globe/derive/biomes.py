@@ -203,7 +203,7 @@ def effective_alpine_min(surface_land: np.ndarray, dp) -> float:
     return float(dp.alpine_min_relief_frac) * float(np.quantile(s, 0.999))
 
 
-def classify(T, P_cm, surface, slope, lake, river_near, lake_near, dp, cliff_slope: float | None = None, alpine_min: float | None = None) -> np.ndarray:
+def classify(T, P_cm, surface, slope, lake, river_near, lake_near, dp, cliff_slope: float | None = None, alpine_min: float | None = None, ocean=None) -> np.ndarray:
     """Full biome classification of one array (coarse ``(6, N, N)`` or one
     fine face ``(Nf, Nf)``): Whittaker base plus the overrides of the module
     table.  ``dp`` is ``params.derive``; ``cliff_slope`` overrides
@@ -211,10 +211,12 @@ def classify(T, P_cm, surface, slope, lake, river_near, lake_near, dp, cliff_slo
     overrides ``dp.alpine_min_m`` (see :func:`effective_alpine_min`).  ``lake`` /
     ``river_near`` / ``lake_near`` are bool masks (``river_near`` = within
     ``riparian_cells`` of a channel; ``lake_near`` = within
-    ``wetland_cells`` of a lake)."""
+    ``wetland_cells`` of a lake).  ``ocean`` is the sea mask; it defaults to
+    ``surface < 0``, which calls every closed basin below sea level ocean, so
+    pass hydro's mask where there is one (:func:`globe.hydro.run.open_ocean`)."""
     surface = np.asarray(surface, dtype=np.float32)
     T = np.asarray(T, dtype=np.float32)
-    ocean = surface < 0.0
+    ocean = (surface < 0.0) if ocean is None else np.asarray(ocean, dtype=bool)
     am = dp.alpine_min_m if alpine_min is None else alpine_min
     alpine = (surface >= np.float32(am)) & (T < np.float32(dp.alpine_T))
     cs = dp.cliff_slope if cliff_slope is None else cliff_slope

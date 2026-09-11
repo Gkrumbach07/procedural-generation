@@ -14,6 +14,7 @@ from globe.cubesphere import get_grid
 from globe.field import rotation_field
 from globe.io.world_store import WorldStore
 from globe.pipeline import bake
+from globe.tectonics import intraplate
 from globe.tectonics import run as tect
 from globe.tectonics.collision import build_tree, collide, label_map, label_map_fast, relax_segments, spread_collisions, weighted_quantile
 from globe.tectonics.plates import Plates, cluster_plates, rotate_segments
@@ -130,6 +131,57 @@ def test_collisions_conserve_mass_and_kill_denser():
     relax_segments(seg, build_tree(seg), 0.3, 0.1, s)
     assert seg.total_mass() == pytest.approx(m0, rel=1e-12)
     assert np.allclose(seg.mass, seg.thickness * seg.density)
+
+
+def test_ocean_on_ocean_subduction_has_one_polarity_per_boundary():
+    """One plate dives along the whole trench, not whichever segment happens
+    to win each contact.
+
+    Every oceanic segment has the same density, so ``density[i] > density[j]``
+    compared the rounding of ``mass / thickness`` and the ties fell to the
+    segment index: measured over 300 steps of the Earth preset, 28.7 % of
+    ocean-on-ocean collisions were exact ties and the rest were decided by
+    the last bits of a division.  Both are uncorrelated with the plate, so
+    each side kept half the contacts and drove fingers into the other.
+    """
+    rng = np.random.default_rng(11)
+    pos = best_candidate_sphere(800, rng)
+    pid = cluster_plates(pos, 2, rng)
+    seg = Segments(pos, 0.2, 0.88, 0.0, pid, 4 * np.pi / 800)
+    seg.age[pid == 0] = 300.0    # plate 0 carries the older, colder floor
+    seg.age[pid == 1] = 50.0
+    seg.density[::2] = np.nextafter(0.88, 1.0)   # the noise a run actually has
+    seg.mass[:] = seg.thickness * seg.density
+    plates = Plates(2)
+    plates.update_stats(seg)
+    s = mean_spacing(800)
+    alive = np.ones(seg.M, bool)
+    # omega = 0: nothing is approaching, so every pair takes the overlap branch
+    losers, survivors = collide(seg, build_tree(seg), 1.2 * s, plates.omega, alive, overlap_fraction=1.0)
+    assert losers.size > 0
+    assert (seg.plate_id[losers] == 0).all()
+    assert (seg.plate_id[survivors] == 1).all()
+
+
+def test_rift_opens_the_cut_rather_than_shearing_along_it(tiny_sim):
+    """The Euler pole of a spreading pair lies on the rift, so the halves
+    move apart; about the cut's normal they would only slide along it.  And
+    a new pole obeys the speed cap -- the plate moves before the force model
+    is reached, so an over-fast one has already teleported the crust (the
+    step that opened a rift used to turn each half 14.4 degrees)."""
+    sim = tect.initialise(WorldParams.tiny_world(), log=None)
+    P0 = sim.plates.P
+    target = int(np.argmax(sim.plates.count))
+    out = intraplate._rift_one(sim, target, sim.params.rng("tectonics", 6, 1))
+    assert out["split"] == target and out["moved"] > 0
+    om = sim.plates.omega
+    assert np.linalg.norm(om, axis=1).max() <= sim.max_omega * (1 + 1e-12)
+    a, b = sim.seg.plate_id == target, sim.seg.plate_id == P0
+    ca, cb = sim.seg.pos[a].mean(axis=0), sim.seg.pos[b].mean(axis=0)
+    va, vb = np.cross(om[target], ca), np.cross(om[P0], cb)
+    # the halves separate: their relative velocity points along the line
+    # between them (a shear would leave this at ~0)
+    assert float(np.dot(va - vb, ca - cb)) > 0.0
 
 
 # --------------------------------------------------------------------------

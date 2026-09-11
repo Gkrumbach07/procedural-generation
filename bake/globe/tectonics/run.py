@@ -257,6 +257,13 @@ class TectonicSim:
             relax_segments(seg, tree, tp.relax_rate, tp.relax_threshold, self.spacing, int(tp.relax_knn))
         self.ledger["subducted"] += seg.total_mass() - mass0
 
+        # a plate the trenches have just cut in two is two plates from here on
+        if tp.plate_split_every > 0 and k % int(tp.plate_split_every) == 0:
+            ev = intraplate.split_disconnected(self, int(tp.plate_split_min), rng=self.params.rng("tectonics", 9, k))
+            if ev["split"] or ev.get("welded"):
+                self.events.append(ev)
+                plates = self.plates
+
         # active orogens become former ones: what convergence stops feeding,
         # erosion and root delamination take back down.  After the `subducted`
         # accounting above, which attributes every mass change since `mass0`.

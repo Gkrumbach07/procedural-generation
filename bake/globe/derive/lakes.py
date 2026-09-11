@@ -31,12 +31,23 @@ _STRUCT8 = np.ones((3, 3), dtype=bool)
 # --------------------------------------------------------------------------
 # masks and labels
 # --------------------------------------------------------------------------
-def lake_mask(surface: np.ndarray, water_surface: np.ndarray, min_depth_m: float) -> np.ndarray:
-    """Lake cells: land (``surface >= 0``) with a water surface (``> 0``;
-    ocean cells are 0 by contract) more than ``min_depth_m`` above it."""
+def lake_mask(surface: np.ndarray, water_surface: np.ndarray, min_depth_m: float, ocean=None) -> np.ndarray:
+    """Lake cells: cells that are not sea, with a water surface more than
+    ``min_depth_m`` above the ground.
+
+    ``ocean`` is the sea mask (hydro's ``flow_dir == OCEAN``, or the fine
+    equivalent).  Without it the test falls back to ``surface >= 0``, which
+    is only the same thing when no land lies below sea level: a closed basin
+    whose floor is under the waterline -- the Caspian, and here a trapped
+    piece of ocean floor inside a continent -- is full of lake, and every
+    cell of it fails ``surface >= 0``.  So pass the mask wherever there is
+    one; see :func:`globe.hydro.run.open_ocean`."""
     s = np.asarray(surface, dtype=np.float32)
     w = np.asarray(water_surface, dtype=np.float32)
-    return (w > 0.0) & (s >= 0.0) & ((w - s) > np.float32(min_depth_m))
+    deep = (w - s) > np.float32(min_depth_m)
+    if ocean is None:
+        return (w > 0.0) & (s >= 0.0) & deep
+    return deep & ~np.asarray(ocean, dtype=bool)
 
 
 def label_lakes(mask: np.ndarray) -> tuple[np.ndarray, int]:

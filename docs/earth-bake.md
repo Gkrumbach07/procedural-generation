@@ -1,5 +1,12 @@
 # The first complete Earth-scale bake
 
+> Viewing this world in the globe viewer afterwards turned up four defects
+> it does not describe — rifts that sheared instead of opening, plates that
+> kept rotating as one body after a trench cut them in two, inland basins
+> classified as ocean, and lakes drawn as ground. See
+> **docs/plates-rifts-and-water.md**; the tectonics numbers below predate
+> those fixes.
+
 One end-to-end run of the shipped `earth` preset — 1024² per face, 9773 m
 cells, 1500 tectonic steps, 800 erosion iterations — measured at every
 stage against Earth. This is the run that the crust-type, craton and orogen

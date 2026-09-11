@@ -147,6 +147,13 @@ def build_world(path, params, drainage=None):
     wc.exchange_halos()
     store.save_field(hc)
     store.save_field(wc)
+    # stub_hydro wrote flow_dir from the surface it saw, and the coarse height
+    # has been edited since; derive reads that mask (not the sign of the
+    # surface) to decide what is sea, so it has to agree with the height here
+    fdc = store.load_field("flow_dir", grid)
+    surf_c = hc.data + store.load_field("sediment", grid).data
+    fdc.data[...] = np.where(surf_c >= 0.0, np.uint8(0), np.uint8(255))
+    store.save_field(fdc)
     outlet = [0, int(l0[0, 0] // R), int(l0[0, 1] // R)]
     store.write_json("graph/lakes_coarse.json", {"lakes": [{"id": EDGE_LAKE_ID, "surface_m": EDGE_LAKE_LEVEL, "outlet": outlet, "faces": [0, A]}], "lake_min_depth": params.hydro.lake_min_depth})
     if drainage is not None:
@@ -324,7 +331,9 @@ def test_outputs_and_biome_codes(tiny):
     b = store.load_field("biome", grid)
     assert b.dtype == np.uint8 and b.interior.shape == (6, N, N)
     surface = store.load_field("height", grid).interior + store.load_field("sediment", grid).interior
-    assert (b.interior[surface < 0] == biomes.OCEAN).all()
+    # ocean is hydro's connected sea, so a cell below sea level need not be
+    # ocean (a closed basin holds a lake); both implications still hold
+    assert (surface[b.interior == biomes.OCEAN] < 0).all()
     assert (b.interior[surface >= 0] != biomes.OCEAN).all()
     assert b.interior.max() < biomes.N_BIOMES
     for name in derive_run.OUTPUTS:
@@ -336,9 +345,9 @@ def test_outputs_and_biome_codes(tiny):
         assert bi.shape == veg.shape == rm.shape == (Nf, Nf)
         assert bi.dtype == veg.dtype == rm.dtype == np.uint8
         sf = np.asarray(load_face(store, "height", f)) + np.asarray(load_face(store, "sediment", f))
-        assert (bi[sf < 0] == biomes.OCEAN).all() and (bi[sf >= 0] != biomes.OCEAN).all()
+        assert (sf[bi == biomes.OCEAN] < 0).all() and (bi[sf >= 0] != biomes.OCEAN).all()
         assert bi.max() < biomes.N_BIOMES
-        assert (veg[sf < 0] == 0).all() and (rm[sf < 0] == 0).all()
+        assert (veg[bi == biomes.OCEAN] == 0).all() and (rm[bi == biomes.OCEAN] == 0).all()
         assert set(np.unique(rm)) <= {0, 255}
     veg0 = np.asarray(load_face(store, "vegetation", 0))
     assert 20 < np.median(veg0) < 250

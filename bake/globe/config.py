@@ -105,7 +105,9 @@ class TectonicsParams:
     rift_plates: int = 2  # at most this many plates rift per event; the actual number is 1..this, and the targets are drawn at random weighted by area rather than always being the largest. Deterministic argmax targeting sliced the same supercontinent every event, which reads as the whole map coming apart on a schedule
     rift_zigzag: float = 0.35  # spherical-noise perturbation of the rift plane. A spreading centre is a staircase of ridge segments offset by transforms, not a smooth arc; 0 gives the old straight cut
     rift_zigzag_freq: float = 6.0  # lattice frequency of that perturbation: higher = shorter ridge segments between offsets
-    rift_speed_factor: float = 1.0  # × convection: separation speed of the two halves of a rifted plate
+    rift_speed_factor: float = 1.0  # × max_speed: the rate at which the two halves of a rifted plate move apart. It used to multiply `convection`, which is not a speed: 10 spacings per step against a cap of 0.3, so the one step that opened a rift rotated each half 14.4° (~1600 km) before the cap could apply
+    plate_split_every: int = 1  # steps between checking whether a plate has been cut into disconnected pieces (0 = never). A plate is a rigid rotation, which preserves distances, so a piece severed by a trench can never drift away from its parent: measured at step 800 of the Earth preset, one plate was four pieces 46-83° apart moving as one body, which is what interleaves the ocean plates into ribbons
+    plate_split_min: int = 16  # segments a severed piece needs to become a plate in its own right (it inherits its parent's motion); smaller fragments are welded onto the plate around them
     hotspots: int = 0  # fixed points in the mantle frame that thicken crust drifting over them (0 = none)
     hotspot_rate: float = 0.0  # thickness added per step at a hotspot centre, tapering to 0 at its rim
     hotspot_radius_factor: float = 3.0  # × mean segment spacing: hotspot radius
@@ -334,6 +336,7 @@ class HydroParams:
     lake_min_depth: float = 0.5  # m
     river_threshold: float = 200.0  # cells of accumulation (× mean precip volume)
     requantile_land_fraction: bool = True
+    ocean_min_fraction: float = 0.02  # a body of water below sea level is *ocean* only if it covers at least this fraction of the globe (the largest one always counts). Everything else below sea level is a closed basin on land -- a Caspian, not a gulf -- and the flood fills it to its spill point as a lake. Measured on the first Earth bake before this existed: 504 landlocked basins, 6.9 M km² (4.5 % of the land), all classified as ocean
 
 
 @dataclass

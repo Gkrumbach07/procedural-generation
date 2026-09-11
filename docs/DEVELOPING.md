@@ -49,7 +49,13 @@ freely; do not build a stage on one.
 | | `collision_zone` | u8 | 1 where a subduction point landed within `collision_zone_factor` spacings since the uplift reference step |
 | | `crust_kind` | u8 | 1 = continental crust under this cell, 0 = oceanic.  The mask `sea_level` uses in shelf mode.  Without it a submerged cell cannot be told from a drowned shelf, which is the difference between "the abyssal plain is too shallow" and "much of the ocean is not sea floor" — see `scripts/ocean_depth.py` and docs/crust-audit.md |
 
-`surface = height + sediment` everywhere; `ocean = surface < 0`.  Erosion
+`surface = height + sediment` everywhere.  **`ocean` is hydro's
+`flow_dir == OCEAN`, not `surface < 0`**: the sea is the connected body of
+water below sea level, and a closed basin under the waterline is land with a
+lake in it (`hydro.run.open_ocean`, `hydro.ocean_min_fraction`; measured on
+the first Earth bake, 504 such basins covering 4.5 % of the land were being
+called ocean — see docs/plates-rifts-and-water.md).  `surface < 0` is still
+the rule *inside* erosion, which runs before hydro and has no mask.  Erosion
 already holds the datum every iteration (see *Erosion kernel contract*), so
 `land_fraction` of the coarse cells are land from the first stage on;
 hydro's `requantile_land_fraction` stays as the exact final guarantee and
@@ -305,7 +311,7 @@ pre-erosion field.
 
 | code | name | rule |
 |---:|---|---|
-| 0 | ocean | `surface < 0` |
+| 0 | ocean | hydro's `flow_dir == OCEAN` (the *connected* sea; `surface < 0` only where no mask exists). On the fine grid: `surface < 0` within one coarse cell of an ocean cell |
 | 1 | ice | T < −12 |
 | 2 | tundra | T < −2, or T < 5 and P < 20 |
 | 3 | boreal_forest | T < 5, P ≥ 20 |
@@ -321,7 +327,7 @@ pre-erosion field.
 | 13 | cliff | slope > `derive.cliff_slope` (rise/run) |
 | 14 | riparian | within `derive.riparian_cells` coarse cells (× R at fine) of a channel / river-mask cell |
 | 15 | wetland | within `derive.wetland_cells` of a lake cell |
-| 16 | lake | `water_surface − surface > hydro.lake_min_depth` on land |
+| 16 | lake | `water_surface − surface > hydro.lake_min_depth` and not ocean. A lake stands at its spill point, so it is usually *above* sea level, and its floor may be below it |
 
 `fine/vegetation` is `255 · sqrt(min(P/100, 1)) · sqrt(1 − min(slope/cliff_slope, 1))
 · biome_factor · soil_factor` (biome factors in `biomes.BIOMES`, soil factor

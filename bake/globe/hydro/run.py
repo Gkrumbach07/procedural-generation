@@ -1,6 +1,11 @@
 """Hydro stage driver (PLAN.md section 9): sea level, priority flood, D8
 routing, flow accumulation, drainage tree, lakes.
 
+The sea is the *connected* body of water below sea level
+(:func:`open_ocean`), so a closed basin under the waterline is land with a
+lake in it rather than ocean; ``flow_dir == OCEAN`` is the mask every later
+stage should read.
+
 Inputs (coarse): ``height``, ``sediment``, ``precip``.
 Outputs: ``water_surface`` (f32, 0 on ocean), ``flow_dir`` (u8, 255 ocean),
 ``flow_acc`` (f32 accumulated precip volume), ``graph/drainage.json``,
@@ -19,11 +24,45 @@ import numpy as np
 
 from ..field import FaceField
 from .d8 import OCEAN, downstream_table
-from .lakes import extract_lakes
+from .lakes import extract_lakes, label_components
 from .priority_flood import priority_flood_sphere
 from .routing import accumulate, channel_network, flow_directions
 
 OUTPUTS = ["water_surface", "flow_dir", "flow_acc", "graph/drainage.json", "graph/lakes_coarse.json"]
+
+
+def open_ocean(surface: np.ndarray, grid, min_fraction: float = 0.02) -> np.ndarray:
+    """The sea: the cells below sea level that are *connected* to it,
+    ``(6, N, N)`` bool.
+
+    Being below sea level is not what makes a cell ocean; being joined to the
+    ocean is.  Earth carries several million km² of dry land and inland sea
+    under the waterline -- the Caspian depression, Qattara, the Dead Sea,
+    Turpan, Death Valley -- and none of it is ocean, because a rim of higher
+    ground stands between it and the water.  The same basins arise here
+    whenever plate motion traps a piece of ocean floor inside a continent or
+    a rift drops one below the waterline, and taking ``surface < 0`` as the
+    sea called all of them ocean: measured on the first Earth-scale bake,
+    **504 enclosed basins covering 6.9 M km², 4.5 % of the land**, the
+    largest of them 5.8 M km² of trapped oceanic crust.
+
+    A below-sea body is open ocean when it covers at least ``min_fraction``
+    of the globe; the largest always counts, so a world whose sea is small
+    still has one.  The rest are closed basins on land, which the priority
+    flood below fills to their spill points and reports as lakes.  That is
+    the Caspian: a landlocked sea in a basin the ocean cannot reach, with a
+    lake surface rather than a sea surface.
+    """
+    N, H = grid.N, grid.H
+    below = np.ascontiguousarray(np.asarray(surface) < 0.0).reshape(-1)
+    if not below.any():
+        return np.zeros((6, N, N), dtype=bool)
+    labels, n = label_components(below, np.zeros(below.size, dtype=np.float32), grid.owner, N, H)
+    area = grid.interior_cell_area.reshape(-1).astype(np.float64)
+    per = np.bincount(labels[below], weights=area[below], minlength=max(n, 1))
+    keep = per >= float(min_fraction) * float(area.sum())
+    keep[int(np.argmax(per))] = True
+    return (below & keep[np.maximum(labels, 0)]).reshape(6, N, N)
 
 
 def requantile_height(height: np.ndarray, sediment: np.ndarray, land_fraction: float) -> tuple[np.ndarray, float]:
@@ -74,10 +113,15 @@ def run(store, params, log=print) -> dict:
         info["height_shift_m"] = float(shift)
         log(f"[hydro] re-quantiled height: shift {shift:+.2f} m so land fraction = {params.world.land_fraction}")
     surface = (h.interior + sed.interior).astype(np.float32)
-    ocean = surface < 0.0
+    # the sea is what the sea is connected to; a closed basin below sea level
+    # is land with a lake in it (see `open_ocean`)
+    ocean = open_ocean(surface, grid, hp.ocean_min_fraction)
+    closed = int(np.count_nonzero((surface < 0.0) & ~ocean))
     n_land = int(np.count_nonzero(~ocean))
     info["land_fraction"] = n_land / M
-    log(f"[hydro] land cells {n_land:,} / {M:,} ({n_land / M:.3%})")
+    info["closed_basin_cells"] = closed
+    log(f"[hydro] land cells {n_land:,} / {M:,} ({n_land / M:.3%}); "
+        f"{closed:,} of them closed basins below sea level")
 
     # 2. priority flood
     t = time.time()
@@ -158,17 +202,17 @@ def _dilate(mask: np.ndarray, r: int) -> np.ndarray:
     return out
 
 
-def render_hydro(surface, water_surface, cell_order, cell_size_m, lake_min_depth=0.5, minor=None):
+def render_hydro(surface, water_surface, cell_order, cell_size_m, lake_min_depth=0.5, minor=None, ocean=None):
     """Hillshade + lakes + channels drawn with width by Strahler order.
     ``surface``/``water_surface`` (6, N, N) float, ``cell_order`` (6, N, N)
     int; ``minor`` optional (6, N, N) bool mask of sub-threshold channels
-    drawn faintly underneath (drawing aid only).  Returns (6, N, N, 3)
-    uint8 [f, i, j]."""
+    drawn faintly underneath (drawing aid only); ``ocean`` the sea mask
+    (default ``surface < 0``).  Returns (6, N, N, 3) uint8 [f, i, j]."""
     from ..viz import quicklook as ql
 
     img = ql.render_height(surface, 0.0, cell_size_m)
     lake = (water_surface - surface) > lake_min_depth
-    lake &= surface >= 0
+    lake &= (surface >= 0) if ocean is None else ~np.asarray(ocean, dtype=bool)
     img = ql.overlay(img, lake, (70, 130, 230), 0.9)
     if minor is not None:
         img = ql.overlay(img, minor & (surface >= 0), (90, 140, 230), 0.45)
@@ -201,5 +245,6 @@ def quicklook(store, params, path):
     lake &= land
     _, _, cell_order = channel_network(fd.interior, acc.interior, thr, grid, lake=lake)
     minor = (acc.interior > 0.25 * thr) & land  # faint sub-threshold channels (drawing only)
-    img = render_hydro(surface, ws.interior, cell_order, grid.cell_size_m, params.hydro.lake_min_depth, minor=minor)
+    img = render_hydro(surface, ws.interior, cell_order, grid.cell_size_m, params.hydro.lake_min_depth,
+                       minor=minor, ocean=~land)
     return ql.save_image(path, img)

@@ -170,6 +170,35 @@ def _load_faces(root: Path, name: str, sub: str = "coarse"):
     return np.stack([np.load(p) for p in paths])
 
 
+#: ``water`` channel codes.  Nothing else in the viewer knows what is water:
+#: the timeline frames are pre-hydro, so there the shader still reads the sea
+#: off the height, and only the final frame carries this.
+WATER_LAND, WATER_LAKE, WATER_OCEAN = 0, 1, 2
+
+
+def water_code(surface: np.ndarray, flow_dir: np.ndarray | None, water_surface: np.ndarray | None,
+               lake_min_depth: float = 0.5) -> np.ndarray:
+    """Per cell: 0 land, 1 lake, 2 ocean (uint8).
+
+    Colouring elevation by ``height < 0`` gets both kinds of water wrong.  A
+    lake is *above* sea level almost everywhere -- it is a filled depression,
+    so its water stands at the spill point -- and therefore rendered as
+    ordinary terrain, which is the "lakes don't render as lakes" report; and
+    a closed basin below sea level is rendered as ocean, which is the
+    "landlocked sea" one.  Hydro has already decided both: ``flow_dir ==
+    OCEAN`` is the sea (:func:`globe.hydro.run.open_ocean`) and a water
+    surface standing above the ground is a lake.
+    """
+    surf = np.asarray(surface, np.float32)
+    ocean = (np.asarray(flow_dir) == 255) if flow_dir is not None else (surf < 0.0)
+    code = np.full(surf.shape, WATER_LAND, np.uint8)
+    code[ocean] = WATER_OCEAN
+    if water_surface is not None:
+        deep = (np.asarray(water_surface, np.float32) - surf) > np.float32(lake_min_depth)
+        code[deep & ~ocean] = WATER_LAKE
+    return code
+
+
 class _Frame:
     """One timeline entry before encoding: metres + optional channels."""
 
@@ -239,8 +268,12 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
             plate = np.asarray(alive_last, np.int64)[np.maximum(plate, 0)]  # compact ids -> raw, as in the frames
         plate = plate + 1
     crust = _load_faces(root, "crust_kind", "diagnostics")
+    ws = _load_faces(root, "water_surface")
+    water = water_code(surf, _load_faces(root, "flow_dir"), ws,
+                       float((manifest.get("params", {}).get("hydro", {}) or {}).get("lake_min_depth", 0.5)))
     frames.append(_Frame(
         "final", N, label, ds(surf),
+        water=ds(water, "nearest"),
         discharge=ds(_load_faces(root, "discharge"), "max"),
         temperature=ds(_load_faces(root, "temperature")),
         precip=ds(_load_faces(root, "precip")),
@@ -289,6 +322,8 @@ def channel_specs(final: _Frame) -> dict:
         specs["sediment"] = {"label": "Sediment", "kind": "log", "lo": 1.0, "hi": max(_pctl(s, 99.9, 100.0), 10.0), "unit": "m", "cmap": "viridis"}
     if "crust" in final.ch:
         specs["crust"] = {"label": "Crust", "kind": "category", "cmap": "plates", "names": ["oceanic", "continental"]}
+    if "water" in final.ch:
+        specs["water"] = {"label": "Water", "kind": "category", "cmap": "plates", "names": ["land", "lake", "ocean"]}
     return specs
 
 
@@ -304,7 +339,8 @@ def _byte(name: str, a: np.ndarray, specs: dict) -> np.ndarray:
 
 
 # textures beyond texture 0 on the final frame: (R, G, B) channel names
-FINAL_TEXTURES = (("temperature", "precip", "biome"), ("plate", "sediment", "crust"))
+# (short tuples are padded with zero channels)
+FINAL_TEXTURES = (("temperature", "precip", "biome"), ("plate", "sediment", "crust"), ("water",))
 
 
 def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
@@ -321,6 +357,7 @@ def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
             if not present:
                 continue
             chans = [pad_faces(_byte(n, fr.ch[n], specs)) if n in present else zero for n in names]
+            chans += [zero] * (3 - len(chans))
             k = len(images)
             images.append(atlas(chans))
             for c, n in enumerate(names):
@@ -422,10 +459,20 @@ def _ramp(t: np.ndarray, stops: np.ndarray) -> np.ndarray:
     return stops[k] * (1 - f) + stops[k + 1] * f
 
 
-def elevation_rgb(h: np.ndarray, land_top: float, ocean_bottom: float) -> np.ndarray:
+LAKE_RGB = np.array([0.27, 0.51, 0.90])  # derive.biomes PALETTE[LAKE], as a fraction
+
+
+def elevation_rgb(h: np.ndarray, land_top: float, ocean_bottom: float, water: np.ndarray | None = None) -> np.ndarray:
+    """Hypsometric colours.  ``water`` (see :func:`water_code`) says which
+    cells are sea and which are lake; without it the sea is ``h < 0``, which
+    misses every lake and drowns every closed basin."""
     sea = _ramp(np.power(np.clip(-h / -ocean_bottom, 0, 1), 0.6), SEA)
     land = _ramp(np.power(np.clip(h / land_top, 0, 1), 0.75), LAND)
-    return np.where((h < 0)[..., None], sea, land)
+    if water is None:
+        return np.where((h < 0)[..., None], sea, land)
+    w = np.asarray(water)
+    out = np.where((w == WATER_OCEAN)[..., None], sea, land)
+    return np.where((w == WATER_LAKE)[..., None], LAKE_RGB, out)
 
 
 @lru_cache(maxsize=4)
@@ -456,7 +503,7 @@ def equirect(padded: np.ndarray, width: int, pad: int = PAD, nearest: bool = Fal
 
 
 def relief(h: np.ndarray, R: float, land_top: float, ocean_bottom: float, exag: float = 12.0,
-           river: np.ndarray | None = None) -> np.ndarray:
+           river: np.ndarray | None = None, water: np.ndarray | None = None) -> np.ndarray:
     """Shaded relief of an equirect height map, lit as in the shader."""
     H, W = h.shape
     lat = (0.5 - (np.arange(H) + 0.5) / H) * np.pi
@@ -464,13 +511,14 @@ def relief(h: np.ndarray, R: float, land_top: float, ocean_bottom: float, exag: 
     gx = (np.roll(h, -1, 1) - np.roll(h, 1, 1)) / (2 * R * dlam * np.maximum(np.cos(lat), 1e-3)[:, None])
     hp = np.pad(h, ((1, 1), (0, 0)), mode="edge")
     gy = (hp[:-2] - hp[2:]) / (2 * R * dphi)
-    ex = np.where(h < 0, 0.35 * exag, exag)
+    wet = (h < 0) if water is None else (np.asarray(water) > WATER_LAND)
+    ex = np.where(wet, 0.35 * exag, exag)
     n = np.stack([-gx * ex, -gy * ex, np.ones_like(h)], -1)
     n /= np.linalg.norm(n, axis=-1, keepdims=True)
     shade = np.clip(n @ LIGHT / LIGHT[2], 0, 2)
-    col = elevation_rgb(h, land_top, ocean_bottom) * (0.15 + 0.85 * shade)[..., None]
+    col = elevation_rgb(h, land_top, ocean_bottom, water) * (0.15 + 0.85 * shade)[..., None]
     if river is not None:
-        m = river & (h >= 0)
+        m = river & ~wet
         col[m] = col[m] * 0.35 + np.array([0.16, 0.40, 0.90]) * 0.65
     return (np.clip(col, 0, 1) ** 0.95 * 255).astype(np.uint8)
 
@@ -493,7 +541,8 @@ def export_extras(frames: list[_Frame], specs: dict, meta: dict, out: Path, fmts
         river = None
         if "discharge" in final.ch:
             river = equirect(pad_faces(final.ch["discharge"].astype(np.float32)), W, nearest=True) > specs["discharge"]["river_min"]
-        Image.fromarray(relief(h, R, top, bot, river=river)).save(out / "equirect_relief.png")
+        wat = equirect(pad_faces(final.ch["water"]), W, nearest=True) if "water" in final.ch else None
+        Image.fromarray(relief(h, R, top, bot, river=river, water=wat)).save(out / "equirect_relief.png")
         for name, s in specs.items():
             if name == "discharge":
                 continue
@@ -514,7 +563,8 @@ def export_extras(frames: list[_Frame], specs: dict, meta: dict, out: Path, fmts
             river = None
             if disc and "discharge" in fr.ch:
                 river = equirect(pad_faces(fr.ch["discharge"].astype(np.float32)), W, nearest=True) > disc["river_min"]
-            imgs.append(Image.fromarray(relief(h, R, top, bot, river=river)))
+            wat = equirect(pad_faces(fr.ch["water"]), W, nearest=True) if "water" in fr.ch else None
+            imgs.append(Image.fromarray(relief(h, R, top, bot, river=river, water=wat)))
         dur = [100] * (len(imgs) - 1) + [2000]
         imgs[0].save(out / "timeline.webp", save_all=True, append_images=imgs[1:], duration=dur, loop=0, quality=80, method=4)
         log(f"[viewer] timeline.webp ({len(imgs)} frames) -> {out}")
