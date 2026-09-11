@@ -18,9 +18,12 @@ segments within ``link`` spacings of each other are one landmass
 
 ``biggest``
     the largest landmass as a share of all continental *area*.  1.0 is one
-    supercontinent; Earth today is ~0.37 (Afro-Eurasia of all continental
-    crust).  This is the cycle's order parameter: assembly drives it up,
-    breakup drives it down.
+    supercontinent.  This is the cycle's order parameter: assembly drives it
+    up, breakup drives it down.  Do not compare it to a single Earth number:
+    at a 176 km link Earth's largest mass takes in the Americas through an
+    82 km Bering Strait, so the figure moves as much with the radius there
+    as it does here.  Compare the *radius at which the answer changes*,
+    which is how wide the oceans between the fragments are.
 ``masses``
     how many landmasses hold at least 1 % of the continental area, which
     separates a genuine split from a few segments calving off.  Computed at

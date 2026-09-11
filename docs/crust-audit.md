@@ -122,7 +122,13 @@ hide that; it would not fix it.
 the largest connected continental mass as a share of all continental *area*,
 sampled 75 times through the run. It works on the segment cloud, not the
 rendered grid, so sea level and the splat kernel cannot colour the answer.
-Earth today is ~0.37 (Afro-Eurasia of all continental crust).
+
+There is deliberately no Earth number in the table below. At a 176 km link
+Earth's own largest mass would be Afro-Eurasia *plus* the Americas, because
+the Bering Strait is 82 km wide and Panama is narrower — the metric is as
+sensitive to the radius on Earth as it is here. What is not sensitive, and
+is the comparison that matters, is how wide the water between the fragments
+is: the Atlantic is 5000 km and the Pacific 15,000.
 
 Two continental segments are one landmass if they are within `link` segment
 spacings of each other, and **the whole answer is in that radius** — which
