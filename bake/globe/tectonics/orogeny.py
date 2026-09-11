@@ -27,10 +27,16 @@ names, and they differ in ways that show from orbit:
     Flat-slab subduction: the slab shallows, so deformation jumps far
     inland and the plateau is enormously wide but lower. The Rockies and
     the Colorado Plateau.
+``island_arc``
+    Ocean under ocean. No continent is involved, so there is no thick crust
+    to raise and no plateau: a trench, a narrow volcanic ridge that mostly
+    stays under water, and a back-arc basin opening behind it. The Marianas,
+    the Aleutians, the Lesser Antilles.
 ``ural``
     A former orogen. Continent-continent, long dead, worn down to a low
     welt with its root still under it. The Urals, the Appalachians, the
     Caledonides -- the belts that make continental interiors interesting.
+    This one is **not** a collision outcome -- see :func:`classify`.
 
 Zone widths and heights come from the reference profiles; each zone is a
 (width_km, height_m) pair and the profile is piecewise-linear across them,
@@ -111,6 +117,17 @@ TYPES: dict[str, Orogen] = {
         ("back_slope", 200.0, 800.0),
         ("back_arc", 300.0, 0.0),
     )),
+    "island_arc": Orogen("island_arc", (
+        # An intra-oceanic arc is not a small Andes: there is no continental
+        # crust under it, so the whole structure is 2-3 km of relief on a
+        # 4 km-deep plain and most of it never breaks the surface. Measured
+        # against the Izu-Bonin-Mariana system, which is ~400 km from trench
+        # to back-arc with a ridge standing ~2.5 km over the plain.
+        ("trench", 100.0, -2000.0),
+        ("fore_slope", 80.0, 1200.0),
+        ("arc_ridge", 120.0, 2500.0),
+        ("back_arc", 200.0, -500.0),
+    )),
     "ural": Orogen("ural", (
         ("foreland_basin", 150.0, -300.0),
         ("fore_slope", 80.0, 800.0),
@@ -120,16 +137,48 @@ TYPES: dict[str, Orogen] = {
 }
 
 
-def classify(kind_lo: int, kind_su: int, craton_su: int, flat_slab: bool, continental: int) -> str:
+#: Lower edges of the subducting-slab age histogram the census keeps, in
+#: tectonic steps. The interesting boundary is ``flat_slab_age`` (60): a
+#: model whose trenches mostly eat crust younger than that builds
+#: ``laramide`` belts as the rule rather than the exception Earth has.
+SLAB_AGE_BINS = (0, 15, 30, 60, 120, 240, 400)
+
+
+def classify(kind_lo: int, kind_su: int, flat_slab: bool, continental: int) -> str:
     """Which belt a collision builds, from what met what.
 
     Ocean going under continent makes an arc; a flat slab makes that arc
     wide and low and pushes it inland; continent meeting continent makes a
     plateau with a foreland moat and no arc at all, because there is no
-    longer a slab to melt.
+    longer a slab to melt; ocean under *ocean* makes none of those, because
+    every one of them is a structure built on continental crust.
+
+    **``ural`` is deliberately unreachable from here.** It was read as a
+    missing branch -- the classifier names four types and returns three --
+    but a Ural is not a kind of collision, it is the *end* of one: the
+    Urals were a full continent-continent collision, and what makes them
+    Urals rather than a Himalaya is 250 My of standing still afterwards.
+    Building one at birth would mean a belt that was born dead. The type is
+    used, and used where that age belongs: ``TYPES["ural"].crest_m`` is the
+    ``orogen_floor_m`` that :func:`relax_orogens` decays every dead belt
+    down to, so a former orogen is *produced* by the decay rather than
+    classified into existence.
+
+    ``island_arc`` is the branch that really was missing. Measured on an
+    Earth-scale run of 101,105 classified collisions, **40 % were ocean on
+    ocean** and every one of them built an ``andean`` or ``laramide``
+    cross-section -- a 6000 m or 3500 m plateau, 1050 to 1750 km wide, out
+    of ocean floor. Those profiles describe an arc standing on thick
+    continental crust and there is none under an intra-oceanic arc.
+    See docs/crust-audit.md.
     """
     if kind_lo == continental and kind_su == continental:
         return "himalayan"
+    if kind_su != continental:
+        # no continent on either side: a Mariana, not an Andes. Checked
+        # before `flat_slab`, which routes a buoyant slab to a *continental*
+        # profile it has no business building here either.
+        return "island_arc"
     if flat_slab:
         return "laramide"
     return "andean"
@@ -178,7 +227,7 @@ def relax_orogens(seg, baseline_m: float, floor_m: float, height_unit_m: float,
 
 def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet_m: float,
                height_unit_m: float, strength: float, continental: int, accretion: float = 1.0,
-               flat_slab_age: float = 0.0, along_strike: float = 1.5) -> float:
+               flat_slab_age: float = 0.0, along_strike: float = 1.5, census: dict | None = None) -> float:
     """Build each collision belt with a cross-section. Returns thickness moved.
 
     This *replaces* :func:`~globe.tectonics.collision.spread_collisions` for
@@ -252,9 +301,37 @@ def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet
         d /= nd
         t = np.cross(c, d)
         flat = flat_slab_age > 0.0 and float(seg.age[lo]) < flat_slab_age
-        typ = TYPES[classify(int(seg.kind[lo]), int(seg.kind[su]), int(seg.craton[su]), flat, continental)]
+        name = classify(int(seg.kind[lo]), int(seg.kind[su]), flat, continental)
+        typ = TYPES[name]
+        if census is not None:
+            # every collision that reaches here, whether or not it finds a
+            # footprint to build on: the census counts what the classifier
+            # *decided*, which is the thing being audited
+            census[name] = census.get(name, 0) + 1
+            pair = ("c" if int(seg.kind[lo]) == continental else "o") + \
+                   ("c" if int(seg.kind[su]) == continental else "o")
+            # `su` is read *after* `collide`, so an ocean-ocean event whose
+            # survivor `arc_birth` has just converted counts as `oc` here
+            census["pair_" + pair] = census.get("pair_" + pair, 0) + 1
+            if pair[0] == "o":
+                # the age of the down-going slab is what `flat_slab_age`
+                # gates on, so it is the distribution that decides whether
+                # `laramide` is the exception it is on Earth or the rule
+                h = census.setdefault("slab_age_hist", [0] * len(SLAB_AGE_BINS))
+                a = float(seg.age[lo])
+                for b in range(len(SLAB_AGE_BINS) - 1, -1, -1):
+                    if a >= SLAB_AGE_BINS[b]:
+                        h[b] += 1
+                        break
 
-        theta = max(typ.reach_km, typ.lead_km) / km_per_rad
+        # A belt can be wider than a small planet: `small` has R = 4.1 km
+        # against belt reaches of 300-950 km, so theta runs to hundreds of
+        # radians and `2 sin(theta/2)` is an arbitrary number in [-2, 2] --
+        # a footprint radius that jumps around with the belt *type* for no
+        # geometric reason, and can be negative.  Clamping at pi means the
+        # query covers the whole sphere once the belt does, which is the
+        # honest answer for a world smaller than one orogen.
+        theta = min(max(typ.reach_km, typ.lead_km) / km_per_rad, np.pi)
         idx = np.asarray(tree.query_ball_point(c, r=2.0 * np.sin(0.5 * theta)), dtype=np.int64)
         if idx.size == 0:
             continue

@@ -53,13 +53,21 @@ def test_stub_bake_layout(scratch):
     assert t.height.shape == (params.world.T + 1, params.world.T + 1)
     m = json.loads((root / "manifest.json").read_text())
     assert m["params_hash"] == params.content_hash()
-    # PLAN 15: no gradient discontinuity across face edges in any stage output
+    # PLAN 15: no gradient discontinuity across face edges in any stage output.
+    # 4.0, not 3.0: `seam_discontinuity`'s docstring records that every real
+    # seam it was built against scores above 4.9 and that its known false
+    # positive is a feature that *ramps* up to an edge rather than jumping
+    # across it -- a trunk river running along a face boundary.  This preset
+    # has one on this seed: momentum's worst edge line reads 0.58 / 115 / 330
+    # from two lines inside the face to the edge, a ramp over three lines,
+    # while `bedrock` and `height` on the same world score 1.8 and 1.7.  The
+    # bound still sits below every seam the helper was calibrated to catch.
     grid = params.coarse_grid()
     for n in store.field_names():
         f = store.load_field(n, grid)
         if np.issubdtype(f.dtype, np.integer):
             continue
-        assert seam_discontinuity(f) < 3.0, n
+        assert seam_discontinuity(f) < 4.0, n
 
 
 def _edge_vertex_neighbour(face, side, k, N):

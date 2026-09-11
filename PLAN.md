@@ -26,7 +26,10 @@ Read this block before trusting §0's goals, the repository tree, or §12.
   orogens with real cross-sections — none of which §5 anticipated. See
   docs/crust-types.md.
 * Results and open defects from the first complete Earth-scale run are in
-  **docs/earth-bake.md**.
+  **docs/earth-bake.md**, and what came of chasing them in
+  **docs/missing-relief.md** (why there are no mountains) and
+  **docs/crust-audit.md** (belt types, the supercontinent cycle, the ocean
+  floor, where erosion particles die).
 
 ---
 ## 0. Goals, non-goals, decisions

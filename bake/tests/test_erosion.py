@@ -195,6 +195,45 @@ def test_offshore_loss_is_accounted():
     assert s["deaths"]["ocean"] > 0
 
 
+def test_diag_hook_sees_the_change_list_and_changes_nothing():
+    """``run_iteration``'s ``diag`` hook, and the change-list invariants a
+    diagnostic reads it through (scripts/fork_erosion.py --deaths).
+
+    The hook exists so a diagnostic can ask where particles stopped without
+    re-tracing them; if what it is handed does not mean what it is
+    documented to mean, every number built on it is wrong and nothing else
+    would notice.
+    """
+    p = WorldParams.small_world(0)
+    seen = []
+
+    def diag(state, cl_cell, cl_vol, cl_count, cap, sp_death):
+        assert cl_count.shape == sp_death.shape
+        for q in range(cl_count.shape[0]):
+            row = cl_vol[q * cap: q * cap + cl_count[q]]
+            if row.size == 0:
+                continue
+            # steps come first and final deposits last, so every entry after
+            # the first negative one is also negative: the death cell is the
+            # first `cl_vol < 0` and there is nothing of the walk behind it
+            neg = np.flatnonzero(row < 0.0)
+            if neg.size:
+                assert np.all(row[neg[0]:] < 0.0)
+            assert np.all(row[:neg[0] if neg.size else row.size] >= 0.0)
+        seen.append((int(cl_count.sum()), int((cl_vol[:cl_count.shape[0] * cap] < 0).sum())))
+
+    st = make_window(48, "tilt", p, deposit_on_exit=True)
+    ref = make_window(48, "tilt", p, deposit_on_exit=True)
+    for it in range(3):
+        a = run_iteration(st, p, it, diag=diag)
+        b = run_iteration(ref, p, it)
+        assert a["entries"] == b["entries"] and a["deaths"] == b["deaths"]
+    assert seen and any(n > 0 for n, _ in seen)
+    # the hook is a diagnostic: with it and without it the state is identical
+    assert np.array_equal(st.height, ref.height)
+    assert np.array_equal(st.sediment, ref.sediment)
+
+
 def test_exit_without_deposit_loses_mass_only():
     """Default window mode: particles leaving the mask deposit nothing, so
     the total can only decrease (and does, on an open face)."""

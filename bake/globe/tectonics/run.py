@@ -158,6 +158,11 @@ class TectonicSim:
         # collisions transferred 100 %.
         self.ledger = {k: 0.0 for k in MASS_KEYS}
         self.ledger["initial"] = seg.total_mass()
+        #: how many belts of each :mod:`~globe.tectonics.orogeny` type the run
+        #: built, and the crust-type pairing of every collision that reached
+        #: the classifier (`pair_oc` = oceanic slab under continental
+        #: survivor).  Counts, not mass -- a diagnostic, never in the ledger.
+        self.belt_census: dict[str, int] = {}
         # fixed points in the mantle frame; plates drift over them and come
         # out with a track of thickened crust (see tectonics/intraplate.py)
         self.hotspot_pos = intraplate.seed_hotspots(int(self.tp.hotspots), self.params.rng("tectonics", 7))
@@ -230,7 +235,7 @@ class TectonicSim:
                     seg, tree, losers, survivors, alive, self.spacing, self.params.R_planet,
                     float(tp.height_scale_m), float(tp.orogen_shaping), CONTINENTAL,
                     accretion=float(tp.arc_accretion), flat_slab_age=float(tp.flat_slab_age),
-                    along_strike=float(tp.orogen_along_strike))
+                    along_strike=float(tp.orogen_along_strike), census=self.belt_census)
             else:
                 spread_collisions(seg, tree, losers, survivors, alive, tp.belt_width_factor * self.spacing,
                                   accretion=float(tp.arc_accretion))
@@ -635,17 +640,20 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     bed = _resample(bed_t).astype(np.float64)
     dh = _resample(dh_t).astype(np.float64)
     area = coarse.interior_cell_area.astype(np.float64)
-    cont_c = None
-    if tp.shelf_fraction > 0:
-        cont_t = FaceField.from_interior(grid, blend(seg.kind.astype(np.float64)), exchange=True)
-        cont_c = _resample(cont_t).astype(np.float64) > 0.5
-    q = sea_level(bed, area, cont_c, params)
+    # Crust type on the coarse grid.  `sea_level` uses it only in shelf mode,
+    # but it is saved as a diagnostic either way (see `crust_kind` below), so
+    # it is computed unconditionally and `shelf_mask` -- not `cont_c` -- is
+    # what reaches `sea_level`, which keeps the placement unchanged.
+    cont_t = FaceField.from_interior(grid, blend(seg.kind.astype(np.float64)), exchange=True)
+    cont_c = _resample(cont_t).astype(np.float64) > 0.5
+    shelf_mask = cont_c if tp.shelf_fraction > 0 else None
+    q = sea_level(bed, area, shelf_mask, params)
     bed -= q
     # fractal detail, then sea level again: the noise shifts how much of the
     # surface is above water, so the quantile has to be re-derived or the
     # land fraction drifts (measured 14.4 % -> 14.0 % when it was not)
     bed = inject_detail(bed, coarse, tp, params.rng("tectonics", 8))
-    bed -= sea_level(bed, area, cont_c, params)
+    bed -= sea_level(bed, area, shelf_mask, params)
     land = bed > 0
     # vertical scale: tie the relief to the *horizontal* scale of the
     # tectonic pattern (the mean segment spacing, in metres) unless an
@@ -720,6 +728,13 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
 
     heat_c = FaceField.from_interior(coarse, _resample(sim.heat, order=1).astype(np.float32), name="heat")
     zone_f = FaceField.from_interior(coarse, zone.astype(np.uint8), name="collision_zone")
+    # 1 where the crust under a cell is continental.  Without it on disk there
+    # is no way to ask which *kind* of crust a submerged cell sits on, and
+    # "the ocean is too shallow" cannot be separated from "much of the ocean
+    # is drowned continental shelf" -- which want opposite fixes (see
+    # scripts/ocean_depth.py).  Diagnostic only: not in OUTPUTS, so the stage
+    # hash and every world already baked are unchanged.
+    crust_kind = FaceField.from_interior(coarse, cont_c.astype(np.uint8), name="crust_kind")
     return {
         "bedrock": bedrock,
         "uplift": uplift,
@@ -727,6 +742,7 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
         "plate_id": plate_id,
         "plate_vel": plate_vel,
         "collision_zone": zone_f,
+        "crust_kind": crust_kind,
         "heat": heat_c,
         "_land_slope": slope_info,
         "_scale_m_per_unit": scale,
@@ -766,6 +782,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     diag_dir = store.root / "diagnostics"
     out["heat"].save(diag_dir)
     out["collision_zone"].save(diag_dir)
+    out["crust_kind"].save(diag_dir)
     last = sim.stats[-1] if sim.stats else {}
     info = {
         "segments_final": int(sim.seg.M),
@@ -779,6 +796,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         "final_mass": float(last.get("mass", 0.0)),
         "sim_seconds": t_sim,
         "seconds_per_step": t_sim / max(sim.step_index, 1),
+        "belts": dict(sorted(sim.belt_census.items())),
         "bedrock_max_m": float(out["bedrock"].interior.max()),
         "bedrock_min_m": float(out["bedrock"].interior.min()),
         "uplift_max": float(out["uplift"].interior.max()),

@@ -1,0 +1,192 @@
+# Where the 3.5 km of missing relief went
+
+`docs/earth-bake.md` ended the first complete Earth-scale bake with one big
+defect: after erosion nothing on the planet stands above 5 km (Earth: 8849 m)
+and every band above 2 km is about half of Earth's. Two contributors were
+named and not separated — `tectonics.orogen_decay = 0.008`, which left
+tectonics at a 6619 m maximum, and the glacial pass, which took the maximum
+from 7300 m to 4900 m in fifty iterations.
+
+They are separated here, one at a time, and the split is lopsided.
+
+## Tectonics is not the problem: it is already on Earth's curve
+
+Three tectonics-only runs of the `earth` preset, identical but for
+`orogen_decay`, ~3 minutes each (`scripts/hypsometry.py` reads them):
+
+| band, % of land | Earth | **0.008** (shipped) | 0.004 | 0.002 |
+|---|---|---|---|---|
+| 0–1 km | 71.6 | 59.7 | 58.0 | 56.0 |
+| 1–2 | 15.4 | 27.1 | 25.1 | 20.1 |
+| 2–3 | 7.5 | 7.6 | 8.9 | 10.2 |
+| 3–4 | 3.8 | 3.5 | 4.4 | 7.5 |
+| 4–5 | 1.7 | 1.5 | 2.2 | 4.0 |
+| >5 | 0.3 | 0.7 | 1.3 | 2.0 |
+| **above 2 km** | **13.3** | **13.2** | 16.9 | 23.9 |
+| above 3 km | 5.8 | 5.7 | 7.9 | 13.6 |
+| above 4 km | 2.0 | 2.2 | 3.5 | 6.1 |
+| max | 8849 m | 6619 | 8003 | 7350 |
+| land % | 29.2 | 27.8 | 28.4 | 27.9 |
+
+Read the bold column against the Earth column. **At the shipped decay rate
+the pre-erosion high ground is already exactly Earth's post-erosion
+distribution** — 13.2 % of land above 2 km against 13.3, 5.7 above 3 km
+against 5.8, 2.2 above 4 km against 2.0. Three bands, all within 0.2 points.
+
+That is the finding, and it inverts the argument the value was chosen on.
+`docs/crust-types.md` picked 0.008 as "modestly above Earth's curve, on the
+argument that erosion closes the rest". It is not modestly above the curve;
+it is *on* the curve, before erosion has run — so there was nothing left for
+erosion to close and it could only overshoot. After erosion the same bands
+come out at 3.2 / 0.7 / 0.2: **erosion removes 69 % of the high ground it is
+handed.**
+
+Two consequences.
+
+**Lowering `orogen_decay` cannot fix this on its own.** To end at Earth's
+13.3 % after losing 69 %, tectonics would have to deliver ~43 %. The sweep
+reaches 23.9 % at 0.002, and `docs/crust-types.md` measured 31.1 % with the
+decay switched off entirely. Even a world where no orogen ever came down is
+short by a third.
+
+**`max` is not the statistic to tune on.** It is one segment, and it is not
+monotone in the knob: 6619 m at 0.008, 8003 at 0.004, 7350 at 0.002. The
+bands are monotone and the peak is noise on top of them. (Earth's 8849 m is
+also a post-erosion number for a range that is still actively rising, so
+matching it pre-erosion would be wrong anyway.)
+
+So the question is not "how much more relief should tectonics build" but
+"why does erosion remove 69 % of it", and that is the second contributor.
+
+## The glacial pass is carving in the wrong units
+
+Before running anything, the arithmetic. `erosion/glacial.py` lowers the bed
+by
+
+```python
+dz = rate * np.sqrt(q) * (1.0 - 0.5 * state.hardness) * taper
+np.clip(dz, 0.0, float(ep.glacial_max), out=dz)
+state.height -= dz
+```
+
+`q` is `discharge / disc_saturation` and is dimensionless; `taper` and the
+hardness factor are in [0, 1]. So `glacial_rate` and `glacial_max` are
+**lengths**, in the kernel's height unit, which is the grid's cell size.
+
+`config.py` already knows that this is a trap. `LENGTH_PARAMS_M` exists
+precisely so that a length is declared in metres and divided by the cell
+size at use, with its docstring saying why:
+
+> Their defaults are the values they were tuned at (the old cell-unit number
+> × 50 m), so a 50 m world is unchanged and every other cell size now means
+> the same physical thing.
+
+`cover_depth`, `max_erode`, `iter_erode`, `iter_deposit`, `thermal_max`,
+`fan_room` and `min_volume` are all in that list. **`glacial_rate` and
+`glacial_max` are not.** They are consumed raw, and
+`docs/erosion-tuning.md` records where their values came from: "Sweeps on
+the small preset at `N_c = 256`" — and the small preset's cells are
+**50 m**, whatever `N_c` is set to, because `cell_size_m` is its own
+parameter.
+
+So at the `earth` preset's 9773 m cells the shipped values mean:
+
+| | cell units | at 50 m cells (where tuned) | at 9773 m cells (as shipped) |
+|---|---|---|---|
+| `glacial_rate` (at the reference ice flux) | 1.0 | 50 m per pass | **9773 m per pass** |
+| `glacial_max` (the per-pass cap) | 0.4 | 20 m per pass | **3909 m per pass** |
+
+a factor of **195**. The cap alone permits a cell to lose four kilometres of
+bed in a single pass, and `glacial_every = 10` fires 20 passes between
+iteration 600 and 800. On `tiny`, where the values were tuned, the deepest
+cell of a pass carves 15 m against the 20 m cap — nearly binding, which is
+what a calibrated cap looks like.
+
+That is arithmetic on the configuration, not a measurement. The
+measurement costs seconds and nobody had taken it: `glacial.carve` is
+mass-conserving and touches nothing but `height`, so **one** call on a copy
+of a real Earth-scale state *is* a pass. Loading the iteration-200
+checkpoint and carving once at each setting:
+
+| `glacial_rate` / `max` | ice cells | deepest cell | mean over carved cells |
+|---|---|---|---|
+| **1.0 / 0.4** (shipped) | 508,938 | **3909 m** (= the cap) | **848 m** |
+| 0.2 / 0.08 | 508,938 | 782 m | 373 m |
+| 0.05 / 0.02 | 508,938 | 195 m | 131 m |
+| 0.005116 / 0.002046 (= 50 m / 20 m) | 508,938 | 20 m | 13 m |
+
+**One pass at the shipped settings takes 848 m off the average glaciated
+cell and the full 3909 m cap off the deepest, and there are 20 passes.**
+Earth's entire Quaternary — 2.5 My of it — deepened valleys by a few hundred
+metres, with the deepest fjords around a kilometre.
+
+It also explains the one previous result in this area.
+`docs/erosion-tuning.md` reports that `glacial_rate` *saturates*: rate 8.0
+gave shallower lakes than rate 1.0, "the carve hits the sea-level floor and
+the moraine cap". That sweep only ever went *up* from 1.0. The deepest cell
+at rate 1.0 is exactly `glacial_max`, so the pass is already pinned against
+its own cap before the sweep starts — saturation was the measurement telling
+us the scale was wrong, read as a property of the knob.
+
+## The fluvial half, measured rather than extrapolated
+
+`docs/earth-bake.md` is emphatic that an erosion trajectory must not be
+extrapolated across iteration 600, because the glacial pass reverses every
+trend. The corollary is that the *pre*-glacial half has to be measured on
+its own, which means keeping checkpoints that `_prune_checkpoints` would
+otherwise delete — it retains only the two newest per parameter hash, so
+iteration 200 is gone by iteration 300.
+
+Share of land above 2 km, all from checkpoints of the one baseline run:
+
+| | tectonics | iter 150 | iter 200 | iter 400¹ | iter 500¹ | iter 800¹ |
+|---|---|---|---|---|---|---|
+| above 2 km | **13.3** | 10.1 | **9.0** | 6.9 | 6.4 | **4.1** |
+| land median | 741 m | 356 | 316 | 254 | 226 | 585² |
+| max | 6619 m | 6831 | 6942 | 7312 | ~7300 | 5355² |
+
+¹ from `docs/earth-bake.md`'s table of the same configuration.
+² after the glacial pass; the median *rises* and the max falls.
+
+Two things worth separating.
+
+**The lowlands settle almost immediately and land where Earth is.** Land
+median is 316 m at iteration 200 against Earth's ~350, and the 0–1 km band
+is 75.2 % against 71.6. Whatever is wrong, it is not that the fluvial system
+is planing the continents too hard in general.
+
+**The mountains never stop coming down.** The above-2 km share falls
+monotonically for the whole pre-glacial run — 13.3, 10.1, 9.0, 6.9, 6.4 —
+while the single highest peak *rises* (6619 → 6942 → 7312) because uplift is
+concentrated on the collision zones that are still active. So uplift holds a
+handful of peaks up and loses the rest of the high ground: by iteration 500
+the fluvial pass alone has removed **52 %** of it, before the glacial pass
+has run at all.
+
+## Uplift is not holding the mountains up
+
+The `uplift` field is metres per erosion iteration, so what a cell receives
+over the run is `uplift × erosion.iterations` — less the global mean, which
+`apply_uplift` removes every iteration so that uplift redistributes relief
+instead of inflating the planet. Area-weighted, on the baseline world:
+
+| where | cells | over the 800-iteration run, mean-free | p90 |
+|---|---|---|---|
+| land above 2 km | 241,866 | **952 m** | 2090 m |
+| land 0–2 km | 1,504,064 | 158 m | 520 m |
+| ocean | 4,545,526 | −101 m | — |
+
+So the high ground is fed 0.95 km over the whole run — 2.1 km on the most
+active tenth of it — and still loses two thirds of its area above 2 km. The
+uplift is correctly *placed* (it is 8× larger on the mountains than on the
+plains, and negative offshore, which is the mean-free construction working),
+and it is an order of magnitude short of holding a range up against this
+erosion.
+
+That is a third contributor, independent of both knobs this document was
+asked to separate, and it is the one that decides where the bands end up:
+`orogen_decay` sets what tectonics hands over, the glacial pass takes a
+slice off the top at the end, and the ratio of fluvial erosion to uplift
+decides everything in between. It is also the one that cannot be settled by
+a fork — it acts from iteration 1 — so it needs a full re-bake to test and
+is out of scope here.

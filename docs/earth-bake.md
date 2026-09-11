@@ -152,16 +152,35 @@ pre-bake.** Basins should be refined ahead of the camera at play time. The
 refine nor tiles, so nothing that has been asked of the pipeline depends on
 this stage completing.
 
-## What to measure next
+## What to measure next — and what was measured
 
-1. **Split the missing 3.5 km of relief** between `orogen_decay` (which cost
-   2.2 km before erosion started) and glacial carving (which cost 1.3 km
-   after). Re-run tectonics alone at 0.004 and 0.002 to isolate the first;
-   vary `glacial_rate` / `glacial_max` on a checkpoint at iteration 600 to
-   isolate the second. Do not tune both at once.
-2. **Offshore sediment**, if it is worth the time: shelf concentration is
-   0.59× against deep water's 1.33×, a 2.3× bias. `fan_slope` is ruled out
-   (above). Instrument where particles die before proposing another
-   mechanism.
-3. **Ocean depth** (−2142 m against −3700) — check whether it is sediment
-   fill from (2), or the ridge-buoyancy / oceanic-thickness pair.
+The three questions this document ended on have since been taken up. Their
+answers are in **docs/missing-relief.md** (1) and **docs/crust-audit.md**
+(2, 3), and they changed the shape of the problem:
+
+1. **Split the missing 3.5 km of relief.** Done, and the split is not the
+   one this document guessed. `orogen_decay = 0.008` is *not* the culprit:
+   swept against 0.004 and 0.002, the shipped value puts the pre-erosion
+   high ground exactly on Earth's post-erosion curve (13.2 % of land above
+   2 km against Earth's 13.3). Erosion then removes 69 % of it. Of that,
+   the glacial pass is carving in the wrong units — `glacial_rate` and
+   `glacial_max` are lengths tuned on a 50 m-cell preset and consumed in
+   cell units, so at 9773 m cells one pass takes 848 m off the average
+   glaciated cell and 3909 m off the deepest. See docs/missing-relief.md.
+2. **Offshore sediment.** The particle census exists now
+   (`scripts/fork_erosion.py --deaths`, through a `diag` hook on
+   `maps.run_iteration`) and 94.7 % of particles die in the ocean. A
+   candidate mechanism turned up on the way: only 2.5 % of the globe is
+   drowned continent above −200 m, so the margin is a ramp rather than a
+   shelf and there is nowhere for a particle to stop.
+3. **Ocean depth.** Not sediment fill, and not the arc plateaus that were
+   the obvious suspect (tested: correcting them made the ocean *shallower*).
+   Fully subsided sea floor is pinned at −4018 m by
+   `(h_ocean − sea_level) × height_scale_m`, which is where Earth's abyssal
+   plain starts, and only 22.8 % of the sea floor has got that far.
+
+Also opened by the same work, both in docs/crust-audit.md: the
+supercontinent **never breaks up** (the largest continental mass never falls
+below 0.79 of continental area in 1500 steps, against Earth's ~0.37), and
+`classify` was building Andean plateaus out of ocean floor for 40 % of all
+collisions.

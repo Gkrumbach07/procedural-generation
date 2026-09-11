@@ -370,6 +370,7 @@ def run_iteration(
     particles_per_cell: float | None = None,
     rng_stage: str = "erosion",
     log=None,
+    diag=None,
 ) -> dict:
     """PLAN 8.2, particle part: spawn (rain + re-injected stockpiles),
     trace in chunks, apply each change list serially on the live terrain
@@ -379,7 +380,17 @@ def run_iteration(
     ``params.rng(rng_stage, *key)``.  ``params`` may be a ``WorldParams`` or
     an ``ErosionParams`` (then ``rng`` must be reachable: pass a WorldParams
     for real runs).  Does *not* do thermal erosion, uplift or halos — see
-    :func:`step`."""
+    :func:`step`.
+
+    ``diag``, when given, is called once per chunk as
+    ``diag(state, cl_cell, cl_vol, cl_count, cap, sp_death)`` with that
+    chunk's raw change list, *before* :func:`particle.apply_changes` folds
+    it in.  It is how a diagnostic gets at what the kernel did without
+    re-implementing the loop around it: a particle's entries are
+    ``cl_cell[p*cap : p*cap + cl_count[p]]``, its seafloor steps carry
+    ``cl_vol == 0``, its final deposits ``cl_vol < 0``, and so its death
+    cell is the first entry with ``cl_vol < 0``.  Production passes
+    nothing and the branch costs a single ``is None``."""
     ep = _eparams(params)
     key = iteration_key if isinstance(iteration_key, (tuple, list)) else (int(iteration_key),)
     rng = params.rng(rng_stage, *key)
@@ -486,6 +497,8 @@ def run_iteration(
                 sp_death[:m],
             )
         t2 = time.time()
+        if diag is not None:
+            diag(state, cl_cell, cl_vol, cl_count[:m], cap, sp_death[:m])
         nc, tp, lo, lo_off = pk.apply_changes(
             cl_cell, cl_delta, cl_vol, cl_mom, cl_count[:m], cap,
             state.height, state.sediment, state.acc, state.pending, state.samp, state.disch_track, state.mom_track, state.mask,
