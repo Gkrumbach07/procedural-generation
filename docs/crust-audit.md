@@ -113,36 +113,54 @@ short, so the crust arriving at a trench is young, so the flat-slab branch
 fires, so `laramide` dominates. Raising `flat_slab_age`'s threshold would
 hide that; it would not fix it.
 
-## The supercontinent cycle does not happen
+## The supercontinent cycle happens, and its oceans are 200 km wide
 
 `scripts/supercontinent.py` measures the order parameter the cycle is about:
 the largest connected continental mass as a share of all continental *area*,
 sampled 75 times through the run. It works on the segment cloud, not the
-rendered grid, so sea level and the splat kernel cannot colour the answer,
-and it reports three link radii so the answer is not an artifact of one
-threshold. Earth today is ~0.37 (Afro-Eurasia of all continental crust).
+rendered grid, so sea level and the splat kernel cannot colour the answer.
+Earth today is ~0.37 (Afro-Eurasia of all continental crust).
 
-Over 1500 steps the largest mass never falls below **0.79**, and:
+Two continental segments are one landmass if they are within `link` segment
+spacings of each other, and **the whole answer is in that radius** — which
+is why the script reports several and why reading one of them alone is how
+this was very nearly got wrong:
 
-* **0 of 1500 steps** have the crust apart (largest mass < 0.7).
-* The single deepest sample, 0.791 at step 1260, is back to 0.935 twenty
-  steps later. That is a collision healing, not an ocean opening.
-* The link radius does not rescue it: at 1.1 spacings the largest mass runs
-  0.89–0.93 over the second half of the run against 0.95–0.96 at 1.6.
-* Landmasses holding ≥ 1 % of continental area: **1** for almost the
-  whole run, never more than 2.
+| link | in km | smallest largest-mass | steps apart (< 0.7) of 1500 | longest spell |
+|---|---|---|---|---|
+| **1.1** | **176** | **0.274** | **560** | **300** |
+| 1.6 | 256 | 0.791 | 0 | 0 |
+| 2.5 | 399 | 0.926 | 0 | 0 |
 
-So the honest status is not "breakup verified, reassembly unverified".
-**Breakup does not happen either.** What `docs/crust-types.md` measured as
-"biggest 27.0 ± 6.1 %" is the largest *emergent* landmass as a share of
-*land*, which is a different quantity: one continental mass, cut into 15
-visible pieces by where sea level happens to fall. The map looks like
-several continents; the crust is one.
+At a 176 km link there is a clean supercontinent cycle:
 
-`rift` does what it says — it splits a plate and gives the halves new poles,
-and the earlier fix that stopped it re-drawing every plate's pole is real —
-but splitting a *plate* is not splitting a *continent*, and nothing in the
-run drives the halves far enough apart to open an ocean between them.
+| steps | | largest mass |
+|---|---|---|
+| 0–400 | assembled | 0.94 |
+| 400–580 | **split**, and close to evenly | 0.66 (min 0.50) |
+| 580–1180 | reassembled | 0.82 |
+| 1180–1500 | **split again** | 0.46 (min 0.27) |
+
+That is the thing that was never verified: a break-up at step ~400, a
+**reassembly** by ~600 that holds for 600 steps, and a second break-up from
+~1200 that is still going at the end. It is not an artifact of one sample —
+the second split holds for 300 consecutive steps.
+
+At a 256 km link none of it is visible. So the fragments separate by
+somewhere between 176 and 256 km — one to one and a half segment spacings —
+and then stop. **The cycle is real and the oceans it opens are rift valleys.**
+Earth's Atlantic is 5000 km across.
+
+That relocates the defect. `rift` splits a plate and gives the halves new
+Euler poles, and it demonstrably splits the *continent* too; what is missing
+is the several thousand kilometres of spreading that turns a rift into an
+ocean basin. The knob to look at is how far the halves are pushed and how
+long they keep going, not whether the split happens.
+
+(`docs/crust-types.md`'s "biggest 27.0 ± 6.1 %" is a third quantity again:
+the largest *emergent* landmass as a share of *land*. One continental mass
+can read as 15 visible continents depending on where sea level falls, so
+that number cannot settle this question either way.)
 
 ## The ocean is shallow because there is no abyss
 

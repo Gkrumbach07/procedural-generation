@@ -179,8 +179,10 @@ answers are in **docs/missing-relief.md** (1) and **docs/crust-audit.md**
    `(h_ocean − sea_level) × height_scale_m`, which is where Earth's abyssal
    plain starts, and only 22.8 % of the sea floor has got that far.
 
-Also opened by the same work, both in docs/crust-audit.md: the
-supercontinent **never breaks up** (the largest continental mass never falls
-below 0.79 of continental area in 1500 steps, against Earth's ~0.37), and
-`classify` was building Andean plateaus out of ocean floor for 40 % of all
-collisions.
+Also settled by the same work, both in docs/crust-audit.md: the
+supercontinent cycle **does** happen — split at step ~400, reassembly by
+~600, a second split from ~1200 — but the oceans it opens are only 176 to
+256 km wide, so the cycle is invisible to any measurement that calls
+anything within 256 km one landmass. And `classify` was building Andean
+plateaus out of ocean floor for 40 % of all collisions; it now has an
+`island_arc` branch.

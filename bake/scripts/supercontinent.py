@@ -23,7 +23,8 @@ segments within ``link`` spacings of each other are one landmass
     breakup drives it down.
 ``masses``
     how many landmasses hold at least 1 % of the continental area, which
-    separates a genuine split from a few segments calving off.
+    separates a genuine split from a few segments calving off.  Computed at
+    ``--link`` only; ``biggest`` is reported at every radius in ``--links``.
 
 A dip is not a cycle.  Crust that splits and re-merges within a sample or
 two is a collision healing, so the verdict is based on how long the crust
@@ -38,7 +39,11 @@ with having the simulation in hand are printed at the end: the belt census
 the age of every subducting slab) and the age distribution of the surviving
 sea floor, which is what the ocean's depth curve is a function of.
 
-Measured on the shipped `earth` preset: no breakup at all -- see
+Measured on the shipped `earth` preset: the cycle is there -- split at
+step ~400, reassembly by ~600, a second split from ~1200 -- but only at a
+176 km link.  At 256 km it is invisible, so the oceans it opens are about
+200 km wide against the Atlantic's 5000.  Reading one link radius would
+have answered "no breakup", which is why there are three.  See
 docs/crust-audit.md.
 """
 import argparse
@@ -183,28 +188,49 @@ def main() -> int:
     # samples is a collision healing, not an ocean opening.  Ask instead how
     # long the crust stayed apart -- Pangaea has been broken for ~180 My of a
     # ~400 My cycle, so a real breakup occupies a large fraction of the run.
+    # A cycle is not a dip: crust that splits and re-merges within one or two
+    # samples is a collision healing, not an ocean opening.  Ask instead how
+    # long the crust stays apart -- Pangaea has been broken for ~180 My of a
+    # ~400 My cycle, so a real breakup occupies a large fraction of the run.
+    #
+    # And ask it at *every* link radius, because that is where the answer
+    # lives: two continents 200 km apart are one mass to a 256 km link and
+    # two to a 176 km one, and which of those is right is exactly the
+    # question "did an ocean open, or only a rift valley".
     apart = 0.7
-    below = big < apart
-    longest = held = 0
-    for v in below:
-        held = held + 1 if v else 0
-        longest = max(longest, held)
-    span = steps / max(len(big) - 1, 1)
+    span = steps / max(len(rows) - 1, 1)
+    km = lambda L: L * sim.spacing * params.R_planet / 1000.0  # noqa: E731
     summary["apart_threshold"] = apart
-    summary["samples_below"] = int(below.sum())
-    summary["longest_spell_steps"] = int(longest * span)
-    rec = summary["recovery_biggest"] - summary["min_biggest"]
-    print(f"  recovery after the minimum: {rec:+.3f} of continental area")
-    print(f"  steps with the crust apart (biggest < {apart}): "
-          f"{int(below.sum() * span)} of {steps}; longest unbroken spell {summary['longest_spell_steps']} steps")
-    if below.sum() == 0:
-        print("  VERDICT: no breakup. The continental crust is one mass for the whole run; "
-              "a dip in `biggest` that heals within a sample or two is a collision, not an ocean.")
-    elif longest * span < 0.1 * steps:
-        print("  VERDICT: breakup is transient -- it never holds for a tenth of the run, "
-              "so there is no cycle to reassemble from.")
+    summary["per_link"] = {}
+    print(f"\n  how long the crust stays apart (largest mass < {apart}), by link radius:")
+    for L in links:
+        v = np.array([r["biggest_by_link"][str(L)] for r in rows])
+        below = v < apart
+        longest = held = 0
+        for x in below:
+            held = held + 1 if x else 0
+            longest = max(longest, held)
+        summary["per_link"][str(L)] = {"min": float(v.min()),
+                                       "steps_apart": int(below.sum() * span),
+                                       "longest_spell_steps": int(longest * span)}
+        print(f"    link {L:<5} ({km(L):5.0f} km): min {v.min():.3f}  "
+              f"apart for {int(below.sum() * span):5d} of {steps} steps  "
+              f"longest spell {int(longest * span):5d}")
+    best = max(links, key=lambda L: summary["per_link"][str(L)]["steps_apart"])
+    worst = min(links, key=lambda L: summary["per_link"][str(L)]["steps_apart"])
+    b_ap = summary["per_link"][str(best)]["steps_apart"]
+    w_ap = summary["per_link"][str(worst)]["steps_apart"]
+    if b_ap == 0:
+        print("  VERDICT: no breakup at any radius.  The continental crust is one mass for "
+              "the whole run; a dip that heals within a sample or two is a collision, "
+              "not an ocean.")
+    elif w_ap == 0 and b_ap > 0.1 * steps:
+        print(f"  VERDICT: the crust splits and reassembles, but the oceans it opens are "
+              f"narrow -- plain at {best} spacings ({km(best):.0f} km) and invisible at "
+              f"{worst} ({km(worst):.0f} km), so the fragments separate by somewhere "
+              f"between those two.  Earth's Atlantic is 5000 km.")
     else:
-        print("  VERDICT: the crust breaks up and stays apart; reassembly is the number above.")
+        print("  VERDICT: the crust breaks up and stays apart at every radius measured.")
     if args.out:
         with open(args.out, "w") as fh:
             json.dump({"summary": summary, "history": rows}, fh, indent=1)
