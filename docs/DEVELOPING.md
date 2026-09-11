@@ -37,6 +37,18 @@ All `Grid`s share `R_planet` (derived from the coarse grid).
 | watersheds | `basin_id` | i32 | −1 = ocean; otherwise a basin id from `graph/basins.json` |
 | derive | `biome` | u8 | biome code (see `derive/biomes.py`); 0 = ocean |
 
+## Diagnostic fields (`diagnostics/<name>.f{0..5}.npy`)
+
+Written by a stage but **not** in its `OUTPUTS`, so they are not part of the
+stage hash and adding one does not invalidate a baked world.  Read them
+freely; do not build a stage on one.
+
+| stage | field | dtype | units / meaning |
+|---|---|---|---|
+| tectonics | `heat` | f32 | mantle heat resampled to the coarse grid, [0,1] |
+| | `collision_zone` | u8 | 1 where a subduction point landed within `collision_zone_factor` spacings since the uplift reference step |
+| | `crust_kind` | u8 | 1 = continental crust under this cell, 0 = oceanic.  The mask `sea_level` uses in shelf mode.  Without it a submerged cell cannot be told from a drowned shelf, which is the difference between "the abyssal plain is too shallow" and "much of the ocean is not sea floor" — see `scripts/ocean_depth.py` and docs/crust-audit.md |
+
 `surface = height + sediment` everywhere; `ocean = surface < 0`.  Erosion
 already holds the datum every iteration (see *Erosion kernel contract*), so
 `land_fraction` of the coarse cells are land from the first stage on;
