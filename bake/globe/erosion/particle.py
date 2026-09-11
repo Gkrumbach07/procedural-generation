@@ -71,7 +71,28 @@ DEATH_PIT = 3  # more than pit_steps consecutive uphill steps
 DEATH_EVAP = 4  # volume < min_volume
 DEATH_STOP = 5  # no motion
 DEATH_NAMES = ("age", "ocean", "exit", "pit", "evap", "stop")
-#: minimum per-step deposition allowance (cell units) before the concurrency divisor
+#: minimum per-step deposition allowance (cell units) before the concurrency
+#: divisor, and — via ``lim = -DEP_FLOOR - s_c`` in :func:`apply_changes` —
+#: the water the kernel keeps over any deposit so that particles never turn
+#: sea into land.
+#:
+#: **DEFECT, measured, not yet fixed.** This is a *length* in cell units, so
+#: it means a different depth at every cell size: 1 m of water at the 50 m
+#: cells the model was tuned on, **195.5 m** at the ``earth`` preset's
+#: 9773 m cells.  ``lim`` is then negative for every cell shallower than
+#: that and the deposit clamps to zero, so at Earth scale nothing may be
+#: deposited anywhere in the top 195 m of the water column.  Measured on a
+#: real iteration-600 state with one isolated particle pass: of the 41,355
+#: cells between −50 m and −190 m, **zero** gained any sediment.  The same
+#: constant gives mass wasting its "room below ``-DEP_FLOOR``", so the band
+#: is a one-way valve — it can lose material and can never receive any.
+#:
+#: No delta, coastal plain or shelf wedge can build while this holds, and it
+#: is the offshore-sediment bias docs/earth-bake.md left open.  Fixing it
+#: means scaling with the cell size and bumping ``KERNEL_VERSION``, which
+#: invalidates every checkpoint, and the consequences (base level rising at
+#: river mouths, incision slowing) want a full re-bake to judge.  See
+#: docs/crust-audit.md.
 DEP_FLOOR = 0.02
 
 #: 8-neighbour offsets (di, dj) used by thermal erosion (D8 order)
