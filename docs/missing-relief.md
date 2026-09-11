@@ -289,6 +289,20 @@ depends on `glacial_rate`: **a fork from 600 to 800 with different glacial
 values is bit-for-bit what a full re-bake with those values would produce.**
 The complete corrected world therefore costs 200 iterations rather than 800.
 
+> **Correction — off by exactly the pass that matters.** The gate fires on
+> the step that *produces* iteration 600, so the iteration-600 checkpoint
+> already contains one glacial pass at the shipped settings. The fork below
+> therefore carried that pass into its "corrected" world, and that one pass
+> is not a detail: measured on the re-baked world in
+> docs/streaks-and-flats.md, it flattened **4.94 % of the globe** — every
+> cold cell it reached — from more than 50 m to within ±1 m of sea level,
+> onto a single plane at exactly 0.000 m. A continent-sized plane at
+> 0 m drags the land median down and fills the ±50 m band, which is
+> precisely the direction of the "every band statistic gets worse" result
+> below. A clean corrected-glacial world has to fork from a checkpoint
+> *before* 600 (any ≤ 590; 550 is used there), and that result supersedes
+> the table in this section.
+
 `earthlike` (0.015 / 0.006 — 147 m and 59 m per pass at this grid) run out
 to iteration 800, against the shipped run and Earth:
 
