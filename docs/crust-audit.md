@@ -175,7 +175,13 @@ classifier, world `w-dec008`), the whole sea floor:
 | ocean median | −2859 m | −3700 |
 | ocean p5 | −3914 | — |
 | deepest cell anywhere | **−4020** | −11,000 |
-| ocean shallower than −2500 m | **66 %** | ~13 |
+| ocean deeper than −2500 m | 66 % | ~80 |
+| ocean deeper than −3500 m | **23 %** | ~65 |
+| ocean deeper than −4000 m | **0.6 %** | ~54 |
+
+(The Earth column for the three depth rows is read off the standard ocean
+hypsometry and is approximate to a few points; the comparison it is making —
+0.6 % against roughly half the ocean floor — does not turn on that.)
 
 **There is a hard floor at −4020 m**, and it is not a coincidence: oceanic
 crust floats at `h_ocean = 0.024` bedrock units and sea level sits at
