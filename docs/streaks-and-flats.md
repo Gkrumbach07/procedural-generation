@@ -485,6 +485,28 @@ of the first section. The working reading is that the fingerprint is the
 routing streaks made permanent by the ice, which makes it the routing fix's
 job — tested by running both fixes together.
 
-(combined run pending) (A secondary point stands on its own: a
+**The combined run settles it.** V5 carries all four fixes — `route_eps` at
+5 cm, isostasy 0.8, the glacial units corrected, sticky ice — from iteration
+200. The same window at 550 (before glaciation) and at 650 (two passes in):
+
+| ring window | V5 550 | V5 650 | sticky ice alone, 650 |
+|---|---|---|---|
+| bedrock high-pass std | 37.6 m | 68.8 m | 31.7 m |
+| land/sea boundary cells | 0.36 % | **0.35 %** | 2.88 % |
+| below sea level | 1.6 % | **1.5 %** | 19.0 % |
+| globe: lake share of land | 2.46 % | 2.96 % | 2.59 % |
+| globe: lakes | 1854 | 2270 | 1724 |
+| globe: deepest lake | 275 m | 618 m | 314 m |
+
+The glaciation no longer moves the coast at all, and there are no rings.
+The high-pass field doubles, but the render shows why: it is a dendritic
+valley network running downslope, sharper and denser than before the ice,
+not bands parallel to the margin — the ice is deepening real valleys. The
+straight diagonal fingerprint that sticky ice alone left behind (the old
+routing's discharge, printed by the √q term) is gone with the routing fix,
+which confirms that reading. The glaciation also does what it is for: more
+lakes, deeper ones, and more of the land in them.
+
+(A secondary point stands on its own: a
 taper quantised into five one-cell steps will terrace an ice margin on any
 terrain, and a continuous distance would not.)
