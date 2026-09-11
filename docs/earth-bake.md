@@ -35,11 +35,29 @@ belongs. That was the prediction made when the orogen decay rate was chosen
 — that the excess was crust awaiting erosion rather than an orogen defect —
 and it held.
 
+> **Retracted.** That agreement is an artifact. `glacial_rate` and
+> `glacial_max` are lengths consumed in cell units and tuned on a 50 m-cell
+> preset, so at 9773 m cells the glacial pass carves 195× too hard; what it
+> was doing to these bands was hauling the lowlands back up from where the
+> fluvial pass had over-planed them, and it happened to stop near Earth's
+> figures. Correct the scale and the same run gives 87.9 % in the 0–1 km
+> band and a land median of 241 m, against Earth's 71.6 % and ~350 m. The
+> fluvial/uplift balance was the defect underneath, and this reading hid it.
+> See docs/missing-relief.md.
+
 **Nothing survives above 5 km.** Every band above 2 km comes out at roughly
 half of Earth's, and the highest point on the planet is 5355 m. Two
 contributors, and they need separating before either knob is turned:
 `orogen_decay = 0.008` left tectonics with a 6619 m maximum (Earth 8849),
 and erosion then removed another 1264 m of that.
+
+> **Separated, and it was neither of the two.** `orogen_decay` hands over
+> exactly Earth's high-ground distribution (13.2 % of land above 2 km
+> against 13.3). Of the 10.3 points erosion then removes, the fluvial pass
+> and uplift take 9.0 and the glacial pass 1.3. The glacial pass does cost
+> 2263 m of the *highest point* in fifty iterations, so which contributor
+> looks dominant depends on which statistic you read.
+> See docs/missing-relief.md.
 
 **The ocean is too shallow** at a −2142 m median against −3700. Related to
 the sediment problem below rather than to anything on land.

@@ -281,3 +281,64 @@ That is not a reason to keep it. It is two errors of opposite sign, and the
 knob that happens to cancel them is a unit bug carving four kilometres a
 pass. Correcting the units exposes the lowland error rather than creating
 it — which is the point of correcting it.
+
+## Correcting the glacial scale alone makes the world worse
+
+The glacial pass only ever runs after iteration 600, so nothing before that
+depends on `glacial_rate`: **a fork from 600 to 800 with different glacial
+values is bit-for-bit what a full re-bake with those values would produce.**
+The complete corrected world therefore costs 200 iterations rather than 800.
+
+`earthlike` (0.015 / 0.006 — 147 m and 59 m per pass at this grid) run out
+to iteration 800, against the shipped run and Earth:
+
+| band, % of land | Earth | shipped | **glacial scale corrected** |
+|---|---|---|---|
+| 0–1 km | 71.6 | 76.2 | **87.9** |
+| 1–2 | 15.4 | 19.7 | **8.5** |
+| 2–3 | 7.5 | 3.2 | 2.6 |
+| 3–4 | 3.8 | 0.7 | 0.7 |
+| 4–5 | 1.7 | 0.2 | 0.2 |
+| >5 | 0.3 | 0.0 | **0.1** |
+| **above 2 km** | **13.3** | 4.1 | **3.5** |
+| land % of globe | 29.2 | 27 | 25 |
+| land mean | 840 m | 696 | 445 |
+| land median | ~350 m | 585 | **241** |
+| **max** | **8849 m** | 5355 | **6795** |
+| ocean median | −3700 m | −2142 | −2661 |
+| within ±50 m of sea | 1–2 % | 5 | **11** |
+
+The maximum improves by 1440 m and **every band statistic gets worse.**
+Above 2 km falls 4.1 → 3.5. The land median goes from 585 m — an overshoot
+of Earth's ~350 — to 241 m, an undershoot. The land within ±50 m of sea
+level doubles to 11 % against Earth's 1–2 %.
+
+That is the two-errors result stated at full strength, and it is worth being
+blunt about what it means for the previous document.
+`docs/earth-bake.md`'s headline was that "the continental interior behaves"
+— that erosion moved the 0–1 km and 1–2 km bands almost exactly onto
+Earth's. **That agreement was manufactured by the unit bug.** A glacial
+pass carving four kilometres a pass was hauling the lowlands back up from
+where the fluvial pass had over-planed them, and it happened to stop in
+about the right place. Take the bug away and the fluvial error is visible
+underneath it: with a correctly-scaled glacial pass the landscape planes
+straight through Earth's median and keeps going — 320 m at iteration 650,
+241 m at 800, still falling.
+
+So the ordering of the work is fixed by this, and it is not the ordering
+that looked obvious at the start:
+
+1. **The fluvial/uplift balance is the first problem**, not the third. It
+   removes 9.0 of the 10.3 points of high ground, it over-planes the
+   lowlands, and it does not reach a steady state — the median is still
+   falling at iteration 800. Uplift delivers 952 m to the high ground over
+   the run; that is the number to move, and `uplift_scale` is the knob.
+   It acts from iteration 1, so it needs a full re-bake to test: ~2.5 hours.
+2. **Then the glacial units.** The fix is mechanical (the
+   `LENGTH_PARAMS_M` pattern) but it should land *after* (1), because
+   correcting it today trades a 1440 m improvement in the maximum for a
+   worse distribution everywhere else.
+3. **Only then `orogen_decay`.** It hands over exactly Earth's curve today.
+   What it *should* hand over depends entirely on what (1) and (2) take
+   away, and that is not known until they are settled. Tuning it now would
+   be fitting the last free parameter to two known defects.

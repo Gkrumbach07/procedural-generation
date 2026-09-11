@@ -318,14 +318,21 @@ before their last deposit. Whether that walk ends on the shelf or in the
 abyss is the whole of the offshore-sediment question, and it is what the
 census measures.
 
-One thing the baseline's own checkpoints already say about it: the sediment
-split runs deep 86.9 % / shelf 0.6 % at iteration 200 and deep 88.1 % /
-shelf 0.9 % at 400, against deep 86.4 % / shelf 4.9 % at the end of the run
-(`docs/earth-bake.md`). **The shelf gains four fifths of its final sediment
-in the last 400 iterations**, which is the glacial window. So "the shelf is
-starved" and "the shelf is filled by glacial outwash" are both live
-readings of the same end-state number, and the `off` arm of the glacial
-fork separates them.
+One thing the baseline's own checkpoints say about it: the sediment split
+runs deep 86.9 % / shelf 0.6 % at iteration 200 and deep 88.1 % / shelf
+0.9 % at 400, against deep 86.4 % / shelf 4.9 % at the end of the run
+(`docs/earth-bake.md`). The shelf gains four fifths of its final sediment
+after iteration 400 — which is also the glacial window, so "the shelf is
+starved" and "the shelf is filled by glacial outwash" both fit that
+end-state number.
+
+The `off` arm settles it: with the glacial pass switched off entirely the
+shelf still reaches **3.8 %** by iteration 650, from 0.9 % at 400. It is
+not outwash; the shelf simply fills late. And correcting the glacial scale
+does not fix the bias either — at iteration 800 the corrected world holds
+5.4 % on the shelf against the shipped 4.9 %. Whatever starves the shelf is
+not the glacial pass, which is what sends the search to the deposition
+kernel below.
 
 ## Hotspots are written and switched off; LIPs do not exist
 
