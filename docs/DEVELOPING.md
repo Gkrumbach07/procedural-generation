@@ -247,6 +247,33 @@ it is on by default.
 Each stage module defines `quicklook(store, params, path)`.  Use
 `globe.viz.quicklook` helpers; write the unfolded net.
 
+## Timeline frames and the viewer (`frames/`, `viewer/`)
+
+`frames/<stage>/<key>.npz` + `<key>.json`, written during tectonics (key =
+step, `render.tectonics_frames` of them) and erosion (key = iteration, every
+`render.erosion_frame_every`, plus 0 and the last).  Interior `(6, r, r)`,
+`[face, i, j]`, `r = min(render.frame_res, N)`:
+
+| stage | arrays | notes |
+|---|---|---|
+| tectonics | `height` f16, `plate` i16 | height in **bedrock units**, sea-levelled per frame; ×`stages.tectonics.info.scale_m_per_unit` for metres. `plate` = raw plate index + 1; the JSON lists the `alive` indices, so compact `coarse/plate_id` maps back to raw |
+| erosion | `height` f16, `discharge` f16 | height = `height + sediment` in metres (block mean); discharge block max |
+
+Capture only reads the simulation: a bake with and without frames has
+identical hashes (`tests/test_viewer.py`).  A tectonics rerun deletes all
+frames; an erosion run deletes erosion frames past its resume point.
+
+`viewer/index.html` + `viewer/data/{meta.js, fNNNN.js}` are written at the end
+of `pipeline.bake` when `render.viewer` is set (`globe/viz/viewer.py`).
+Every texture is a cube-face atlas of `(r + 2)²` tiles, 3 columns × 2 rows
+(face `f` at column `f % 3`, row `f // 3`), and pixel `(1 + i, 1 + j)` holds
+cell `(i, j)`.  The one-cell border comes from the neighbouring face.
+Texture 0 is `R,G` = 16-bit height over the frame's `[h0, h1]` m and `B` =
+the overlay (plate byte, or log discharge).  The final frame adds
+`(temperature, precip, biome)` and `(plate, sediment, crust)` textures.  The
+channel encodings are in `meta.channels`.  Latitude/longitude use the +Z pole
+(`Grid.latitude`); longitude 0 is +X.
+
 ## Tests
 
 `bake/tests/test_<stage>.py`, runnable in < 60 s on the `tiny`/`small`

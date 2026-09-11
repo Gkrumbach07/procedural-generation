@@ -196,6 +196,16 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         load_checkpoint(state, *ck)
         log(f"[erosion] resumed from {ck[0].name} (iteration {state.iteration})")
     log(f"[erosion] {grid.describe()}; heights in units of {state.height_unit_m:.1f} m; {n_iter} iterations, {ep.particles_per_cell} particles/cell")
+    # viewer timeline frames (hash-exempt, read-only).  Frames past the
+    # resume point belong to whichever run wrote them, not to this one.
+    from ..viz import frames as vf
+
+    rp = params.render
+    frame_every = int(rp.erosion_frame_every) if rp.viewer else 0
+    rec = vf.FrameRecorder(store.root, "erosion", min(int(rp.frame_res), grid.N))
+    rec.clear(after=state.iteration)
+    if frame_every > 0 and state.iteration == 0:
+        vf.erosion_frame(state, rec, 0, n_iter)
     times = []
     clamped = 0
     lost_offshore = 0.0
@@ -216,6 +226,8 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
             f"pending {st.get('pending_total', 0.0):.1f}, {st['seconds_particles']:.2f}s particles, {dt:.2f}s total"
         )
         done = state.iteration
+        if frame_every > 0 and (done % frame_every == 0 or done == n_iter):
+            vf.erosion_frame(state, rec, done, n_iter)
         if ep.checkpoint_every > 0 and (done % ep.checkpoint_every == 0 or done == n_iter):
             p = save_checkpoint(store, state, params)
             log(f"[erosion] checkpoint -> {p.name}")

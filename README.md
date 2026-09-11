@@ -24,10 +24,12 @@ python scripts/bake.py --world big  --from erosion           # resume from a sta
 python scripts/inspect_world.py worlds/demo                  # stats + images
 ```
 
-A default `big` bake is not a coffee break: at the default `N_c = 1024` an
-erosion iteration measures 29 s on 4 cores (~20 s projected on 8), so the
-default `erosion.iterations = 800` is ~6 h of erosion on 4 cores and ~4 h on
-8 — not PLAN 8.4's "≈ 30 min global" (see *Deviations from PLAN.md*).  The
+A default (Earth, `N_c = 1024`) bake is not a coffee break. The first
+complete one, every stage through tiles, took **84.5 minutes** on a 20-thread
+machine: 73 minutes of erosion, 7 of refine, and about 4 for everything
+else, viewer exports included. That is not PLAN 8.4's "≈ 30 min global" (see *Deviations from
+PLAN.md*). docs/bake-performance.md has the per-phase breakdown and what
+would make it faster.  The
 stage checkpoints every `erosion.checkpoint_every` iterations and `--from
 erosion` resumes, so a long bake can be interrupted (only the two newest
 checkpoints per parameter hash are kept; `erosion.iterations` is not part of
@@ -37,14 +39,9 @@ Stages: `tectonics, climate, erosion, hydro, watersheds, refine, derive, tiles`.
 Every stage writes `worlds/<name>/quicklook/<stage>.png` (an unfolded cube net);
 `manifest.json` records parameters and a content hash per stage.
 
-`scripts/animate.py` re-runs a baked world's tectonics or erosion and writes
-an animated WebP of it — plates drifting and colliding, or the drainage
-network organising itself over the erosion iterations:
-
-```sh
-python scripts/animate.py --world worlds/demo --stage tectonics --out tect.webp
-python scripts/animate.py --world worlds/demo --stage erosion   --out ero.webp
-```
+Every bake also ends by writing `worlds/<name>/viewer/index.html`, a
+viewer for the whole run (see *Viewing a world*). The timeline behind it is
+captured while tectonics and erosion run, as `worlds/<name>/frames/`.
 
 Further reading: [docs/DEVELOPING.md](docs/DEVELOPING.md) is the binding
 cross-stage contract (field names, dtypes, units, JSON schemas).
@@ -147,6 +144,54 @@ erosion defaults; re-run any row of it with
   parameter drift.
 
 ## Viewing a world
+
+Open `worlds/<name>/viewer/index.html` in a browser. It works straight from
+disk, with no server. What it does:
+
+* **Views:** a globe or a flat map (`G`). Drag to pan, scroll to zoom at the
+  cursor, double-click to zoom in.
+* **Timeline:** runs from the first tectonic step through every erosion
+  iteration captured to the final state. Drag through it or play it (`Space`).
+* **Layers:** elevation, plates, rivers/discharge, temperature,
+  precipitation, biome, sediment and crust, whichever the frame carries.
+  Relief exaggeration and a lat/lon grid are controls in the side panel.
+* **Readout:** hovering shows latitude, longitude and every layer's value.
+* **Links:** the URL holds the frame and camera, so a copied link reopens
+  exactly that view.
+
+Latitude has its pole on +Z, as the climate stage does.
+
+```sh
+cd bake
+python scripts/export_viewer.py worlds/demo --single                   # + standalone.html, one file
+python scripts/export_viewer.py worlds/demo --formats equirect,anim    # lat/lon PNGs, animated WebP
+python scripts/capture_frames.py worlds/old --tectonics --checkpoints DIR   # backfill an older world's timeline
+python scripts/viewer_shot.py worlds/demo --view flat --frame 0 --out shot.png   # headless screenshot (Playwright)
+```
+
+The `render.*` knobs control it: `viewer`, `viewer_formats`,
+`tectonics_frames`, `erosion_frame_every`, `frame_res` and
+`viewer_final_res`. They are excluded from the content hash, and capturing
+frames does not change any stage's output.
+
+**Viewing from another machine.** Copy the viewer there; `scp` works
+wherever SSH does. An Earth viewer is about 100 MB, so for a laptop or phone
+make a light single file (~15 MB): the timeline thinned to 60 frames at
+128² per face, and the final state at 512²:
+
+```sh
+python scripts/export_viewer.py worlds/earth --out /tmp/lite --single \
+    --max-frames 60 --frame-res 128 --final-res 512
+scp you@bakehost:/tmp/lite/standalone.html ~/Downloads/   # then open it
+```
+
+Serving `viewer/` over HTTP needs the port open. On a Fedora bake host,
+`tailscale0` falls into firewalld's default zone unless it is added to
+`trusted`, so Tailscale alone does not reach it. An `ssh -L` tunnel to an
+unlabelled port is refused by SELinux (`sshd-session` may not
+`name_connect` there).
+
+The older Godot export still works:
 
 ```sh
 cd bake

@@ -394,6 +394,19 @@ class RenderParams:
     view_distance_m: float = 8000.0
     reanchor_distance_tiles: float = 1.0
     physics_radius_m: float = 500.0
+    # -- the HTML viewer (globe/viz/viewer.py); all hash-exempt ------------
+    #: export ``<world>/viewer/`` at the end of every bake
+    viewer: bool = True
+    #: extra exports beside it: any of "equirect", "anim" (comma separated)
+    viewer_formats: str = ""
+    #: timeline frames captured during tectonics (0 = none)
+    tectonics_frames: int = 60
+    #: capture an erosion frame every this many iterations (0 = none)
+    erosion_frame_every: int = 10
+    #: cells per face of a timeline frame
+    frame_res: int = 256
+    #: cells per face of the final frame (capped at N_c)
+    viewer_final_res: int = 1024
 
 
 @dataclass

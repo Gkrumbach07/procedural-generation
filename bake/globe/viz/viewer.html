@@ -1,0 +1,785 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Globe viewer</title>
+<style>
+  :root { --bg:#0b0e14; --panel:rgba(18,22,30,.88); --line:#2a3140; --text:#d6dde8; --dim:#8a96a8; --accent:#6cb4ff; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font:13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; overflow:hidden; }
+  #gl { position:fixed; inset:0; width:100%; height:100%; display:block; cursor:grab; touch-action:none; }
+  #gl.dragging { cursor:grabbing; }
+  .panel { position:fixed; background:var(--panel); border:1px solid var(--line); border-radius:8px;
+    backdrop-filter:blur(6px); padding:10px 12px; }
+  #top { top:10px; left:10px; width:260px; }
+  #top h1 { font-size:14px; margin:0 0 2px; font-weight:600; }
+  #top .sub { color:var(--dim); font-size:11px; margin-bottom:8px; }
+  .row { display:flex; align-items:center; gap:6px; margin:6px 0; flex-wrap:wrap; }
+  .row label { color:var(--dim); min-width:62px; }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+  .seg button { background:transparent; color:var(--text); border:0; padding:4px 9px; cursor:pointer; font:inherit; }
+  .seg button + button { border-left:1px solid var(--line); }
+  .seg button.on { background:#24344d; color:#fff; }
+  select, input[type=range] { flex:1; min-width:0; }
+  select { background:#141a24; color:var(--text); border:1px solid var(--line); border-radius:5px; padding:3px 4px; font:inherit; }
+  .chk { display:inline-flex; align-items:center; gap:4px; margin-right:8px; color:var(--text); cursor:pointer; }
+  button.plain { background:#141a24; color:var(--text); border:1px solid var(--line); border-radius:5px; padding:3px 8px; cursor:pointer; font:inherit; }
+  button.plain:hover, .seg button:hover { background:#1d2635; }
+  #legend { margin-top:8px; }
+  #legend canvas { width:100%; height:12px; border-radius:3px; display:block; }
+  #legend .ticks { display:flex; justify-content:space-between; color:var(--dim); font-size:11px; }
+  #readout { bottom:106px; right:10px; min-width:190px; font-variant-numeric:tabular-nums; }
+  #readout div { display:flex; justify-content:space-between; gap:12px; }
+  #readout span:first-child { color:var(--dim); }
+  #timeline { left:10px; right:10px; bottom:10px; height:88px; padding:8px 10px; display:flex; gap:10px; align-items:stretch; }
+  #tl-controls { display:flex; flex-direction:column; justify-content:flex-start; gap:3px; width:220px; flex:none; overflow:hidden; }
+  #tl-label { font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #tl-stats { font-size:11px; color:var(--dim); line-height:1.2; }
+  #tl-canvas { flex:1; min-width:0; height:100%; cursor:pointer; border-radius:4px; }
+  #play { width:34px; font-size:14px; }
+  #loading { position:fixed; top:10px; left:50%; transform:translateX(-50%); padding:6px 12px; }
+  #loading .bar { height:3px; background:var(--line); border-radius:2px; margin-top:5px; }
+  #loading .bar i { display:block; height:100%; width:0; background:var(--accent); border-radius:2px; }
+  #help { top:10px; right:10px; width:230px; color:var(--dim); font-size:11px; display:none; }
+  #help b { color:var(--text); font-weight:500; }
+  #helpbtn { position:fixed; top:10px; right:10px; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div id="top" class="panel">
+  <h1 id="title">Globe</h1>
+  <div class="sub" id="subtitle"></div>
+  <div class="row"><label>View</label>
+    <span class="seg" id="viewseg"><button data-v="globe" class="on">Globe</button><button data-v="flat">Flat</button></span>
+    <button class="plain" id="reset" title="Reset view (Home)">⟲</button>
+  </div>
+  <div class="row"><label>Layer</label><select id="layer"></select></div>
+  <div class="row"><label>Relief</label><input type="range" id="exag" min="0" max="60" step="0.5" value="12"><span id="exagv" style="width:28px;text-align:right">12×</span></div>
+  <div class="row">
+    <span class="chk"><input type="checkbox" id="rivers" checked>rivers</span>
+    <span class="chk"><input type="checkbox" id="grid">grid</span>
+    <span class="chk"><input type="checkbox" id="fade" checked>blend</span>
+    <span class="chk"><input type="checkbox" id="coast">coast</span>
+  </div>
+  <div class="row"><label>Speed</label><input type="range" id="fps" min="1" max="30" step="1" value="10"><span id="fpsv" style="width:28px;text-align:right">10</span></div>
+  <div class="row"><button class="plain" id="shot">Save PNG</button><button class="plain" id="copylink">Copy view link</button></div>
+  <div id="legend"><canvas id="legendc" width="256" height="12"></canvas><div class="ticks"><span id="lg0"></span><span id="lgmid"></span><span id="lg1"></span></div></div>
+</div>
+
+<button class="plain" id="helpbtn">?</button>
+<div id="help" class="panel">
+  <b>Drag</b> pan / rotate · <b>Wheel</b> zoom at cursor · <b>Double-click</b> zoom in<br>
+  <b>Space</b> play/pause · <b>← →</b> step frame · <b>Shift+← →</b> jump stage<br>
+  <b>G</b> globe/flat · <b>Home</b> reset · <b>1–9</b> layers · <b>R</b> rivers · <b>L</b> grid<br><br>
+  The URL keeps the view, so a link reopens exactly this frame and camera.
+</div>
+
+<div id="readout" class="panel hidden"></div>
+
+<div id="timeline" class="panel">
+  <div id="tl-controls">
+    <div class="row" style="margin:0"><button class="plain" id="play" title="Play (Space)">▶</button>
+      <button class="plain" id="prev" title="Previous frame">‹</button><button class="plain" id="next" title="Next frame">›</button></div>
+    <div id="tl-label">—</div>
+    <div id="tl-stats"></div>
+  </div>
+  <canvas id="tl-canvas"></canvas>
+</div>
+
+<div id="loading" class="panel">Loading…<div class="bar"><i id="loadbar"></i></div></div>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------------------
+// Data arrives through <script> tags (file:// forbids fetch): meta.js calls
+// GLOBE_VIEWER.setMeta({...}); each frame file calls GLOBE_VIEWER.frame(i, [b64...]).
+// Every texture is a cube-face atlas: 3 columns x 2 rows of (res+2*pad)^2 tiles,
+// face f at column f%3, row f/3, pixel (pad+i, pad+j) holding cell (i, j).
+// Texture 0: R,G = height (16-bit over [h0, h1] metres), B = frame overlay.
+// ---------------------------------------------------------------------------
+const GV = window.GLOBE_VIEWER = window.GLOBE_VIEWER || {};
+GV.pending = GV.pending || {};
+GV.setMeta = m => { GV.meta = m; };
+GV.frame = (i, texs) => { GV.pending[i] = texs; if (GV.onFrame) GV.onFrame(i); };
+</script>
+<!--GLOBE_VIEWER_DATA-->
+<script>
+"use strict";
+(function () {
+const GV = window.GLOBE_VIEWER;
+const META = GV.meta;
+const $ = id => document.getElementById(id);
+if (!META) { $("loading").textContent = "No data: meta.js did not load."; return; }
+
+const PI = Math.PI, HALF_PI = PI / 2;
+const canvas = $("gl");
+const gl = canvas.getContext("webgl2", { antialias: false, preserveDrawingBuffer: true });
+if (!gl) { $("loading").textContent = "WebGL2 is not available in this browser."; return; }
+
+// ---------------------------------------------------------------------------
+// Cube-sphere mapping -- mirrors globe/cubesphere.py (BASES, face_of, from_sphere).
+// ---------------------------------------------------------------------------
+const BR = [[0,0,-1],[0,0,1],[1,0,0],[1,0,0],[1,0,0],[-1,0,0]];
+const BU = [[0,-1,0],[0,-1,0],[0,0,1],[0,0,-1],[0,-1,0],[0,-1,0]];
+const BN = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+const dot3 = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+function faceOf(p) {
+  const ax = Math.abs(p[0]), ay = Math.abs(p[1]), az = Math.abs(p[2]);
+  if (ax >= ay && ax >= az) return p[0] >= 0 ? 0 : 1;
+  if (ay >= az) return p[1] >= 0 ? 2 : 3;
+  return p[2] >= 0 ? 4 : 5;
+}
+function fromSphere(p) {
+  const f = faceOf(p), d = dot3(p, BN[f]);
+  return [f, Math.atan(dot3(p, BR[f]) / d) * (2 / PI) + 0.5, Math.atan(dot3(p, BU[f]) / d) * (2 / PI) + 0.5];
+}
+// Latitude/longitude with the pole on +Z (as globe.cubesphere.Grid.latitude).
+const dirOf = (lat, lon) => [Math.cos(lat) * Math.cos(lon), Math.cos(lat) * Math.sin(lon), Math.sin(lat)];
+const latLonOf = p => [Math.asin(Math.max(-1, Math.min(1, p[2]))), Math.atan2(p[1], p[0])];
+const wrapLon = l => { l = (l + PI) % (2 * PI); return (l < 0 ? l + 2 * PI : l) - PI; };
+
+// ---------------------------------------------------------------------------
+// Shaders
+// ---------------------------------------------------------------------------
+const VS = `#version 300 es
+in vec2 aPos; void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+const FS = `#version 300 es
+precision highp float; precision highp int;
+out vec4 outColor;
+uniform vec2 uView;            // canvas size, px
+uniform int uMode;             // 0 globe, 1 flat
+uniform float uScale;          // globe radius px / flat px per radian
+uniform float uLat0, uLon0;
+uniform vec3 uE, uN, uC;       // globe camera basis
+uniform float uRplanet;        // metres
+uniform sampler2D uT0a, uT0b;  // frame a / b main atlases
+uniform vec3 uGeoA, uGeoB;     // (res, pad, unused)
+uniform vec2 uHA, uHB;         // height decode ranges, metres
+uniform float uMix;            // blend a->b heights
+uniform float uSea;            // sea level, metres
+uniform float uLandTop, uOceanBottom;
+uniform float uExag, uShadeAmt;
+uniform int uLayer;            // 0 elevation, 1 category, 2 scalar
+uniform sampler2D uLT;         // layer texture
+uniform vec3 uLGeo;            // layer texture (res, pad)
+uniform int uLCh;              // channel 0..2
+uniform int uLKind;            // 0 linear, 1 category
+uniform int uCmap;             // 0 thermal, 1 rain, 2 plates, 3 biome, 4 viridis, 5 sediment
+uniform vec3 uBiome[32];
+uniform int uRivers;           // 1 when frame a carries discharge in B
+uniform float uRiverMin;       // byte threshold
+uniform int uGrid, uCoast;
+uniform float uTexelRad;       // one texel of frame a, radians
+const float PI = 3.14159265358979;
+const float TWO_OVER_PI = 0.636619772367581;
+
+const vec3 BR[6] = vec3[6](vec3(0,0,-1), vec3(0,0,1), vec3(1,0,0), vec3(1,0,0), vec3(1,0,0), vec3(-1,0,0));
+const vec3 BU[6] = vec3[6](vec3(0,-1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1), vec3(0,-1,0), vec3(0,-1,0));
+const vec3 BN[6] = vec3[6](vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1));
+
+int faceOf(vec3 p){ vec3 a = abs(p);
+  if (a.x >= a.y && a.x >= a.z) return p.x >= 0.0 ? 0 : 1;
+  if (a.y >= a.z) return p.y >= 0.0 ? 2 : 3;
+  return p.z >= 0.0 ? 4 : 5; }
+
+// atlas pixel coordinate (continuous; texel centres at integer + 0.5 - 0.5) of direction p
+vec2 atlasXY(vec3 p, vec3 geo){
+  int f = faceOf(p); float d = dot(p, BN[f]);
+  float u = atan(dot(p, BR[f]) / d) * TWO_OVER_PI + 0.5;
+  float v = atan(dot(p, BU[f]) / d) * TWO_OVER_PI + 0.5;
+  float T = geo.x + 2.0 * geo.y;
+  return vec2(float(f % 3) * T + geo.y + u * geo.x - 0.5, float(f / 3) * T + geo.y + v * geo.x - 0.5);
+}
+float decodeH(vec4 c, vec2 hr){
+  float q = floor(c.r * 255.0 + 0.5) * 256.0 + floor(c.g * 255.0 + 0.5);
+  return hr.x + q * (1.0 / 65535.0) * (hr.y - hr.x);
+}
+float heightIn(sampler2D t, vec3 geo, vec2 hr, vec3 p){
+  vec2 xy = atlasXY(p, geo); vec2 i0 = floor(xy); vec2 fr = xy - i0; ivec2 a = ivec2(i0);
+  float h00 = decodeH(texelFetch(t, a, 0), hr), h10 = decodeH(texelFetch(t, a + ivec2(1,0), 0), hr);
+  float h01 = decodeH(texelFetch(t, a + ivec2(0,1), 0), hr), h11 = decodeH(texelFetch(t, a + ivec2(1,1), 0), hr);
+  return mix(mix(h00, h10, fr.x), mix(h01, h11, fr.x), fr.y);
+}
+float heightAt(vec3 p){
+  float h = heightIn(uT0a, uGeoA, uHA, p);
+  if (uMix > 0.0) h = mix(h, heightIn(uT0b, uGeoB, uHB, p), uMix);
+  return h;
+}
+float chan(vec4 c, int ch){ return ch == 0 ? c.r : (ch == 1 ? c.g : c.b); }
+float byteNearest(sampler2D t, vec3 geo, int ch, vec3 p){
+  return floor(chan(texelFetch(t, ivec2(floor(atlasXY(p, geo) + 0.5)), 0), ch) * 255.0 + 0.5);
+}
+float byteLinear(sampler2D t, vec3 geo, int ch, vec3 p){
+  vec2 xy = atlasXY(p, geo); vec2 i0 = floor(xy); vec2 fr = xy - i0; ivec2 a = ivec2(i0);
+  float b00 = chan(texelFetch(t, a, 0), ch), b10 = chan(texelFetch(t, a + ivec2(1,0), 0), ch);
+  float b01 = chan(texelFetch(t, a + ivec2(0,1), 0), ch), b11 = chan(texelFetch(t, a + ivec2(1,1), 0), ch);
+  return mix(mix(b00, b10, fr.x), mix(b01, b11, fr.x), fr.y) * 255.0;
+}
+
+vec3 ramp(float t, vec3 c0, vec3 c1, vec3 c2, vec3 c3, vec3 c4){
+  t = clamp(t, 0.0, 1.0) * 4.0;
+  if (t < 1.0) return mix(c0, c1, t); if (t < 2.0) return mix(c1, c2, t - 1.0);
+  if (t < 3.0) return mix(c2, c3, t - 2.0); return mix(c3, c4, t - 3.0);
+}
+vec3 elevColor(float h){
+  if (h < uSea) {
+    float t = clamp((uSea - h) / max(uSea - uOceanBottom, 1.0), 0.0, 1.0);
+    return ramp(pow(t, 0.6), vec3(0.62,0.80,0.86), vec3(0.36,0.62,0.80), vec3(0.18,0.42,0.68), vec3(0.09,0.24,0.50), vec3(0.03,0.09,0.26));
+  }
+  float t = clamp((h - uSea) / max(uLandTop - uSea, 1.0), 0.0, 1.0);
+  return ramp(pow(t, 0.75), vec3(0.30,0.50,0.28), vec3(0.58,0.64,0.38), vec3(0.78,0.70,0.48), vec3(0.58,0.45,0.34), vec3(0.96,0.96,0.97));
+}
+vec3 thermal(float t){ return ramp(t, vec3(0.19,0.07,0.55), vec3(0.16,0.44,0.90), vec3(0.94,0.94,0.90), vec3(0.95,0.55,0.18), vec3(0.62,0.05,0.10)); }
+vec3 rain(float t){ return ramp(t, vec3(0.93,0.87,0.72), vec3(0.72,0.80,0.45), vec3(0.30,0.65,0.40), vec3(0.15,0.45,0.70), vec3(0.10,0.15,0.50)); }
+vec3 viridis(float t){ return ramp(t, vec3(0.27,0.00,0.33), vec3(0.23,0.32,0.55), vec3(0.13,0.57,0.55), vec3(0.37,0.79,0.38), vec3(0.99,0.91,0.14)); }
+const vec3 QUAL[12] = vec3[12](   // qualitative palette for plates / crust / other ids
+  vec3(0.90,0.62,0.00), vec3(0.34,0.71,0.91), vec3(0.00,0.62,0.45), vec3(0.94,0.89,0.26),
+  vec3(0.00,0.45,0.70), vec3(0.84,0.37,0.00), vec3(0.80,0.47,0.65), vec3(0.55,0.55,0.55),
+  vec3(0.60,0.80,0.40), vec3(0.65,0.35,0.85), vec3(0.95,0.55,0.55), vec3(0.40,0.30,0.20));
+vec3 hashColor(float id){ return QUAL[int(mod(id - 1.0, 12.0))]; }
+vec3 space(vec2 q, float r){
+  float g = exp(-max(r - 1.0, 0.0) * 18.0);
+  return mix(vec3(0.043,0.055,0.078), vec3(0.30,0.48,0.80), 0.55 * g);
+}
+
+void main(){
+  vec2 q = (gl_FragCoord.xy - 0.5 * uView) / uScale;
+  vec3 p; float zc = 1.0;
+  if (uMode == 0) {
+    float r2 = dot(q, q);
+    if (r2 > 1.0) { outColor = vec4(space(q, sqrt(r2)), 1.0); return; }
+    zc = sqrt(1.0 - r2);
+    p = normalize(q.x * uE + q.y * uN + zc * uC);
+  } else {
+    float lat = uLat0 + q.y;
+    if (abs(lat) > 0.5 * PI) { outColor = vec4(0.043,0.055,0.078,1.0); return; }
+    float lon = uLon0 + q.x;
+    p = vec3(cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat));
+  }
+
+  // local east/north (fallback at the poles)
+  vec3 e = vec3(-p.y, p.x, 0.0);
+  e = dot(e, e) < 1e-10 ? vec3(0.0, 1.0, 0.0) : normalize(e);
+  vec3 n = cross(p, e);
+  float d = uTexelRad;
+  float h  = heightAt(p);
+  float hE = heightAt(normalize(p + d * e)), hW = heightAt(normalize(p - d * e));
+  float hN = heightAt(normalize(p + d * n)), hS = heightAt(normalize(p - d * n));
+  float scale = 1.0 / (2.0 * d * uRplanet);
+  vec2 g = vec2(hE - hW, hN - hS) * scale;
+  bool wet = h < uSea;
+  float ex = uExag * (wet ? 0.35 : 1.0);
+  vec3 nrm = normalize(vec3(-g.x * ex, -g.y * ex, 1.0));
+  vec3 L = normalize(vec3(-0.6, 0.6, 0.75));
+  float shade = clamp(dot(nrm, L) / L.z, 0.0, 2.0);
+
+  vec3 col;
+  if (uLayer == 0) {
+    col = elevColor(h);
+  } else {
+    float b = uLKind == 1 ? byteNearest(uLT, uLGeo, uLCh, p) : byteLinear(uLT, uLGeo, uLCh, p);
+    if (uLKind == 1) {
+      col = uCmap == 3 ? uBiome[int(b) & 31] : (b < 0.5 ? vec3(0.12) : hashColor(b));
+    } else {
+      float t = b / 255.0;
+      col = uCmap == 0 ? thermal(t) : uCmap == 1 ? rain(t) : viridis(t);
+    }
+    if (wet && uCmap != 3 && uCmap != 0 && uCmap != 1) col *= 0.75;
+  }
+  col *= mix(1.0, shade, uShadeAmt);
+
+  if (uRivers == 1 && !wet) {
+    float b = byteLinear(uT0a, uGeoA, 2, p);
+    float w = smoothstep(uRiverMin - 6.0, uRiverMin + 6.0, b);
+    col = mix(col, vec3(0.16, 0.40, 0.90), w * clamp(0.45 + (b - uRiverMin) / 60.0, 0.45, 0.9));
+  }
+  if (uCoast == 1) {
+    float w = fwidth(h);
+    col = mix(col, vec3(0.05), (1.0 - smoothstep(0.0, 1.2 * w, abs(h - uSea))) * 0.9);
+  }
+  if (uGrid == 1) {
+    float lat = asin(clamp(p.z, -1.0, 1.0)), lon = atan(p.y, p.x);
+    float step = uScale > 1500.0 ? PI / 36.0 : PI / 12.0;
+    vec2 gg = vec2(lon, lat) / step; vec2 fw = fwidth(gg);
+    vec2 l = abs(fract(gg - 0.5) - 0.5) / max(fw, vec2(1e-6));
+    float line = 1.0 - clamp(min(l.x, l.y), 0.0, 1.0);
+    bool eq = abs(lat) / max(fwidth(lat), 1e-6) < 1.0;
+    col = mix(col, eq ? vec3(1.0, 0.85, 0.4) : vec3(1.0), line * 0.35);
+  }
+  if (uMode == 0) col *= 0.72 + 0.28 * zc;
+  outColor = vec4(pow(col, vec3(0.95)), 1.0);
+}`;
+
+function compile(type, src) {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+const quad = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(prog, "aPos");
+gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+const U = {};
+for (let i = 0, n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS); i < n; i++) {
+  const name = gl.getActiveUniform(prog, i).name.replace(/\[0\]$/, "");
+  U[name] = gl.getUniformLocation(prog, name);
+}
+gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+
+// ---------------------------------------------------------------------------
+// Frames and textures
+// ---------------------------------------------------------------------------
+const frames = META.frames;
+const NF = frames.length;
+const tex = new Array(NF).fill(null);        // [WebGLTexture per atlas]
+const bitmaps = new Array(NF).fill(null);    // ImageBitmaps (kept for the readout)
+let loaded = 0;
+
+function b64ToBlob(b64, type) {
+  const bin = atob(b64); const u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return new Blob([u], { type });
+}
+async function ingest(i) {
+  const srcs = GV.pending[i]; delete GV.pending[i];
+  const bms = await Promise.all(srcs.map(s => createImageBitmap(b64ToBlob(s, "image/webp"),
+    { premultiplyAlpha: "none", colorSpaceConversion: "none" })));
+  tex[i] = bms.map(bm => {
+    const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bm);
+    for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.NEAREST);
+    for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
+    return t;
+  });
+  bitmaps[i] = bms;
+  loaded++;
+  $("loadbar").style.width = (100 * loaded / NF).toFixed(1) + "%";
+  if (loaded === NF) { $("loading").classList.add("hidden"); document.body.dataset.ready = "1"; }
+  if (i === state.frame || i === state.frame + 1) requestDraw();
+  drawTimeline();
+}
+// Frame scripts are injected one at a time: the final frame first, then in order.
+const order = [META.final_index ?? NF - 1, ...frames.map((_, i) => i).filter(i => i !== (META.final_index ?? NF - 1))];
+let orderPos = 0;
+const queue = [];
+GV.onFrame = i => { queue.push(ingest(i)); };
+for (const k of Object.keys(GV.pending)) GV.onFrame(+k);   // frames inlined before this script ran
+function loadNext() {
+  while (orderPos < order.length && (tex[order[orderPos]] || !frames[order[orderPos]].file)) orderPos++;
+  if (orderPos >= order.length) return;
+  const i = order[orderPos++];
+  const s = document.createElement("script");
+  s.src = frames[i].file; s.onload = () => loadNext();
+  s.onerror = () => { console.warn("frame failed", frames[i].file); loadNext(); };
+  document.head.appendChild(s);
+}
+loadNext(); loadNext();   // two in flight
+
+// ---------------------------------------------------------------------------
+// State, URL hash
+// ---------------------------------------------------------------------------
+const state = {
+  frame: META.final_index ?? NF - 1, fpos: META.final_index ?? NF - 1,
+  view: "globe", lat0: 0.35, lon0: 0.0, zoom: 1.0,
+  layer: "elevation", exag: META.default_exag ?? 12, rivers: true, grid: false, coast: false, fade: true,
+  playing: false, fps: 10,
+};
+// zoom 1 shows the whole planet in either view
+function baseScale() {
+  return state.view === "flat" ? 0.98 * Math.min(canvas.width / (2 * PI), canvas.height / PI)
+                               : 0.46 * Math.min(canvas.width, canvas.height);
+}
+function scalePx() { return baseScale() * state.zoom; }
+function readHash() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  const num = (k, f) => h.has(k) && isFinite(+h.get(k)) ? f(+h.get(k)) : undefined;
+  num("f", v => state.frame = state.fpos = Math.max(0, Math.min(NF - 1, Math.round(v))));
+  if (h.get("v") === "flat" || h.get("v") === "globe") state.view = h.get("v");
+  num("lat", v => state.lat0 = v * PI / 180); num("lon", v => state.lon0 = v * PI / 180);
+  num("z", v => state.zoom = v); num("x", v => state.exag = v);
+  if (h.has("layer")) state.layer = h.get("layer");
+  for (const k of ["rivers", "grid", "coast", "fade"]) if (h.has(k)) state[k] = h.get(k) === "1";
+  if (h.get("ui") === "0") document.body.classList.add("noui");
+}
+let hashTimer = 0;
+function writeHash() {
+  clearTimeout(hashTimer);
+  hashTimer = setTimeout(() => {
+    const d = v => (v * 180 / PI).toFixed(3);
+    const h = `f=${state.frame}&v=${state.view}&lat=${d(state.lat0)}&lon=${d(state.lon0)}&z=${state.zoom.toFixed(4)}`
+      + `&layer=${state.layer}&x=${state.exag}&rivers=${+state.rivers}&grid=${+state.grid}&coast=${+state.coast}&fade=${+state.fade}`;
+    history.replaceState(null, "", "#" + h);
+  }, 200);
+}
+readHash();
+
+// ---------------------------------------------------------------------------
+// Layers: elevation, plus whichever channels the frames carry.
+// meta.channels: {name: {label, kind:'linear'|'category'|'log', lo, hi, unit, cmap}}
+// frame.layers:  {name: [texIndex, channel]}
+// ---------------------------------------------------------------------------
+const CHANNELS = Object.assign({ elevation: { label: "Elevation", unit: "m" } }, META.channels || {});
+const CMAPS = { thermal: 0, rain: 1, plates: 2, biome: 3, viridis: 4 };
+const layerNames = ["elevation", ...Object.keys(META.channels || {}).filter(k => k !== "discharge_overlay")];
+const sel = $("layer");
+layerNames.forEach((k, idx) => { const o = document.createElement("option"); o.value = k;
+  o.textContent = (idx < 9 ? (idx + 1) + "  " : "") + CHANNELS[k].label; sel.appendChild(o); });
+if (!layerNames.includes(state.layer)) state.layer = "elevation";
+const biome = new Float32Array(96);
+(META.biome_palette || []).forEach((c, i) => { if (i < 32) { biome[3*i] = c[0]/255; biome[3*i+1] = c[1]/255; biome[3*i+2] = c[2]/255; } });
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+function camBasis() {
+  const { lat0, lon0 } = state;
+  const C = dirOf(lat0, lon0);
+  const E = [-Math.sin(lon0), Math.cos(lon0), 0];
+  const N = [-Math.sin(lat0) * Math.cos(lon0), -Math.sin(lat0) * Math.sin(lon0), Math.cos(lat0)];
+  return { C, E, N };
+}
+// canvas pixel (top-left origin, device px) -> unit direction or null
+function screenToDir(px, py) {
+  const s = scalePx();
+  const qx = (px - canvas.width / 2) / s, qy = (canvas.height / 2 - py) / s;
+  if (state.view === "globe") {
+    const r2 = qx * qx + qy * qy; if (r2 > 1) return null;
+    const z = Math.sqrt(1 - r2), { C, E, N } = camBasis();
+    return [0, 1, 2].map(k => qx * E[k] + qy * N[k] + z * C[k]);
+  }
+  const lat = state.lat0 + qy; if (Math.abs(lat) > HALF_PI) return null;
+  return dirOf(lat, state.lon0 + qx);
+}
+
+let drawQueued = false;
+function requestDraw() { if (!drawQueued) { drawQueued = true; requestAnimationFrame(draw); } }
+function bindTex(unit, t, name) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t); gl.uniform1i(U[name], unit); }
+function geoOf(fr, k) { const g = (fr.tex && fr.tex[k]) || fr; return [g.res, g.pad, 0]; }
+
+// nearest loaded frame at or before i (so scrubbing ahead of the loader still shows something)
+function loadedAtOrBefore(i) { for (let k = i; k >= 0; k--) if (tex[k]) return k; for (let k = i; k < NF; k++) if (tex[k]) return k; return -1; }
+
+function draw() {
+  drawQueued = false;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  gl.viewport(0, 0, w, h);
+  const a = loadedAtOrBefore(state.frame);
+  if (a < 0) return;
+  let b = a, mix = 0;
+  if (state.fade && a === state.frame && state.fpos > a && a + 1 < NF && tex[a + 1] && frames[a + 1].stage === frames[a].stage) {
+    b = a + 1; mix = state.fpos - a;
+  }
+  const FA = frames[a], FB = frames[b];
+  const { C, E, N } = camBasis();
+  gl.uniform2f(U.uView, w, h);
+  gl.uniform1i(U.uMode, state.view === "globe" ? 0 : 1);
+  gl.uniform1f(U.uScale, scalePx());
+  gl.uniform1f(U.uLat0, state.lat0); gl.uniform1f(U.uLon0, state.lon0);
+  gl.uniform3fv(U.uE, E); gl.uniform3fv(U.uN, N); gl.uniform3fv(U.uC, C);
+  gl.uniform1f(U.uRplanet, META.R_planet_m);
+  bindTex(0, tex[a][0], "uT0a"); bindTex(1, tex[b][0], "uT0b");
+  gl.uniform3fv(U.uGeoA, geoOf(FA, 0)); gl.uniform3fv(U.uGeoB, geoOf(FB, 0));
+  gl.uniform2f(U.uHA, FA.h0, FA.h1); gl.uniform2f(U.uHB, FB.h0, FB.h1);
+  gl.uniform1f(U.uMix, mix);
+  gl.uniform1f(U.uSea, META.sea_level_m || 0);
+  gl.uniform1f(U.uLandTop, META.land_top_m); gl.uniform1f(U.uOceanBottom, META.ocean_bottom_m);
+  gl.uniform1f(U.uExag, state.exag); gl.uniform1f(U.uShadeAmt, state.exag > 0 ? 0.85 : 0.0);
+  gl.uniform1f(U.uTexelRad, HALF_PI / FA.res);
+  gl.uniform3fv(U.uBiome, biome);
+  const L = (FA.layers || {})[state.layer];
+  if (state.layer !== "elevation" && L) {
+    const ch = CHANNELS[state.layer];
+    gl.uniform1i(U.uLayer, 1);
+    bindTex(2, tex[a][L[0]], "uLT");
+    gl.uniform3fv(U.uLGeo, geoOf(FA, L[0]));
+    gl.uniform1i(U.uLCh, L[1]);
+    gl.uniform1i(U.uLKind, ch.kind === "category" ? 1 : 0);
+    gl.uniform1i(U.uCmap, CMAPS[ch.cmap] ?? 4);
+  } else {
+    gl.uniform1i(U.uLayer, 0);
+    bindTex(2, tex[a][0], "uLT");
+  }
+  const riv = FA.layers && FA.layers.discharge;
+  gl.uniform1i(U.uRivers, state.rivers && riv && riv[0] === 0 && riv[1] === 2 ? 1 : 0);
+  gl.uniform1f(U.uRiverMin, META.river_byte_min ?? 150);
+  gl.uniform1i(U.uGrid, state.grid ? 1 : 0); gl.uniform1i(U.uCoast, state.coast ? 1 : 0);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  updateLabels(a);
+  updateLegend(FA);
+}
+
+// ---------------------------------------------------------------------------
+// UI: labels, legend, readout
+// ---------------------------------------------------------------------------
+$("title").textContent = META.world || "Globe";
+$("subtitle").textContent = [META.preset && `preset ${META.preset}`, META.N_c && `${META.N_c}² per face`,
+  META.cell_size_m && `${(META.cell_size_m / 1000).toFixed(META.cell_size_m < 1000 ? 2 : 1)} km cells`, META.seed != null && `seed ${META.seed}`]
+  .filter(Boolean).join(" · ");
+const fmtM = v => Math.abs(v) >= 1000 ? (v / 1000).toFixed(2) + " km" : v.toFixed(0) + " m";
+function updateLabels(a) {
+  const f = frames[a];
+  $("tl-label").textContent = f.label + (a !== state.frame ? " (loading…)" : "");
+  const s = f.stats || {};
+  $("tl-stats").textContent = [s.land_pct != null && `land ${s.land_pct.toFixed(1)}%`,
+    s.max_m != null && `max ${fmtM(s.max_m)}`, s.above2k_pct != null && `>2 km ${s.above2k_pct.toFixed(1)}%`].filter(Boolean).join(" · ");
+  $("play").textContent = state.playing ? "❚❚" : "▶";
+  for (const btn of $("viewseg").children) btn.classList.toggle("on", btn.dataset.v === state.view);
+  sel.value = state.layer;
+  for (const o of sel.options) o.disabled = o.value !== "elevation" && !(f.layers && f.layers[o.value]);
+  $("exag").value = state.exag; $("exagv").textContent = state.exag + "×";
+  $("rivers").checked = state.rivers; $("grid").checked = state.grid; $("coast").checked = state.coast; $("fade").checked = state.fade;
+  $("fps").value = state.fps; $("fpsv").textContent = state.fps;
+}
+const lgc = $("legendc").getContext("2d");
+const lerp3 = (a, b, t) => a.map((v, k) => v + (b[k] - v) * t);
+function rampJS(t, cs) { t = Math.max(0, Math.min(1, t)) * 4; const k = Math.min(3, Math.floor(t)); return lerp3(cs[k], cs[k + 1], t - k); }
+const LAND = [[.30,.50,.28],[.58,.64,.38],[.78,.70,.48],[.58,.45,.34],[.96,.96,.97]];
+const SEA = [[.62,.80,.86],[.36,.62,.80],[.18,.42,.68],[.09,.24,.50],[.03,.09,.26]];
+const CM = { thermal: [[.19,.07,.55],[.16,.44,.90],[.94,.94,.90],[.95,.55,.18],[.62,.05,.10]],
+  rain: [[.93,.87,.72],[.72,.80,.45],[.30,.65,.40],[.15,.45,.70],[.10,.15,.50]],
+  viridis: [[.27,0,.33],[.23,.32,.55],[.13,.57,.55],[.37,.79,.38],[.99,.91,.14]] };
+let legendKey = "";
+function updateLegend(f) {
+  const ch = CHANNELS[state.layer], key = state.layer + ":" + (f.layers && f.layers[state.layer] ? 1 : 0);
+  if (key === legendKey) return; legendKey = key;
+  const img = lgc.createImageData(256, 12);
+  for (let x = 0; x < 256; x++) {
+    let c;
+    if (state.layer === "elevation") {
+      const hm = META.ocean_bottom_m + (META.land_top_m - META.ocean_bottom_m) * x / 255;
+      c = hm < 0 ? rampJS(Math.pow(-hm / -META.ocean_bottom_m, 0.6), SEA) : rampJS(Math.pow(hm / META.land_top_m, 0.75), LAND);
+    } else if (ch.kind === "category") {
+      c = [x / 255, x / 255, x / 255].map((v, k) => 0.35 + 0.5 * Math.abs(Math.sin(x * 0.37 + k * 2.1)));
+    } else c = rampJS(x / 255, CM[ch.cmap] || CM.viridis);
+    for (let y = 0; y < 12; y++) { const o = 4 * (y * 256 + x); img.data[o] = c[0]*255; img.data[o+1] = c[1]*255; img.data[o+2] = c[2]*255; img.data[o+3] = 255; }
+  }
+  lgc.putImageData(img, 0, 0);
+  if (state.layer === "elevation") { $("lg0").textContent = fmtM(META.ocean_bottom_m); $("lgmid").textContent = "0"; $("lg1").textContent = fmtM(META.land_top_m); }
+  else if (ch.kind === "category") { $("lg0").textContent = ""; $("lgmid").textContent = ch.label + " (categories)"; $("lg1").textContent = ""; }
+  else { $("lg0").textContent = ch.lo_label ?? fmtVal(ch, ch.lo); $("lgmid").textContent = ch.unit || ""; $("lg1").textContent = ch.hi_label ?? fmtVal(ch, ch.hi); }
+}
+function fmtVal(ch, v) { if (v == null) return ""; return Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 1 ? v.toFixed(1) : v.toPrecision(2); }
+function decodeByte(ch, b) {   // byte -> physical value, per meta.channels
+  if (ch.kind === "log") return Math.exp(Math.log(ch.lo) + (b / 255) * (Math.log(ch.hi) - Math.log(ch.lo)));
+  if (ch.kind === "linear") return ch.lo + (b / 255) * (ch.hi - ch.lo);
+  return b;
+}
+
+// readout: sample the frame's bitmap on the CPU (lazy, one frame cached)
+const rd = { frame: -1, data: [] };
+function pixelsOf(a) {
+  if (rd.frame === a) return rd.data;
+  rd.frame = a;
+  rd.data = bitmaps[a].map(bm => {
+    const c = new OffscreenCanvas(bm.width, bm.height), x = c.getContext("2d", { willReadFrequently: true });
+    x.drawImage(bm, 0, 0); return { w: bm.width, d: x.getImageData(0, 0, bm.width, bm.height).data };
+  });
+  return rd.data;
+}
+function texel(f, k, p) {
+  const g = (f.tex && f.tex[k]) || f, T = g.res + 2 * g.pad, [fc, u, v] = fromSphere(p);
+  const x = Math.min(g.res - 1, Math.floor(u * g.res)) + g.pad + (fc % 3) * T;
+  const y = Math.min(g.res - 1, Math.floor(v * g.res)) + g.pad + Math.floor(fc / 3) * T;
+  return [x, y];
+}
+function readout(px, py) {
+  const el = $("readout");
+  const p = screenToDir(px, py), a = loadedAtOrBefore(state.frame);
+  if (!p || a < 0 || !bitmaps[a]) { el.classList.add("hidden"); return; }
+  const f = frames[a], pix = pixelsOf(a);
+  const [lat, lon] = latLonOf(p);
+  const rows = [["lat", `${(lat * 180 / PI).toFixed(2)}°`], ["lon", `${(lon * 180 / PI).toFixed(2)}°`]];
+  const [x0, y0] = texel(f, 0, p), o0 = 4 * (y0 * pix[0].w + x0), d0 = pix[0].d;
+  const hq = d0[o0] * 256 + d0[o0 + 1];
+  rows.push(["elevation", fmtM(f.h0 + hq / 65535 * (f.h1 - f.h0))]);
+  for (const [name, [k, c]] of Object.entries(f.layers || {})) {
+    const ch = CHANNELS[name]; if (!ch) continue;
+    const [x, y] = texel(f, k, p), b = pix[k].d[4 * (y * pix[k].w + x) + c];
+    let v = decodeByte(ch, b);
+    if (ch.kind === "category") v = ch.names ? (ch.names[b] ?? b) : (b === 0 ? "—" : b - (ch.offset ?? 0));
+    else v = fmtVal(ch, v) + (ch.unit ? " " + ch.unit : "");
+    if (name === "discharge" && b === 0) v = "—";
+    rows.push([ch.label.toLowerCase(), v]);
+  }
+  el.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><span>${v}</span></div>`).join("");
+  el.classList.remove("hidden");
+}
+
+// ---------------------------------------------------------------------------
+// Timeline
+// ---------------------------------------------------------------------------
+const tl = $("tl-canvas"), tlx = tl.getContext("2d");
+const STAGE_COL = { tectonics: "#c9884a", erosion: "#4a9fc9", final: "#7bc96f" };
+function tlX(i) { return NF <= 1 ? tl.width / 2 : 6 + (tl.width - 12) * i / (NF - 1); }
+function drawTimeline() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.round(tl.clientWidth * dpr), h = Math.round(tl.clientHeight * dpr);
+  if (tl.width !== w || tl.height !== h) { tl.width = w; tl.height = h; }
+  tlx.clearRect(0, 0, w, h);
+  const top = 14 * dpr, bot = h - 4 * dpr;
+  // stage bands + labels
+  let s0 = 0;
+  for (let i = 1; i <= NF; i++) {
+    if (i === NF || frames[i].stage !== frames[s0].stage) {
+      const x0 = tlX(s0) - (s0 ? (tlX(s0) - tlX(s0 - 1)) / 2 : 6), x1 = i === NF ? w : (tlX(i - 1) + tlX(i)) / 2;
+      tlx.fillStyle = STAGE_COL[frames[s0].stage] || "#888"; tlx.globalAlpha = 0.14; tlx.fillRect(x0, top, x1 - x0, bot - top);
+      tlx.globalAlpha = 0.9; tlx.font = `${11 * dpr}px system-ui`; tlx.fillText(frames[s0].stage, x0 + 3 * dpr, 11 * dpr);
+      s0 = i;
+    }
+  }
+  tlx.globalAlpha = 1;
+  // stat lines: max elevation and land fraction
+  const series = [["max_m", "#e8d9b0"], ["land_pct", "#9fd0ff"]];
+  for (const [key, colr] of series) {
+    const vals = frames.map(f => f.stats && f.stats[key]).filter(v => v != null);
+    if (vals.length < 2) continue;
+    const lo = Math.min(...vals), hi = Math.max(...vals), span = hi - lo || 1;
+    tlx.strokeStyle = colr; tlx.lineWidth = 1.2 * dpr; tlx.beginPath();
+    let started = false;
+    frames.forEach((f, i) => { const v = f.stats && f.stats[key]; if (v == null) return;
+      const y = bot - (bot - top) * (0.1 + 0.8 * (v - lo) / span);
+      started ? tlx.lineTo(tlX(i), y) : tlx.moveTo(tlX(i), y); started = true; });
+    tlx.stroke();
+  }
+  // loaded ticks
+  tlx.fillStyle = "rgba(255,255,255,.35)";
+  for (let i = 0; i < NF; i++) if (tex[i]) tlx.fillRect(tlX(i) - 0.5 * dpr, bot - 3 * dpr, 1 * dpr, 3 * dpr);
+  // playhead
+  const x = tlX(state.fpos);
+  tlx.fillStyle = "#fff"; tlx.fillRect(x - 1 * dpr, top - 4 * dpr, 2 * dpr, bot - top + 4 * dpr);
+  // series key, bottom-left inside the plot
+  tlx.font = `${10 * dpr}px system-ui`;
+  tlx.fillStyle = "#e8d9b0"; tlx.fillText("— max elevation", 8 * dpr, bot - 6 * dpr);
+  tlx.fillStyle = "#9fd0ff"; tlx.fillText("— land %", 100 * dpr, bot - 6 * dpr);
+}
+function setFrame(i, keepPos) {
+  i = Math.max(0, Math.min(NF - 1, i));
+  state.frame = Math.floor(i); if (!keepPos) state.fpos = state.frame; else state.fpos = i;
+  writeHash(); requestDraw(); drawTimeline();
+}
+function tlPick(ev) {
+  const r = tl.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const x = (ev.clientX - r.left) * dpr;
+  setFrame(Math.round((x - 6) / (tl.width - 12) * (NF - 1)));
+}
+let tlDrag = false;
+tl.addEventListener("pointerdown", ev => { tlDrag = true; tl.setPointerCapture(ev.pointerId); state.playing = false; tlPick(ev); });
+tl.addEventListener("pointermove", ev => { if (tlDrag) tlPick(ev); });
+tl.addEventListener("pointerup", () => { tlDrag = false; });
+
+// ---------------------------------------------------------------------------
+// Playback
+// ---------------------------------------------------------------------------
+let lastT = 0;
+function tick(t) {
+  if (!state.playing) return;
+  const dt = lastT ? (t - lastT) / 1000 : 0; lastT = t;
+  let np = state.fpos + dt * state.fps;
+  if (np >= NF - 1) { np = NF - 1; state.playing = false; }
+  const nextInt = Math.floor(np);
+  if (!tex[nextInt] || (nextInt + 1 < NF && !tex[nextInt + 1] && np > nextInt)) np = Math.min(np, state.fpos); // wait for loader
+  state.frame = Math.floor(np); state.fpos = state.fade ? np : state.frame;
+  requestDraw(); drawTimeline(); writeHash();
+  if (state.playing) requestAnimationFrame(tick); else updateLabels(state.frame);
+}
+function togglePlay() {
+  state.playing = !state.playing;
+  if (state.playing) { if (state.frame >= NF - 1) setFrame(0); lastT = 0; requestAnimationFrame(tick); }
+  requestDraw();
+}
+function jumpStage(dir) {
+  const st = frames[state.frame].stage; let i = state.frame;
+  if (dir > 0) { while (i < NF - 1 && frames[i].stage === st) i++; }
+  else { while (i > 0 && frames[i - 1].stage === st) i--; if (i === state.frame && i > 0) { i--; const s2 = frames[i].stage; while (i > 0 && frames[i - 1].stage === s2) i--; } }
+  setFrame(i);
+}
+
+// ---------------------------------------------------------------------------
+// Camera interaction
+// ---------------------------------------------------------------------------
+const MAXZ = Math.max(4, (frames[META.final_index ?? NF - 1].res || 512) / 16);
+function zoomAt(px, py, factor) {
+  const before = screenToDir(px, py);
+  state.zoom = Math.max(0.35, Math.min(MAXZ, state.zoom * factor));
+  if (before) {
+    for (let it = 0; it < 3; it++) {           // keep the point under the cursor fixed
+      const after = screenToDir(px, py); if (!after) break;
+      const [la0, lo0] = latLonOf(before), [la1, lo1] = latLonOf(after);
+      state.lon0 = wrapLon(state.lon0 + wrapLon(lo0 - lo1));
+      state.lat0 = Math.max(-HALF_PI + 1e-3, Math.min(HALF_PI - 1e-3, state.lat0 + (la0 - la1)));
+    }
+  }
+  writeHash(); requestDraw();
+}
+let drag = null;
+canvas.addEventListener("pointerdown", ev => { drag = { x: ev.clientX, y: ev.clientY }; canvas.setPointerCapture(ev.pointerId); canvas.classList.add("dragging"); });
+canvas.addEventListener("pointermove", ev => {
+  const dpr = window.devicePixelRatio || 1;
+  if (drag) {
+    const s = scalePx() / dpr, dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
+    drag = { x: ev.clientX, y: ev.clientY };
+    const k = state.view === "globe" ? 1 / Math.max(Math.cos(state.lat0), 0.15) : 1;
+    state.lon0 = wrapLon(state.lon0 - dx / s * k);
+    state.lat0 = Math.max(-HALF_PI + 1e-3, Math.min(HALF_PI - 1e-3, state.lat0 + dy / s));
+    writeHash(); requestDraw();
+  }
+  readout(ev.offsetX * dpr, ev.offsetY * dpr);
+});
+canvas.addEventListener("pointerup", () => { drag = null; canvas.classList.remove("dragging"); });
+canvas.addEventListener("pointerleave", () => $("readout").classList.add("hidden"));
+canvas.addEventListener("wheel", ev => { ev.preventDefault(); const dpr = window.devicePixelRatio || 1;
+  zoomAt(ev.offsetX * dpr, ev.offsetY * dpr, Math.exp(-ev.deltaY * (ev.deltaMode ? 0.05 : 0.0015))); }, { passive: false });
+canvas.addEventListener("dblclick", ev => { const dpr = window.devicePixelRatio || 1; zoomAt(ev.offsetX * dpr, ev.offsetY * dpr, 2); });
+
+function resetView() { state.lat0 = 0.35; state.lon0 = 0; state.zoom = 1; writeHash(); requestDraw(); }
+for (const btn of $("viewseg").children) btn.onclick = () => { state.view = btn.dataset.v; writeHash(); requestDraw(); };
+$("reset").onclick = resetView;
+sel.onchange = () => { state.layer = sel.value; legendKey = ""; writeHash(); requestDraw(); };
+$("exag").oninput = e => { state.exag = +e.target.value; writeHash(); requestDraw(); };
+$("fps").oninput = e => { state.fps = +e.target.value; $("fpsv").textContent = state.fps; };
+for (const k of ["rivers", "grid", "coast", "fade"]) $(k).onchange = e => { state[k] = e.target.checked; writeHash(); requestDraw(); };
+$("play").onclick = togglePlay;
+$("prev").onclick = () => { state.playing = false; setFrame(state.frame - 1); };
+$("next").onclick = () => { state.playing = false; setFrame(state.frame + 1); };
+$("helpbtn").onclick = () => $("help").style.display = $("help").style.display === "block" ? "none" : "block";
+$("shot").onclick = () => { draw(); canvas.toBlob(b => { const a = document.createElement("a"); a.href = URL.createObjectURL(b);
+  a.download = `${META.world || "globe"}_${frames[state.frame].label.replace(/\W+/g, "_")}.png`; a.click(); }); };
+$("copylink").onclick = () => navigator.clipboard && navigator.clipboard.writeText(location.href);
+window.addEventListener("keydown", ev => {
+  if (ev.target.tagName === "SELECT" || ev.target.tagName === "INPUT" && ev.target.type !== "checkbox" && ev.target.type !== "range") return;
+  const k = ev.key;
+  if (k === " ") { ev.preventDefault(); togglePlay(); }
+  else if (k === "ArrowRight") { ev.preventDefault(); state.playing = false; ev.shiftKey ? jumpStage(1) : setFrame(state.frame + 1); }
+  else if (k === "ArrowLeft") { ev.preventDefault(); state.playing = false; ev.shiftKey ? jumpStage(-1) : setFrame(state.frame - 1); }
+  else if (k === "g" || k === "G") { state.view = state.view === "globe" ? "flat" : "globe"; writeHash(); requestDraw(); }
+  else if (k === "Home") resetView();
+  else if (k === "r" || k === "R") { state.rivers = !state.rivers; writeHash(); requestDraw(); }
+  else if (k === "l" || k === "L") { state.grid = !state.grid; writeHash(); requestDraw(); }
+  else if (/^[1-9]$/.test(k) && layerNames[+k - 1]) { state.layer = layerNames[+k - 1]; legendKey = ""; writeHash(); requestDraw(); }
+});
+window.addEventListener("resize", () => { requestDraw(); drawTimeline(); });
+window.addEventListener("hashchange", () => { readHash(); requestDraw(); drawTimeline(); });
+if (document.body.classList.contains("noui")) for (const id of ["top", "timeline", "helpbtn", "loading"]) $(id).classList.add("hidden");
+GV.state = state; GV.setFrame = setFrame; GV.draw = draw;
+requestDraw(); drawTimeline();
+})();
+</script>
+</body>
+</html>

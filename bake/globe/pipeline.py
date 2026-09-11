@@ -115,6 +115,13 @@ def bake(
             logger(f"[{s}] quicklook failed: {e!r}")
         store.mark_stage(s, outputs, info, dt, params=params)
         logger(f"[{s}] done in {dt:.1f}s (hash {store.stage_info(s)['hash']})")
+    if params.render.viewer:
+        try:  # like quicklooks, the viewer must never break a bake
+            from .viz.viewer import export_viewer
+
+            export_viewer(store.root, formats=params.render.viewer_formats, log=logger)
+        except Exception as e:
+            logger(f"[viewer] export failed: {e!r}")
     return store
 
 

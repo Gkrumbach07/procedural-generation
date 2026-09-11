@@ -403,16 +403,17 @@ def sea_level(bed, area, continental, params) -> float:
     return float(weighted_quantile(bed, area, 1.0 - params.world.land_fraction))
 
 
-def frame_bed(sim) -> np.ndarray:
+def frame_bed(sim, tree=None) -> np.ndarray:
     """The current crust as a sea-levelled bed on the tect grid.
 
     Shared by the in-simulation animation capture and the quicklook, so a
-    frame drawn during the run is identical to the finished map.
+    frame drawn during the run is identical to the finished map.  ``tree``
+    is the segment KD-tree when the caller has already built it.
     """
     from .collision import SmoothSplat, build_tree
 
     tp, grid = sim.tp, sim.grid
-    tree = build_tree(sim.seg)
+    tree = build_tree(sim.seg) if tree is None else tree
     blend = SmoothSplat(tree, grid, tp.splat_sigma_factor * sim.spacing, int(tp.splat_knn))
     buoy = ridge_buoyancy(sim.seg, tp)
     bed = _smooth_field(grid, blend(sim.seg.height() + buoy), tp, cascade=True).interior
@@ -754,14 +755,27 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
 # stage entry points
 # --------------------------------------------------------------------------
 def run(store: WorldStore, params: WorldParams, log=print) -> dict:
+    from ..viz import frames as vf
+
     t0 = time.time()
     tp = params.tectonics
     frames: list = []
-    if int(tp.animate_frames) > 0:
+    # viewer timeline frames (hash-exempt: capture only reads the sim).  A
+    # rerun of tectonics owns every frame downstream of it, erosion's too.
+    vf.clear_all(store.root)
+    n_view = int(params.render.tectonics_frames) if params.render.viewer else 0
+    rec = vf.FrameRecorder(store.root, "tectonics", min(int(params.render.frame_res), int(tp.N_tect)))
+    n_frames = max(int(tp.animate_frames), n_view)
+
+    def on_frame(s, i):
+        if int(tp.animate_frames) > 0:
+            frames.append(frame_image(s, int(tp.animate_width)))
+        if n_view > 0:
+            vf.tectonics_frame(s, rec, i, int(tp.steps))
+
+    if n_frames > 0:
         sim = initialise(params, log)
-        sim.run(int(tp.steps), log=log,
-                on_frame=lambda s, i: frames.append(frame_image(s, int(tp.animate_width))),
-                frames=int(tp.animate_frames))
+        sim.run(int(tp.steps), log=log, on_frame=on_frame, frames=n_frames)
     else:
         sim = simulate(params, log)
     t_sim = time.time() - t0
