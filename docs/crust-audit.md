@@ -252,11 +252,18 @@ The sea floor itself is what sits high, and two things hold it there:
 * **Most of it never finishes subsiding.** Median sea-floor age is 169 steps
   against `ridge_age = 400`, and only **22.8 % of it by area** is fully
   subsided. The median sea floor is therefore still carrying ~35 % of its
-  ridge buoyancy — several hundred metres of it — where Earth's median sea
+  ridge buoyancy — 785 m of the 2244 m ramp — where Earth's median sea
   floor (~60 My of ~80) carries ~13 %.
 
-Both come back to the same short conveyor that makes 41 % of subducted
-slabs younger than 15 steps.
+Those are two different defects, not one. The floor is a calibration
+question — `oceanic_thickness`, `oceanic_density`, and where
+`shelf_fraction` puts sea level between them — and it caps how deep the
+ocean can ever be. The age distribution is the same short conveyor that
+makes 41 % of subducted slabs younger than 15 steps, and it decides how
+much of the ocean gets near that cap. Fixing the second alone buys at most
+the 785 m of ridge buoyancy the median sea floor is still carrying, which
+would take the ocean median to about −3.6 km and still leave the abyssal
+plain one to two kilometres short.
 
 ### Two explanations tested and eliminated
 
@@ -310,6 +317,15 @@ the sea floor for up to `ocean_steps = 64` steps — 625 km at 9773 m cells —
 before their last deposit. Whether that walk ends on the shelf or in the
 abyss is the whole of the offshore-sediment question, and it is what the
 census measures.
+
+One thing the baseline's own checkpoints already say about it: the sediment
+split runs deep 86.9 % / shelf 0.6 % at iteration 200 and deep 88.1 % /
+shelf 0.9 % at 400, against deep 86.4 % / shelf 4.9 % at the end of the run
+(`docs/earth-bake.md`). **The shelf gains four fifths of its final sediment
+in the last 400 iterations**, which is the glacial window. So "the shelf is
+starved" and "the shelf is filled by glacial outwash" are both live
+readings of the same end-state number, and the `off` arm of the glacial
+fork separates them.
 
 ## Hotspots are written and switched off; LIPs do not exist
 
