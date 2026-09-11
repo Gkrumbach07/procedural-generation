@@ -280,23 +280,18 @@ class ErosionParams:
     glacial_every: int = 10  # run the glacial pass (erosion/glacial.py) every k iterations; 0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion).  Ice is where the mean annual temperature is at or below freezing (evap <= 0), which at the defaults is ~9 % of land, close to Earth's glaciated fraction
     ice_evap: float = 0.0  # ice forms where the climate field `evap` is at or below this.  `evap` is k_evap*max(T,0), so 0 is exactly the freezing line and a positive value is a warmer equilibrium-line altitude (more of the world glaciated).  This is the FIRST-ORDER control on lakes: measured across three seeds, lake area swung 5x with the seed (0.14 %, 0.31 %, 0.74 % of land) but at most 43 % with glacial_from/glacial_every, and one seed had no land below +1.6 C at all, so no ice and no glacial lakes were possible however the other knobs were set
     glacial_from: float = 0.75  # start glaciating this far through the run (fraction of erosion.iterations); 0 = glaciate throughout.  Earth is lake-rich because glaciation was *recent* — the basins ice cut ~10 ka ago have not had time to fill, and lake lifetime is short next to landscape evolution time.  Carving throughout instead gives the fluvial system the whole rest of the run to drain and backfill every basin
-    # DEFECT, measured, not yet fixed: `glacial_rate` and `glacial_max` are *lengths* and are
-    # consumed in cell units, so they are NOT in LENGTH_PARAMS_M and do not mean the same physical
-    # thing at two cell sizes.  Both were tuned on the small preset's 50 m cells, where 1.0 and 0.4
-    # are 50 m and 20 m per pass; at the `earth` preset's 9773 m cells they are 9773 m and 3909 m,
-    # a factor of 195.  Measured on a real Earth-scale state, one pass then takes 848 m off the
-    # average glaciated cell and the full 3909 m cap off the deepest, twenty times over, and costs
-    # 2263 m of the planet's highest point in fifty iterations.  The fix is the LENGTH_PARAMS_M
-    # pattern (declare in metres, divide by the cell size), but the Earth-scale *value* is a
-    # separate decision with a real trade-off: the mis-scaled pass is also what carries the
-    # lowlands back up from where the fluvial pass over-planes them, and weakening it moves the
-    # land median from 463 m to 280 m against Earth's ~350.  See docs/missing-relief.md.
-    glacial_rate: float = 1.0  # bed lowered per glacial pass (cell units) at the reference ice flux, scaled by sqrt(discharge/disc_saturation) and by (1 - 0.5*hardness).  Unlike every other erosional term this one has NO base-level limit — ice flows uphill out of a basin — which is what leaves the closed depressions that become lakes
+    # `glacial_rate` and `glacial_max` are lengths (metres; LENGTH_PARAMS_M).  They used to be
+    # consumed in cell units, tuned on the small preset's 50 m cells, so at the `earth` preset's
+    # 9773 m cells they meant 9773 m and 3909 m a pass, a factor of 195: one pass took 2263 m off
+    # the highest point in fifty iterations (docs/missing-relief.md), planed the waterline flat in
+    # a single step, and against the isostatic rebound ran away to 22.8 km peaks and -17.5 km pits
+    # by iteration 800 (docs/streaks-and-flats.md).
+    glacial_rate: float = 50.0  # bed lowered per glacial pass (metres) at the reference ice flux, scaled by sqrt(discharge/disc_saturation) and by (1 - 0.5*hardness).  Unlike every other erosional term this one has NO base-level limit — ice flows uphill out of a basin — which is what leaves the closed depressions that become lakes
     glacial_ramp: int = 4  # cells over which the carve ramps up from the ice margin inward.  Erosion that only scales with ice flux deepens a valley monotonically downstream, which drains; tapering it to zero at the snout leaves a rock lip with the deepest point inside the ice, i.e. a closed basin
-    glacial_max: float = 0.4  # cap on the bed a cell loses in one glacial pass (cell units); see the scale defect noted on `glacial_rate`
-    glacial_sticky: bool = False  # a cell glaciated in one pass stays glaciated while it is still cold, even once its bed is carved below sea level.  Off, the ice margin is the coastline in cold lowlands and it migrates inland pass by pass as the carve drowns the outer steps, printing land/sea bands and concentric arcs (docs/streaks-and-flats.md).  Persisted in checkpoints
+    glacial_max: float = 20.0  # cap on the bed a cell loses in one glacial pass (metres; LENGTH_PARAMS_M)
+    glacial_sticky: bool = True  # a cell glaciated in one pass stays glaciated while it is still cold, even once its bed is carved below sea level.  Off, the ice margin is the coastline in cold lowlands and it migrates inland pass by pass as the carve drowns the outer steps, printing land/sea bands and concentric arcs (docs/streaks-and-flats.md).  Persisted in checkpoints
     moraine_frac: float = 1.0  # fraction of the excavated rock deposited on the ice margin as moraine (the rest is lost); 1.0 keeps the pass mass-conserving, and the moraine dams valleys leaving an ice field, which is the second way ice makes lakes
-    isostasy: float = 0.0  # Airy compensation of the mass surface processes move: an eroded column rebounds by this fraction of the rock removed, a loaded one subsides by it.  0.8 = continental crust over mantle (tectonics.continental_density 0.804), i.e. eroding 1 km of rock lowers the surface ~200 m.  Without it erosion lowers the surface one-for-one and planes a continent to base level (docs/missing-relief.md).  0 = off
+    isostasy: float = 0.8  # (needs the glacial lengths in metres: against the old cell-unit glacial scale it ran away to 22.8 km peaks.)  Airy compensation of the mass surface processes move: an eroded column rebounds by this fraction of the rock removed, a loaded one subsides by it.  0.8 = continental crust over mantle (tectonics.continental_density 0.804), i.e. eroding 1 km of rock lowers the surface ~200 m.  Without it erosion lowers the surface one-for-one and planes a continent to base level (docs/missing-relief.md).  0 = off
     flexure_km: float = 60.0  # the rebound is regional, not per cell: Gaussian sigma of the flexural response (a ~30 km elastic plate).  A locally-rebounding valley could never be incised; a flexural one lifts the peaks around it.  In metres, so it means the same thing at every cell size
     isostasy_every: int = 20  # apply the accumulated rebound every k iterations: the flexural smoothing is ~250 monotone diffusion steps at the earth preset (~16 s), so this keeps it near +0.8 s per iteration
     resume: bool = True  # resume from checkpoints/ whose parameter + upstream + kernel-version hash matches; False recomputes from bedrock
@@ -325,7 +320,8 @@ class ErosionParams:
 #: ``fan_slope``), rates and ratios are genuinely dimensionless and carry over
 #: untouched.
 LENGTH_PARAMS_M = ("cover_depth", "max_erode", "iter_erode", "iter_deposit",
-                   "thermal_max", "fan_room", "min_volume", "route_eps")
+                   "thermal_max", "fan_room", "min_volume", "route_eps",
+                   "glacial_rate", "glacial_max")
 
 
 def cell_units(ep: "ErosionParams", name: str, cell_size_m: float) -> float:

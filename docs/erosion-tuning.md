@@ -97,7 +97,9 @@ sediment per iteration to shelves that were never deeper than 0.07 cells; a shel
 Sweeps on the small preset at `N_c=256`, 200 iterations, each config reusing
 one template's tectonics + climate so only the glaciation differs.
 
-**`glacial_rate` saturates.** Across 0.5/0.75/0.9 x 1.0/3.0/8.0 there is no
+**`glacial_rate` saturates.** Across 0.5/0.75/0.9 x 1.0/3.0/8.0 (rate in the
+cell units it was then consumed in: 50, 150 and 400 m a pass at the small
+preset's 50 m cells; it is declared in metres now) there is no
 monotonic gain from a harder cut — rate 8.0 gave shallower lakes than rate
 1.0 (the carve hits the sea-level floor and the moraine cap). Rate is not
 the lever.

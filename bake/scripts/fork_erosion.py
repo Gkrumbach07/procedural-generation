@@ -2,7 +2,7 @@
 """Fork a baked world's erosion state at a checkpoint and run on from it.
 
     python3 scripts/fork_erosion.py <world> --at 600 --iterations 200 \
-        --set erosion.glacial_rate=0.5 --label rate05
+        --set erosion.glacial_rate=25 --label rate25m
 
 Why this exists.  Erosion at Earth scale is ~2 hours, and most of what is
 worth asking about it -- how hard the glacial pass carves, where the

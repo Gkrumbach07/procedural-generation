@@ -536,9 +536,11 @@ def test_isostasy_smoother_is_stable_on_white_noise(scratch):
     assert float(np.abs(dh).max()) <= 0.8 * peak * 1.05
 
 
-def test_isostasy_is_off_by_default(scratch):
-    p = WorldParams.tiny_world(5)
-    assert p.erosion.isostasy == 0.0
+def test_isostasy_is_on_by_default_and_zero_turns_it_off(scratch):
+    """On by default (docs/streaks-and-flats.md, "What ships"); 0 must still
+    switch it off completely, with no accumulator kept."""
+    assert WorldParams().erosion.isostasy == 0.8
+    p = WorldParams.tiny_world(5).with_overrides(erosion={"isostasy": 0.0})
     st = erosion_run.build_state(_stub_world(scratch, "iso_off", p), p)
     step(st, p, 0)
     assert getattr(st, "iso_acc", None) is None
@@ -638,7 +640,7 @@ def test_alluvial_cover_lets_hardness_shape_the_landscape():
 def test_sticky_ice_keeps_a_cell_carved_below_sea_level_glaciated(scratch):
     """With erosion.glacial_sticky, a cold cell that was ice stays ice after
     its bed drops below sea level; without it, it leaves the mask (and the
-    margin migrates).  Off by default, and then no state is kept at all."""
+    margin migrates).  Off, no state is kept at all."""
     for sticky in (False, True):
         p = WorldParams.tiny_world(2).with_overrides(erosion={"glacial_sticky": sticky})
         st = erosion_run.build_state(_stub_world(scratch, f"sticky{int(sticky)}", p), p)
@@ -667,7 +669,7 @@ def test_glacial_carving_makes_closed_basins_and_conserves_mass():
     does create depressions the flood can pond in, and it moves rock rather
     than creating or destroying it (so it composes with `hold_datum`).
     """
-    p = WorldParams.small_world(0).with_overrides(erosion={"glacial_rate": 1.0, "glacial_every": 10})
+    p = WorldParams.small_world(0).with_overrides(erosion={"glacial_rate": 50.0, "glacial_every": 10})
     st = make_window(64, "dome", p, iters=40)
     # freeze the upper half of the dome: `evap <= 0` is the kernel's `T <= 0`
     st.evap[...] = 1.0
@@ -684,6 +686,27 @@ def test_glacial_carving_makes_closed_basins_and_conserves_mass():
     assert stats["moraine_cells"] > 0
     assert abs(after - before) <= 1e-9 * max(abs(before), 1.0), (before, after)
     assert _closed_depressions(st) > depressions_before
+
+
+def test_glacial_lengths_are_metres_at_every_cell_size():
+    """`glacial_rate` and `glacial_max` are lengths in LENGTH_PARAMS_M: the
+    same 20 m cap takes 20 m of bed at 50 m cells and at 100 m cells.  In
+    cell units the cap was 20 m at the 50 m cells it was tuned on and 3909 m
+    at the earth preset's 9773 m (docs/missing-relief.md).  At 50 m cells it
+    is still exactly the old 0.4 cell units, so the small presets are
+    unchanged."""
+    carved = {}
+    for cs in (50.0, 100.0):
+        p = WorldParams.small_world(0).with_overrides(world={"cell_size_m": cs}, erosion={"glacial_max": 20.0})
+        st = make_window(64, "dome", p, iters=40)
+        st.evap[...] = 1.0
+        st.evap[st.surface() > np.percentile(st.surface()[st.interior], 70)] = 0.0
+        st.discharge[...] = 1e4  # an ice flux far past the cap wherever the taper is non-zero
+        stats = glacial.carve(st, p)
+        assert st.height_unit_m == cs
+        carved[cs] = stats["max_carve"]
+    assert carved[50.0] == 0.4
+    assert carved[50.0] * 50.0 == pytest.approx(20.0) and carved[100.0] * 100.0 == pytest.approx(20.0)
 
 
 def _closed_depressions(state) -> int:

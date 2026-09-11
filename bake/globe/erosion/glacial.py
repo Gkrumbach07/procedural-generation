@@ -123,7 +123,8 @@ def carve(state, params) -> dict:
     downstream.  That is the whole point: it is what leaves a hole.
     """
     ep = params.erosion
-    rate = float(ep.glacial_rate)
+    rate = cell_units(ep, "glacial_rate", state.height_unit_m)
+    cap = cell_units(ep, "glacial_max", state.height_unit_m)
     stats = {"ice_cells": 0, "carved": 0.0, "moraine_cells": 0, "max_carve": 0.0, "outwash": 0.0}
     if rate <= 0.0:
         return stats
@@ -157,7 +158,7 @@ def carve(state, params) -> dict:
     q = np.maximum(state.discharge, 0.0) / sat
     taper = ice_depth(state, ice, int(ep.glacial_ramp))
     dz = rate * np.sqrt(q) * (1.0 - 0.5 * state.hardness) * taper
-    np.clip(dz, 0.0, float(ep.glacial_max), out=dz)
+    np.clip(dz, 0.0, cap, out=dz)
     dz = np.where(ice, dz, 0.0)
     # never carve a cell below sea level: a fjord is as deep as this gets,
     # and dropping land into the sea would fight `hold_datum` every pass

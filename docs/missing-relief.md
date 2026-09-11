@@ -90,6 +90,14 @@ the small preset at `N_c = 256`" — and the small preset's cells are
 **50 m**, whatever `N_c` is set to, because `cell_size_m` is its own
 parameter.
 
+> **Fixed since.** Both are now in `LENGTH_PARAMS_M`, declared in metres
+> at the values they were tuned at — 50 m and 20 m a pass — so a 50 m-cell
+> world is bit-identical and the `earth` preset carves 50 m / 20 m instead
+> of 9773 m / 3909 m. The fix is coupled to isostasy: correcting the scale
+> alone makes the tidal flat worse (below), and isostasy with the old scale
+> runs away to 22.8 km peaks and −17.5 km pits (docs/streaks-and-flats.md).
+> What follows is the defect as it was measured.
+
 So at the `earth` preset's 9773 m cells the shipped values mean:
 
 | | cell units | at 50 m cells (where tuned) | at 9773 m cells (as shipped) |

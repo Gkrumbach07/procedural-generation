@@ -510,3 +510,92 @@ lakes, deeper ones, and more of the land in them.
 (A secondary point stands on its own: a
 taper quantised into five one-cell steps will terrace an ice margin on any
 terrain, and a continuous distance would not.)
+
+## What ships
+
+**All four fixes, at iteration 800, against every partial combination.**
+Surface metrics except where marked bedrock:
+
+| iteration 800 | Earth | shipped | route | isostasy | route + iso | glacial units | **all four** |
+|---|---|---|---|---|---|---|---|
+| 0–1 km, % of land (bedrock) | 71.6 | 74.5 | 67.2 | 73.6 | 71.3 | 85.0 | **68.4** |
+| 1–2 | 15.4 | 20.3 | 26.8 | 16.5 | 18.3 | 8.9 | **17.3** |
+| 2–3 | 7.5 | 3.8 | 4.3 | 5.5 | 5.7 | 3.6 | **6.3** |
+| 3–4 | 3.8 | 1.2 | 1.4 | 2.7 | 2.8 | 1.5 | **4.1** |
+| 4–5 | 1.7 | 0.2 | 0.3 | 1.2 | 1.2 | 0.5 | **2.0** |
+| >5 | 0.34 | 0.01 | 0.01 | 0.56 | 0.59 | 0.45 | **1.98** |
+| land above 2 km | 13.3 | 4.80 | 5.45 | 9.41 | 9.51 | 5.54 | **13.32** |
+| land median, m | ~350 | 484 | 565 | 565 | 601 | 188 | 500 |
+| globe within ±1 m of sea | | 0.13 | 0.11 | 0.18 | 0.15 | 1.83 | 0.14 |
+| globe within ±50 m | 1–2 | 6.40 | 7.16 | 4.38 | 4.33 | 11.45 | **3.97** |
+| cells straddling the waterline | | 3.33 | 3.54 | 1.62 | 1.69 | 3.98 | **1.46** |
+| sea level per 1 % of land, m | | 37 | 43 | 37 | 39 | 2.6 | 48 |
+| routing surface above terrain, p90 m | | 1317 | 25 | 1239 | 32 | 1070 | **12** |
+| ocean median, m | −3700 | −1927 | −1918 | −2497 | −2483 | −2525 | **−2755** |
+| lowest / highest bedrock, m | / 8849 | −8889 / 5192 | −7427 / 5220 | −17,525 / 22,833 | −15,871 / 22,938 | −3862 / 10,096 | −8588 / 12,973 |
+
+Every partial combination fails somewhere the full one does not: without
+the routing fix the phantom surface is back (p90 1.2–1.3 km); isostasy with
+the shipped glacial scale runs away; the glacial units without isostasy
+plane the lowlands (median 188 m, 11 % of the globe within 50 m of the
+sea). Together, every band from sea level to 5 km sits within about a point
+of Earth's, the land above 2 km is 13.32 % against 13.3, the waterline is
+the best-conditioned of the six, and the ocean is 800 m deeper than
+shipped, closer to Earth's. The one band that is worse is the top: 1.98 %
+of land above 5 km against Earth's 0.34, still thickening between 600
+(1.53 %) and 800, with a highest point of 12,973 m. That is the orogen tail
+above, and its cap is the tectonic ceiling the erosion-stage uplift does
+not yet respect.
+
+**The glacial lengths go into metres at the values they were tuned at.**
+`LENGTH_PARAMS_M` declares every length at its old cell-unit value × 50 m,
+so a 50 m-cell world stays bit-identical; for the glacial pass that is 50 m
+and 20 m a pass. V5 ran the stronger 147 m / 59 m, so V6 repeats it from
+V5's own iteration-550 checkpoint (all four fixes, before any ice) with
+50 m / 20 m. After the first glacial pass the two are the same world:
+
+| iteration 600 | V5, 147 / 59 m a pass | V6, 50 / 20 m a pass |
+|---|---|---|
+| lowest / highest bedrock | −7471 / 11,436 m | −7476 / 11,427 m |
+| globe within ±1 m of sea level | 0.04 % | 0.04 % |
+| globe within ±50 m | 3.04 % | 3.14 % |
+| land above 2 km | 13.1 % | 13.0 % |
+| land above 5 km | 1.53 % | 1.53 % |
+| land median | 492 m | 487 m |
+| largest set of cells sharing one surface value | 20 | 23 |
+
+The earlier forks without isostasy said the same (`metres` against
+`earthlike` in docs/missing-relief.md: 7124 against 7055 m at the top,
+4.4 % above 2 km in both). The per-pass value is not what the world is
+sensitive to; the units were.
+
+**The small preset takes isostasy and sticky ice without trouble.** Its
+worlds are spherical too, so the two defaults reach them. Baked through
+`scripts/bake.py --preset small --to erosion`, the eroded surface
+(`coarse/height` + `sediment` — `hypsometry.py`'s world mode reads the
+tectonic `bedrock`, which the two bakes share):
+
+| small preset, seed 0, eroded surface | off | isostasy 0.8 + sticky |
+|---|---|---|
+| globe within ±1 m of sea level | 5.73 % | **2.64 %** |
+| globe within ±50 m | 41.3 % | 39.7 % |
+| land median | 14.9 m | 18.9 m |
+| highest bedrock | 608 m | 678 m |
+| erosion stage | 3.8 s | 11.6 s |
+
+Half the surface moves by more than a metre and the same way it does at
+Earth scale — the waterline flat halves and the land stands a little
+higher — with nothing running away. The cost is the flexural smoother:
+at 50 m cells `flexure_km` asks for more than the planet, the sigma is
+capped at N/8 = 16 cells, and 60 iterations apply it three times. The
+tiny preset's 10 iterations never reach `isostasy_every = 20`, so it is
+unchanged.
+
+**The defaults, then.** `erosion.route_eps = 0.05` m (already shipped);
+`erosion.glacial_rate = 50` m and `erosion.glacial_max = 20` m, in
+`LENGTH_PARAMS_M`; `erosion.isostasy = 0.8`; `erosion.glacial_sticky =
+True`. The four ship together or not at all — every partial combination in
+the table above fails somewhere. A new test pins the glacial lengths to
+metres at two cell sizes, the isostasy default test now asserts 0.8 and
+that 0 still switches it off, and the whole suite passes. The open cost is
+the orogen tail above 5 km.

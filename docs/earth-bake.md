@@ -185,6 +185,8 @@ answers are in **docs/missing-relief.md** (1) and **docs/crust-audit.md**
    `glacial_max` are lengths tuned on a 50 m-cell preset and consumed in
    cell units, so at 9773 m cells one pass takes 848 m off the average
    glaciated cell and 3909 m off the deepest. See docs/missing-relief.md.
+   (Both are declared in metres now, at 50 m and 20 m a pass; the fix only
+   works together with erosional isostasy — docs/streaks-and-flats.md.)
 2. **Offshore sediment.** The particle census exists now
    (`scripts/fork_erosion.py --deaths`, through a `diag` hook on
    `maps.run_iteration`) and 94.7 % of particles die in the ocean. A
