@@ -3,6 +3,13 @@
 Where the time and memory actually go, so it is obvious which stages have
 room to grow and which do not.
 
+> **Superseded for absolute numbers.** Everything below was measured on 4
+> cores, and partly on older erosion defaults. docs/bake-performance.md has
+> the 20-thread measurements, including the first complete Earth bake
+> (84.5 min, refine 7 min — the "~73 hours" projection below was a
+> scheduling artefact). The structure of each stage described here still
+> holds.
+
 All measurements are the shipped `final512` world: `N_c = 512`, `R = 4`,
 50 m coarse cells, 30 % land. Scaling exponents are empirical, from
 comparing against `med1` (`N_c = 256`, `R = 2`), where coarse cells go up 4×

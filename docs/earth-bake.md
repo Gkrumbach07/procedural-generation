@@ -206,3 +206,40 @@ supercontinent cycle **does** happen — split at step ~400, reassembly by
 anything within 256 km one landmass. And `classify` was building Andean
 plateaus out of ocean floor for 44 % of all collisions; it now has an
 `island_arc` branch.
+
+## The complete bake on the shipped defaults (`worlds/earth-full`)
+
+On 2026-09-11 the `earth` preset was baked from scratch through every
+stage, with the streaks-and-flats fixes on (glacial lengths in metres,
+isostasy 0.8, sticky ice, `route_eps` in metres). The whole pipeline took
+84.5 minutes on 20 threads. Stage costs are in docs/bake-performance.md.
+Tectonics is byte-identical to w-base (hash `4570488a24e464fa`).
+
+The eroded surface (`height + sediment`, area-weighted) against Earth:
+
+| band | Earth | earth-full |
+|---|---|---|
+| 0–1 km | 71.6 | 70.3 |
+| 1–2 | 15.4 | 16.6 |
+| 2–3 | 7.5 | 5.7 |
+| 3–4 | 3.8 | 3.7 |
+| 4–5 | 1.7 | 1.9 |
+| >5 | 0.3 | **1.8** |
+| land % of globe | 29.2 | 30.1 |
+| land mean | 840 m | 946 |
+| land median | ~350 m | 474 |
+| max | 8849 m | **12 915** |
+| ocean median | −3700 m | −2777 |
+| within ±50 m of sea level | 1–2 % | 3.9 |
+
+This reproduces the iteration-800 fork in docs/streaks-and-flats.md from a
+fresh start: land above 2 km is 13.1 % against Earth's 13.3 %, and every
+band up to 5 km is within two points of Earth. The open defect is unchanged:
+too much ground above 5 km and a 12.9 km summit. Erosion applies tectonic
+uplift with no ceiling.
+
+**Measure the eroded surface, not bedrock.** `scripts/hypsometry.py
+<world>` reads `coarse/bedrock`, the *tectonics* output. Run on this world
+it reports a 6604 m maximum and 59 % in the 0–1 km band, which is the
+bedrock before any erosion. Use `--checkpoints` for the erosion result, or
+the viewer's per-frame stats.
