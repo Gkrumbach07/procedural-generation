@@ -86,7 +86,9 @@ from .plates import (
     Plates,
     cluster_plates,
     heat_gradient_3d,
+    boundary_torques,
     plate_torques,
+    slab_pull_torques,
     random_initial_omega,
     rotate_segments,
     seed_supercontinent,
@@ -112,6 +114,16 @@ MASS_KEYS = ("initial", "spawned", "crystallised", "subducted", "delaminated", "
 #: are diagnostics and must be left out of any mass balance.
 COUNTER_KEYS = ("orogen_shaped", "differentiated")
 SINK_KEYS = ("subducted", "delaminated", "orogen_decayed")
+
+
+def _padded_sum(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Sum of two (P, 3) torque tables whose P may differ (a split this step
+    appended plates); the shorter is zero-padded."""
+    P = max(a.shape[0], b.shape[0])
+    out = np.zeros((P, 3), dtype=np.float64)
+    out[:a.shape[0]] += a
+    out[:b.shape[0]] += b
+    return out
 
 
 class TectonicSim:
@@ -167,6 +179,11 @@ class TectonicSim:
         # out with a track of thickened crust (see tectonics/intraplate.py)
         self.hotspot_pos = intraplate.seed_hotspots(int(self.tp.hotspots), self.params.rng("tectonics", 7))
         self.events: list = []
+        #: decayed count of continent-on-continent collisions per plate pair
+        #: (min, max), for :func:`intraplate.suture`
+        self.suture_count: dict[tuple[int, int], float] = {}
+        self.suture_block: dict[tuple[int, int], int] = {}   # pair -> step before which it may not weld
+        self.sutures = 0
 
     # -- helpers ------------------------------------------------------------
     def heat_at(self, pos: np.ndarray) -> np.ndarray:
@@ -206,8 +223,11 @@ class TectonicSim:
             self.events.append(intraplate.reorganise(self, n, self.params.rng("tectonics", 5, k)))
             plates = self.plates
         if tp.rift_every > 0 and k > 0 and k % int(tp.rift_every) == 0:
-            self.events.append(intraplate.rift(self, self.params.rng("tectonics", 6, k), int(tp.rift_plates)))
+            ev = intraplate.rift(self, self.params.rng("tectonics", 6, k), int(tp.rift_plates))
+            self.events.append(ev)
             plates = self.plates
+            for a, b in ev.get("pairs", ()):
+                self.suture_block[(min(a, b), max(a, b))] = k + int(tp.suture_cooldown)
         if self.hotspot_pos.shape[0] and tp.hotspot_rate > 0:
             self.events.append(intraplate.apply_hotspots(
                 self, self.hotspot_pos, float(tp.hotspot_rate),
@@ -219,13 +239,16 @@ class TectonicSim:
 
         # 1. move
         mass0 = seg.total_mass()
+        tau_slab = None
+        cc_pair_max = 0
         rotate_segments(seg, plates)
 
         # 2. collisions
         tree = build_tree(seg)
         alive = np.ones(seg.M, dtype=bool)
         losers, survivors = collide(seg, tree, self.r_coll, plates.omega, alive, tp.overlap_fraction,
-                                    float(tp.arc_accretion), float(tp.arc_birth), self.params.rng("tectonics", 7, k))
+                                    float(tp.arc_accretion), float(tp.arc_birth), self.params.rng("tectonics", 7, k),
+                                    shortening=float(tp.continental_shortening))
         n_coll = int(losers.size)
         if n_coll:
             if tp.orogen_shaping > 0.0:
@@ -235,10 +258,11 @@ class TectonicSim:
                     seg, tree, losers, survivors, alive, self.spacing, self.params.R_planet,
                     float(tp.height_scale_m), float(tp.orogen_shaping), CONTINENTAL,
                     accretion=float(tp.arc_accretion), flat_slab_age=float(tp.flat_slab_age),
-                    along_strike=float(tp.orogen_along_strike), census=self.belt_census)
+                    along_strike=float(tp.orogen_along_strike), census=self.belt_census,
+                    shortening=float(tp.continental_shortening))
             else:
                 spread_collisions(seg, tree, losers, survivors, alive, tp.belt_width_factor * self.spacing,
-                                  accretion=float(tp.arc_accretion))
+                                  accretion=float(tp.arc_accretion), shortening=float(tp.continental_shortening))
             # crust that has been through a collision comes out lighter: the
             # light melt stays, the dense residue goes to the mantle.  This is
             # what separates continental from oceanic crust, and so what makes
@@ -247,6 +271,22 @@ class TectonicSim:
                 self.ledger["differentiated"] = self.ledger.get("differentiated", 0.0) + differentiate(
                     seg, survivors, float(tp.differentiation), float(tp.density_continental))
             pts = seg.pos[losers].copy()
+            if tp.suture_collisions > 0.0:
+                cc = (seg.kind[losers] == CONTINENTAL) & (seg.kind[survivors] == CONTINENTAL)
+                if cc.any():
+                    pa = seg.plate_id[losers[cc]].astype(np.int64)
+                    pb = seg.plate_id[survivors[cc]].astype(np.int64)
+                    key = np.minimum(pa, pb) * plates.P + np.maximum(pa, pb)
+                    for kk, cnt in zip(*np.unique(key, return_counts=True)):
+                        pair = (int(kk) // plates.P, int(kk) % plates.P)
+                        if self.suture_block.get(pair, -1) > k:
+                            continue      # freshly rifted: the teeth grinding is not a collision
+                        self.suture_count[pair] = self.suture_count.get(pair, 0.0) + float(cnt)
+                        cc_pair_max = max(cc_pair_max, int(cnt))
+            if tp.slab_pull > 0.0:
+                # before compress: `losers` index the pre-collision cloud
+                tau_slab = slab_pull_torques(seg, losers, plates, float(tp.slab_pull), float(tp.ridge_age), OCEANIC,
+                                             survivors=survivors, suction=float(tp.trench_suction))
             if k >= self.ref_step:
                 self.subduction_pts.append(pts)
             if tp.subduction_heating > 0:
@@ -256,6 +296,33 @@ class TectonicSim:
         if tp.relax_rate > 0:
             relax_segments(seg, tree, tp.relax_rate, tp.relax_threshold, self.spacing, int(tp.relax_knn))
         self.ledger["subducted"] += seg.total_mass() - mass0
+
+        # two continents that have been grinding together long enough are one plate
+        if tp.suture_collisions > 0.0 and self.suture_count:
+            decay = 1.0 - 1.0 / max(float(tp.suture_window), 1.0)
+            due = [pr for pr, c in self.suture_count.items() if c >= float(tp.suture_collisions)]
+            if due:
+                # only continents weld; an ocean plate carrying an arc does not
+                pid_all = seg.plate_id.astype(np.int64)
+                tot = np.bincount(pid_all, weights=seg.area, minlength=plates.P)[:plates.P]
+                cont = np.bincount(pid_all[seg.kind == CONTINENTAL], weights=seg.area[seg.kind == CONTINENTAL], minlength=plates.P)[:plates.P]
+                cont_share = cont / np.maximum(tot, 1e-12)
+            for pr in due:
+                a, b = pr
+                if a < plates.P and b < plates.P and plates.alive[a] and plates.alive[b] and a != b \
+                        and min(cont_share[a], cont_share[b]) >= float(tp.suture_continental):
+                    self.events.append(intraplate.suture(self, a, b, self.params.rng("tectonics", 10, k)))
+                    plates = self.plates
+                    self.sutures += 1
+                    # the joined plate's contacts are the merged plate's now
+                    self.suture_count = {q: v for q, v in self.suture_count.items() if b not in q}
+                    if tau_slab is not None:
+                        tau_slab[a] += tau_slab[b] if b < tau_slab.shape[0] else 0.0
+                        if b < tau_slab.shape[0]:
+                            tau_slab[b] = 0.0
+                else:
+                    self.suture_count.pop(pr, None)
+            self.suture_count = {q: v * decay for q, v in self.suture_count.items() if v * decay > 0.5}
 
         # a plate the trenches have just cut in two is two plates from here on
         if tp.plate_split_every > 0 and k % int(tp.plate_split_every) == 0:
@@ -284,6 +351,10 @@ class TectonicSim:
             n_new = new.M
             if n_new and tp.gap_cooling > 0:
                 self._heat_blobs(new.pos, -tp.gap_cooling)
+            if n_new and tp.ridge_push > 0.0:
+                # the crust a ridge makes pushes its own plates off the ridge
+                tr = boundary_torques(new.pos, new.plate_id, float(tp.ridge_push) * new.area, plates.com, plates.P, towards=False)
+                tau_slab = tr if tau_slab is None else _padded_sum(tau_slab, tr)
             if n_new:
                 self.ledger["spawned"] += new.total_mass()
                 seg.append(new)
@@ -299,6 +370,19 @@ class TectonicSim:
                 seg, float(tp.max_crust_thickness), float(tp.delamination))
 
         # 5. heat diffusion + slow relaxation towards the background field
+        if tp.heat_insulation > 0 and self.idx is not None:
+            # the background itself moves: cold grows under continents, warm
+            # under ocean floor, so the attractor the plates feel is not the
+            # step-0 noise for the whole run (heat_insulation)
+            idx = self.idx
+            cont = (idx >= 0) & (seg.kind[np.maximum(idx, 0)] == CONTINENTAL)
+            Nh = self.heat.grid.N
+            r = idx.shape[1] // Nh
+            frac = cont.reshape(6, Nh, r, Nh, r).mean(axis=(2, 4))
+            H = self.heat.grid.H
+            bg = self.heat_bg[:, H:-H, H:-H]
+            bg -= float(tp.heat_insulation) * (2.0 * frac - 1.0)
+            np.clip(bg, 0.0, 1.0, out=bg)
         if tp.heat_relax > 0:
             self.heat.data += tp.heat_relax * (self.heat_bg - self.heat.data)
         np.clip(self.heat.data, 0.0, 1.0, out=self.heat.data)
@@ -309,6 +393,15 @@ class TectonicSim:
         grad3 = heat_gradient_3d(self.heat, seg.pos)
         plates.update_stats(seg)
         tau = plate_torques(seg, grad3, plates.P)
+        slab_ratio = 0.0
+        if tau_slab is not None:
+            # a split this step appended plates; they get no slab torque until next step
+            ts = np.zeros_like(tau)
+            n = min(tau_slab.shape[0], plates.P)
+            ts[:n] = tau_slab[:n]
+            heat_mag = float(np.linalg.norm(tau, axis=1).sum())
+            slab_ratio = float(np.linalg.norm(ts, axis=1).sum()) / max(heat_mag, 1e-30)
+            tau = tau + ts
         update_omega(plates, tau, self.gain, tp.damping, self.max_omega)
 
         self.step_index += 1
@@ -323,6 +416,9 @@ class TectonicSim:
             "speed_mean": float(spd.mean() / self.spacing) if spd.size else 0.0,
             "speed_max": float(spd.max() / self.spacing) if spd.size else 0.0,
             "mass": seg.total_mass(),
+            "slab_ratio": slab_ratio,
+            "sutures": self.sutures,
+            "cc_pair_max": cc_pair_max,
         }
         self.stats.append(info)
         return info
@@ -349,7 +445,10 @@ class TectonicSim:
                     f"[tectonics] step {self.step_index}/{steps}: M={info['M']} plates={info['plates']} "
                     f"coll={info['collisions']} gaps={info['gap_cells']} new={info['spawned']} "
                     f"v={info['speed_mean']:.3f}/{info['speed_max']:.3f} sp/step mass={info['mass']:.1f} "
-                    f"({time.time() - t0:.1f}s)"
+                    + (f"slab/heat={info['slab_ratio']:.2f} " if info.get('slab_ratio') else "")
+                    + (f"sutures={info['sutures']} " if info.get('sutures') else "")
+                    + (f"cc_pair_max={info['cc_pair_max']} " if info.get('cc_pair_max') else "")
+                    + f"({time.time() - t0:.1f}s)"
                 )
         return self
 

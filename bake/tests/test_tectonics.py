@@ -438,3 +438,83 @@ def test_strata_fabric_gives_hardness_structure_at_basin_scale():
     assert band_ac < 0.6 * flat_ac, (flat_ac, band_ac)
     assert float(band.min()) >= 0.0 and float(band.max()) <= 1.0
 
+
+
+def test_slab_pull_drags_the_plate_towards_its_trench():
+    """A subducted oceanic segment pulls its own plate towards the trench:
+    the velocity the torque induces *at the trench* points from the
+    plate's centre of mass to the trench, not away from it.  Continental
+    losers and newborn slabs pull nothing; an old slab pulls in full."""
+    from globe.tectonics.plates import slab_pull_torques
+    from globe.tectonics.segments import CONTINENTAL, OCEANIC
+    com = np.array([1.0, 0.0, 0.0])
+    a = np.deg2rad(25.0)
+    trench = np.array([np.cos(a), np.sin(a), 0.0])       # east of the centre of mass
+    pos = np.stack([com, trench, trench])
+    seg = Segments(pos, 1.0, 0.9, [500.0, 500.0, 0.0], [0, 0, 0], 1.0,
+                   kind=np.array([OCEANIC, OCEANIC, OCEANIC], np.int8))
+    plates = Plates(1)
+    plates.update_stats(seg)
+    plates.com[0] = com
+    # old slab: full pull
+    tau = slab_pull_torques(seg, np.array([1]), plates, gain=1.0, ridge_age=400.0, oceanic=OCEANIC)
+    v = np.cross(tau[0], trench)                          # velocity at the trench for omega ∝ tau
+    away = trench - com
+    away -= away @ trench * trench
+    assert v @ away > 0.99 * np.linalg.norm(v) * np.linalg.norm(away)
+    # a slab at age 0 pulls nothing; a continental one never does
+    assert np.allclose(slab_pull_torques(seg, np.array([2]), plates, 1.0, 400.0, OCEANIC), 0.0)
+    seg.kind[1] = CONTINENTAL
+    assert np.allclose(slab_pull_torques(seg, np.array([1]), plates, 1.0, 400.0, OCEANIC), 0.0)
+
+
+def test_suture_welds_two_plates_and_keeps_their_momentum(tiny_sim):
+    """Two plates welded by `suture` become one, the crust is untouched, and
+    the merged pole is the inertia-weighted mean of the two."""
+    import copy
+    sim = copy.deepcopy(tiny_sim)
+    plates = sim.plates
+    live = np.flatnonzero(plates.alive)
+    assert live.size >= 2
+    a, b = int(live[0]), int(live[1])
+    M, n_alive = sim.seg.M, plates.n_alive()
+    Ia, Ib = plates.inertia[a], plates.inertia[b]
+    expect = (Ia * plates.omega[a] + Ib * plates.omega[b]) / (Ia + Ib)
+    big = a if plates.area[a] >= plates.area[b] else b
+    ev = intraplate.suture(sim, a, b, np.random.default_rng(0))
+    assert ev["kept"] == big and sim.seg.M == M
+    assert sim.plates.n_alive() == n_alive - 1
+    assert not (sim.seg.plate_id == ev["joined"]).any()
+    assert np.allclose(sim.plates.omega[big], expect)
+
+
+def test_continental_shortening_conserves_area_and_mass():
+    """With `shortening` on, a continent-on-continent collision keeps the
+    losing segment alive on the winner's plate, moves that fraction of it
+    into the winner, and conserves total mass; an oceanic loser still dies."""
+    from globe.tectonics.segments import CONTINENTAL, OCEANIC
+    s = 0.05
+    # two continental segments on different plates, head-on; a third pair oceanic-vs-continental
+    pos = np.array([[1.0, 0.0, 0.0], [np.cos(0.5 * s), np.sin(0.5 * s), 0.0],
+                    [0.0, 1.0, 0.0], [np.cos(0.5 * s) * 0.0 + 0.0 , np.cos(0.5 * s), np.sin(0.5 * s)]])
+    pos /= np.linalg.norm(pos, axis=1, keepdims=True)
+    seg = Segments(pos, [1.0, 1.0, 1.0, 0.2], [0.8, 0.8, 0.8, 0.88], 100.0, [0, 1, 0, 1], 1.0,
+                   kind=np.array([CONTINENTAL, CONTINENTAL, CONTINENTAL, OCEANIC], np.int8))
+    plates = Plates(2)
+    plates.update_stats(seg)
+    # plate 1 turns towards plate 0 at both contacts
+    plates.omega[0] = 0.0
+    plates.omega[1] = np.array([0.0, 0.0, -0.1]) + np.array([-0.1, 0.0, 0.0])
+    tree = build_tree(seg)
+    alive = np.ones(4, dtype=bool)
+    m0 = seg.total_mass()
+    losers, survivors = collide(seg, tree, 1.2 * s, plates.omega, alive, shortening=0.5, accretion=0.15)
+    assert losers.size == 2
+    cc = [(lo, su) for lo, su in zip(losers, survivors) if seg.kind[lo] == CONTINENTAL][0]
+    lo, su = cc
+    assert alive[lo] and seg.plate_id[lo] == seg.plate_id[su]
+    assert np.isclose(seg.thickness[lo], 0.5) and np.isclose(seg.thickness[su], 1.5)
+    oc = [(lo, su) for lo, su in zip(losers, survivors) if seg.kind[lo] == OCEANIC][0]
+    assert not alive[oc[0]]
+    # live mass = initial - what the slab returned to the mantle
+    assert np.isclose(seg.mass[alive].sum(), m0 - (1.0 - 0.15) * 0.2 * 0.88)

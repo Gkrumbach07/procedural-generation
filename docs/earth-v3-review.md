@@ -152,6 +152,10 @@ not the thing the graphic shows.
 
 Slab pull is the lever; the other three shape where it takes the plates.
 
+> **Measured, and the order was wrong.** Slab pull gives the cycle and
+> shreds the continent; the moving heat background (item 2, shipped as
+> `heat_insulation`) gives the cycle on its own. See docs/plate-forces.md.
+
 ## 2. Hydrology: the rivers and the lakes come from three different places
 
 The complaint was that rivers cut through lakes on little land bridges,

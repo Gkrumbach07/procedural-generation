@@ -191,7 +191,7 @@ def _rift_one(sim, target: int, rng) -> dict:
     new.omega[P] = _capped(base + 0.5 * sep * axis, sim.max_omega)
     new.omega[~new.alive] = 0.0
     sim.plates = new
-    return {"event": "rift", "split": target, "moved": int(side.sum()),
+    return {"event": "rift", "split": target, "new": int(P), "moved": int(side.sum()),
             "cratons_spared": intact, "plates": int(new.n_alive())}
 
 
@@ -227,6 +227,7 @@ def rift(sim, rng, max_plates: int = 1) -> dict:
         out.append(_rift_one(sim, int(t), rng))
     split = [r["split"] for r in out if r["split"] >= 0]
     return {"event": "rift", "split": split, "plates": int(sim.plates.n_alive()),
+            "pairs": [(r["split"], r["new"]) for r in out if r["split"] >= 0],
             "moved": sum(r.get("moved", 0) for r in out)}
 
 
@@ -300,6 +301,25 @@ def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rn
     sim.plates = _rebuild(seg, pid, P + len(extra), rng, float(sim.tp.initial_speed) * sim.spacing, keep=keep)
     return {"event": "split", "split": len(extra), "welded": int(orphans.sum()),
             "plates": int(sim.plates.n_alive())}
+
+
+def suture(sim, a: int, b: int, rng) -> dict:
+    """Weld plates ``a`` and ``b`` into one: the smaller (by area) joins the
+    larger and the merged plate turns about the inertia-weighted mean of
+    the two poles, so the momentum of the collision carries on.  The
+    emptied plate id stays dead (``alive`` is False once it has no
+    segments), as after any other loss of a plate."""
+    seg, plates = sim.seg, sim.plates
+    if plates.area[b] > plates.area[a]:
+        a, b = b, a
+    pid = seg.plate_id.copy()
+    pid[pid == b] = a
+    om = plates.omega.copy()
+    Ia, Ib = float(plates.inertia[a]), float(plates.inertia[b])
+    om[a] = (Ia * om[a] + Ib * om[b]) / max(Ia + Ib, 1e-12)
+    om[b] = 0.0
+    sim.plates = _rebuild(seg, pid, plates.P, rng, float(sim.tp.initial_speed) * sim.spacing, keep=om)
+    return {"event": "suture", "kept": int(a), "joined": int(b), "plates": int(sim.plates.n_alive())}
 
 
 def seed_hotspots(count: int, rng) -> np.ndarray:

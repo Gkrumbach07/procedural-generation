@@ -227,7 +227,8 @@ def relax_orogens(seg, baseline_m: float, floor_m: float, height_unit_m: float,
 
 def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet_m: float,
                height_unit_m: float, strength: float, continental: int, accretion: float = 1.0,
-               flat_slab_age: float = 0.0, along_strike: float = 1.5, census: dict | None = None) -> float:
+               flat_slab_age: float = 0.0, along_strike: float = 1.5, census: dict | None = None,
+               shortening: float = 0.0) -> float:
     """Build each collision belt with a cross-section. Returns thickness moved.
 
     This *replaces* :func:`~globe.tectonics.collision.spread_collisions` for
@@ -349,7 +350,12 @@ def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet
         share = prof[up] / prof[up].sum()
 
         # 1. accretion: what the collision handed the survivor, laid out as a range
-        f = 1.0 if int(seg.kind[lo]) == continental else float(accretion)
+        if int(seg.kind[lo]) == continental:
+            # a shortened continental loser is still alive holding (1 - s) of
+            # itself; the survivor received s, i.e. s / (1 - s) of what is left
+            f = float(shortening) / max(1.0 - float(shortening), 1e-9) if (shortening > 0.0 and alive[lo]) else 1.0
+        else:
+            f = float(accretion)
         th_in, m_in = f * float(seg.thickness[lo]), f * float(seg.mass[lo])
         # never hand out more than the survivor is holding: clamping the
         # thickness afterwards would conjure the shortfall out of nothing

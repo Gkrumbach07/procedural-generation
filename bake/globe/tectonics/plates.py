@@ -177,6 +177,61 @@ def plate_torques(seg: Segments, grad3: np.ndarray, P: int) -> np.ndarray:
     return np.stack([np.bincount(seg.plate_id, weights=tau[:, k], minlength=P)[:P] for k in range(3)], axis=1)
 
 
+def boundary_torques(pos: np.ndarray, pid: np.ndarray, weight: np.ndarray, com: np.ndarray, P: int,
+                     towards: bool = True) -> np.ndarray:
+    """Torque (P, 3) from a force of magnitude ``weight`` at each boundary
+    point ``pos`` on plate ``pid``, along the tangent between the plate's
+    centre of mass and the point: ``towards`` the point (a pull at a
+    trench) or away from it (a push at a ridge).  The velocity such a
+    torque induces *at the point* is the force direction, so a pull moves
+    the plate's edge into the trench and a push moves it off the ridge.
+    Same units as :func:`plate_torques`."""
+    tau = np.zeros((P, 3), dtype=np.float64)
+    if pos.shape[0] == 0:
+        return tau
+    pid = np.asarray(pid, np.int64)
+    t = pos - com[pid]
+    t -= np.sum(t * pos, axis=1, keepdims=True) * pos       # tangent at pos
+    n = np.linalg.norm(t, axis=1, keepdims=True)
+    t = np.where(n > 1e-9, t / np.maximum(n, 1e-12), 0.0)
+    f = (np.asarray(weight, np.float64) * (1.0 if towards else -1.0))[:, None] * t
+    tq = np.cross(pos, f)
+    for k in range(3):
+        tau[:, k] = np.bincount(pid, weights=tq[:, k], minlength=P)[:P]
+    return tau
+
+
+def slab_pull_torques(seg: Segments, losers: np.ndarray, plates: Plates, gain: float, ridge_age: float,
+                      oceanic: int, survivors: np.ndarray | None = None, suction: float = 0.0) -> np.ndarray:
+    """Torque (P, 3) from slab pull, per plate.  Every *oceanic* segment
+    that went down this step pulls its own plate towards the trench: a
+    force ``gain * w(age) * area`` along the tangent from the plate's centre
+    of mass to the segment, ``w = clip(age / ridge_age, 0, 1)`` so that
+    crust spawned at a ridge and eaten a few steps later (a third of all
+    slabs at the defaults) pulls almost nothing and a slab that has had
+    time to cool pulls in full.  With ``survivors`` and ``suction > 0`` the
+    overriding plate is pulled towards the same trench by ``suction`` times
+    that force (trench suction).  Same units as :func:`plate_torques`, so
+    they are added before :func:`update_omega`.
+
+    A continental loser is crustal shortening, not a slab, and gets none."""
+    P = plates.P
+    tau = np.zeros((P, 3), dtype=np.float64)
+    if losers.size == 0 or gain <= 0.0:
+        return tau
+    m = seg.kind[losers] == oceanic
+    sel = losers[m]
+    if sel.size == 0:
+        return tau
+    p = seg.pos[sel]
+    w = np.clip(seg.age[sel] / ridge_age, 0.0, 1.0) if ridge_age > 0 else np.ones(sel.size)
+    f = gain * w * seg.area[sel]
+    tau += boundary_torques(p, seg.plate_id[sel], f, plates.com, P, towards=True)
+    if survivors is not None and suction > 0.0:
+        tau += boundary_torques(p, seg.plate_id[survivors[m]], suction * f, plates.com, P, towards=True)
+    return tau
+
+
 def update_omega(plates: Plates, torque: np.ndarray, gain: float, damping: float, max_speed: float = 0.0) -> None:
     """``omega = (1 - damping) * omega + gain * τ / I`` for live plates
     (radians per step), optionally capped at ``max_speed`` (radians per

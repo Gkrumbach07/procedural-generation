@@ -414,7 +414,7 @@ CONTINENTAL_K = np.int8(CONTINENTAL)
 
 
 @njit(cache=True)
-def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, kind, craton, polarity, alive, overlap2, accretion, arc_birth, birth_draw):
+def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, kind, craton, polarity, alive, overlap2, accretion, arc_birth, birth_draw, shortening, radius):
     n = pairs.shape[0]
     losers = np.empty(n, dtype=np.int64)
     survivors = np.empty(n, dtype=np.int64)
@@ -485,6 +485,36 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
         # height.  Continent-on-continent keeps everything: nothing subducts,
         # the crust doubles, and that is what a Tibet is.
         f = 1.0 if kind[lo] == CONTINENTAL_K else accretion
+        if kind[lo] == CONTINENTAL_K and shortening > 0.0:
+            # crustal shortening, area conserved: part of the segment is
+            # stacked into the belt, the rest stays where it is and moves with
+            # the plate it has just been welded to (see continental_shortening)
+            f = shortening
+            mass[su] += f * mass[lo]
+            thickness[su] += f * thickness[lo]
+            density[su] = mass[su] / thickness[su]
+            mass[lo] *= 1.0 - f
+            thickness[lo] *= 1.0 - f
+            plate_id[lo] = plate_id[su]
+            # the crust between the two has shortened: the loser's centre
+            # retreats to the edge of the collision radius, so the same pair
+            # is not a collision again next step (it would be, every step,
+            # until nothing was left of it -- measured at 14 million
+            # continent-on-continent events in a run against 9 thousand)
+            dn = np.sqrt(dx * dx + dy * dy + dz * dz)
+            if dn > 1e-12:
+                s = 1.05 * radius / dn
+                px = pos[su, 0] - dx * s
+                py = pos[su, 1] - dy * s
+                pz = pos[su, 2] - dz * s
+                pn = np.sqrt(px * px + py * py + pz * pz)
+                pos[lo, 0] = px / pn
+                pos[lo, 1] = py / pn
+                pos[lo, 2] = pz / pn
+            losers[k] = lo
+            survivors[k] = su
+            k += 1
+            continue
         mass[su] += f * mass[lo]
         thickness[su] += f * thickness[lo]
         density[su] = mass[su] / thickness[su]
@@ -506,7 +536,7 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
     return losers[:k], survivors[:k]
 
 
-def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, alive: np.ndarray, overlap_fraction: float = 0.5, accretion: float = 1.0, arc_birth: float = 0.0, rng: np.random.Generator | None = None):
+def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, alive: np.ndarray, overlap_fraction: float = 0.5, accretion: float = 1.0, arc_birth: float = 0.0, rng: np.random.Generator | None = None, shortening: float = 0.0):
     """Subduction: for every pair of segments of different plates within
     chord ``radius`` (KD-tree pair query, applied in sorted order) that are
     *approaching* — or closer than ``overlap_fraction * radius`` whatever
@@ -523,7 +553,10 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     in ``alive`` (in place).  The loser's own arrays keep the
     transferred amounts until ``seg.compress(alive)``; the total mass of
     live segments is conserved.  Returns ``(losers, survivors)`` index
-    arrays (into the current arrays; a survivor may appear several times)."""
+    arrays (into the current arrays; a survivor may appear several times).
+    With ``shortening > 0`` a continental loser is not killed: that fraction
+    of it goes to the survivor, it keeps the rest and joins the survivor's
+    plate (``plate_id`` is updated in place)."""
     pairs = tree.query_pairs(radius, output_type="ndarray")
     if pairs.shape[0] == 0:
         return np.zeros(0, np.int64), np.zeros(0, np.int64)
@@ -532,11 +565,24 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     draw = rng.random(pairs.shape[0]) if (rng is not None and arc_birth > 0.0) else np.zeros(pairs.shape[0])
     P = int(seg.plate_id.max()) + 1 if seg.M else 1
     pol = plate_pair_polarity(seg.plate_id, seg.age, seg.kind, pairs, P)
-    return _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.kind, seg.craton, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw))
+    return _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.kind, seg.craton, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw), float(shortening), float(radius))
 
 
 @njit(cache=True)
-def _spread_kernel(losers, survivors, nbrs, pos, plate_id, kind, mass, thickness, density, alive, inv2s2, accretion):
+def _received_fraction(kind_lo, alive_lo, accretion, shortening):
+    """What the survivor received, as a multiple of what the loser's arrays
+    hold *now*: all of a dead continental partner, ``accretion`` of a slab,
+    and for a continental loser that is still alive (shortening) the part
+    that moved over the part that stayed."""
+    if kind_lo == CONTINENTAL_K:
+        if alive_lo and shortening > 0.0:
+            return shortening / max(1.0 - shortening, 1e-9)
+        return 1.0
+    return accretion
+
+
+@njit(cache=True)
+def _spread_kernel(losers, survivors, nbrs, pos, plate_id, kind, mass, thickness, density, alive, inv2s2, accretion, shortening):
     K = nbrs.shape[1]
     w = np.empty(K, dtype=np.float64)
     for e in range(losers.shape[0]):
@@ -547,7 +593,7 @@ def _spread_kernel(losers, survivors, nbrs, pos, plate_id, kind, mass, thickness
         # only what the survivor actually received: an oceanic slab hands over
         # `accretion` of itself and the rest goes to the mantle, so spreading
         # the whole slab would create mass that was never accreted
-        f = 1.0 if kind[lo] == CONTINENTAL_K else accretion
+        f = _received_fraction(kind[lo], alive[lo], accretion, shortening)
         m = f * mass[lo]
         th = f * thickness[lo]
         tot = 0.0
@@ -579,7 +625,7 @@ def _spread_kernel(losers, survivors, nbrs, pos, plate_id, kind, mass, thickness
         density[su] = mass[su] / thickness[su]
 
 
-def spread_collisions(seg: Segments, tree: cKDTree, losers: np.ndarray, survivors: np.ndarray, alive: np.ndarray, sigma: float, knn: int = 12, accretion: float = 1.0) -> None:
+def spread_collisions(seg: Segments, tree: cKDTree, losers: np.ndarray, survivors: np.ndarray, alive: np.ndarray, sigma: float, knn: int = 12, accretion: float = 1.0, shortening: float = 0.0) -> None:
     """Belt formation: the mass and thickness a survivor just received from
     a subducted segment are shared, with Gaussian weights ``exp(-d²/2σ²)``,
     among the survivor and its ``knn`` nearest *live, same-plate, same-kind* segments
@@ -592,7 +638,7 @@ def spread_collisions(seg: Segments, tree: cKDTree, losers: np.ndarray, survivor
     kk = min(int(knn), tree.n)
     _, nb = tree.query(seg.pos[survivors], k=kk, workers=-1)
     nb = np.atleast_2d(nb).reshape(survivors.size, kk).astype(np.int64)
-    _spread_kernel(np.ascontiguousarray(losers), np.ascontiguousarray(survivors), np.ascontiguousarray(nb), seg.pos, seg.plate_id, seg.kind, seg.mass, seg.thickness, seg.density, alive, 1.0 / (2.0 * float(sigma) ** 2), float(accretion))
+    _spread_kernel(np.ascontiguousarray(losers), np.ascontiguousarray(survivors), np.ascontiguousarray(nb), seg.pos, seg.plate_id, seg.kind, seg.mass, seg.thickness, seg.density, alive, 1.0 / (2.0 * float(sigma) ** 2), float(accretion), float(shortening))
 
 
 @njit(cache=True)
