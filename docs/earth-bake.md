@@ -5,7 +5,8 @@
 > kept rotating as one body after a trench cut them in two, inland basins
 > classified as ocean, and lakes drawn as ground. See
 > **docs/plates-rifts-and-water.md**; the tectonics numbers below predate
-> those fixes.
+> those fixes.  Since re-measured on a full bake of the fixed code —
+> **the tectonics fixes through erosion**, at the end of this document.
 
 One end-to-end run of the shipped `earth` preset — 1024² per face, 9773 m
 cells, 1500 tectonic steps, 800 erosion iterations — measured at every
@@ -245,8 +246,136 @@ band up to 5 km is within two points of Earth. The open defect is unchanged:
 too much ground above 5 km and a 12.9 km summit. Erosion applies tectonic
 uplift with no ceiling.
 
+> **Retracted.** That agreement is an artifact, of the same kind as the
+> glacial one above: this world's tectonics handed erosion a 1–2 km band
+> nearly twice too full, and the fluvial pass planed it down to something
+> near Earth's. On the fixed tectonics it plants the same landscape at
+> half Earth's land median. See **the tectonics fixes through erosion**
+> at the end of this document.
+
 **Measure the eroded surface, not bedrock.** `scripts/hypsometry.py
 <world>` reads `coarse/bedrock`, the *tectonics* output. Run on this world
 it reports a 6604 m maximum and 59 % in the 0–1 km band, which is the
 bedrock before any erosion. Use `--checkpoints` for the erosion result, or
 the viewer's per-frame stats.
+
+## The tectonics fixes through erosion (`worlds/earth-v2`)
+
+`worlds/earth-v2` is the `earth` preset baked from scratch on the fixed
+tectonics of docs/plates-rifts-and-water.md — rifts that open instead of
+shearing, trench polarity from crust age, and `split_disconnected` so a
+plate cut in two stops rotating as one body. Same seed, same preset, and
+the same tectonics and climate hashes as `worlds/earth-v3`, so it differs
+from `earth-full` only by those fixes. This is the comparison
+docs/plates-rifts-and-water.md asked for and could not make.
+
+Measured with `scripts/hypsometry.py --checkpoints`, on the **eroded
+surface** at iteration 800.
+
+| band | Earth | earth-full tect | earth-full @800 | **earth-v2 tect** | **earth-v2 @800** |
+|---|---|---|---|---|---|
+| 0–1 km | 71.6 | 59.0 | 70.3 | 76.7 | **82.2** |
+| 1–2 | 15.4 | 26.2 | 16.6 | 8.7 | **7.8** |
+| 2–3 | 7.5 | 9.5 | 5.7 | 7.4 | 4.1 |
+| 3–4 | 3.8 | 3.3 | 3.7 | 4.2 | 2.4 |
+| 4–5 | 1.7 | 1.0 | 1.9 | 1.9 | 1.3 |
+| >5 | 0.3 | 0.9 | 1.8 | 1.1 | **2.2** |
+| above 2 km | 13.3 | 14.7 | 13.1 | 14.6 | 10.0 |
+| land % of globe | 29.2 | 27 | 30 | 31 | 30 |
+| land mean | 840 m | 993 | 946 | 870 | 685 |
+| land median | ~350 m | 723 | 474 | 363 | **197** |
+| max | 8849 m | 6604 | 12 915 | **8783** | 12 769 |
+| ocean median | −3700 m | −2747 | −2777 | −3100 | **−3571** |
+| ±50 m of sea level | 1–2 % | 1 | 4 | 1 | 5 |
+
+### The ocean is fixed, or nearly
+
+This is the large result and it was not the one being looked for.
+docs/crust-audit.md left the ocean too shallow and traced it to the −4018 m
+pin on fully subsided sea floor, with only 22.8 % of the floor having got
+that far. Plates that stop ploughing through each other subside properly:
+
+| | earth-full | **earth-v2** | Earth |
+|---|---|---|---|
+| ocean, share of globe | 69.9 % | 70.4 % | 70.8 % |
+| ocean median | −2777 m | **−3571 m** | −3700 m |
+| sea floor below −3500 m | 24.0 % | **53.0 %** | ~62 % |
+| sea floor below −4000 m | 0.3 % | 5.5 % | ~52 % |
+| 5th percentile | −3807 m | −4006 m | |
+
+The median moves 794 m and more than doubles the share of abyssal floor.
+What is left is the pin itself: 5.5 % below −4000 m against Earth's ~52 %,
+because `(h_ocean − sea_level) × height_scale_m` cannot produce a deeper
+plain. The ocean-depth question is now a question about that one constant
+and nothing else.
+
+### The land got worse, and that is the point
+
+`earth-full`'s land hypsometry looked good — 70.3 % in the 0–1 km band
+against Earth's 71.6, every band up to 5 km within two points. On
+`earth-v2` the 0–1 km band is **82.2 %** and the 1–2 km band **7.8 %**
+against Earth's 15.4, and the land median is **197 m against ~350**.
+
+> **Retracted.** "This reproduces the iteration-800 fork ... land above
+> 2 km is 13.1 % against Earth's 13.3 %, and every band up to 5 km is
+> within two points of Earth" above is an artifact of the same kind the
+> glacial reading was. `earth-full`'s tectonics handed erosion a 1–2 km
+> band of 26.2 % against Earth's 15.4 and a land median of 723 m against
+> ~350 — nearly twice too high — and the fluvial pass planed it down to
+> 16.6 % and 474 m, which happened to land near Earth. The fixed
+> tectonics hands over 8.7 % and 363 m, which is *already* Earth's land
+> median, and the same erosion planes it to 7.8 % and 197 m. **Erosion
+> removes 46 % of the land median on `earth-v2` against 35 % on
+> `earth-full`, and neither is right; the first one was hidden.**
+
+That is the fluvial/uplift balance docs/missing-relief.md named as "the
+defect underneath" once the glacial units were corrected. There is now
+nothing in front of it.
+
+### `orogen_decay` holds, and so do the glacial parameters
+
+**`orogen_decay = 0.008` holds, and holds better than when it was chosen.**
+It was set against the old numbers on the argument that the pre-erosion
+high ground should sit on Earth's post-erosion curve. On `earth-v2` it
+hands over **14.6 % of land above 2 km against Earth's 13.3**, and a
+maximum of **8783 m against Earth's 8849** — where before it handed over
+14.7 % and 6604 m. Both halves of the argument are now satisfied before
+erosion touches the world, and the post-erosion deficit above 2 km (10.0 %)
+is erosion removing high ground, not tectonics failing to build it.
+docs/missing-relief.md already swept 0.004 and 0.002 and refuted the knob;
+nothing here reopens it.
+
+**The glacial parameters hold too, and for a different reason than before.**
+From the frame trajectory (`render.erosion_frame_every = 10`, a 4×4 block
+mean, so a trend and not a measurement), the glacial phase on `earth-v2`:
+
+| iteration | 500 | 600 | 700 | 800 |
+|---|---|---|---|---|
+| land median | 173 | 173 | 187 | ~197 |
+| ±50 m of sea level | 5.77 % | 5.72 % | 4.58 % | ~4.6 % |
+| max | 11 288 | 11 736 | 12 224 | 12 769 |
+
+With `glacial_rate` and `glacial_max` in metres the pass no longer takes
+2263 m off the highest point in fifty iterations — the maximum climbs
+straight through it — and what it does instead is push the median back up
+and pull the ±50 m band back down, i.e. it is now a modest counterweight to
+the fluvial over-planing rather than the thing doing the damage. Turning it
+down would make the land worse, not better. Leave it.
+
+### What to fix next, in order
+
+1. **The fluvial/uplift balance.** The land median is half Earth's and the
+   1–2 km band half Earth's, with the compensating error gone. This is the
+   one that moves the headline table.
+2. **The ceiling on uplift.** 2.2 % of land above 5 km against Earth's 0.3,
+   and a 12 769 m summit against 8849. Erosion applies tectonic uplift with
+   no ceiling, and the fixed tectonics did not change that: 12 915 →
+   12 769 m.
+3. **The −4018 m pin** on fully subsided sea floor, now that it is the only
+   thing left between this ocean and Earth's.
+
+Also worth recording from the same run: 154,474 closed-basin cells below
+sea level against `earth-full`'s 91,583, and 437,090 coarse lake cells
+against 204,806 — the fixed tectonics traps a great deal more water inland,
+which is what made the two questions in docs/erosion-and-the-sea.md worth
+answering at all.
