@@ -173,8 +173,14 @@ uniform sampler2D uWT;         // water mask: 0 land, 1 lake, 2 ocean (final fra
 uniform vec3 uWGeo;
 uniform int uWCh, uHasWater;
 uniform int uLKind;            // 0 linear, 1 category
-uniform int uCmap;             // 0 thermal, 1 rain, 2 plates, 3 biome, 4 viridis, 5 sediment
+uniform int uCmap;             // 0 thermal, 1 rain, 2 plates, 3 biome, 4 viridis, 5 sediment, 6 satellite, 7 order
 uniform vec3 uBiome[32];
+uniform vec3 uSat[32];         // satellite ground colour per biome code (ice, rock classes)
+uniform vec2 uTempRange;       // temperature byte -> degC (lo, hi), for the satellite layer
+uniform vec2 uPrecipRange;     // precip byte -> x land mean (log lo, hi)
+uniform sampler2D uOT;         // Strahler order (final frame only): colours the river overlay
+uniform vec3 uOGeo;
+uniform int uOCh, uHasOrder;
 uniform int uRivers;           // 1 when frame a carries discharge in B
 uniform float uRiverMin;       // byte threshold
 uniform int uGrid, uCoast;
@@ -243,6 +249,39 @@ vec3 elevColor(float h, float w){
   float t = clamp((h - uSea) / max(uLandTop - uSea, 1.0), 0.0, 1.0);
   return ramp(pow(t, 0.75), vec3(0.30,0.50,0.28), vec3(0.58,0.64,0.38), vec3(0.78,0.70,0.48), vec3(0.58,0.45,0.34), vec3(0.96,0.96,0.97));
 }
+// Satellite: the biome's ground colour, going to bare rock and then snow
+// with height whatever the climate class says, under the same relief
+// shading as everything else.  Water is decided by the water mask, never
+// by the class, so a lake reads as a lake even where the class is wetland.
+vec3 satColor(float b, float h, vec3 p){
+  // ground colour from the climate itself (the biome texture's sister
+  // channels), so it grades continuously instead of stepping at class edges
+  float tb = byteLinear(uLT, uLGeo, 0, p) / 255.0;
+  float pb = byteLinear(uLT, uLGeo, 1, p) / 255.0;
+  float T = uTempRange.x + tb * (uTempRange.y - uTempRange.x);
+  float lw = log(uPrecipRange.x) + pb * (log(uPrecipRange.y) - log(uPrecipRange.x));   // ln(precip / land mean)
+  float w = clamp((lw - log(0.15)) / (log(4.0) - log(0.15)), 0.0, 1.0);
+  vec3 c = ramp(w, vec3(0.80, 0.72, 0.52), vec3(0.66, 0.62, 0.38), vec3(0.42, 0.52, 0.28), vec3(0.24, 0.42, 0.22), vec3(0.13, 0.33, 0.17));
+  c = mix(c, vec3(0.60, 0.56, 0.46), smoothstep(6.0, -8.0, T));      // tundra
+  c = mix(c, vec3(0.94, 0.95, 0.97), smoothstep(-10.0, -22.0, T));   // permanent snow
+  int cls = int(b);
+  if (cls == 1) c = uSat[1];                                          // ice sheet
+  if (cls == 12 || cls == 13) c = mix(c, uSat[cls], 0.7);             // alpine, cliff: bare rock
+  float t = clamp((h - uSea) / max(uLandTop - uSea, 1.0), 0.0, 1.0);
+  c = mix(c, vec3(0.56, 0.50, 0.44), smoothstep(0.45, 0.85, t));
+  c = mix(c, vec3(0.95, 0.95, 0.96), smoothstep(0.82, 1.0, t));
+  return c;
+}
+vec3 satWater(float h, float w){
+  if (w > 0.5 && w < 1.5) return vec3(0.22, 0.42, 0.72);      // lake
+  float d = clamp((uSea - h) / max(uSea - uOceanBottom, 1.0), 0.0, 1.0);
+  vec3 shelf = vec3(0.30, 0.60, 0.68), deep = vec3(0.02, 0.07, 0.22);
+  return mix(shelf, deep, pow(d, 0.45));
+}
+vec3 orderColor(float o){       // Strahler 1 (pale) .. 6+ (deep blue)
+  float t = clamp((o - 1.0) / 5.0, 0.0, 1.0);
+  return mix(vec3(0.55, 0.78, 0.98), vec3(0.03, 0.16, 0.55), t);
+}
 vec3 thermal(float t){ return ramp(t, vec3(0.19,0.07,0.55), vec3(0.16,0.44,0.90), vec3(0.94,0.94,0.90), vec3(0.95,0.55,0.18), vec3(0.62,0.05,0.10)); }
 vec3 rain(float t){ return ramp(t, vec3(0.93,0.87,0.72), vec3(0.72,0.80,0.45), vec3(0.30,0.65,0.40), vec3(0.15,0.45,0.70), vec3(0.10,0.15,0.50)); }
 vec3 viridis(float t){ return ramp(t, vec3(0.27,0.00,0.33), vec3(0.23,0.32,0.55), vec3(0.13,0.57,0.55), vec3(0.37,0.79,0.38), vec3(0.99,0.91,0.14)); }
@@ -296,19 +335,26 @@ void main(){
   } else {
     float b = uLKind == 1 ? byteNearest(uLT, uLGeo, uLCh, p) : byteLinear(uLT, uLGeo, uLCh, p);
     if (uLKind == 1) {
-      col = uCmap == 3 ? uBiome[int(b) & 31] : (b < 0.5 ? vec3(0.12) : hashColor(b));
+      if (uCmap == 6)      col = wet ? satWater(h, wcode) : satColor(b, h, p);
+      else if (uCmap == 7) col = b < 0.5 ? (wet ? vec3(0.30, 0.34, 0.40) : vec3(0.82, 0.80, 0.76)) : orderColor(b);
+      else col = uCmap == 3 ? uBiome[int(b) & 31] : (b < 0.5 ? vec3(0.12) : hashColor(b));
     } else {
       float t = b / 255.0;
       col = uCmap == 0 ? thermal(t) : uCmap == 1 ? rain(t) : viridis(t);
     }
-    if (wet && uCmap != 3 && uCmap != 0 && uCmap != 1) col *= 0.75;
+    if (wet && uCmap != 3 && uCmap != 0 && uCmap != 1 && uCmap != 6 && uCmap != 7) col *= 0.75;
   }
   col *= mix(1.0, shade, uShadeAmt);
 
   if (uRivers == 1 && !wet) {
     float b = byteLinear(uT0a, uGeoA, 2, p);
     float w = smoothstep(uRiverMin - 6.0, uRiverMin + 6.0, b);
-    col = mix(col, vec3(0.16, 0.40, 0.90), w * clamp(0.45 + (b - uRiverMin) / 60.0, 0.45, 0.9));
+    vec3 rc = vec3(0.16, 0.40, 0.90);
+    if (uHasOrder == 1) {
+      float o = byteNearest(uOT, uOGeo, uOCh, p);
+      if (o > 0.5) rc = orderColor(o);
+    }
+    col = mix(col, rc, w * clamp(0.45 + (b - uRiverMin) / 60.0, 0.45, 0.9));
   }
   if (uCoast == 1) {
     float w = fwidth(h);
@@ -445,14 +491,15 @@ readHash();
 // frame.layers:  {name: [texIndex, channel]}
 // ---------------------------------------------------------------------------
 const CHANNELS = Object.assign({ elevation: { label: "Elevation", unit: "m" } }, META.channels || {});
-const CMAPS = { thermal: 0, rain: 1, plates: 2, biome: 3, viridis: 4 };
+const CMAPS = { thermal: 0, rain: 1, plates: 2, biome: 3, viridis: 4, sediment: 5, satellite: 6, order: 7 };
 const layerNames = ["elevation", ...Object.keys(META.channels || {}).filter(k => k !== "discharge_overlay")];
 const sel = $("layer");
 layerNames.forEach((k, idx) => { const o = document.createElement("option"); o.value = k;
   o.textContent = (idx < 9 ? (idx + 1) + "  " : "") + CHANNELS[k].label; sel.appendChild(o); });
 if (!layerNames.includes(state.layer)) state.layer = "elevation";
-const biome = new Float32Array(96);
+const biome = new Float32Array(96), sat = new Float32Array(96);
 (META.biome_palette || []).forEach((c, i) => { if (i < 32) { biome[3*i] = c[0]/255; biome[3*i+1] = c[1]/255; biome[3*i+2] = c[2]/255; } });
+(META.satellite_palette || []).forEach((c, i) => { if (i < 32) { sat[3*i] = c[0]/255; sat[3*i+1] = c[1]/255; sat[3*i+2] = c[2]/255; } });
 
 // ---------------------------------------------------------------------------
 // Rendering
@@ -513,7 +560,9 @@ function draw() {
   gl.uniform1f(U.uLandTop, META.land_top_m); gl.uniform1f(U.uOceanBottom, META.ocean_bottom_m);
   gl.uniform1f(U.uExag, state.exag); gl.uniform1f(U.uShadeAmt, state.exag > 0 ? 0.85 : 0.0);
   gl.uniform1f(U.uTexelRad, HALF_PI / FA.res);
-  gl.uniform3fv(U.uBiome, biome);
+  gl.uniform3fv(U.uBiome, biome); gl.uniform3fv(U.uSat, sat);
+  const tch = CHANNELS.temperature || {}, pch = CHANNELS.precip || {};
+  gl.uniform2f(U.uTempRange, tch.lo ?? -45, tch.hi ?? 35); gl.uniform2f(U.uPrecipRange, pch.lo ?? 0.02, pch.hi ?? 5);
   const L = (FA.layers || {})[state.layer];
   if (state.layer !== "elevation" && L) {
     const ch = CHANNELS[state.layer];
@@ -533,9 +582,14 @@ function draw() {
   gl.uniform3fv(U.uWGeo, geoOf(FA, wat ? wat[0] : 0));
   gl.uniform1i(U.uWCh, wat ? wat[1] : 0);
   gl.uniform1i(U.uHasWater, wat ? 1 : 0);
-  const riv = FA.layers && FA.layers.discharge;
-  gl.uniform1i(U.uRivers, state.rivers && riv && riv[0] === 0 && riv[1] === 2 ? 1 : 0);
-  gl.uniform1f(U.uRiverMin, META.river_byte_min ?? 150);
+  const rb = FA.river_min_byte ?? META.river_byte_min;
+  gl.uniform1i(U.uRivers, state.rivers && rb != null ? 1 : 0);
+  gl.uniform1f(U.uRiverMin, rb ?? 255);
+  const ord = (FA.layers || {}).order;
+  bindTex(5, tex[a][ord ? ord[0] : 0], "uOT");
+  gl.uniform3fv(U.uOGeo, geoOf(FA, ord ? ord[0] : 0));
+  gl.uniform1i(U.uOCh, ord ? ord[1] : 0);
+  gl.uniform1i(U.uHasOrder, ord ? 1 : 0);
   gl.uniform1i(U.uGrid, state.grid ? 1 : 0); gl.uniform1i(U.uCoast, state.coast ? 1 : 0);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   updateLabels(a);
@@ -627,12 +681,12 @@ function readout(px, py) {
   const hq = d0[o0] * 256 + d0[o0 + 1];
   rows.push(["elevation", fmtM(f.h0 + hq / 65535 * (f.h1 - f.h0))]);
   for (const [name, [k, c]] of Object.entries(f.layers || {})) {
-    const ch = CHANNELS[name]; if (!ch) continue;
+    const ch = CHANNELS[name]; if (!ch || name === "satellite") continue;
     const [x, y] = texel(f, k, p), b = pix[k].d[4 * (y * pix[k].w + x) + c];
     let v = decodeByte(ch, b);
     if (ch.kind === "category") v = ch.names ? (ch.names[b] ?? b) : (b === 0 ? "—" : b - (ch.offset ?? 0));
     else v = fmtVal(ch, v) + (ch.unit ? " " + ch.unit : "");
-    if (name === "discharge" && b === 0) v = "—";
+    if ((name === "discharge" || name === "flow") && b === 0) v = "—";
     rows.push([ch.label.toLowerCase(), v]);
   }
   el.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><span>${v}</span></div>`).join("");

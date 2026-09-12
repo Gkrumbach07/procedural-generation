@@ -15,8 +15,13 @@ face ``f`` at column ``f % 3``, row ``f // 3``, with a one-cell border taken
 from the neighbouring face so bilinear filtering is seamless.  Pixel
 ``(x, y) = (1 + i, 1 + j)`` of a tile is cell ``(i, j)``.  Texture 0 is
 ``R, G`` = 16-bit height over the frame's ``[h0, h1]`` metres and ``B`` = an
-overlay byte (plate id in tectonics frames, log discharge afterwards); the
-final frame adds climate/biome and plate/sediment/crust textures.  The
+overlay byte (plate id in tectonics frames, log erosion discharge in erosion
+frames, log hydro flow accumulation on the final frame -- so the rivers
+drawn there are the reaches of ``graph/drainage.json`` and agree with the
+lakes by construction); the final frame adds climate/biome,
+plate/sediment/crust and water/river-order/basin textures, and a
+``satellite`` layer that colours the ground continuously from the climate
+channels.  The
 shader (``viewer.html``) maps every pixel to a direction on the sphere and
 then to ``(face, u, v)`` exactly as :mod:`globe.cubesphere` does, so no
 reprojection happens anywhere.  Latitude has its pole on +Z, as in
@@ -170,6 +175,27 @@ def _load_faces(root: Path, name: str, sub: str = "coarse"):
     return np.stack([np.load(p) for p in paths])
 
 
+def order_raster(root: Path, N: int) -> np.ndarray | None:
+    """Strahler order per cell (uint8, 0 = no channel), painted from the
+    reaches in ``graph/drainage.json`` -- the same graph the lakes' inflow
+    and outflow nodes live in, so what is drawn as a river is what hydro
+    routed, not the erosion stage's particle discharge."""
+    path = root / "graph" / "drainage.json"
+    if not path.exists():
+        return None
+    g = json.loads(path.read_text())
+    out = np.zeros((6, N, N), np.uint8)
+    for e in g.get("edges", []):
+        cells = np.asarray(e.get("cells", ()), np.int64)
+        if cells.size == 0:
+            continue
+        o = int(e.get("order", 1))
+        f, i, j = cells[:, 0], cells[:, 1], cells[:, 2]
+        cur = out[f, i, j]
+        out[f, i, j] = np.maximum(cur, min(o, 255))
+    return out
+
+
 #: ``water`` channel codes.  Nothing else in the viewer knows what is water:
 #: the timeline frames are pre-hydro, so there the shader still reads the sea
 #: off the height, and only the final frame carries this.
@@ -271,10 +297,14 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
     ws = _load_faces(root, "water_surface")
     water = water_code(surf, _load_faces(root, "flow_dir"), ws,
                        float((manifest.get("params", {}).get("hydro", {}) or {}).get("lake_min_depth", 0.5)))
+    basin = _load_faces(root, "basin_id")
     frames.append(_Frame(
         "final", N, label, ds(surf),
         water=ds(water, "nearest"),
         discharge=ds(_load_faces(root, "discharge"), "max"),
+        flow=ds(_load_faces(root, "flow_acc"), "max"),
+        order=ds(order_raster(root, N), "max"),
+        basin=ds(None if basin is None else (basin.astype(np.int64) + 1).clip(0), "nearest"),
         temperature=ds(_load_faces(root, "temperature")),
         precip=ds(_load_faces(root, "precip")),
         biome=ds(_load_faces(root, "biome"), "nearest"),
@@ -295,10 +325,30 @@ def _pctl(a, q, default):
     return float(np.percentile(a, q)) if a.size else default
 
 
-def channel_specs(final: _Frame) -> dict:
-    """Byte encodings, fixed across the timeline so frames compare."""
+def channel_specs(final: _Frame, river_threshold: float | None = None) -> dict:
+    """Byte encodings, fixed across the timeline so frames compare.
+    ``river_threshold`` is hydro's ``river_threshold_volume``: a cell whose
+    flow accumulation exceeds it is a channel in the drainage graph, so the
+    final frame's rivers are drawn at exactly that line."""
     specs = {}
     land = final.height >= 0
+    if "biome" in final.ch:
+        from ..derive.biomes import NAMES
+        specs["satellite"] = {"label": "Satellite", "kind": "category", "cmap": "satellite",
+                              "names": [n.replace("_", " ") for n in NAMES]}
+    if "flow" in final.ch:
+        q = final.ch["flow"].astype(np.float64)
+        ql = q[land & (q > 0)]
+        lo = max(_pctl(ql, 50, 1.0), 1e-6)
+        hi = max(float(q.max()), lo * 10)
+        rmin = float(river_threshold) if river_threshold else _pctl(ql, 97, lo * 4)
+        specs["flow"] = {"label": "Flow accumulation", "kind": "log", "lo": lo, "hi": hi, "unit": "", "cmap": "viridis",
+                         "river_min": max(rmin, lo * 1.001)}
+    if "order" in final.ch:
+        specs["order"] = {"label": "River order", "kind": "category", "cmap": "order",
+                          "names": ["—"] + [str(k) for k in range(1, 256)]}
+    if "basin" in final.ch:
+        specs["basin"] = {"label": "Basins", "kind": "category", "cmap": "plates", "offset": 1}
     if "discharge" in final.ch:
         q = final.ch["discharge"].astype(np.float64)
         ql = q[land & (q > 0)]
@@ -329,8 +379,9 @@ def channel_specs(final: _Frame) -> dict:
 
 def _byte(name: str, a: np.ndarray, specs: dict) -> np.ndarray:
     s = specs[name]
-    if name == "plate":
-        return (np.asarray(a, np.int64) % 256).astype(np.uint8)
+    if name in ("plate", "basin"):
+        b = np.asarray(a, np.int64)
+        return np.where(b > 0, 1 + (b - 1) % 255, 0).astype(np.uint8)
     if s["kind"] == "category":
         return np.clip(np.asarray(a, np.int64), 0, 255).astype(np.uint8)
     if s["kind"] == "log":
@@ -340,17 +391,20 @@ def _byte(name: str, a: np.ndarray, specs: dict) -> np.ndarray:
 
 # textures beyond texture 0 on the final frame: (R, G, B) channel names
 # (short tuples are padded with zero channels)
-FINAL_TEXTURES = (("temperature", "precip", "biome"), ("plate", "sediment", "crust"), ("water",))
+FINAL_TEXTURES = (("temperature", "precip", "biome"), ("plate", "sediment", "crust"), ("water", "order", "basin"))
 
 
 def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
     """-> ([atlas images], frame meta)."""
     hi, lo, h0, h1 = encode_height(pad_faces(fr.height))
     zero = np.zeros_like(hi)
-    over = "plate" if fr.stage == "tectonics" else "discharge"
+    over = "plate" if fr.stage == "tectonics" else ("flow" if "flow" in fr.ch and "flow" in specs else "discharge")
     b = pad_faces(_byte(over, fr.ch[over], specs)) if over in fr.ch and over in specs else zero
     images = [atlas([hi, lo, b])]
     layers = {over: [0, 2]} if over in fr.ch and over in specs else {}
+    river_min_byte = None
+    if over in layers and "river_min" in specs[over]:
+        river_min_byte = int(log_byte(np.array([specs[over]["river_min"]]), specs[over]["lo"], specs[over]["hi"])[0])
     if fr.stage == "final":
         for names in FINAL_TEXTURES:
             present = [n for n in names if n in fr.ch and n in specs]
@@ -363,8 +417,12 @@ def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
             for c, n in enumerate(names):
                 if n in present:
                     layers[n] = [k, c]
+        if "biome" in layers and "satellite" in specs:
+            layers["satellite"] = layers["biome"]   # same texture, coloured for terrain rather than for classes
     meta = {"stage": fr.stage, "key": int(fr.key), "label": fr.label, "res": fr.res, "pad": PAD,
             "h0": h0, "h1": h1, "layers": layers, "stats": frame_stats(fr.height)}
+    if river_min_byte is not None:
+        meta["river_min_byte"] = river_min_byte
     return images, meta
 
 
@@ -382,7 +440,8 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
     frames, manifest = collect_frames(root, final_res or _render_param(manifest_of(root), "viewer_final_res", 1024), log,
                                       frame_res=frame_res, max_frames=max_frames)
     final = frames[-1]
-    specs = channel_specs(final)
+    hydro_info = (manifest.get("stages", {}).get("hydro", {}) or {}).get("info", {}) or {}
+    specs = channel_specs(final, hydro_info.get("river_threshold_volume"))
     land_final = final.height[final.height >= 0]
     land_top = max(_pctl(land_final, 99.5, 1000.0), 200.0)
     ocean_bottom = min(_pctl(final.height[final.height < 0], 1.0, -4000.0), -200.0)
@@ -403,15 +462,14 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
             scripts.append(payload)
         metas.append(meta)
 
-    disc = specs.get("discharge")
     meta = {
         "world": root.resolve().name,
         "N_c": manifest.get("N_c"), "cell_size_m": manifest.get("cell_size_m"), "seed": manifest.get("seed"),
         "R_planet_m": float(manifest.get("R_planet") or manifest.get("N_c", 1024) * manifest.get("cell_size_m", 9773.0) * 2 / math.pi),
         "sea_level_m": 0.0, "land_top_m": land_top, "ocean_bottom_m": ocean_bottom, "default_exag": default_exag,
         "channels": specs,
-        "river_byte_min": int(log_byte(np.array([disc["river_min"]]), disc["lo"], disc["hi"])[0]) if disc else 255,
         "biome_palette": _biome_palette() if "biome" in specs else [],
+        "satellite_palette": SATELLITE_PALETTE if "satellite" in specs else [],
         "stage_seconds": {s: round(v.get("seconds", 0.0), 1) for s, v in manifest.get("stages", {}).items()},
         "exported": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "final_index": len(frames) - 1,
@@ -447,6 +505,30 @@ def _render_param(manifest: dict, key: str, default):
 def _biome_palette() -> list:
     from ..derive.biomes import PALETTE
     return PALETTE.astype(int).tolist()
+
+
+#: Ground colour per biome code (derive.biomes order) for the satellite
+#: layer: what the class looks like from orbit rather than a legend colour.
+#: Water classes are never used -- the water mask decides those.
+SATELLITE_PALETTE = [
+    [20, 50, 110],     # ocean (unused)
+    [236, 240, 244],   # ice
+    [146, 138, 112],   # tundra
+    [46, 74, 46],      # boreal forest
+    [142, 150, 84],    # temperate grassland
+    [58, 96, 48],      # temperate forest
+    [36, 82, 46],      # temperate rainforest
+    [214, 190, 142],   # desert
+    [150, 140, 92],    # shrubland
+    [176, 160, 88],    # savanna
+    [76, 116, 52],     # tropical seasonal forest
+    [30, 86, 36],      # tropical rainforest
+    [136, 126, 112],   # alpine
+    [110, 100, 90],    # cliff
+    [72, 110, 58],     # riparian
+    [88, 116, 88],     # wetland
+    [60, 110, 190],    # lake (unused)
+]
 
 
 # --------------------------------------------------------------------------
@@ -538,13 +620,11 @@ def export_extras(frames: list[_Frame], specs: dict, meta: dict, out: Path, fmts
         Image.fromarray(q).save(out / "equirect_height16.png")
         (out / "equirect_height16.json").write_text(json.dumps({"h0_m": h0, "h1_m": h1, "encoding": "h0 + v/65535*(h1-h0)",
                                                                  "projection": "equirectangular, pole +Z, lon 0 = +X, north up"}))
-        river = None
-        if "discharge" in final.ch:
-            river = equirect(pad_faces(final.ch["discharge"].astype(np.float32)), W, nearest=True) > specs["discharge"]["river_min"]
+        river = _river_mask(final, specs, W)
         wat = equirect(pad_faces(final.ch["water"]), W, nearest=True) if "water" in final.ch else None
         Image.fromarray(relief(h, R, top, bot, river=river, water=wat)).save(out / "equirect_relief.png")
         for name, s in specs.items():
-            if name == "discharge":
+            if name in ("discharge", "flow", "satellite"):
                 continue
             b = equirect(pad_faces(_byte(name, final.ch[name], specs)), W, nearest=True)
             if s["kind"] == "category":
@@ -557,18 +637,24 @@ def export_extras(frames: list[_Frame], specs: dict, meta: dict, out: Path, fmts
     if "anim" in fmts:
         W = 1024
         imgs = []
-        disc = specs.get("discharge")
         for fr in frames:
             h = equirect(pad_faces(fr.height), W)
-            river = None
-            if disc and "discharge" in fr.ch:
-                river = equirect(pad_faces(fr.ch["discharge"].astype(np.float32)), W, nearest=True) > disc["river_min"]
+            river = _river_mask(fr, specs, W)
             wat = equirect(pad_faces(fr.ch["water"]), W, nearest=True) if "water" in fr.ch else None
             imgs.append(Image.fromarray(relief(h, R, top, bot, river=river, water=wat)))
         dur = [100] * (len(imgs) - 1) + [2000]
         imgs[0].save(out / "timeline.webp", save_all=True, append_images=imgs[1:], duration=dur, loop=0, quality=80, method=4)
         log(f"[viewer] timeline.webp ({len(imgs)} frames) -> {out}")
     log(f"[viewer] extras in {time.time() - t0:.1f}s")
+
+
+def _river_mask(fr: _Frame, specs: dict, W: int):
+    """Equirect boolean river mask from the frame's overlay channel: hydro's
+    flow accumulation on the final frame, erosion discharge before it."""
+    for name in ("flow", "discharge"):
+        if name in fr.ch and name in specs and "river_min" in specs[name]:
+            return equirect(pad_faces(fr.ch[name].astype(np.float32)), W, nearest=True) > specs[name]["river_min"]
+    return None
 
 
 def _hash_rgb(b: np.ndarray) -> np.ndarray:
