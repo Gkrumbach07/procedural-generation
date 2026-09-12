@@ -188,7 +188,11 @@ ocean) built from `flow_dir` and `water_surface`, and the shader colours
 from it; the timeline frames, which are captured before hydro has run, still
 fall back to the height sign because there is nothing else to use.
 
-## What this does not fix
+## What this does not fix -- and what came of it
+
+All three have since been taken up.  The first two are in
+**docs/erosion-and-the-sea.md**, the third at the end of
+**docs/earth-bake.md**.
 
 * **Erosion still believes the sign.** `erosion/particle.py` treats any cell
   with `h < 0` as sea (`in_sea`), so a closed basin is still a marine
@@ -197,11 +201,39 @@ fall back to the height sign because there is nothing else to use.
   now right everywhere downstream of erosion; the physics inside it is not.
   Fixing that means carrying the mask into the particle kernel and re-running
   erosion (~73 min at Earth scale).
+
+  > **Retracted, and then fixed.** The -165 m against -433 m is not
+  > evidence of anything: the **median sediment in that basin is 0 m**, and
+  > the 263 m between the floor and the bedrock is the erosion stage's
+  > `height` rising under uplift, isostasy and the datum hold -- the open
+  > ocean's median `height - bedrock` is +156 m over the same run.  The
+  > defect was real and the number did not show it.  What does: closed
+  > basins hold 2.33 % of the world's sediment on 1.36 % of its area,
+  > 1.71x, the most concentrated sink on the planet.  The mask is now in
+  > the kernel (`maps.refresh_base`), and over a full re-bake it keeps
+  > 565 Mm of sediment that used to be deleted and doubles the mean
+  > sediment on the ocean floor.  See docs/erosion-and-the-sea.md.
+
 * **Lake level is the spill point.** There is no evaporation-limited level,
   so an arid closed basin fills to its rim and overflows instead of settling
   below it.  That is exactly why the Caspian is 28 m *below* sea level, and
   it is the next thing to model if these basins are to read as endorheic
   seas rather than as very large lakes.
+
+  > **Done** (`hydro/balance.py`), with `lake_evap` derived rather than
+  > tuned.  Note for anyone reading the lake counts in section 4 below: the
+  > 204,806 there is the spill-point fill, and the balance takes it to
+  > 169,902 on the same erosion output.
+
 * **The tectonics fixes have not been through erosion.** Everything in 1-3
   was measured on tectonics-only runs; a full re-bake is needed before the
   hypsometry table in docs/earth-bake.md can be compared against.
+
+  > **Done** (`worlds/earth-v2`), and it cut both ways.  The ocean median
+  > goes -2777 -> -3571 m against Earth's -3700, and the share of sea floor
+  > below -3500 m 24.0 -> 53.0 %: the plate-splitting fix very nearly closed
+  > the ocean-depth gap.  The land got *worse* -- land median 474 -> 197 m
+  > against Earth's ~350 -- because `earth-full`'s good-looking hypsometry
+  > was a compensating error, tectonics too high in the 1-2 km band and
+  > erosion over-planing it back.  `orogen_decay` and the glacial parameters
+  > both hold.  See docs/earth-bake.md.
