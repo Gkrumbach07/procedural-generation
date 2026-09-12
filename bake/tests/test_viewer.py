@@ -119,3 +119,49 @@ def test_resumed_erosion_drops_frames_past_the_resume_point(tmp_path):
     after = [k for k, _, _ in vf.list_frames(tmp_path / "w", "erosion")]
     assert 9999 in kept and 9999 not in after
     assert after == [k for k in kept if k <= p.erosion.iterations]
+
+
+# --------------------------------------------------------------------------
+# the page has to parse (viewer.html)
+# --------------------------------------------------------------------------
+def _template_literals(js: str):
+    """Every backtick-delimited run in ``js``, as (start, end) offsets, by a
+    plain left-to-right scan that honours backslash escapes.  Crude, but it
+    is exactly the scan a JS parser does for a template literal with no
+    ``${}`` in it, which is what the shader sources are."""
+    out, i, n = [], 0, len(js)
+    while i < n:
+        if js[i] == "\\":
+            i += 2
+            continue
+        if js[i] == "`":
+            j = i + 1
+            while j < n and js[j] != "`":
+                j += 2 if js[j] == "\\" else 1
+            out.append((i, j))
+            i = j + 1
+            continue
+        i += 1
+    return out
+
+
+def test_shader_sources_are_not_cut_short_by_a_stray_backtick():
+    """The GLSL lives in JS template literals, so **a backtick anywhere in
+    it ends the string** -- including one inside a GLSL comment, where it
+    looks like ordinary prose markup and reads as perfectly innocent.
+
+    That is not hypothetical: a comment written as ``// `w` is the water
+    code`` truncated the fragment shader mid-file, so the whole script block
+    failed to parse with "Unexpected identifier 'w'" and every viewer
+    written for two commits was a blank page.  Nothing else checked that the
+    emitted page is even syntactically valid JavaScript.
+    """
+    js = vw.TEMPLATE.read_text()
+    for name, tail in (("VS", "gl_Position"), ("FS", "void main")):
+        k = js.index(f"const {name} = `")
+        start = js.index("`", k)
+        lit = _template_literals(js[start:])[0]
+        body = js[start + lit[0] + 1 : start + lit[1]]
+        assert body.startswith("#version 300 es"), name
+        assert tail in body, f"{name} shader is cut short: {body[-120:]!r}"
+        assert body.rstrip().endswith("}"), f"{name} shader does not end at a closing brace"

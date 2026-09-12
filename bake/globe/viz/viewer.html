@@ -230,7 +230,7 @@ vec3 ramp(float t, vec3 c0, vec3 c1, vec3 c2, vec3 c3, vec3 c4){
   if (t < 1.0) return mix(c0, c1, t); if (t < 2.0) return mix(c1, c2, t - 1.0);
   if (t < 3.0) return mix(c2, c3, t - 2.0); return mix(c3, c4, t - 3.0);
 }
-// `w` is the water code (0 land, 1 lake, 2 ocean).  Colouring by `h < uSea`
+// w is the water code (0 land, 1 lake, 2 ocean).  Colouring by h < uSea
 // instead gets both kinds of water wrong: a lake is a filled depression, so
 // its surface stands at the spill point *above* sea level and comes out as
 // ordinary terrain, while a closed basin below sea level comes out as sea.
