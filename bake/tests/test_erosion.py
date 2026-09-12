@@ -27,7 +27,7 @@ from globe.field import FaceField
 from globe.erosion import glacial
 from globe.erosion import particle as pk
 from globe.erosion import run as erosion_run
-from globe.erosion.maps import ErosionState, apply_isostasy, apply_uplift, run_iteration, step
+from globe.erosion.maps import ErosionState, apply_isostasy, apply_uplift, hold_datum, run_iteration, step
 from globe.hydro import run as hydro_run
 from globe.io.world_store import WorldStore
 from globe.stubs import stub_climate, stub_tectonics
@@ -816,3 +816,28 @@ def test_closed_basin_erodes_as_land_and_keeps_its_sediment(scratch):
     assert out["off"][0] > 0.0, "the old rule must lose mass offshore, or this proves nothing"
     assert out["on"][0] < out["off"][0]
     assert out["on"][1] > out["off"][1], out   # the basin keeps what it is given
+
+
+def test_hold_datum_carries_the_base_level_with_it(scratch):
+    """``hold_datum`` is a rigid shift of the datum, not a physical change,
+    so everything registered to the terrain moves with it.  Sea level is 0
+    in the new datum as in the old, so the open ocean's base stays 0; a
+    closed basin's base is the elevation of its floor, and the floor just
+    moved.  Left behind, it drifts against the terrain by the accumulated
+    hold between refreshes."""
+    p, st = _land_world(scratch, "base_datum")
+    face, i0, j0 = _dry_site(st, 6)
+    basin = _dig_basin(st, face, i0, j0, 6, -4.0)
+    st.height += 1.5                  # push the planet up, so the hold has work to do
+    st.refresh_base(p.hydro.ocean_min_fraction)
+    b0 = st.base[st.interior].reshape(-1).copy()
+    assert np.allclose(b0[basin], -2.5)          # the dug floor in the lifted datum
+
+    q = hold_datum(st, p.world.land_fraction)
+    assert q > 1.0, q    # ~1.5; the order statistic moved a little when the basin was dug
+    b1 = st.base[st.interior].reshape(-1)
+    assert np.allclose(b1[basin], b0[basin] - q)   # the basin floor moved with the datum
+    assert np.allclose(b1[b0 == 0.0], 0.0)         # sea level did not
+    # and the basin is still registered to the terrain, which is the point
+    surf = st.surface()[st.interior].reshape(-1)
+    assert abs(float(surf[basin].min()) - float(b1[basin].min())) < 1e-9

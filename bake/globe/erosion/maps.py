@@ -777,7 +777,8 @@ def hold_datum(state: ErosionState, land_fraction: float) -> float:
     was 0.30 -> 0.56 and -163.8 m).  Any such late one-shot shift drops
     sea level onto terrain that was sculpted against a different base
     level and drowns the drainage network erosion built, which PLAN 9-11
-    then have to work with.  Holding the datum every iteration keeps the
+    then have to work with.  The cached routing surface and the per-cell
+    base level are shifted with it: both are registered to the terrain.  Holding the datum every iteration keeps the
     coastline erosion sees equal to the one hydro will use, and makes
     ``hydro.requantile_land_fraction`` (kept as the final guarantee) a
     no-op.
@@ -806,6 +807,14 @@ def hold_datum(state: ErosionState, land_fraction: float) -> float:
         state.height -= q
         if state.route is not None:  # the cached routing surface must stay registered with the terrain
             state.route -= q
+        # ... and so must the base level, for the same reason.  Sea level is
+        # 0 in the new datum as it was in the old, so the 0 entries stay put;
+        # a closed basin's base level is the elevation of its floor, and the
+        # floor just moved with everything else.  Left un-shifted it drifts
+        # against the terrain by the accumulated hold between refreshes
+        # (-0.63 m an iteration on earth-full, so ~6 m at a stride of 10).
+        if state.base is not None:
+            np.subtract(state.base, q, out=state.base, where=state.base < 0.0)
     return q
 
 

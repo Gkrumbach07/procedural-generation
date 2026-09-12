@@ -217,6 +217,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     clamped = 0
     lost_offshore = 0.0
     datum_shift = 0.0
+    sea = None  # last `maps.refresh_base` census: what erosion called sea
     while state.iteration < n_iter:
         it = state.iteration
         t0 = time.time()
@@ -226,6 +227,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         clamped += int(st.get("clamped", 0))
         lost_offshore += float(st.get("lost_offshore", 0.0))
         datum_shift += float(st.get("datum_shift", 0.0))
+        sea = st.get("sea", sea)
         d = st.get("deaths", {})
         log(
             f"[erosion] iter {it + 1}/{n_iter}: {st['particles']} particles, mean {st['steps_mean']:.0f} steps, "
@@ -263,6 +265,10 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         "datum_drift_m": datum_shift * state.height_unit_m,
         "lost_offshore_m": lost_offshore * state.height_unit_m,
     }
+    if sea is not None:
+        # what the kernel called sea at the last refresh (maps.refresh_base):
+        # the classification the whole stage ran on, worth having on record
+        info["sea"] = sea
     return info
 
 
