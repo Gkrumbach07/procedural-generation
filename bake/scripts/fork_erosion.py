@@ -64,6 +64,8 @@ def write_checkpoint(out: Path, state, label: str, forked_from: str, overrides) 
                   momentum=state.momentum, pending=state.pending)
     if state.route is not None:
         arrays["route"] = state.route
+    if getattr(state, "base_at", None) is not None:
+        arrays["base"] = state.base
     if getattr(state, "iso_acc", None) is not None:
         arrays["iso_acc"] = state.iso_acc
     if getattr(state, "ice_prev", None) is not None:

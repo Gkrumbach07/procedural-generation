@@ -57,7 +57,7 @@ MASK_FROZEN = 2
 
 #: bumped whenever a kernel change alters results: part of the checkpoint
 #: hash, so stale checkpoints are never resumed after a code change
-KERNEL_VERSION = 5
+KERNEL_VERSION = 6
 
 #: a dying particle deposits its remaining load at the cell it died in; the
 #: excess over that cell's caps moves back up its last SPREAD active cells
@@ -65,16 +65,16 @@ SPREAD = 8
 
 #: why a particle stopped (``sp_death`` output of :func:`trace_particles`)
 DEATH_AGE = 0  # reached max_steps
-DEATH_OCEAN = 1  # stepped into a cell with surface < 0
+DEATH_OCEAN = 1  # stepped into standing water (surface < S_BASE)
 DEATH_EXIT = 2  # left the mask / the window array
 DEATH_PIT = 3  # more than pit_steps consecutive uphill steps
 DEATH_EVAP = 4  # volume < min_volume
 DEATH_STOP = 5  # no motion
 DEATH_NAMES = ("age", "ocean", "exit", "pit", "evap", "stop")
 #: minimum per-step deposition allowance (cell units) before the concurrency
-#: divisor, and — via ``lim = -DEP_FLOOR - s_c`` in :func:`apply_changes` —
-#: the water the kernel keeps over any deposit so that particles never turn
-#: sea into land.
+#: divisor, and — via ``lim = base - DEP_FLOOR - s_c`` in
+#: :func:`apply_changes` — the water the kernel keeps over any deposit so
+#: that particles never turn sea into land.
 #:
 #: **DEFECT, measured, not yet fixed.** This is a *length* in cell units, so
 #: it means a different depth at every cell size: 1 m of water at the 50 m
@@ -154,11 +154,12 @@ S_SED = 7  # sediment thickness (erodibility rule)
 S_G = 8  # metric g_ii, g_ij, g_jj (8..10)
 S_GINV = 11  # inverse metric (11..13)
 S_RFLAG = 14  # 1.0 where the packed routing surface differs from the (live) surface of this cell; a bilinear route sample is skipped when all four stencil cells are 0 (identical inputs give an identical bilinear, so this is exact)
+S_BASE = 15  # local base level in cell units (`maps.ErosionState.refresh_base`): 0 on the open ocean and on ordinary land, the floor of its own basin inside a closed depression below sea level.  The kernel's *sea* is `surface < base`, not `surface < 0` -- the sign of the height says a cell is under the waterline, not that it is joined to the sea
 NS = 16
 
 
 @njit(cache=True, parallel=True)
-def pack_samples(samp, height, sediment, route, use_route, discharge, momentum, evap, hardness, metric, metric_inv):
+def pack_samples(samp, height, sediment, route, use_route, discharge, momentum, evap, hardness, metric, metric_inv, base):
     """Fill the packed sample array from the state arrays (once per iteration)."""
     F, NE, _ = height.shape
     for f in prange(F):
@@ -180,7 +181,7 @@ def pack_samples(samp, height, sediment, route, use_route, discharge, momentum, 
                     samp[f, ei, ej, S_G + k] = metric[f, ei, ej, k]
                     samp[f, ei, ej, S_GINV + k] = metric_inv[f, ei, ej, k]
                 samp[f, ei, ej, S_RFLAG] = 1.0 if (use_route and samp[f, ei, ej, S_ROUTE] != samp[f, ei, ej, S_SURF]) else 0.0
-                samp[f, ei, ej, 15] = 0.0
+                samp[f, ei, ej, S_BASE] = base[f, ei, ej]
 
 
 @njit(cache=True, inline="always")
@@ -387,12 +388,13 @@ def trace_particles(
                 break
             cell = (f * NE + ei) * NE + ej
             h_here = samp[f, ei, ej, S_SURF]
-            if step == 0 and h_here < 0.0:
+            b_here = samp[f, ei, ej, S_BASE]
+            if step == 0 and h_here < b_here:
                 in_sea = True  # a stockpile re-injected on the seafloor
             if in_sea:
                 # a sea particle never climbs back onto land, and stops when
                 # its load is gone or its seafloor walk is over
-                if h_here >= 0.0 or sed * vol / volume0 < 1e-4 or sea_steps >= ocean_steps:
+                if h_here >= b_here or sed * vol / volume0 < 1e-4 or sea_steps >= ocean_steps:
                     cause = DEATH_OCEAN
                     break
                 sea_steps += 1
@@ -504,7 +506,8 @@ def trace_particles(
             nfi = nx - 0.5 + H
             nfj = ny - 0.5 + H
             h1 = _sbilin(samp, nf, nfi, nfj, S_SURF)
-            dh = h0 - (h1 if h1 > 0.0 else 0.0)  # the drop into the sea counts down to sea level only
+            b1 = samp[nf, nei, nej, S_BASE]
+            dh = h0 - (h1 if h1 > b1 else b1)  # the drop into standing water counts down to its surface only
             h1r = h1
             if use_route and _rflag(samp, nf, nfi, nfj):
                 r1 = _sbilin(samp, nf, nfi, nfj, S_ROUTE)
@@ -518,7 +521,7 @@ def trace_particles(
                 room = h_prev - h_here if h_prev > -1e300 else fan_room
                 if room < fan_room:
                     room = fan_room  # flat seafloor: fans still build (the live caps bound the pile)
-                lim = -DEP_FLOOR - h_here  # sea-level ceiling
+                lim = b_here - DEP_FLOOR - h_here  # waterline ceiling
                 if lim < room:
                     room = lim
                 if room < 0.0:
@@ -617,7 +620,7 @@ def trace_particles(
             f = nf
             h_prev = h_here
             # --- stop conditions -------------------------------------------
-            if samp[nf, nei, nej, S_SURF] < 0.0 and not in_sea:
+            if samp[nf, nei, nej, S_SURF] < samp[nf, nei, nej, S_BASE] and not in_sea:
                 # reached the ocean: from here on a deposit-only seafloor
                 # walk (submarine fan) instead of dumping the load in one cell
                 in_sea = True
@@ -650,7 +653,7 @@ def trace_particles(
             cj = _cell_of(y, N)
             ei = ci + H
             ej = cj + H
-            if mask[f, ei, ej] == MASK_ACTIVE and not (in_sea and samp[f, ei, ej, S_SURF] >= 0.0):
+            if mask[f, ei, ej] == MASK_ACTIVE and not (in_sea and samp[f, ei, ej, S_SURF] >= samp[f, ei, ej, S_BASE]):
                 cell = (f * NE + ei) * NE + ej
                 newest = (rpos + SPREAD - 1) % SPREAD
                 if nring == 0 or cl_cell[rbase + newest] != cell:
@@ -766,13 +769,14 @@ def apply_changes(
             v = cl_vol[base + k]
             is_step = v >= 0.0  # path entry (v == 0: seafloor step, no discharge)
             s_c = hflat[c] + sflat[c] + aflat[c]
+            b_c = pflat[c, S_BASE]
             if d < 0.0:
                 e = -d
                 e_act = e
                 room = iter_erode + aflat[c]
                 if e_act > room:
                     e_act = room
-                floor = 0.0 if s_c >= 0.0 else s_c  # ocean cells are never eroded
+                floor = b_c if s_c >= b_c else s_c  # submerged cells are never eroded
                 if k + 1 < cnt:
                     nc = cl_cell[base + k + 1]  # the cell the particle stepped to
                     ns = hflat[nc] + sflat[nc] + aflat[nc]
@@ -804,14 +808,14 @@ def apply_changes(
                     ref = cl_cell[base + k + 1]  # next-older path cell
                 if ref >= 0:
                     ceil = hflat[ref] + sflat[ref] + aflat[ref] + DEP_FLOOR
-                    if s_c < 0.0 and is_step:
+                    if s_c < b_c and is_step:
                         ceil -= DEP_FLOOR + fan_slope  # a fan descends away from its source
                     lim = ceil - s_c
                     if d_act > lim:
                         d_act = lim
-                if s_c < 0.0:
-                    # an ocean cell fills to just below sea level, never above
-                    lim = -DEP_FLOOR - s_c
+                if s_c < b_c:
+                    # a submerged cell fills to just below the waterline, never above
+                    lim = b_c - DEP_FLOOR - s_c
                     if d_act > lim:
                         d_act = lim
                 if d_act < 0.0:
@@ -838,7 +842,7 @@ def apply_changes(
                 prev = c
         if surplus > 0.0:
             if death >= 0:
-                if hflat[death] + sflat[death] + aflat[death] < 0.0:
+                if hflat[death] + sflat[death] + aflat[death] < pflat[death, S_BASE]:
                     # a load the seafloor walk could not place (a shelf
                     # filled to sea level) leaves the modelled surface for
                     # the deep ocean: parking it would deadlock, since sea

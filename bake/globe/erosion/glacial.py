@@ -109,7 +109,7 @@ def _margin(ice: np.ndarray, state) -> np.ndarray:
             if di == 0 and dj == 0:
                 continue
             n |= np.roll(np.roll(ice, di, axis=1), dj, axis=2)
-    return n & ~ice & (state.mask == pk.MASK_ACTIVE) & (state.surface() > 0.0)
+    return n & ~ice & (state.mask == pk.MASK_ACTIVE) & (state.surface() > state.base)
 
 
 def carve(state, params) -> dict:
@@ -160,9 +160,12 @@ def carve(state, params) -> dict:
     dz = rate * np.sqrt(q) * (1.0 - 0.5 * state.hardness) * taper
     np.clip(dz, 0.0, cap, out=dz)
     dz = np.where(ice, dz, 0.0)
-    # never carve a cell below sea level: a fjord is as deep as this gets,
-    # and dropping land into the sea would fight `hold_datum` every pass
-    room = np.maximum(state.surface() + pk.DEP_FLOOR, 0.0)
+    # never carve a cell below its own base level: a fjord is as deep as this
+    # gets, and dropping land into the sea would fight `hold_datum` every pass.
+    # Inside a closed basin the base level is the basin's floor, not sea level
+    # (maps.refresh_base), so ice may deepen a below-sea-level basin down to
+    # the lowest ground it already has instead of stopping at the waterline.
+    room = np.maximum(state.surface() + pk.DEP_FLOOR - state.base, 0.0)
     dz = np.minimum(dz, room)
 
     interior = state.interior

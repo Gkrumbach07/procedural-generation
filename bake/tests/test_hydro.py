@@ -317,6 +317,17 @@ def test_a_closed_basin_below_sea_level_is_not_ocean():
 # the stage on the stub world
 # --------------------------------------------------------------------------
 @pytest.fixture(scope="module")
+def tiny_hydro_spill(scratch):
+    """The same world with the endorheic balance off, for the invariants
+    that only hold when every lake overflows."""
+    params = WorldParams.tiny_world(seed=5).with_overrides(hydro={"lake_evap": 0.0})
+    params.hydro.river_threshold = 8.0
+    store = _bake_to_erosion(scratch, "hydro_tiny_spill", params)
+    info = hydro_run.run(store, params, _log)
+    return store, params, info
+
+
+@pytest.fixture(scope="module")
 def tiny_hydro(scratch):
     params = WorldParams.tiny_world(seed=5)
     params.hydro.river_threshold = 8.0  # noise input: small basins, so a low threshold yields channels
@@ -352,9 +363,15 @@ def test_stage_outputs_and_requantile(tiny_hydro):
     assert (fd.interior[ocean] == OCEAN).all() and (fd.interior[~ocean] < 8).all()
     assert (acc.interior[ocean] == 0).all()
     assert info["n_lakes"] > 0 and info["n_edges"] > 0
-    # the water surface is exactly the reference depression fill on land
+    # the water surface is the reference depression fill, *at most*: with
+    # `hydro.lake_evap` on, a basin that cannot sustain a full pool settles
+    # below its spill point (hydro/balance.py), and the exact-equality case
+    # is `test_lake_evap_zero_is_the_spill_point_fill`
     ref = _reference_fill(surface, ocean, grid)
-    assert np.array_equal(ws.interior[~ocean], ref[~ocean])
+    assert (ws.interior[~ocean] <= ref[~ocean] + 1e-4).all()
+    bal = info["lake_balance"]
+    if bal["closed"] == 0 and bal["dry"] == 0:
+        assert np.array_equal(ws.interior[~ocean], ref[~ocean])
     assert (ws.interior > surface + params.hydro.lake_min_depth)[~ocean].sum() == info["lake_cells"]
 
 
@@ -383,8 +400,12 @@ def test_flow_dir_acyclic_and_reaches_ocean(tiny_hydro):
     assert cross.sum() > 0
 
 
-def test_flow_acc_equals_precip_sum_per_basin(tiny_hydro):
-    store, params, _ = tiny_hydro
+def test_flow_acc_equals_precip_sum_per_basin(tiny_hydro_spill):
+    """Accumulation is conservative and monotone downstream -- on a world
+    where every depression overflows.  `hydro.lake_evap` deliberately breaks
+    both below a closed lake (its outlet passes nothing on), which is what
+    `test_a_closed_lake_passes_no_water_downstream` checks instead."""
+    store, params, _ = tiny_hydro_spill
     grid = params.coarse_grid()
     fd = store.load_field("flow_dir", grid).interior
     acc = store.load_field("flow_acc", grid).interior.reshape(-1).astype(np.float64)
@@ -519,3 +540,112 @@ def test_quicklook_writes_png(tiny_hydro, tmp_path):
     store, params, _ = tiny_hydro
     p = hydro_run.quicklook(store, params, tmp_path / "hydro.png")
     assert Path(p).exists() and Path(p).stat().st_size > 1000
+
+
+# --------------------------------------------------------------------------
+# evaporation-limited lake levels (hydro/balance.py)
+# --------------------------------------------------------------------------
+def _bowl_world(N=64, floor=-30.0, rim=40.0, radius=0.30):
+    """One face carrying a round bowl in a plateau, the rest of the planet
+    ocean.  Returns (grid, surface, ocean) on the interior."""
+    grid = get_grid(N, 4, 4000.0)
+    surface = np.full((6, N, N), -100.0, dtype=np.float32)
+    x = (np.arange(N) + 0.5) / N
+    X, Y = np.meshgrid(x, x, indexing="ij")
+    r = np.sqrt((X - 0.5) ** 2 + (Y - 0.5) ** 2)
+    plateau = np.where(r < 0.45, rim, -100.0)
+    bowl = np.where(r < radius, floor + (rim - floor) * (r / radius) ** 2, plateau)
+    surface[0] = bowl.astype(np.float32)
+    ocean = surface < 0
+    ocean[0] = ocean[0] & (r >= 0.45)          # the bowl's floor is landlocked
+    return grid, surface, ocean
+
+
+def _solve_bowl(lake_evap, precip_scale=1.0, evap_scale=1.0, **kw):
+    from globe.hydro.balance import balance_lakes
+    grid, surface, ocean = _bowl_world(**kw)
+    flood = priority_flood_sphere(surface, ocean, grid)
+    fd = flow_directions(flood.filled, ocean, flood.parent, grid)
+    down = downstream_table(fd, grid.owner, grid.H)
+    topo = flood.pop_seq[::-1]
+    topo = topo[~ocean.reshape(-1)[topo]]
+    precip = np.full((6, grid.N, grid.N), precip_scale, dtype=np.float32)
+    evap = np.full((6, grid.N, grid.N), evap_scale, dtype=np.float32)
+    water, acc, info = balance_lakes(surface, flood.filled, ocean, flood.order, down, topo,
+                                     precip, evap, grid, lake_evap)
+    return surface, flood.filled, water, acc, info
+
+
+def test_lake_evap_zero_is_the_spill_point_fill():
+    """``lake_evap = 0`` must be a strict no-op: the water surface is the
+    priority flood's filled DEM, which is what hydro did before the balance
+    existed, so the switch cannot move a coastline by itself."""
+    surface, filled, water, acc, info = _solve_bowl(0.0)
+    assert np.array_equal(water, filled)
+    assert info["closed"] == 0 and info["overflowing"] == 0
+
+
+def test_a_basin_settles_below_its_rim_when_evaporation_can_take_the_inflow():
+    """The balance: raise ``lake_evap`` and the bowl's water level falls,
+    monotonically, from the spill point towards the floor."""
+    surface, filled, _, _, _ = _solve_bowl(0.0)
+    spill = float(filled[0].max() if False else filled[0][filled[0] > surface[0]].max())
+    floor = float(surface[0].min())
+    levels = []
+    for le in (0.5, 2.0, 8.0, 32.0, 128.0):
+        _, _, water, _, info = _solve_bowl(le)
+        lv = float(water[0][water[0] > surface[0]].max()) if (water[0] > surface[0]).any() else floor
+        levels.append(lv)
+        assert floor <= lv <= spill
+    assert levels == sorted(levels, reverse=True), levels
+    assert levels[0] >= spill - 1e-3, "a weakly evaporating lake still overflows"
+    assert levels[-1] < spill, "a strongly evaporating one does not"
+
+
+def test_a_closed_lake_passes_no_water_downstream():
+    """A lake that does not reach its spill point has no outlet, so the flow
+    accumulation *at* its outlet cell is zero -- that, not ``flow_dir``, is
+    what says the river is not there (see hydro/balance.py).  An overflowing
+    one passes on exactly the surplus its evaporation could not take."""
+    surface, filled, _, _, _ = _solve_bowl(0.0)
+    dep = (filled > surface).reshape(-1)
+    grid, _, ocean = _bowl_world()
+    flood = priority_flood_sphere(surface, ocean, grid)
+    cells = np.flatnonzero(dep)
+    outlet = cells[np.argmin(np.asarray(flood.order)[cells])]
+
+    _, _, _, acc_open, info_open = _solve_bowl(0.5)
+    _, _, _, acc_shut, info_shut = _solve_bowl(128.0)
+    assert info_open["overflowing"] == 1 and info_open["closed"] == 0
+    assert info_shut["closed"] == 1 and info_shut["overflowing"] == 0
+    assert acc_open[outlet] > 0.0        # spills into the sea
+    assert acc_shut[outlet] == 0.0       # keeps every drop
+    # the surplus is the inflow the full pool could not evaporate, so the
+    # overflowing lake still passes on less than everything that fell on it
+    assert acc_open[outlet] < acc_open.max()
+
+
+def test_a_cold_lake_cannot_evaporate_and_still_overflows():
+    """``evap`` is ``k_evap*max(T, 0)``, so a lake in a frozen place has no
+    evaporative term at all and fills to its rim whatever ``lake_evap`` says.
+    That is the right answer -- and it is why most of this world's
+    depressions can never close."""
+    surface, filled, water, _, info = _solve_bowl(1e6, evap_scale=0.0)
+    assert np.array_equal(water, filled)
+    assert info["overflowing"] == 1 and info["closed"] == 0
+
+
+def test_the_balance_runs_in_the_stage(scratch):
+    """End to end through ``hydro.run``: the stage reports the mix and the
+    lakes it writes are no larger than the spill-point ones."""
+    p = WorldParams.small_world(3)
+    counts = {}
+    for le in (0.0, 6.0):
+        pp = p.with_overrides(hydro={"lake_evap": le})
+        store = _bake_to_erosion(scratch, f"balance_{le}", pp)
+        info = hydro_run.run(store, pp, _log)
+        counts[le] = (info["lake_cells"], info["n_lakes"], info["lake_balance"])
+    assert counts[6.0][0] <= counts[0.0][0]
+    bal = counts[6.0][2]
+    assert bal["depressions"] == bal["overflowing"] + bal["closed"] + bal["dry"]
+    assert bal["cells_balanced"] <= bal["cells_spill"]

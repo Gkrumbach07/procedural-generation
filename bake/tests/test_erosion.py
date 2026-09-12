@@ -714,3 +714,105 @@ def _closed_depressions(state) -> int:
     surf = state.surface()[state.interior]
     lo = ndimage.minimum_filter(surf, size=3, mode="nearest")
     return int(((surf <= lo) & (surf > 0)).sum())
+
+
+# --------------------------------------------------------------------------
+# the sea is what the sea is connected to (maps.refresh_base)
+# --------------------------------------------------------------------------
+def _dig_basin(st, face, i0, j0, size, floor):
+    """Punch a closed square depression of ``floor`` (cell units, negative)
+    into an otherwise unbroken piece of land, and return its flat mask."""
+    H = st.H
+    sl = (face, slice(H + i0, H + i0 + size), slice(H + j0, H + j0 + size))
+    st.height[sl] = floor
+    st.sediment[sl] = 0.0
+    st.exchange_halos()
+    m = np.zeros_like(st.height, dtype=bool)
+    m[sl] = True
+    return m[st.interior].reshape(-1)
+
+
+def _dry_site(st, size, pad=2):
+    """A ``(size + 2*pad)`` square of dry land to dig a basin in, as
+    ``(face, i0, j0)`` for the basin's own corner."""
+    land = st.surface()[st.interior] >= 0.0
+    w = size + 2 * pad
+    for f in range(land.shape[0]):
+        ok = land[f]
+        for i in range(0, land.shape[1] - w):
+            for j in range(0, land.shape[2] - w):
+                if ok[i:i + w, j:j + w].all():
+                    return f, i + pad, j + pad
+    raise AssertionError("no dry site in this world")
+
+
+def _land_world(scratch, name, seed=0):
+    """A world whose surface is land everywhere except one real ocean, so a
+    dug basin is unambiguously landlocked."""
+    p = WorldParams.small_world(seed).with_overrides(hydro={"ocean_min_fraction": 0.02})
+    st = erosion_run.build_state(_stub_world(scratch, name, p), p)
+    return p, st
+
+
+def test_refresh_base_separates_a_closed_basin_from_the_sea(scratch):
+    """A depression below sea level with a rim of land around it is *not*
+    sea: `refresh_base` gives it its own floor as a base level, while the
+    open ocean keeps 0.  This is the classification `hydro.open_ocean`
+    already made and erosion did not (docs/plates-rifts-and-water.md)."""
+    p, st = _land_world(scratch, "base_basin")
+    surf = st.surface()[st.interior].reshape(-1)
+    assert (surf < 0).any() and (surf >= 0).any(), "the stub world needs both sea and land"
+    # a basin dug in the middle of the largest contiguous piece of land
+    face, i0, j0 = _dry_site(st, 6)
+    floor = -4.0
+    basin = _dig_basin(st, face, i0, j0, 6, floor)
+
+    info = st.refresh_base(p.hydro.ocean_min_fraction)
+    base = st.base[st.interior].reshape(-1)
+    now = st.surface()[st.interior].reshape(-1)
+    assert info["closed_basins"] >= 1
+    assert np.allclose(base[basin], floor)              # its own floor, not sea level
+    # and so the basin is *land* to the kernel: surface >= base everywhere in it
+    assert (now[basin] >= base[basin]).all()
+    # only a cell under the waterline ever gets an internal base level, and
+    # erosion's classification is hydro's: the open ocean keeps sea level
+    ocean = hydro_run.open_ocean(now.reshape(6, st.N, st.N).astype(np.float32),
+                                 st.grid, p.hydro.ocean_min_fraction).reshape(-1)
+    assert (now[base != 0.0] < 0.0).all()
+    assert np.allclose(base[ocean], 0.0)
+    assert not ocean[basin].any()                       # the dug basin is not sea
+    assert int(info["sea_cells"]) == int(ocean.sum())
+    assert int(info["closed_cells"]) == int(((now < 0.0) & ~ocean).sum())
+
+
+def test_sea_mask_off_is_the_old_sign_rule(scratch):
+    """``sea_mask_every = 0`` leaves ``base`` at zero, which makes every
+    ``surface < base`` test in the kernel exactly the old ``surface < 0``:
+    the switch is a true no-op, so any difference between the two arms of a
+    measurement is the mask and nothing else."""
+    p, st = _land_world(scratch, "base_off")
+    p_off = p.with_overrides(erosion={"sea_mask_every": 0})
+    for it in range(3):
+        step(st, p_off, it)
+    assert np.all(st.base == 0.0)
+    assert getattr(st, "base_at", None) is None
+
+
+def test_closed_basin_erodes_as_land_and_keeps_its_sediment(scratch):
+    """With the mask on, a landlocked basin below sea level takes sediment
+    and none of it is written off as ``lost_offshore``; with the mask off it
+    is a marine sink and the load that will not fit leaves the model."""
+    out = {}
+    for label, every in (("on", 1), ("off", 0)):
+        p, st = _land_world(scratch, f"base_sink_{label}")
+        pp = p.with_overrides(erosion={"sea_mask_every": every, "glacial_every": 0, "isostasy": 0.0})
+        face, i0, j0 = _dry_site(st, 6)
+        basin = _dig_basin(st, face, i0, j0, 6, -4.0)
+        lost = 0.0
+        for it in range(6):
+            lost += float(step(st, pp, it).get("lost_offshore", 0.0))
+        sed = st.sediment[st.interior].reshape(-1)
+        out[label] = (lost, float(sed[basin].sum()))
+    assert out["off"][0] > 0.0, "the old rule must lose mass offshore, or this proves nothing"
+    assert out["on"][0] < out["off"][0]
+    assert out["on"][1] > out["off"][1], out   # the basin keeps what it is given

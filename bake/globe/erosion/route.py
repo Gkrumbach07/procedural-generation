@@ -28,7 +28,7 @@ from .particle import MASK_OUTSIDE, _D8
 
 
 @njit(cache=True)
-def priority_flood_eps(surface, mask, owner, H, N, eps):
+def priority_flood_eps(surface, mask, owner, H, N, eps, base):
     """Epsilon-filled surface (extended array, same shape as ``surface``).
 
     ``surface`` float64 (F, NE, NE); ``mask`` uint8 (0 = outside);
@@ -37,14 +37,24 @@ def priority_flood_eps(surface, mask, owner, H, N, eps):
     or identity everywhere for a single non-spherical window);
     ``eps`` the minimum drop per cell along the filled surface.
 
-    Seeds are the interior cells with ``surface < 0`` (ocean) and, in
-    window mode, interior cells whose neighbour is outside the array or
-    outside the mask (they drain out of the window).  Halo cells keep their
+    Seeds are the interior cells that drain out of the model -- the open
+    ocean, the floor of every closed basin, and (window mode) cells whose
+    neighbour is outside the array or the mask.  ``base`` is the per-cell
+    base level (:meth:`~globe.erosion.maps.ErosionState.refresh_base`), 0 on
+    the sea and on land and the basin floor inside a closed depression, so
+    ``surface < 0 and surface <= base`` picks the sea plus each basin's own
+    low point and nothing else.  With ``base`` all zero this is exactly the
+    old ``surface < 0``.
+
+    Seeding on the sign instead put *every* cell of a landlocked basin in the
+    seed set, so the flood never filled the sub-depressions inside one and a
+    particle that fell into any of them died there.  Halo cells keep their
     surface value; refresh them with a halo exchange afterwards.
     """
     F, NE, _ = surface.shape
     total = F * NE * NE
     sflat = surface.reshape(total)
+    bflat = base.reshape(total)
     mflat = mask.reshape(total)
     oflat = owner.reshape(total)
     filled = surface.copy()
@@ -67,7 +77,7 @@ def priority_flood_eps(surface, mask, owner, H, N, eps):
                 c = (f * NE + ei) * NE + ej
                 if visited[c]:
                     continue
-                seed = sflat[c] < 0.0
+                seed = sflat[c] < 0.0 and sflat[c] <= bflat[c]
                 if not seed:
                     for k in range(8):
                         ni = ei + _D8[k, 0]

@@ -24,6 +24,17 @@ most of it below -200 m is bypassing its own continental margins, and
 material that leaves the margin can never backfill a valley or build a
 coastal plain -- so base level is never locally raised and incision never
 slows.  See docs/earth-bake.md.
+
+**Read the concentration column, not the share.** Deep water is about
+two thirds of the globe here, so "86 % of the sediment is deep" is a 1.3x
+concentration and not the wholesale margin bypass it sounds like; a whole
+round of analysis and a proposed fix were built on the un-normalised
+version before that was caught (docs/earth-bake.md).
+
+``--checkpoints`` measures the **eroded surface** (``height + sediment``),
+which is what the tables in docs/earth-bake.md quote and what decides where
+the coastline is; it used to read ``height`` alone, which is the bedrock
+under the sediment and puts the land fraction ~2 points low.
 """
 import argparse
 import glob
@@ -63,13 +74,39 @@ def measure(bed_m, area, halo_stripped=True):
     }
 
 
-def sediment_split(sed_m, bed_m, area):
+#: (label, lower bound in metres) of the sediment split.  The -200 m shelf
+#: break is the one `scripts/fork_erosion.py` splits on too.
+SED_ZONES = (("land (> 50)", 50.0), ("coast (0..50)", 0.0), ("shelf (-200..0)", -200.0), ("deep (< -200 m)", -np.inf))
+
+
+def _zone_rows(sed_m, z_m, area, tot, A):
+    out = {}
+    for i, (name, lo) in enumerate(SED_ZONES):
+        hi = SED_ZONES[i - 1][1] if i else np.inf
+        m = (z_m > lo) & (z_m <= hi)
+        sh = float((sed_m[m] * area[m]).sum()) / tot * 100
+        ar = float(area[m].sum()) / A * 100
+        out[name] = (sh, ar, sh / ar if ar > 0 else float("nan"))
+    return out
+
+
+def sediment_split(sed_m, surf_m, bed_m, area):
+    """Where the sediment is, by depth zone, both ways round.
+
+    **By bedrock** is where the material was *delivered to*: the basement
+    under the pile, which does not move when the pile grows.  **By the
+    eroded surface** is the water depth over it now, which is what a
+    bathymetric chart of Earth shows -- but it is partly circular, because
+    a thick enough pile shallows its own water and promotes itself from
+    abyss to shelf.  They answer different questions and they disagree, so
+    both are printed; the table in docs/earth-bake.md is the bedrock one.
+    """
     tot = float((sed_m * area).sum())
+    A = float(area.sum())
     if tot <= 0:
         return None
-    sh = lambda m: float((sed_m[m] * area[m]).sum()) / tot * 100  # noqa: E731
-    return {"deep (< -200 m)": sh(bed_m <= -200), "shelf (-200..0)": sh((bed_m > -200) & (bed_m <= 0)),
-            "coast (0..50)": sh((bed_m > 0) & (bed_m <= 50)), "land (> 50)": sh(bed_m > 50)}
+    return {"bedrock": _zone_rows(sed_m, bed_m, area, tot, A),
+            "eroded surface": _zone_rows(sed_m, surf_m, area, tot, A)}
 
 
 def load_world(world, params):
@@ -83,8 +120,11 @@ def load_checkpoint(path, params):
     H = grid.H
     z = np.load(path)
     hu = params.world.cell_size_m
-    return (z["height"][:, H:-H, H:-H] * hu, grid.interior_cell_area.astype(np.float64),
-            z["sediment"][:, H:-H, H:-H] * hu)
+    sed = z["sediment"][:, H:-H, H:-H] * hu
+    bed = z["height"][:, H:-H, H:-H] * hu
+    # the eroded *surface*, not the bedrock under it: that is what the tables
+    # in docs/earth-bake.md quote and what puts the coastline where hydro will
+    return (bed + sed, grid.interior_cell_area.astype(np.float64), (sed, bed))
 
 
 def main():
@@ -108,7 +148,8 @@ def main():
             for p in sorted(glob.glob(os.path.join(w, "checkpoints", "erosion_iter*.npz"))):
                 it = int(re.search(r"(\d{4})", os.path.basename(p)).group(1))
                 b, a, s = load_checkpoint(p, params)
-                cols.append((f"iter{it}", b, a, s))
+                label = os.path.basename(w.rstrip("/")) or w
+                cols.append((f"{label}@{it}" if args.worlds[1:] else f"iter{it}", b, a, s))
     if not cols:
         raise SystemExit("nothing to measure")
 
@@ -123,12 +164,20 @@ def main():
     for key, ref in EARTH_SCALARS:
         print(f"{key:>16} {ref:>7} " + " ".join(f"{r[1][key]:{w}.0f}" for r in res))
 
-    for name, (_, bed, area, sed) in zip(names, cols):
+    for name, (_, surf, area, sed) in zip(names, cols):
         if sed is None:
             continue
-        split = sediment_split(sed, bed, area)
+        split = sediment_split(sed[0], surf, sed[1], area)
         if split:
-            print(f"\nsediment, {name}: " + "  ".join(f"{k} {v:.1f} %" for k, v in split.items()))
+            print(f"\nsediment, {name}:")
+            print(f"  {'zone':<16}" + "".join(f"{'% sed':>8}{'% area':>8}{'conc':>8}   " for _ in split))
+            print(f"  {'zoned by':<16}" + "".join(f"{k:>24}   " for k in split))
+            for zn, _ in SED_ZONES[::-1]:
+                row = f"  {zn:<16}"
+                for k in split:
+                    sh, ar, c = split[k][zn]
+                    row += f"{sh:8.1f}{ar:8.2f}{c:7.2f}x   "
+                print(row)
 
 
 if __name__ == "__main__":

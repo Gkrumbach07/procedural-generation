@@ -84,6 +84,7 @@ class ErosionState:
     samp: np.ndarray = field(default=None, repr=False)  # packed float32 samples (F, NE, NE, NS), rebuilt every iteration
     acc: np.ndarray = field(default=None, repr=False)  # float64 net terrain change of the current iteration (cell units), zero between iterations
     pending: np.ndarray = field(default=None, repr=False)  # float64 sediment stockpile per cell (cell units) that found no room this iteration (particle.apply_changes); re-injected as a loaded particle next iteration; part of the mass balance
+    base: np.ndarray = field(default=None, repr=False)  # float64 local base level per cell (cell units); see `refresh_base`.  0 everywhere until it is refreshed, which is exactly the old "sea = surface < 0" behaviour
     _owner: np.ndarray = field(default=None, repr=False)
     iteration: int = 0
     deposit_on_exit: bool = False  # window mode: deposit the load at the last active cell when leaving
@@ -100,6 +101,8 @@ class ErosionState:
             self.acc = np.zeros((F, NE, NE), dtype=np.float64)
         if self.pending is None:
             self.pending = np.zeros((F, NE, NE), dtype=np.float64)
+        if self.base is None:
+            self.base = np.zeros((F, NE, NE), dtype=np.float64)
         assert NE == self.N + 2 * self.H, "array width must be N + 2H"
         for a, shape in (
             (self.sediment, (F, NE, NE)),
@@ -226,7 +229,7 @@ class ErosionState:
     def pack(self) -> None:
         """Refresh the packed float32 sample array from the state arrays."""
         use_route = self.route is not None
-        pk.pack_samples(self.samp, self.height, self.sediment, self.route if use_route else self.height, use_route, self.discharge, self.momentum, self.evap, self.hardness, self.metric, self.metric_inv)
+        pk.pack_samples(self.samp, self.height, self.sediment, self.route if use_route else self.height, use_route, self.discharge, self.momentum, self.evap, self.hardness, self.metric, self.metric_inv, self.base)
 
     def height_m(self) -> np.ndarray:
         return self.height * self.height_unit_m
@@ -268,9 +271,69 @@ class ErosionState:
         terrain (:mod:`globe.erosion.route`)."""
         from .route import priority_flood_eps
 
-        self.route = priority_flood_eps(self.surface(), self.mask, self.owner_table(), self.H, self.N, float(eps))
+        self.route = priority_flood_eps(self.surface(), self.mask, self.owner_table(), self.H, self.N, float(eps), self.base)
         if self.spherical:
             FaceField(self.grid, self.route).exchange_halos(linear=True)
+
+    def refresh_base(self, min_fraction: float) -> dict:
+        """Recompute the per-cell base level (:data:`particle.S_BASE`).
+
+        **Being under the waterline is not what makes a cell sea; being
+        joined to the sea is.**  ``hydro.open_ocean`` has said so since
+        docs/plates-rifts-and-water.md, but erosion runs *before* hydro and
+        kept reading the sign of the height, so every closed basin below sea
+        level was a marine sink for the whole stage: deposit-only seafloor
+        walks into it, no erosion of its floor, no hillslope creep on it, and
+        whatever a submarine fan could not place inside it deleted as
+        ``lost_offshore``.
+
+        The base level is 0 on the open ocean and on ordinary land -- so the
+        kernel's ``surface < base`` is bit-identical to the old
+        ``surface < 0`` there -- and, inside a closed basin, the surface of
+        that basin's **deepest cell**.  A closed basin is then land with an
+        internal base level: particles cross it and deposit as they do in any
+        pit, its floor may be eroded down to (never below) its own low point,
+        and its mass stays in the model.
+
+        The coastline moves as erosion runs, so this is recomputed on the
+        ``erosion.sea_mask_every`` stride rather than once; the drift between
+        refreshes is measured in docs/erosion-and-the-sea.md.  Global pass
+        only: a refinement window is one basin and has no sea of its own.
+        """
+        from ..hydro.run import below_sea_components
+
+        base = np.zeros_like(self.height)
+        info = {"closed_cells": 0, "closed_basins": 0, "sea_cells": 0, "deepest_basin_floor": 0.0}
+        if not self.spherical or self.grid is None:
+            self.base = base
+            self.base_at = self.iteration
+            return info
+        inter = self.interior
+        surf = (self.height[inter] + self.sediment[inter]).astype(np.float64)
+        below, labels, keep = below_sea_components(surf.astype(np.float32), self.grid, float(min_fraction))
+        if labels is not None:
+            sea = below & keep[np.maximum(labels, 0)]
+            closed = below & ~sea
+            info["sea_cells"] = int(sea.sum())
+            info["closed_cells"] = int(closed.sum())
+            if closed.any():
+                lab = labels[closed]
+                floor = np.zeros(keep.size, dtype=np.float64)
+                np.minimum.at(floor, lab, surf.reshape(-1)[closed])
+                inner = np.zeros(surf.size, dtype=np.float64)
+                inner[closed] = floor[lab]
+                base[inter] = inner.reshape(surf.shape)
+                info["closed_basins"] = int(np.unique(lab).size)
+                info["deepest_basin_floor"] = float(floor.min())
+        # piecewise constant with sharp jumps at a basin rim: the halo must be
+        # an exact copy of the cell it mirrors, not an interpolation of four
+        # (`FaceField.exchange_halos` does this for integer fields)
+        hm = self.grid.halo
+        flat = base.reshape(6 * self.grid.NE * self.grid.NE, 1)
+        flat[hm.dst] = flat[hm.nearest]
+        self.base = base
+        self.base_at = self.iteration
+        return info
 
     def fields(self, names=("height", "sediment", "discharge", "momentum")) -> dict[str, FaceField]:
         """Output FaceFields in metres (spherical mode)."""
@@ -304,6 +367,13 @@ def _eparams(params) -> ErosionParams:
     return params.erosion if isinstance(params, WorldParams) else params
 
 
+def _ocean_min_fraction(params) -> float:
+    """``hydro.ocean_min_fraction``, so erosion and hydro draw the same
+    coastline.  An ``ErosionParams`` alone (the window/test path) has no
+    hydro group; it falls back to the shipped default."""
+    return float(params.hydro.ocean_min_fraction) if isinstance(params, WorldParams) else 0.02
+
+
 def max_steps_of(ep: ErosionParams, N: int) -> int:
     return int(ep.max_steps) if ep.max_steps > 0 else 2 * int(N)
 
@@ -322,11 +392,15 @@ def chunk_size(ep: ErosionParams, n_particles: int) -> int:
 # --------------------------------------------------------------------------
 def spawn_weights(state: ErosionState) -> tuple[np.ndarray, np.ndarray]:
     """Flat indices of spawnable interior cells (land, mask 1 — frozen
-    divides never spawn — precip > 0) and their weights (precip)."""
+    divides never spawn — precip > 0) and their weights (precip).
+
+    Land is ``surface >= base`` (:meth:`ErosionState.refresh_base`), so the
+    dry floor of a closed basin below sea level catches rain like any other
+    ground; only the open ocean and standing water do not."""
     F, NE, H, N = state.F, state.NE, state.H, state.N
     inter = np.zeros((F, NE, NE), dtype=bool)
     inter[state.interior] = True
-    ok = inter & (state.mask == pk.MASK_ACTIVE) & (state.height + state.sediment >= 0.0) & (state.precip > 0)
+    ok = inter & (state.mask == pk.MASK_ACTIVE) & (state.height + state.sediment >= state.base) & (state.precip > 0)
     idx = np.flatnonzero(ok)
     w = state.precip.reshape(-1)[idx].astype(np.float64)
     return idx, w
@@ -551,7 +625,7 @@ def thermal_erosion(state: ErosionState, params) -> None:
         # Submerged cells are inert for it (frozen in a temporary mask):
         # creep is a hillslope process, it must not diffuse the coast into
         # the sea (the talus pass still lets sea cliffs collapse).
-        cmask = np.where(state.height + state.sediment < 0.0, np.uint8(pk.MASK_FROZEN), state.mask).astype(np.uint8)
+        cmask = np.where(state.height + state.sediment < state.base, np.uint8(pk.MASK_FROZEN), state.mask).astype(np.uint8)
         _mass_wasting_pass(state, np.zeros_like(talus), float(ep.creep_rate), cell_units(ep, "thermal_max", state.height_unit_m), cmask)
 
 
@@ -741,6 +815,13 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
     Increments ``state.iteration``."""
     ep = _eparams(params)
     t0 = time.time()
+    sea_every = int(getattr(ep, "sea_mask_every", 0))
+    if state.spherical and sea_every > 0 and (getattr(state, "base_at", None) is None or state.iteration % sea_every == 0):
+        # before the route: the flood seeds on the sea, and the sea is what
+        # `refresh_base` decides (see `_seed_base` in route.py)
+        st_base = state.refresh_base(_ocean_min_fraction(params))
+    else:
+        st_base = None
     if ep.flood_every > 0 and (state.route is None or state.iteration % ep.flood_every == 0):
         state.refresh_route(cell_units(ep, "route_eps", state.height_unit_m))
     tr = time.time() - t0
@@ -773,6 +854,8 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
         st["datum_shift"] = hold_datum(state, params.world.land_fraction)
     state.exchange_halos()
     state.iteration += 1
+    if st_base is not None:
+        st["sea"] = st_base
     st["seconds_route"] = tr
     st["seconds_particles"] = t1 - t0 - tr
     st["seconds_total"] = time.time() - t0

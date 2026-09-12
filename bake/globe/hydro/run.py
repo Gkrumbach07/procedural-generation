@@ -24,9 +24,10 @@ import numpy as np
 
 from ..field import FaceField
 from .d8 import OCEAN, downstream_table
+from .balance import balance_lakes
 from .lakes import extract_lakes, label_components
 from .priority_flood import priority_flood_sphere
-from .routing import accumulate, channel_network, flow_directions
+from .routing import channel_network, flow_directions
 
 OUTPUTS = ["water_surface", "flow_dir", "flow_acc", "graph/drainage.json", "graph/lakes_coarse.json"]
 
@@ -53,16 +54,32 @@ def open_ocean(surface: np.ndarray, grid, min_fraction: float = 0.02) -> np.ndar
     the Caspian: a landlocked sea in a basin the ocean cannot reach, with a
     lake surface rather than a sea surface.
     """
+    below, labels, keep = below_sea_components(surface, grid, min_fraction)
+    if labels is None:
+        return np.zeros((6, grid.N, grid.N), dtype=bool)
+    return (below & keep[np.maximum(labels, 0)]).reshape(6, grid.N, grid.N)
+
+
+def below_sea_components(surface: np.ndarray, grid, min_fraction: float = 0.02):
+    """The pieces :func:`open_ocean` decides between, kept as one function so
+    that erosion and hydro cannot drift apart in what they call the sea.
+
+    Returns ``(below, labels, keep)`` flat over the interior: ``below`` the
+    cells under the waterline, ``labels`` their connected component (-1
+    elsewhere, ``None`` when nothing is below), ``keep[label]`` True for the
+    components that are open ocean.  Everything below with ``keep`` False is
+    a closed basin -- land with standing water in it, not sea.
+    """
     N, H = grid.N, grid.H
     below = np.ascontiguousarray(np.asarray(surface) < 0.0).reshape(-1)
     if not below.any():
-        return np.zeros((6, N, N), dtype=bool)
+        return below, None, None
     labels, n = label_components(below, np.zeros(below.size, dtype=np.float32), grid.owner, N, H)
     area = grid.interior_cell_area.reshape(-1).astype(np.float64)
     per = np.bincount(labels[below], weights=area[below], minlength=max(n, 1))
     keep = per >= float(min_fraction) * float(area.sum())
     keep[int(np.argmax(per))] = True
-    return (below & keep[np.maximum(labels, 0)]).reshape(6, N, N)
+    return below, labels, keep
 
 
 def requantile_height(height: np.ndarray, sediment: np.ndarray, land_fraction: float) -> tuple[np.ndarray, float]:
@@ -102,6 +119,7 @@ def run(store, params, log=print) -> dict:
     h = store.load_field("height", grid)
     sed = store.load_field("sediment", grid)
     precip = store.load_field("precip", grid)
+    evap = store.load_field("evap", grid)
     info: dict = {}
 
     # 1. sea level
@@ -129,8 +147,6 @@ def run(store, params, log=print) -> dict:
     info["t_flood_s"] = time.time() - t
     log(f"[hydro] priority flood: {flood.n_popped:,} cells in {info['t_flood_s']:.2f}s")
     filled = flood.filled
-    depth = filled - surface
-    depth[ocean] = 0.0
 
     # 3. D8 on the filled DEM
     t = time.time()
@@ -138,12 +154,26 @@ def run(store, params, log=print) -> dict:
     down = downstream_table(fd, grid.owner, H)
     info["t_route_s"] = time.time() - t
 
-    # 4. accumulation (reverse pop order = upstream first)
+    # 4. accumulation (reverse pop order = upstream first), which is also
+    # where each closed basin settles on the level its inflow can sustain
+    # against evaporation instead of filling to its rim (hydro/balance.py)
+    t = time.time()
     topo = flood.pop_seq[::-1]
     topo = topo[~ocean.reshape(-1)[topo]]
-    acc = accumulate(precip.interior, down, topo)
+    water, acc, bal = balance_lakes(surface, filled, ocean, flood.order, down, topo,
+                                    precip.interior, evap.interior, grid, hp.lake_evap)
+    info["t_balance_s"] = time.time() - t
+    info["lake_balance"] = bal
+    depth = water - surface
+    depth[ocean] = 0.0
     acc[ocean.reshape(-1)] = 0.0
     acc = acc.astype(np.float32).reshape(6, N, N)
+    if hp.lake_evap > 0:
+        log(f"[hydro] endorheic balance: {bal['depressions']:,} depressions -> "
+            f"{bal['overflowing']:,} overflowing, {bal['closed']:,} closed, {bal['dry']:,} dry; "
+            f"cells under water {bal['cells_spill']:,} -> {bal['cells_balanced']:,}; "
+            f"drawdown median {bal['drawdown_m_median']:.0f} m max {bal['drawdown_m_max']:.0f} m "
+            f"({info['t_balance_s']:.2f}s)")
 
     # 5. channels + drainage tree
     thr = river_threshold_volume(precip.interior, ~ocean, hp.river_threshold)
@@ -161,7 +191,7 @@ def run(store, params, log=print) -> dict:
 
     # 6. lakes
     t = time.time()
-    lakes, lake_labels = extract_lakes(lake, filled, flood.order, down, grid)
+    lakes, lake_labels = extract_lakes(lake, water, flood.order, down, grid)
     info["t_lakes_s"] = time.time() - t
     info["n_lakes"] = len(lakes)
     info["lake_cells"] = int(np.count_nonzero(lake))
@@ -170,7 +200,7 @@ def run(store, params, log=print) -> dict:
     log(f"[hydro] lakes: {len(lakes)} ({info['lake_cells']:,} cells)")
 
     # outputs
-    ws = filled.copy()
+    ws = water.copy()
     ws[ocean] = 0.0
     store.save_field(FaceField.from_interior(grid, ws, name="water_surface"))
     store.save_field(FaceField.from_interior(grid, fd, name="flow_dir"))
