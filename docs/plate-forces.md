@@ -247,5 +247,55 @@ baseline's 0.36; the deletion in continent-on-continent collisions is
 still there and is the thing to fix next, by a rift that opens along a
 suture so that a locked pair can be unlocked.
 
-`worlds/earth-v4` is the full `earth` bake with these defaults.
+## 6. `worlds/earth-v4`: the bake, and what the breakup costs
+
+The full `earth` bake with `heat_insulation = 0.003` and nothing else
+changed (60 minutes: erosion 3185 s, refine 210 s). The timeline shows
+the rift ocean opening across the continent by step 500 and the final
+frame is several continents with real oceans between them and island
+arcs in the old superocean, against `earth-v3`'s one continent with a
+scar. Tectonics census against `earth-v3`:
+
+| | earth-v3 | earth-v4 |
+|---|---|---|
+| plates alive at 1500 | 10 | 17 |
+| collisions | 55,203 | 62,754 |
+| ocean under ocean / under continent / continent on continent | 53 / 38 / 9 % | 48 / 48 / **4 %** |
+| tectonic maximum | 8783 m | **4884 m** |
+| lakes / rivers / max Strahler order | 2219 / 7976 / 6 | 1534 / 6133 / 4 |
+
+And the hypsometry after erosion (`scripts/hypsometry.py`):
+
+| band | Earth | earth-v3 | earth-v4 |
+|---|---|---|---|
+| 0-1 km | 71.6 | 76.7 | **91.0** |
+| 1-2 | 15.4 | 8.7 | 6.0 |
+| 2-3 | 7.5 | 7.4 | **1.8** |
+| 3-4 | 3.8 | 4.2 | **0.8** |
+| 4-5 | 1.7 | 1.9 | 0.3 |
+| >5 | 0.3 | 1.1 | 0.0 |
+| max | 8849 m | 8783 | **4884** |
+| ocean median | -3700 m | -3100 | -2379 |
+
+**The mountains went with the grinding.** `earth-v3`'s high ground
+was built by continent-on-continent collisions, and most of those were
+the rifted halves being dragged back onto each other by the fixed heat
+field, the very thing this work removed. With the halves pushed apart
+instead, continent-on-continent falls from 9 % to 4 % of collisions, no
+Himalayan belt is built in 1500 steps, and the highest point on the
+planet is an Andean crest at 4884 m. Land above 2 km is 2.9 % against
+Earth's 13.3 %. The ocean is shallower for the right reason (the interior
+oceans are young floor that has not subsided) and the rivers are shorter
+because the continents are.
+
+So the cycle and the mountains are, at these settings, in tension: the
+first needs the continents to disperse, the second needs them to
+collide. Earth has both because its collisions are a *later* phase of
+the same cycle (India left Gondwana and hit Asia 100 My later). Two
+ways to get both, to be measured next: run past the reassembly
+(`steps` 2500-3000, where the 3000-step trajectories re-form the
+continent at 0.9 and split it again), or raise the Andean belt so
+ocean-under-continent margins carry the high ground, as the Andes do at
+6960 m. Either way `orogen_decay` and the belt profiles were tuned on a
+world whose collisions were 9 % continental and will want re-measuring.
 
