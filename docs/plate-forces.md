@@ -299,3 +299,54 @@ ocean-under-continent margins carry the high ground, as the Andes do at
 6960 m. Either way `orogen_decay` and the belt profiles were tuned on a
 world whose collisions were 9 % continental and will want re-measuring.
 
+## 7. Steps, decay, and `earth-v5`
+
+"Just do more steps until it gets interesting." Tectonics-only Earth
+bakes at 2500, 3000 and 4000 steps with `heat_insulation = 0.003`
+(bedrock hypsometry, before erosion):
+
+| | Earth | 1500 (`earth-v4`) | 2500 | 3000 | 4000 | 2500, decay 0.004 | **3000, decay 0.004** |
+|---|---|---|---|---|---|---|---|
+| 1-2 km | 15.4 | 6.0 | 19.1 | 25.7 | 29.0 | 21.8 | 28.1 |
+| 2-3 | 7.5 | 1.8 | 3.3 | 1.5 | 2.4 | 5.2 | **10.2** |
+| 3-4 | 3.8 | 0.8 | 0.9 | 0.8 | 0.9 | 2.0 | **3.8** |
+| 4-5 | 1.7 | 0.3 | 0.1 | 0.0 | 0.5 | 0.5 | 0.9 |
+| max m | 8849 | 4884 | 5475 | 3839 | 5292 | 5661 | 6747 |
+| land % | 29.2 | 42 | 35 | 31 | 25 | 30 | 24 |
+
+Length alone does not bring the mountains back: at `orogen_decay =
+0.008` a belt is gone 125 steps after the convergence that built it
+stops, so whatever the run's length the high ground is what collided in
+the last two hundred steps, and at 3000 that happened to be little.
+4000 steps scatters the crust into an archipelago (25 % land in dozens
+of pieces). Halving the decay keeps the belts of the first reassembly
+standing, and 3000 steps at 0.004 puts the 2-4 km bands on Earth's
+before erosion has touched them. Both are the defaults now; tectonics
+costs 277 s at Earth scale instead of 120 s.
+
+`worlds/earth-v5` is the full bake (with docs/lakes-in-erosion.md as
+well). The eroded surface at iteration 800:
+
+| band | Earth | earth-v4 | **earth-v5** |
+|---|---|---|---|
+| 0-1 km | 71.6 | 94.2 | **67.7** |
+| 1-2 | 15.4 | 3.5 | 18.7 |
+| 2-3 | 7.5 | 1.3 | **6.4** |
+| 3-4 | 3.8 | 0.6 | **2.8** |
+| 4-5 | 1.7 | 0.2 | 2.3 |
+| >5 | 0.3 | 0.1 | 2.1 |
+| land median | ~350 m | 62 | 655 |
+| max | 8849 m | 6021 | 9862 |
+| ocean median | -3700 m | -2457 | -3247 |
+| within ±50 m of sea level | 1-2 % | 20 | 7 |
+
+Four to six continents with mountain belts on their collision margins,
+an ocean nearly at Earth's depth, and a hypsometric curve that is on
+Earth's from 0 to 4 km. Two things stand out on the other side: 2.1 % of
+the land above 5 km against Earth's 0.3 (the reassembly belts at 0.004
+are now too well kept, or erosion is not reaching them), and a land
+median of 655 m against ~350 -- too much of the crust is standing at
+1-2 km, which is where the 3000-step bedrock already had 28 %. The
+decay is a knob with two numbers now and wants sweeping between 0.004
+and 0.008 on the full bake.
+

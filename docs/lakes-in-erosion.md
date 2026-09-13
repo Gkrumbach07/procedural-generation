@@ -72,7 +72,59 @@ half of the coast fringe in the review's section 3; the refine half
   shore and starts again at the outlet instead of being skeletonised
   across the flat and the land bridges between a lake's pieces.
 
-## 4. Measured
+## 4. Measured: `worlds/earth-v5`
 
-`worlds/earth-v5` is the first bake with all of this (and the 3000-step
-tectonics of docs/plate-forces.md section 7). Results follow.
+The first bake with all of this, on the 3000-step tectonics of
+docs/plate-forces.md section 7 (63 minutes: erosion 3389 s, refine 330 s).
+`earth-v4` is the same pipeline before any of it, on 1500-step tectonics,
+so the tectonics differ too; the lake and coast numbers below are still
+the ones this change moves.
+
+| | earth-v3 | earth-v4 | **earth-v5** |
+|---|---|---|---|
+| lakes in erosion at the last refresh: overflowing / closed / dry depressions | -- | -- | 2426 / 58 / 54 |
+| coarse lake cells (hydro) | 124,276 | 103,111 | **41,406** |
+| of which spill-point fill would have given | 214,423 | 121,978 | 77,918 |
+| fine lake cells / 4 (refine, in coarse-cell equivalents) | 127,585 | 95,315 | **40,200** |
+| rivers (derive) / max Strahler order | 7976 / 6 | 6041 / 4 | 6565 / 6 |
+| mean sediment thickness | 129 m | 59 m | **175 m** |
+| sediment on the shelf (−200..0 m by eroded surface), share / concentration | -- | 12.5 % / 0.98x | **56.4 % / 11.4x** |
+| sediment on land (> 50 m) | -- | 17.2 % / 1.05x | 10.5 % / 0.41x |
+| `lost_offshore` (mass deleted) | 1142 Mm | 1052 Mm | **3141 Mm** |
+
+What the numbers say, and what the viewer shows:
+
+* **Lakes are a third of what they were**, because depressions fill
+  while erosion runs instead of being discovered full afterwards: the
+  delta at the shore is where the load goes, and the bed is not cut. In
+  the viewer the big lakes have clean shores, rivers enter them and a
+  single river leaves at the outlet, and no river runs across a lake or
+  along a land bridge between its pieces. The refine and coarse counts
+  now agree to 3 %: the "four times as many fine lake cells" of
+  docs/erosion-and-the-sea.md was fine cells against coarse cells, four
+  per coarse cell, and never a gap. (The cap is still right, for closed
+  lakes.)
+* **The shelf receives sediment**: 56 % of it, at 11x the mean
+  concentration, against 12.5 % and 1x with the 195 m floor. That is the
+  shelf wedge that could not build before, and it is a lot of wedge;
+  whether it is too much wants the depth profile across a margin.
+* **Two things went the wrong way**, both from the same floor. With the
+  ceiling on a step deposit now 1 m above the upstream cell instead of
+  195 m, a particle on a flat floodplain or a flat seafloor can place
+  almost nothing per visit: land keeps 10.5 % of the sediment instead of
+  17 %, and `lost_offshore` -- the load a seafloor walk could not place,
+  which `apply_changes` deletes -- triples. The deletion is the defect
+  (that mass should go to `pending`, as it does on land), and the 1 m
+  floodplain ceiling at 9.8 km cells is a 1e-4 gradient, which is a
+  real floodplain but a slow one. Both are for the next erosion pass.
+* **The coast fringe is not erosion's.** With the floor in metres the
+  spiky light band along every coast is still there, and the
+  tectonics-only bakes in docs/plate-forces.md show it before erosion
+  has run: it is the continental margin as the segment cloud rasterises
+  it -- `margin_taper` thins the outer 35 % of the continent to 45 %
+  thickness, that band sits at the waterline, and its outer edge is the
+  individual 160 km segments splatted one blob at a time. The review's
+  section 3 blamed refine's noise and then erosion's floor; it is the
+  tectonics stage's splat. A smoother margin (a wider splat kernel at the
+  margin, or a taper in the label map rather than per segment) is the
+  fix, in `tectonics/run.py`.

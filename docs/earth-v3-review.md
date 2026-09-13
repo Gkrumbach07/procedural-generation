@@ -303,11 +303,13 @@ few metres of sea level and use plain rather than ridged noise there; put
 `DEP_FLOOR` in metres so the shelf can fill; classify the fine sea by
 connectivity.
 
-> **Built** (`refine.coast_taper_m`, `erosion.dep_floor_m`). And a
-> correction: the viewer's final frame is the *coarse* grid, so the fringe
-> it shows was never refine's noise at all -- it is the coarse shelf band
-> that could receive no sediment. The taper fixes the fine grid; the floor
-> in metres is the fix for what the viewer shows. The satellite layer shades shallow water by depth so the
+> **Built** (`refine.coast_taper_m`, `erosion.dep_floor_m`), and twice
+> corrected. The viewer's final frame is the *coarse* grid, so the fringe
+> it shows was never refine's noise; and with the deposition floor in
+> metres it is still there, and the tectonics-only bakes have it before
+> erosion runs. It is the continental margin as the segment cloud splats
+> it -- see docs/lakes-in-erosion.md section 4. The two fixes here are
+> still right for what they fix. The satellite layer shades shallow water by depth so the
 fringe reads as a shelf rather than as a delta, but the fringe is data and
 the render only changes what it looks like.
 

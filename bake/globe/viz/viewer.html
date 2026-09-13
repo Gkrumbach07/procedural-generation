@@ -336,7 +336,7 @@ void main(){
     float b = uLKind == 1 ? byteNearest(uLT, uLGeo, uLCh, p) : byteLinear(uLT, uLGeo, uLCh, p);
     if (uLKind == 1) {
       if (uCmap == 6)      col = wet ? satWater(h, wcode) : satColor(b, h, p);
-      else if (uCmap == 7) col = b < 0.5 ? (wet ? vec3(0.30, 0.34, 0.40) : vec3(0.82, 0.80, 0.76)) : orderColor(b);
+      else if (uCmap == 7) col = wet ? vec3(0.30, 0.34, 0.40) : (b < 0.5 ? vec3(0.82, 0.80, 0.76) : orderColor(b));   // a reach across a lake is the lake
       else col = uCmap == 3 ? uBiome[int(b) & 31] : (b < 0.5 ? vec3(0.12) : hashColor(b));
     } else {
       float t = b / 255.0;
