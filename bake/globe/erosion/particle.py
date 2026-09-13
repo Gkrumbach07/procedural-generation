@@ -57,7 +57,7 @@ MASK_FROZEN = 2
 
 #: bumped whenever a kernel change alters results: part of the checkpoint
 #: hash, so stale checkpoints are never resumed after a code change
-KERNEL_VERSION = 6
+KERNEL_VERSION = 7
 
 #: a dying particle deposits its remaining load at the cell it died in; the
 #: excess over that cell's caps moves back up its last SPREAD active cells
@@ -153,13 +153,13 @@ S_HARD = 6
 S_SED = 7  # sediment thickness (erodibility rule)
 S_G = 8  # metric g_ii, g_ij, g_jj (8..10)
 S_GINV = 11  # inverse metric (11..13)
-S_RFLAG = 14  # 1.0 where the packed routing surface differs from the (live) surface of this cell; a bilinear route sample is skipped when all four stencil cells are 0 (identical inputs give an identical bilinear, so this is exact)
+S_RFLAG = 14  # 1.0 where the packed routing surface differs from the (live) surface of this cell; 2.0 on an overflowing lake cell (`maps.ErosionState.refresh_lakes`: under the water level of a depression that spills -- a particle drops its load on the shore entering one, exchanges nothing with the bed while crossing, and the bed is never eroded below its level); a bilinear route sample is skipped when all four stencil cells are 0 (identical inputs give an identical bilinear, so this is exact)
 S_BASE = 15  # local base level in cell units (`maps.ErosionState.refresh_base`): 0 on the open ocean and on ordinary land, the floor of its own basin inside a closed depression below sea level.  The kernel's *sea* is `surface < base`, not `surface < 0` -- the sign of the height says a cell is under the waterline, not that it is joined to the sea
 NS = 16
 
 
 @njit(cache=True, parallel=True)
-def pack_samples(samp, height, sediment, route, use_route, discharge, momentum, evap, hardness, metric, metric_inv, base):
+def pack_samples(samp, height, sediment, route, use_route, discharge, momentum, evap, hardness, metric, metric_inv, base, lake_flag):
     """Fill the packed sample array from the state arrays (once per iteration)."""
     F, NE, _ = height.shape
     for f in prange(F):
@@ -180,7 +180,10 @@ def pack_samples(samp, height, sediment, route, use_route, discharge, momentum, 
                 for k in range(3):
                     samp[f, ei, ej, S_G + k] = metric[f, ei, ej, k]
                     samp[f, ei, ej, S_GINV + k] = metric_inv[f, ei, ej, k]
-                samp[f, ei, ej, S_RFLAG] = 1.0 if (use_route and samp[f, ei, ej, S_ROUTE] != samp[f, ei, ej, S_SURF]) else 0.0
+                if use_route and lake_flag[f, ei, ej] > 0:
+                    samp[f, ei, ej, S_RFLAG] = 2.0
+                else:
+                    samp[f, ei, ej, S_RFLAG] = 1.0 if (use_route and samp[f, ei, ej, S_ROUTE] != samp[f, ei, ej, S_SURF]) else 0.0
                 samp[f, ei, ej, S_BASE] = base[f, ei, ej]
 
 
@@ -287,6 +290,8 @@ def trace_particles(
     ocean_rate,
     ocean_steps,
     fan_room,
+    dep_floor,
+    lake_trap,
     # change list: (P*cap,) arrays + (P,) counts, cell range, death cause
     cl_cell,
     cl_delta,
@@ -374,6 +379,7 @@ def trace_particles(
         h_prev = -1e300
         exited = False
         in_sea = False  # reached the ocean: deposit-only seafloor walk
+        in_lake = False  # on an overflowing lake (S_RFLAG == 2): crossing, no exchange with the bed
         sea_steps = 0
         cause = DEATH_AGE
         for step in range(max_steps):
@@ -521,7 +527,7 @@ def trace_particles(
                 room = h_prev - h_here if h_prev > -1e300 else fan_room
                 if room < fan_room:
                     room = fan_room  # flat seafloor: fans still build (the live caps bound the pile)
-                lim = b_here - DEP_FLOOR - h_here  # waterline ceiling
+                lim = b_here - dep_floor - h_here  # waterline ceiling
                 if lim < room:
                     room = lim
                 if room < 0.0:
@@ -574,6 +580,15 @@ def trace_particles(
                 else:
                     k_e = deposition_rate
                 cdiff = k_e * (c_eq - sed)
+                if in_lake:
+                    # crossing a lake: the water surface is what the particle
+                    # rides, the bed sees nothing
+                    cdiff = 0.0
+                elif sed > 0.0 and samp[nf, nei, nej, S_RFLAG] >= 1.5:
+                    # entering a lake: the load drops at the shore (delta)
+                    trap = -lake_trap * sed
+                    if trap < cdiff:
+                        cdiff = trap
                 # Terrain is frozen within a chunk, so K concurrent particles
                 # would each act against the same stale heights.  Cap the
                 # change at (local relief) / (1 + expected visits of this cell
@@ -592,9 +607,9 @@ def trace_particles(
                     if cdiff * vol_rel > ecap:
                         cdiff = ecap / vol_rel
                 elif cdiff < 0.0:
-                    room = h_prev - h_here if h_prev > -1e300 else DEP_FLOOR
-                    if room < DEP_FLOOR:
-                        room = DEP_FLOOR
+                    room = h_prev - h_here if h_prev > -1e300 else dep_floor
+                    if room < dep_floor:
+                        room = dep_floor
                     dcap = room / kexp
                     if -cdiff * vol_rel > dcap:
                         cdiff = -dcap / vol_rel
@@ -619,6 +634,7 @@ def trace_particles(
             y = ny
             f = nf
             h_prev = h_here
+            in_lake = samp[nf, nei, nej, S_RFLAG] >= 1.5
             # --- stop conditions -------------------------------------------
             if samp[nf, nei, nej, S_SURF] < samp[nf, nei, nej, S_BASE] and not in_sea:
                 # reached the ocean: from here on a deposit-only seafloor
@@ -630,7 +646,7 @@ def trace_particles(
             if vol < min_volume:
                 cause = DEATH_OCEAN if in_sea else DEATH_EVAP
                 break
-            if dhr < 0.0:
+            if dhr < 0.0 and not in_lake:
                 uphill += 1
                 if uphill > pit_steps:
                     cause = DEATH_OCEAN if in_sea else DEATH_PIT
@@ -691,7 +707,7 @@ def trace_particles(
 def apply_changes(
     cl_cell, cl_delta, cl_vol, cl_mom, cl_count, cap,
     height, sediment, acc, pending, samp, disch_track, mom_track, mask,
-    iter_erode, iter_deposit, fan_slope, use_route,
+    iter_erode, iter_deposit, fan_slope, use_route, dep_floor,
 ):
     """Apply a change list serially in particle order against the live
     terrain.  This is the single place where physical limits are enforced
@@ -777,6 +793,10 @@ def apply_changes(
                 if e_act > room:
                     e_act = room
                 floor = b_c if s_c >= b_c else s_c  # submerged cells are never eroded
+                if use_route and pflat[c, S_RFLAG] >= 1.5:
+                    r_c = pflat[c, S_ROUTE]
+                    if r_c > floor:
+                        floor = r_c  # a lake bed is never eroded below its water level
                 if k + 1 < cnt:
                     nc = cl_cell[base + k + 1]  # the cell the particle stepped to
                     ns = hflat[nc] + sflat[nc] + aflat[nc]
@@ -807,15 +827,15 @@ def apply_changes(
                 elif k + 1 < cnt:
                     ref = cl_cell[base + k + 1]  # next-older path cell
                 if ref >= 0:
-                    ceil = hflat[ref] + sflat[ref] + aflat[ref] + DEP_FLOOR
+                    ceil = hflat[ref] + sflat[ref] + aflat[ref] + dep_floor
                     if s_c < b_c and is_step:
-                        ceil -= DEP_FLOOR + fan_slope  # a fan descends away from its source
+                        ceil -= dep_floor + fan_slope  # a fan descends away from its source
                     lim = ceil - s_c
                     if d_act > lim:
                         d_act = lim
                 if s_c < b_c:
                     # a submerged cell fills to just below the waterline, never above
-                    lim = b_c - DEP_FLOOR - s_c
+                    lim = b_c - dep_floor - s_c
                     if d_act > lim:
                         d_act = lim
                 if d_act < 0.0:
@@ -831,8 +851,8 @@ def apply_changes(
             pflat[c, S_SURF] = s_new
             sd = sflat[c] + a2
             pflat[c, S_SED] = sd if sd > 0.0 else 0.0
-            if use_route:
-                # keep the route flag in step with the live surface
+            if use_route and pflat[c, S_RFLAG] < 1.5:
+                # keep the route flag in step with the live surface (a lake cell stays a lake cell)
                 pflat[c, S_RFLAG] = 1.0 if pflat[c, S_ROUTE] != pflat[c, S_SURF] else 0.0
             if is_step:
                 if v > 0.0:
@@ -938,7 +958,7 @@ def thermal_pass_a(height, sediment, metric, talus, mask, thermal_rate, thermal_
 
 
 @njit(cache=True, parallel=True)
-def thermal_pass_r(height, sediment, metric, talus, mask, thermal_rate, scale, rscale):
+def thermal_pass_r(height, sediment, metric, talus, mask, thermal_rate, scale, rscale, dep_floor):
     """Receiver scale: a submerged cell (surface < 0) accepts inflow only up
     to its room below ``-DEP_FLOOR`` (mass wasting never turns sea into
     land, like particle deposition); land cells accept everything."""
@@ -958,7 +978,7 @@ def thermal_pass_r(height, sediment, metric, talus, mask, thermal_rate, scale, r
                     if sc <= 0.0 or mask[f, ni, nj] == MASK_OUTSIDE:
                         continue
                     inflow += sc * _thermal_out(height, sediment, metric, talus, f, ni, nj, (k + 4) % 8, thermal_rate)
-                room = -DEP_FLOOR - surf
+                room = -dep_floor - surf
                 if room < 0.0:
                     room = 0.0
                 if inflow > room:

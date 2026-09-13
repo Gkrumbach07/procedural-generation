@@ -93,6 +93,8 @@ def save_checkpoint(store: WorldStore, state: ErosionState, params: WorldParams)
         arrays["iso_acc"] = state.iso_acc
     if getattr(state, "ice_prev", None) is not None:  # sticky ice: part of the state
         arrays["ice_prev"] = state.ice_prev.astype(np.uint8)
+    if state.lake_flag is not None:  # lakes are refreshed every flood_every iterations: part of the state
+        arrays["lake_flag"] = state.lake_flag
     with open(tmp, "wb") as fh:
         np.savez(fh, **arrays)
     tmp.replace(p)
@@ -174,6 +176,7 @@ def load_checkpoint(state: ErosionState, path: Path, meta: dict) -> None:
             state.base_at = None
         state.iso_acc = np.array(z["iso_acc"]) if "iso_acc" in z.files else None
         state.ice_prev = np.array(z["ice_prev"]).astype(bool) if "ice_prev" in z.files else None
+        state.lake_flag = np.ascontiguousarray(z["lake_flag"]).astype(np.uint8) if "lake_flag" in z.files else None
     state.iteration = int(meta["iteration"])
 
 
@@ -218,6 +221,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     lost_offshore = 0.0
     datum_shift = 0.0
     sea = None  # last `maps.refresh_base` census: what erosion called sea
+    lakes = None  # last `maps.refresh_lakes` census
     while state.iteration < n_iter:
         it = state.iteration
         t0 = time.time()
@@ -228,6 +232,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         lost_offshore += float(st.get("lost_offshore", 0.0))
         datum_shift += float(st.get("datum_shift", 0.0))
         sea = st.get("sea", sea)
+        lakes = st.get("lakes", lakes)
         d = st.get("deaths", {})
         log(
             f"[erosion] iter {it + 1}/{n_iter}: {st['particles']} particles, mean {st['steps_mean']:.0f} steps, "
@@ -269,6 +274,8 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         # what the kernel called sea at the last refresh (maps.refresh_base):
         # the classification the whole stage ran on, worth having on record
         info["sea"] = sea
+    if lakes is not None:
+        info["lakes"] = lakes
     return info
 
 

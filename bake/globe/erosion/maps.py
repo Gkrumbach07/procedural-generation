@@ -79,6 +79,7 @@ class ErosionState:
     height_unit_m: float
     grid: Grid | None = None  # needed for halo exchange in spherical mode
     route: np.ndarray | None = None  # (F, NE, NE) float64 routing surface (see route.py); None = steer on the terrain
+    lake_flag: np.ndarray | None = None  # (F, NE, NE) uint8, 1 on an overflowing lake cell (`refresh_lakes`); closed lakes live in `base` instead
     disch_track: np.ndarray = field(default=None, repr=False)
     mom_track: np.ndarray = field(default=None, repr=False)
     samp: np.ndarray = field(default=None, repr=False)  # packed float32 samples (F, NE, NE, NS), rebuilt every iteration
@@ -229,7 +230,9 @@ class ErosionState:
     def pack(self) -> None:
         """Refresh the packed float32 sample array from the state arrays."""
         use_route = self.route is not None
-        pk.pack_samples(self.samp, self.height, self.sediment, self.route if use_route else self.height, use_route, self.discharge, self.momentum, self.evap, self.hardness, self.metric, self.metric_inv, self.base)
+        if self.lake_flag is None:
+            self.lake_flag = np.zeros(self.height.shape, dtype=np.uint8)
+        pk.pack_samples(self.samp, self.height, self.sediment, self.route if use_route else self.height, use_route, self.discharge, self.momentum, self.evap, self.hardness, self.metric, self.metric_inv, self.base, self.lake_flag)
 
     def height_m(self) -> np.ndarray:
         return self.height * self.height_unit_m
@@ -311,6 +314,7 @@ class ErosionState:
         inter = self.interior
         surf = (self.height[inter] + self.sediment[inter]).astype(np.float64)
         below, labels, keep = below_sea_components(surf.astype(np.float32), self.grid, float(min_fraction))
+        sea = None
         if labels is not None:
             sea = below & keep[np.maximum(labels, 0)]
             closed = below & ~sea
@@ -333,7 +337,59 @@ class ErosionState:
         flat[hm.dst] = flat[hm.nearest]
         self.base = base
         self.base_at = self.iteration
+        self.sea = sea
         return info
+
+    def refresh_lakes(self, lake_evap: float, min_depth: float, min_fraction: float) -> dict:
+        """Solve every depression's water level on the current surface and
+        hand it to the kernel (``erosion.lake_balance``).
+
+        Hydro's own sequence -- priority flood, D8 on the filled DEM,
+        upstream-first accumulation with the evaporation balance
+        (:func:`globe.hydro.balance.balance_lakes`) -- run on the eroding
+        surface, so the lakes erosion works with are the lakes hydro will
+        find.  Two kinds come out of it.  A depression whose balance
+        overflows stands at its spill point: its cells are flagged
+        (``lake_flag``, ``S_RFLAG == 2``) and particles cross it on the
+        routing surface, dropping their load at the shore and leaving the
+        bed alone.  One drawn down below its rim is a closed sea: its level
+        goes into ``base`` and the kernel's sea rules do the rest (particles
+        entering it settle their load and stop).  Must run after
+        :meth:`refresh_base` (which rebuilds ``base`` from scratch) and
+        after :meth:`refresh_route`."""
+        from ..hydro.balance import balance_lakes
+        from ..hydro.priority_flood import priority_flood_sphere
+        from ..hydro.routing import downstream_table, flow_directions
+        from ..hydro.run import open_ocean
+
+        H = self.H
+        inter = (slice(None), slice(H, -H), slice(H, -H))
+        surf = np.ascontiguousarray(self.surface()[inter], dtype=np.float32)
+        sea = getattr(self, "sea", None)
+        ocean = np.asarray(sea, bool).reshape(surf.shape) if sea is not None else np.asarray(open_ocean(surf, self.grid, min_fraction), bool).reshape(surf.shape)
+        flood = priority_flood_sphere(surf, ocean, self.grid)
+        fd = flow_directions(flood.filled, ocean, flood.parent, self.grid)
+        down = downstream_table(fd, self.grid.owner, H)
+        topo = flood.pop_seq[::-1]
+        topo = topo[~ocean.reshape(-1)[topo]]
+        water, _acc, bal = balance_lakes(surf, flood.filled, ocean, flood.order, down, topo,
+                                         np.ascontiguousarray(self.precip[inter]), np.ascontiguousarray(self.evap[inter]),
+                                         self.grid, float(lake_evap))
+        lake = ((water - surf) > min_depth) & ~ocean
+        closed = lake & (water < flood.filled - 1e-4)
+        flag = np.zeros(self.height.shape, dtype=np.uint8)
+        flag[inter] = (lake & ~closed).astype(np.uint8)
+        if closed.any():
+            b = self.base[inter]
+            b[closed] = water[closed]
+        hm = self.grid.halo
+        for arr in (flag, self.base):
+            flat = arr.reshape(-1, 1)
+            flat[hm.dst] = flat[hm.nearest]
+        self.lake_flag = flag
+        return {"lake_cells": int(lake.sum()), "lake_cells_closed": int(closed.sum()),
+                "depressions": int(bal.get("depressions", 0)), "overflowing": int(bal.get("overflowing", 0)),
+                "closed": int(bal.get("closed", 0)), "dry": int(bal.get("dry", 0))}
 
     def fields(self, names=("height", "sediment", "discharge", "momentum")) -> dict[str, FaceField]:
         """Output FaceFields in metres (spherical mode)."""
@@ -561,6 +617,8 @@ def run_iteration(
                 float(ep.ocean_deposition_rate),
                 int(ep.ocean_steps),
                 cell_units(ep, "fan_room", state.height_unit_m),
+                cell_units(ep, "dep_floor_m", state.height_unit_m),
+                float(ep.lake_trap),
                 cl_cell,
                 cl_delta,
                 cl_vol,
@@ -579,6 +637,7 @@ def run_iteration(
             cell_units(ep, "iter_erode", state.height_unit_m),
             cell_units(ep, "iter_deposit", state.height_unit_m),
             float(ep.fan_slope), state.route is not None,
+            cell_units(ep, "dep_floor_m", state.height_unit_m),
         )
         n_clamp += int(nc)
         to_pending += tp
@@ -618,7 +677,8 @@ def thermal_erosion(state: ErosionState, params) -> None:
     (parallel micro-rills, no coherent trunk network)."""
     ep = _eparams(params)
     talus = (ep.talus_slope_soft + (ep.talus_slope_hard - ep.talus_slope_soft) * state.hardness).astype(np.float64)
-    _mass_wasting_pass(state, talus, float(ep.thermal_rate), cell_units(ep, "thermal_max", state.height_unit_m))
+    dep_floor = cell_units(ep, "dep_floor_m", state.height_unit_m)
+    _mass_wasting_pass(state, talus, float(ep.thermal_rate), cell_units(ep, "thermal_max", state.height_unit_m), dep_floor=dep_floor)
     if ep.creep_rate > 0.0:
         # hillslope creep: the same conservative pass with talus 0 (every
         # lower neighbour receives creep_rate/2 of the height difference).
@@ -626,16 +686,16 @@ def thermal_erosion(state: ErosionState, params) -> None:
         # creep is a hillslope process, it must not diffuse the coast into
         # the sea (the talus pass still lets sea cliffs collapse).
         cmask = np.where(state.height + state.sediment < state.base, np.uint8(pk.MASK_FROZEN), state.mask).astype(np.uint8)
-        _mass_wasting_pass(state, np.zeros_like(talus), float(ep.creep_rate), cell_units(ep, "thermal_max", state.height_unit_m), cmask)
+        _mass_wasting_pass(state, np.zeros_like(talus), float(ep.creep_rate), cell_units(ep, "thermal_max", state.height_unit_m), cmask, dep_floor=dep_floor)
 
 
-def _mass_wasting_pass(state: ErosionState, talus: np.ndarray, rate: float, cap: float, mask: np.ndarray | None = None) -> None:
+def _mass_wasting_pass(state: ErosionState, talus: np.ndarray, rate: float, cap: float, mask: np.ndarray | None = None, dep_floor: float = pk.DEP_FLOOR) -> None:
     mask = state.mask if mask is None else mask
     out_total = np.zeros_like(state.height)
     scale = np.zeros_like(state.height)
     pk.thermal_pass_a(state.height, state.sediment, state.metric, talus, mask, rate, cap, out_total, scale)
     rscale = np.ones_like(state.height)
-    pk.thermal_pass_r(state.height, state.sediment, state.metric, talus, mask, rate, scale, rscale)
+    pk.thermal_pass_r(state.height, state.sediment, state.metric, talus, mask, rate, scale, rscale, float(dep_floor))
     new_h = state.height.copy()
     new_s = state.sediment.copy()
     pk.thermal_pass_b(state.height, state.sediment, state.metric, talus, mask, rate, out_total, scale, rscale, new_h, new_s)
@@ -833,6 +893,13 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
         st_base = None
     if ep.flood_every > 0 and (state.route is None or state.iteration % ep.flood_every == 0):
         state.refresh_route(cell_units(ep, "route_eps", state.height_unit_m))
+    st_lake = None
+    if state.spherical and bool(getattr(ep, "lake_balance", False)) and ep.flood_every > 0 and \
+            (state.lake_flag is None or state.iteration % ep.flood_every == 0):
+        # after base (rebuilt from scratch) and route (seeded on base)
+        st_lake = state.refresh_lakes(float(params.hydro.lake_evap),
+                                      float(params.hydro.lake_min_depth) / float(state.height_unit_m),
+                                      _ocean_min_fraction(params))
     tr = time.time() - t0
     iso = state.spherical and float(getattr(ep, "isostasy", 0.0)) > 0.0
     if iso:
@@ -865,6 +932,8 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
     state.iteration += 1
     if st_base is not None:
         st["sea"] = st_base
+    if st_lake is not None:
+        st["lakes"] = st_lake
     st["seconds_route"] = tr
     st["seconds_particles"] = t1 - t0 - tr
     st["seconds_total"] = time.time() - t0

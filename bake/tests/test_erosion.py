@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 from scipy import ndimage
 
-from globe.config import WorldParams
+from globe.config import WorldParams, cell_units
 from globe.field import FaceField
 from globe.erosion import glacial
 from globe.erosion import particle as pk
@@ -791,7 +791,9 @@ def test_sea_mask_off_is_the_old_sign_rule(scratch):
     the switch is a true no-op, so any difference between the two arms of a
     measurement is the mask and nothing else."""
     p, st = _land_world(scratch, "base_off")
-    p_off = p.with_overrides(erosion={"sea_mask_every": 0})
+    # lake_balance writes a drawn-down lake's level into `base` too, so it
+    # is switched off here as well: the test is about the sea mask alone
+    p_off = p.with_overrides(erosion={"sea_mask_every": 0, "lake_balance": False})
     for it in range(3):
         step(st, p_off, it)
     assert np.all(st.base == 0.0)
@@ -841,3 +843,31 @@ def test_hold_datum_carries_the_base_level_with_it(scratch):
     # and the basin is still registered to the terrain, which is the point
     surf = st.surface()[st.interior].reshape(-1)
     assert abs(float(surf[basin].min()) - float(b1[basin].min())) < 1e-9
+
+
+def test_lake_balance_makes_a_dug_basin_water_the_kernel_respects(scratch):
+    """`refresh_lakes` finds a basin dug above sea level, flags it (an
+    overflowing lake, `S_RFLAG == 2`) or sinks its level into `base` (a
+    closed one), and from then on the kernel never erodes its bed below
+    the water level."""
+    p, st = _land_world(scratch, "lake_basin")
+    face, i0, j0 = _dry_site(st, 6)
+    H = st.H
+    around = st.surface()[face, H + i0 - 2:H + i0 + 8, H + j0 - 2:H + j0 + 8]
+    floor = 0.3 * float(around.min())   # well below the land around it, above sea level
+    assert floor > 0.0
+    basin = _dig_basin(st, face, i0, j0, 5, floor)
+    st.refresh_base(p.hydro.ocean_min_fraction)
+    st.refresh_route(cell_units(p.erosion, "route_eps", st.height_unit_m))
+    info = st.refresh_lakes(p.hydro.lake_evap, p.hydro.lake_min_depth / st.height_unit_m, p.hydro.ocean_min_fraction)
+    assert info["lake_cells"] >= int(basin.sum()) // 2
+    flag = st.lake_flag[st.interior].reshape(-1)
+    base = st.base[st.interior].reshape(-1)
+    water = (flag[basin] > 0) | (base[basin] > floor + 1e-6)
+    assert water.mean() > 0.8, "the dug basin should be under water either way"
+    before = st.surface()[st.interior].reshape(-1)[basin].copy()
+    for it in range(4):
+        step(st, p, it)
+    after = st.surface()[st.interior].reshape(-1)[basin]
+    # the bed may fill (delta, settling) but is never cut below its floor
+    assert (after >= before - 1e-6).all()

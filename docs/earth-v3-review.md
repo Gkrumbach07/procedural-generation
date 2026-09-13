@@ -262,6 +262,13 @@ hydro in 0.13 s at Earth scale; the routing flood already runs. The new
 kernel work is the deposit-on-entry and the no-erosion-below-level tests,
 both inside the existing per-particle sample.
 
+> **Built.** Steps 1-5 of the design are in, measured in
+> docs/lakes-in-erosion.md: `erosion.lake_balance` (lake level as erosion
+> state, delta at the shore, no erosion below the level, closed lakes as
+> seas), the refine cap at the coarse level, and the derive lake
+> exclusion. Rivers in derive are still thresholded discharge, not the
+> traced graph.
+
 ### What the viewer does now
 
 The viewer's rivers now come from hydro's `flow_acc` on the final frame,
@@ -294,7 +301,13 @@ metres of zero. Three things put them there:
 Fixes, cheapest first: taper the refine noise amplitude to zero within a
 few metres of sea level and use plain rather than ridged noise there; put
 `DEP_FLOOR` in metres so the shelf can fill; classify the fine sea by
-connectivity. The satellite layer shades shallow water by depth so the
+connectivity.
+
+> **Built** (`refine.coast_taper_m`, `erosion.dep_floor_m`). And a
+> correction: the viewer's final frame is the *coarse* grid, so the fringe
+> it shows was never refine's noise at all -- it is the coarse shelf band
+> that could receive no sediment. The taper fixes the fine grid; the floor
+> in metres is the fix for what the viewer shows. The satellite layer shades shallow water by depth so the
 fringe reads as a shelf rather than as a delta, but the fringe is data and
 the render only changes what it looks like.
 
