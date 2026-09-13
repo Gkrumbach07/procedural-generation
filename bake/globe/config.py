@@ -360,6 +360,7 @@ class WatershedParams:
 class RefineParams:
     refine_iterations: int = 150
     detail_amp: float = 0.3
+    coast_taper_m: float = 40.0  # the detail noise fades to nothing at sea level and is full this many metres above or below it. The noise is ridged (sharp creases at the two-cell wavelength) with an amplitude set by the coarse slope, which is largest at the shelf step, so added to a surface hovering within metres of zero it turned every coast into a two-cell fringe of inlets that read as a delta (docs/earth-v3-review.md section 3). 0 = no taper
     halo_cells: int = 8
     workers: int = 0  # 0 -> os.cpu_count()
     feather_cells: int = 8  # fine cells over which a basin's refined detail ramps in from its (frozen) divide; keep >= 2R (a coarse cell): a 2-cell ramp reads as a crease in the LOD-0 hillshade

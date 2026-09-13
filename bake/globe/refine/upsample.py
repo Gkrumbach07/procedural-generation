@@ -251,14 +251,23 @@ def ridged_fbm(shape: tuple[int, int], base_wavelength: float, rng: np.random.Ge
     return out.astype(np.float32)
 
 
-def detail_noise(win: Window, slope: np.ndarray, relief: np.ndarray, hardness: np.ndarray, detail_amp: float, cell_size_m: float, rng: np.random.Generator) -> np.ndarray:
+def detail_noise(win: Window, slope: np.ndarray, relief: np.ndarray, hardness: np.ndarray, detail_amp: float, cell_size_m: float, rng: np.random.Generator,
+                 surface: np.ndarray | None = None, coast_taper_m: float = 0.0) -> np.ndarray:
     """Detail noise in metres on the extended window (``NE x NE``):
     ``detail_amp * min(slope * cell_size_m, relief) * (0.5 + 0.5 hardness)
     * ridged_fbm``.  ``slope`` (rise/run), ``relief`` (m) and ``hardness``
-    are the bilinearly upsampled coarse fields on the same array."""
+    are the bilinearly upsampled coarse fields on the same array.  With
+    ``surface`` (metres, sea level 0) and ``coast_taper_m > 0`` the
+    amplitude fades smoothly to zero at sea level, full again
+    ``coast_taper_m`` above or below it, so the noise cannot move the
+    coastline: the shelf step is the steepest slope on the map and the
+    ridged creases it earned were crossing zero as a fringe of inlets."""
     amp = float(detail_amp) * np.minimum(np.maximum(slope, 0.0) * float(cell_size_m), np.maximum(relief, 0.0)) * (0.5 + 0.5 * np.clip(hardness, 0.0, 1.0))
     if detail_amp <= 0.0:
         return np.zeros((win.NE, win.NE), dtype=np.float32)
+    if surface is not None and coast_taper_m > 0.0:
+        t = np.clip(np.abs(np.asarray(surface, np.float32)) / np.float32(coast_taper_m), 0.0, 1.0)
+        amp = amp * (t * t * (3.0 - 2.0 * t))
     noise = ridged_fbm((win.NE, win.NE), 2.0 * win.R, rng)  # octaves 2R, R, R/2 ... 2 cells: what survives the coarse-cell drift removal of the job
     return (amp * noise).astype(np.float32)
 

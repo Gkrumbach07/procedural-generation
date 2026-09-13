@@ -336,7 +336,8 @@ def _run_basin(root, basin, params, log, t0, bid, rp, grid, fields, derived, win
     mask = build_mask(up["basin_id"], bid)
     active = mask == pk.MASK_ACTIVE
     gen = params.rng("refine", bid)
-    noise = detail_noise(win, up["slope"], up["relief"], up["hardness"], rp.detail_amp, grid.cell_size_m, gen)
+    noise = detail_noise(win, up["slope"], up["relief"], up["hardness"], rp.detail_amp, grid.cell_size_m, gen,
+                         surface=up["height0"] + up["sediment0"], coast_taper_m=float(rp.coast_taper_m))
     del up["slope"], up["relief"]
     noise_max = float(np.abs(noise[active]).max()) if active.any() else 0.0
     height = up["height0"].astype(np.float32)

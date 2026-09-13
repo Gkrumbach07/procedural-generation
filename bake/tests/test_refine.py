@@ -501,3 +501,21 @@ def test_quicklooks_and_runtime(world, tmp_path):
     assert len(info["quicklooks"]) == min(refine_run.N_BASIN_QUICKLOOKS, info["n_basins"])
     assert info["n_basins"] == len(world["basins"]) and info["deaths"]["exit"] > 0
     assert world["seconds"] < 60.0
+
+
+def test_detail_noise_fades_out_at_sea_level():
+    """With a surface and a coast taper the noise is zero on the shoreline
+    and full again a taper's height above or below it."""
+    win = Window(0, 4, 20, 4, 20, 2)
+    NE = win.NE
+    slope = np.full((NE, NE), 0.5, np.float32)
+    relief = np.full((NE, NE), 40.0, np.float32)
+    hard = np.ones((NE, NE), np.float32)
+    surface = np.linspace(-100.0, 100.0, NE, dtype=np.float32)[:, None].repeat(NE, 1)
+    p = WorldParams.tiny_world()
+    n0 = detail_noise(win, slope, relief, hard, 0.3, 50.0, p.rng("refine", 7))
+    n1 = detail_noise(win, slope, relief, hard, 0.3, 50.0, p.rng("refine", 7), surface=surface, coast_taper_m=40.0)
+    shore = np.abs(surface[:, 0]) <= 200.0 / (NE - 1)   # the row or two nearest the waterline
+    far = np.abs(surface[:, 0]) > 40.0
+    assert shore.any() and np.abs(n1[shore]).max() < 0.05 * np.abs(n0).max()
+    assert np.array_equal(n1[far], n0[far])
