@@ -76,6 +76,9 @@ def make_window(N: int, mode: str, params: WorldParams, seed: int = 0, relief: f
     i = 0, frozen (mask 2) wall rims on the other three sides and a
     Gaussian uplift ridge near the far side.
     ``dome``: closed face with an uplift dome in the centre.
+    ``shelf``: ``tilt`` with the sea strip already filled to the deposition
+    floor (nothing can ever be placed on it) and walled on its far side
+    too, so no particle leaves: the runaway test for the seafloor stockpile.
     """
     H = params.world.halo
     NE = N + 2 * H
@@ -96,6 +99,16 @@ def make_window(N: int, mode: str, params: WorldParams, seed: int = 0, relief: f
         h = relief * (0.35 * noise2d(NE, rng) + X) + 0.5
         h = np.where(X < 6.0 / N, -20.0, h)  # deep ocean strip (does not silt up in 150 iterations)
         wall = ((Y < 2.0 / N) | (Y > 1 - 2.0 / N) | (X > 1 - 2.0 / N)) & (mask == 1)
+        h = np.where(wall, relief + 5.0, h)
+        mask[wall] = 2
+        precip[wall] = 0
+        h = np.where(mask == 0, relief + 10.0, h)
+        upl = uplift_total / iters * np.exp(-((X - 0.85) ** 2) / (2 * 0.12**2))
+    elif mode == "shelf":
+        floor = cell_units(params.erosion, "dep_floor_m", cs)
+        h = relief * (0.35 * noise2d(NE, rng) + X) + 0.5
+        h = np.where(X < 12.0 / N, -floor, h)  # a shelf filled to the floor: no room for anything
+        wall = ((Y < 2.0 / N) | (Y > 1 - 2.0 / N) | (X > 1 - 2.0 / N) | (X < 2.0 / N)) & (mask == 1)
         h = np.where(wall, relief + 5.0, h)
         mask[wall] = 2
         precip[wall] = 0
@@ -173,27 +186,85 @@ def test_conservation_closed_window():
 
 def test_offshore_loss_is_accounted():
     """Open coast (``tilt`` window, deposit-on-exit): the mass that leaves
-    the modelled surface is exactly the load submarine fans could not
-    place (``lost_offshore``) — everything else stays in height + sediment
-    + pending — and nothing is parked in ``pending`` on a submerged cell."""
+    the modelled surface is exactly ``lost_offshore`` — everything else
+    stays in height + sediment + pending — and ``lost_offshore`` is the
+    ``offshore_writeoff`` share of what sea deaths could not place: the rest
+    is parked in the death cell's ``pending``, so after every iteration the
+    stockpile on submerged cells is (1 - w) / w times the write-off.  With
+    ``offshore_writeoff = 1.0`` it is the old rule (nothing parked on a
+    submerged cell, the whole surplus deleted), which deletes more."""
     p = WorldParams.small_world(0)
-    st = make_window(48, "tilt", p, deposit_on_exit=True)
+    assert 0.0 < p.erosion.offshore_writeoff < 1.0
+    out = {}
+    for label, pp in (("park", p), ("delete", p.with_overrides(erosion={"offshore_writeoff": 1.0}))):
+        w = pp.erosion.offshore_writeoff
+        st = make_window(48, "tilt", pp, deposit_on_exit=True)
+        m0 = st.total_mass()
+        lost = parked = 0.0
+        for it in range(25):
+            s = step(st, pp, it)
+            lost += s["lost_offshore"]
+            # no deficit leaves this window: the residue is the rounding of
+            # cancelling a clamped particle's later deposits (~1e-18)
+            assert s["deficit_out"] <= 1e-12 * abs(m0)
+            # every sea-death surplus splits 1 - w : w between the stockpile
+            # of its cell and the write-off (pending is re-injected and
+            # zeroed at the start of an iteration, so this is exact)
+            sea_pending = float(st.pending[st.surface() < 0].sum())
+            parked += sea_pending
+            assert abs(sea_pending - (1.0 - w) / w * s["lost_offshore"]) <= 1e-9 * (sea_pending + s["lost_offshore"]), (label, it)
+        # window mode applies uplift as given (only the global state is made
+        # mean-free, apply_uplift), so it is still a mass source here
+        upl = float(st.uplift[st.interior][st.mask[st.interior] == pk.MASK_ACTIVE].sum()) * 25
+        m1 = st.total_mass()
+        assert abs((m1 + lost) - (m0 + upl)) <= 1e-6 * abs(m0), (label, m0, m1, lost, upl)
+        assert s["deaths"]["ocean"] > 0
+        out[label] = (lost, parked)
+    assert out["delete"][0] > 0.0, "the old rule must lose mass offshore, or this proves nothing"
+    assert out["delete"][1] == 0.0  # the old rule never parks on a submerged cell
+    assert out["park"][1] > 0.0  # the new one does ...
+    assert out["park"][0] < out["delete"][0], out  # ... and so deletes less
+
+
+def test_seafloor_stockpile_is_bounded():
+    """A shelf nothing can be placed on (``shelf`` window: the strip is
+    filled to ``dep_floor_m`` below the waterline from the start and walled
+    off), so every load that reaches the sea is surplus, every iteration.
+    The stockpile that comes back must decay, not accumulate: each
+    re-injection writes ``offshore_writeoff`` of it off, so pending on the
+    seafloor is a geometric series bounded by inflow / w, where parking all
+    of it would grow linearly with the iterations (the deadlock the old
+    deletion rule was introduced against)."""
+    p = WorldParams.small_world(0)
+    w = p.erosion.offshore_writeoff
+    st = make_window(48, "shelf", p, deposit_on_exit=True)
+    sea0 = st.surface() < 0
+    assert sea0[st.interior].any()
     m0 = st.total_mass()
-    lost = 0.0
-    for it in range(25):
+    n = 40
+    lost_k = np.zeros(n)
+    pend_k = np.zeros(n)  # pending on submerged cells after each iteration
+    for it in range(n):
         s = step(st, p, it)
-        lost += s["lost_offshore"]
-        # no deficit leaves this window: the residue is the rounding of
-        # cancelling a clamped particle's later deposits (~1e-18)
-        assert s["deficit_out"] <= 1e-12 * abs(m0)
-    # window mode applies uplift as given (only the global state is made
-    # mean-free, apply_uplift), so it is still a mass source here
-    upl = float(st.uplift[st.interior][st.mask[st.interior] == pk.MASK_ACTIVE].sum()) * 25
+        assert s["lost_offshore"] > 0.0, it  # a full shelf writes off every iteration
+        lost_k[it] = s["lost_offshore"]
+        pend_k[it] = float(st.pending[st.surface() < 0].sum())
+        # the kept share is (1 - w) / w of the write-off, less the dust the
+        # kernel writes off outright (a kept share under 1e-4 cell units)
+        gap = (1.0 - w) / w * lost_k[it] - pend_k[it]
+        assert -1e-9 * (pend_k[it] + lost_k[it]) <= gap <= 1e-2 * (1.0 - w) / w * lost_k[it] + 1e-9, (it, gap)
+    assert np.all(st.surface()[sea0] < 0.0)  # sea never turned into land
+    upl = float(st.uplift[st.interior][st.mask[st.interior] == pk.MASK_ACTIVE].sum()) * n
     m1 = st.total_mass()
-    assert abs((m1 + lost) - (m0 + upl)) <= 1e-6 * abs(m0), (m0, m1, lost, upl)
-    sea = st.surface() < 0
-    assert st.pending[sea].sum() == 0.0
-    assert s["deaths"]["ocean"] > 0
+    assert abs((m1 + lost_k.sum()) - (m0 + upl)) <= 1e-6 * abs(m0), (m0, m1, lost_k.sum(), upl)
+    # the split gives the fresh arrivals: lost_k / w = (re-injected) P_{k-1} + I_k
+    fresh = lost_k / w - np.concatenate([[0.0], pend_k[:-1]])
+    assert fresh.max() > 0.0
+    # geometric, not linear: never above the series ceiling, a small fraction
+    # of what parking everything would have piled up, and flat over the run
+    assert pend_k.max() <= (1.0 - w) / w * fresh.max() * (1.0 + 1e-9)
+    assert pend_k[-1] < 0.25 * np.sum((1.0 - w) * fresh), (pend_k[-1], np.sum((1.0 - w) * fresh))
+    assert pend_k[3 * n // 4:].max() < 2.0 * pend_k[n // 4: n // 2].max(), pend_k
 
 
 def test_diag_hook_sees_the_change_list_and_changes_nothing():
@@ -871,3 +942,12 @@ def test_lake_balance_makes_a_dug_basin_water_the_kernel_respects(scratch):
     after = st.surface()[st.interior].reshape(-1)[basin]
     # the bed may fill (delta, settling) but is never cut below its floor
     assert (after >= before - 1e-6).all()
+
+
+def test_offshore_writeoff_is_range_checked():
+    import pytest
+    from globe.config import WorldParams
+    for bad in (0.0, -0.1, 1.5):
+        with pytest.raises(ValueError):
+            WorldParams.tiny_world().with_overrides(erosion={"offshore_writeoff": bad}).validate()
+    WorldParams.tiny_world().with_overrides(erosion={"offshore_writeoff": 1.0}).validate()

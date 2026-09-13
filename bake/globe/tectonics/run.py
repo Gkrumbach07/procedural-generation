@@ -34,6 +34,13 @@ Units
   horizontal scale of the tectonic pattern, in metres), or at ``relief_m``
   when that is set, or scales by ``height_scale_m`` per unit when both are
   0, see :func:`finalise`.
+* The tect grid is reconstructed from the cloud by a Gaussian blend of the
+  ``splat_knn`` nearest segments (sigma ``splat_sigma_factor`` spacings).
+  At a continental margin that resolves the individual boundary segments,
+  so :func:`margin_ramp` re-positions the continental/oceanic step with a
+  kernel ``margin_sigma_factor`` spacings wide and fills the oceanic side
+  up to it (raise-only: land, belts and sea level are as the blend made
+  them).
 * The heat field lives on a coarser grid (``N_tect / heat_grid_divisor``).
 * ``uplift`` is *metres per erosion iteration*: the per-segment height
   gained since the reference step (``steps - uplift_window``) in metres,
@@ -522,8 +529,9 @@ def frame_bed(sim, tree=None) -> np.ndarray:
     tree = build_tree(sim.seg) if tree is None else tree
     blend = SmoothSplat(tree, grid, tp.splat_sigma_factor * sim.spacing, int(tp.splat_knn))
     buoy = ridge_buoyancy(sim.seg, tp)
-    bed = _smooth_field(grid, blend(sim.seg.height() + buoy), tp, cascade=True).interior
-    cont = blend(sim.seg.kind.astype(np.float64)) > 0.5 if tp.shelf_fraction > 0 else None
+    raw, c, _ = margin_ramp(grid, blend, sim.seg, sim.seg.height() + buoy, tp, sim.spacing)
+    bed = _smooth_field(grid, raw, tp, cascade=True).interior
+    cont = c > 0.5 if tp.shelf_fraction > 0 else None
     sea = sea_level(bed, grid.interior_cell_area.astype(np.float64), cont, sim.params)
     return bed - sea
 
@@ -635,6 +643,58 @@ def _smooth_field(grid: Grid, values: np.ndarray, tp, cascade: bool) -> FaceFiel
     return gaussian_smooth(f, float(tp.smooth_sigma))
 
 
+def margin_ramp(grid: Grid, blend: SmoothSplat, seg: Segments, h: np.ndarray, tp, spacing: float):
+    """Per-segment height ``h`` -> (6, N, N) bed on the tect grid with a
+    smooth continental margin.  Returns ``(bed, c, lift)``: the bed, the
+    narrow continental fraction ``c`` (the crust-type boundary, unchanged),
+    and the raise that was applied (zeros when the knob is off).
+
+    ``blend(h)`` is exactly ``c * hc + (1 - c) * ho`` -- the continental
+    fraction of the nearest segments times their mean height plus the
+    oceanic complement -- and ``c`` steps from 1 to 0 over about one
+    spacing, at the positions of the individual boundary segments.  The
+    continental/oceanic step is the largest on the map (~0.06 units, 1.5 km
+    on Earth), so the shelf edge came out scalloped one segment at a time.
+    Here the *step* term alone is re-positioned: ``cw`` is ``c`` blurred by
+    ``margin_sigma_factor`` spacings and ``(cw - c) * (hc_base - ho)`` is
+    what the blend would have added had it seen the crust-type boundary at
+    that resolution.  Only the continental *base* (``min(h, belt height)``)
+    enters the step height, so belt cross-sections keep the narrow
+    resolution; the correction is raise-only, so land, belts and sea level
+    are exactly as the blend made them and the oceanic side climbs to the
+    ramp (a continental rise); and it is exactly zero where ``cw == c`` --
+    the interior of either crust.  Measured on `small`: shelf-edge isoline
+    L/sqrt(A) 7.79 -> 6.38 with the coastline unchanged (docs/coast-fringe.md).
+    """
+    bed0 = blend(h)
+    kind = (seg.kind == CONTINENTAL).astype(np.float64)
+    c = blend(kind)
+    f = float(tp.margin_sigma_factor)
+    if f <= 0.0:
+        return bed0, c, np.zeros_like(bed0)
+    # the nominal belt / craton height, the same product as the seeding
+    # (both float at 0.180); anything above it on continental crust is
+    # orogenic thickening and stays out of the step
+    h_belt = tp.continental_thickness * tp.belt_thickness * (1.0 - tp.continental_density)
+    h_base = np.where(kind > 0, np.minimum(h, h_belt), h)
+    cb = blend(kind * h_base)      # c * mean continental base height
+    ob = blend((1.0 - kind) * h)   # (1 - c) * mean oceanic height
+    sig = f * spacing * grid.N / (math.pi / 2)  # spacings -> tect cells
+
+    def blur(a):
+        return gaussian_smooth(FaceField.from_interior(grid, a, exchange=True), sig).interior
+
+    cw = np.clip(blur(c), 0.0, 1.0)  # the cubic halo exchange can overshoot [0, 1]
+    hc_w = np.where(cw > 1e-12, blur(cb) / np.maximum(cw, 1e-12), 0.0)
+    ho_w = np.where(cw < 1.0 - 1e-12, blur(ob) / np.maximum(1.0 - cw, 1e-12), 0.0)
+    # the step is not sign-definite (young, buoyant ocean floor can stand
+    # above a thinned margin base): only a downward step is a shelf edge
+    corr = (cw - c) * np.maximum(hc_w - ho_w, 0.0)
+    corr = np.where(np.abs(cw - c) < 1e-9, 0.0, corr)
+    lift = np.maximum(corr, 0.0)
+    return bed0 + lift, c, lift
+
+
 class _Resampler:
     """Tect-grid field -> (6, N_c, N_c) interior values on the coarse grid
     (cubic by default; ``order=0`` = nearest, for integer maps).  The
@@ -742,7 +802,8 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     ref = Segments(seg.pos, seg.thickness, seg.density, np.maximum(seg.age - elapsed, 0.0), seg.plate_id, seg.area, kind=seg.kind)
     buoy_ref = ridge_buoyancy(ref, tp)
     h = seg.height() + buoy
-    bed_t = _smooth_field(grid, blend(h), tp, cascade=True)
+    raw, c_t, lift = margin_ramp(grid, blend, seg, h, tp, sim.spacing)
+    bed_t = _smooth_field(grid, raw, tp, cascade=True)
     dh_t = _smooth_field(grid, blend(seg.height() - seg.h_ref + buoy - buoy_ref), tp, cascade=True)
     bed = _resample(bed_t).astype(np.float64)
     dh = _resample(dh_t).astype(np.float64)
@@ -751,7 +812,7 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     # but it is saved as a diagnostic either way (see `crust_kind` below), so
     # it is computed unconditionally and `shelf_mask` -- not `cont_c` -- is
     # what reaches `sea_level`, which keeps the placement unchanged.
-    cont_t = FaceField.from_interior(grid, blend(seg.kind.astype(np.float64)), exchange=True)
+    cont_t = FaceField.from_interior(grid, c_t, exchange=True)
     cont_c = _resample(cont_t).astype(np.float64) > 0.5
     shelf_mask = cont_c if tp.shelf_fraction > 0 else None
     q = sea_level(bed, area, shelf_mask, params)
@@ -854,6 +915,10 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
         "_land_slope": slope_info,
         "_scale_m_per_unit": scale,
         "_sea_level_units": q,
+        # the margin ramp's footprint: share of tect cells raised and the
+        # median raise (m at the final scale); 0 / 0 with the knob off
+        "_margin_raised_fraction": float((lift > 0).mean()),
+        "_margin_lift_median_m": float(np.median(lift[lift > 0]) * scale) if (lift > 0).any() else 0.0,
     }
 
 
@@ -911,6 +976,8 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         "spacing_rad": sim.spacing,
         "scale_m_per_unit": float(out["_scale_m_per_unit"]),
         "sea_level_units": float(out["_sea_level_units"]),
+        "margin_raised_fraction": float(out["_margin_raised_fraction"]),
+        "margin_lift_median_m": float(out["_margin_lift_median_m"]),
         "collisions_total": int(sum(s["collisions"] for s in sim.stats)),
         "spawned_total": int(sum(s["spawned"] for s in sim.stats)),
         "final_mass": float(last.get("mass", 0.0)),

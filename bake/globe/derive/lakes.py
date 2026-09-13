@@ -31,6 +31,24 @@ _STRUCT8 = np.ones((3, 3), dtype=bool)
 # --------------------------------------------------------------------------
 # masks and labels
 # --------------------------------------------------------------------------
+def kept_lake_mask(lake: np.ndarray, min_cells: int) -> np.ndarray:
+    """``lake`` with every 8-connected piece smaller than ``min_cells``
+    removed: the pieces :func:`face_lake_pieces` keeps.  Refine leaves
+    one-to-four-cell water pockets (a fine water surface a metre above
+    the ground where the coarse grid has no lake) that are not lakes to
+    anything downstream, and a river clipped on them is cut in two."""
+    lake = np.asarray(lake, dtype=bool)
+    if min_cells <= 1 or not lake.any():
+        return lake
+    labels, n = ndimage.label(lake, structure=np.ones((3, 3), bool))
+    if n == 0:
+        return lake
+    sizes = np.bincount(labels.ravel())
+    small = sizes < int(min_cells)
+    small[0] = False
+    return lake & ~small[labels]
+
+
 def lake_mask(surface: np.ndarray, water_surface: np.ndarray, min_depth_m: float, ocean=None) -> np.ndarray:
     """Lake cells: cells that are not sea, with a water surface more than
     ``min_depth_m`` above the ground.

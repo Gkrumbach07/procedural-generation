@@ -1,6 +1,22 @@
-"""Rivers (PLAN.md section 11) from the *fine* discharge.
+"""Rivers (PLAN.md section 11), from the coarse drainage graph or from the
+*fine* discharge (``derive.river_source = 'graph' | 'discharge'``).
 
-Per face:
+Graph source (the default; :func:`extract_graph_rivers`): the centrelines
+are the reaches of ``graph/drainage.json``.  Every edge is cut into its
+runs of non-lake cells per face (:func:`edge_face_pieces`, on hydro's own
+lake mask, so a reach ends at the shore and the next one starts at the
+outlet whatever node kinds it has), each run is traced through the fine
+grid — per coarse cell the land fine cell of its block with the highest
+smoothed discharge, i.e. the channel refine cut, joined 8-connectedly,
+walked to the shore and re-clipped on the fine lakes
+(:func:`trace_reach`) — and carries the edge's Strahler order and a
+constant width in metres from its mean discharge with a floor
+(:func:`reach_width_m`).  The mask gets at least the centreline cell, so
+a river exists at any cell size.  A reach crossing a cube edge is two
+records with the same ``edge_id``, extended to the border so they meet.
+
+Discharge source (:func:`extract_face_rivers`; also the fallback when the
+graph has no edges), per face:
 
 1. threshold the (lightly smoothed) fine discharge — the threshold is
    global, chosen so that a given fraction of the land is river
@@ -899,8 +915,301 @@ def extract_face_rivers(face: int, q_s: np.ndarray, surface: np.ndarray, land: n
     return river_mask, rivers, info
 
 
+# --------------------------------------------------------------------------
+# graph source: the coarse reaches traced through the fine grid
+# --------------------------------------------------------------------------
+def _edge_cells(e: dict, N: int) -> np.ndarray:
+    """``(n, 3)`` int64 ``[f, i, j]`` cells of a drainage edge, out-of-range
+    entries dropped (the same guard as :class:`CoarseGraphIndex`)."""
+    cells = np.asarray(e.get("cells", ()), dtype=np.int64)
+    if cells.size == 0:
+        return np.zeros((0, 3), dtype=np.int64)
+    cells = cells.reshape(-1, 3)
+    ok = (cells[:, 0] >= 0) & (cells[:, 0] < 6) & (cells[:, 1] >= 0) & (cells[:, 1] < N) & (cells[:, 2] >= 0) & (cells[:, 2] < N)
+    return cells[ok]
+
+
+def edge_face_pieces(drainage: dict | None, N: int, lake_c: np.ndarray | None = None) -> list[list[dict]]:
+    """Split every edge of ``graph/drainage.json`` into the runs of
+    consecutive *non-lake* cells on one face, in edge-id order per face.
+
+    An edge's cells run from its from-node to its to-node inclusive, so a
+    ``lake_in -> lake_out`` edge is lake but for its last cell, a ``source
+    -> lake_in`` edge ends inside the lake and a junction can sit in one:
+    the split is made on the coarse lake mask ``lake_c`` ``(6, N, N)``
+    (hydro's lake definition, the one that made the nodes), not on node
+    kinds.  A piece is a dict: ``edge_id, order, Q`` (``mean_discharge``),
+    ``ci, cj`` (coarse interior indices), ``free0 / free1`` (the reach
+    continues on another face before / after this run, so the fine trace
+    is extended to the face border), ``ext0 / ext1`` (the lake cell the
+    reach comes from / goes into on this face, ``(i, j)`` or None: the
+    trace is walked towards it up to the shore).  ``ext0`` of an edge's
+    first cell comes from the edge feeding its from-node, so a river
+    leaving a lake starts at the shore too."""
+    pieces: list[list[dict]] = [[] for _ in range(6)]
+    if not drainage or not drainage.get("edges"):
+        return pieces
+    edges = sorted(drainage["edges"], key=lambda e: int(e["id"]))
+    cells_of = {int(e["id"]): _edge_cells(e, N) for e in edges}
+    ins: dict[int, list[int]] = {}
+    outs: set[int] = set()
+    for e in edges:
+        ins.setdefault(int(e["to"]), []).append(int(e["id"]))
+        outs.add(int(e["from"]))
+
+    def is_lake(c) -> bool:
+        return bool(lake_c is not None and lake_c[c[0], c[1], c[2]])
+
+    for e in edges:
+        cells = cells_of[int(e["id"])]
+        n = cells.shape[0]
+        if n == 0:
+            continue
+        lake = np.array([is_lake(c) for c in cells], dtype=bool)
+        # runs of consecutive cells on one face and not in a lake
+        brk = np.ones(n, dtype=bool)
+        brk[1:] = (cells[1:, 0] != cells[:-1, 0]) | lake[1:] | lake[:-1]
+        starts = np.nonzero(brk)[0]
+        ends = np.append(starts[1:], n)
+        for a, b in zip(starts, ends):
+            if lake[a]:
+                continue
+            if a == n - 1 and n >= 2 and int(e["to"]) in outs:
+                # only the to-node cell is left (a lake_in -> lake_out edge
+                # surfaces at its last cell): the edge leaving that node
+                # traces it, with its own discharge
+                continue
+            f = int(cells[a, 0])
+            before = cells[a - 1] if a > 0 else None
+            after = cells[b] if b < n else None
+            ext0 = ext1 = None
+            free0 = before is not None and int(before[0]) != f
+            free1 = after is not None and int(after[0]) != f
+            if before is not None and not free0 and lake[a - 1]:
+                ext0 = (int(before[1]), int(before[2]))
+            if before is None:
+                # the edge starts here: the reach it continues (a lake_out
+                # node has exactly one) tells which lake it comes out of
+                for eid in ins.get(int(e["from"]), ()):
+                    up = cells_of[eid]
+                    if up.shape[0] >= 2 and int(up[-2, 0]) == f and is_lake(up[-2]):
+                        ext0 = (int(up[-2, 1]), int(up[-2, 2]))
+                        break
+            if after is not None and not free1 and lake[b]:
+                ext1 = (int(after[1]), int(after[2]))
+            q = e.get("mean_discharge")
+            pieces[f].append(
+                {
+                    "edge_id": int(e["id"]),
+                    "order": int(e.get("order", 1)),
+                    "Q": float("nan") if q is None else float(q),
+                    "ci": cells[a:b, 1].copy(),
+                    "cj": cells[a:b, 2].copy(),
+                    "free0": bool(free0),
+                    "free1": bool(free1),
+                    "ext0": ext0,
+                    "ext1": ext1,
+                }
+            )
+    return pieces
+
+
+def join_8connected(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Join the integer points ``pts`` ``(m, 2)`` in order into an
+    8-connected pixel chain (``ci, cj`` int64, consecutive duplicates
+    dropped): every segment is sampled ``max|d|`` times and rounded, so
+    each step moves one cell along the major axis and at most one along
+    the other."""
+    p = np.asarray(pts, dtype=np.int64).reshape(-1, 2)
+    if p.shape[0] < 2:
+        return p[:, 0].copy(), p[:, 1].copy()
+    d = np.diff(p, axis=0)
+    cnt = np.maximum(np.abs(d).max(axis=1), 1)
+    idx = np.repeat(np.arange(d.shape[0]), cnt)
+    off = np.arange(int(cnt.sum())) - np.repeat(np.cumsum(cnt) - cnt, cnt)
+    tt = off / cnt[idx]
+    samples = np.vstack([p[idx] + d[idx] * tt[:, None], p[-1:]])
+    ii = np.rint(samples[:, 0]).astype(np.int64)
+    jj = np.rint(samples[:, 1]).astype(np.int64)
+    keep = np.ones(ii.size, dtype=bool)
+    keep[1:] = (ii[1:] != ii[:-1]) | (jj[1:] != jj[:-1])
+    return ii[keep], jj[keep]
+
+
+def reach_width_m(Q: float, Q_ref: float, dp) -> float:
+    """Width in metres of a reach of mean discharge ``Q``:
+    ``max(river_width_min_m, river_width_m_a * (Q / Q_ref)^river_width_b)``
+    (Leopold & Maddock: w ~ Q^0.5).  A reach without a discharge is taken
+    at the reference (``Q_ref`` = the channel threshold)."""
+    a = float(dp.river_width_m_a)
+    b = float(dp.river_width_b)
+    ref = max(float(Q_ref), 1e-9)
+    q = ref if (Q is None or not np.isfinite(Q)) else max(float(Q), 0.0)
+    return max(float(dp.river_width_min_m), a * (q / ref) ** b)
+
+
+def _block_picks(ci_c: np.ndarray, cj_c: np.ndarray, q_s: np.ndarray, land: np.ndarray, R: int):
+    """The land fine cell of every coarse cell's ``R x R`` block with the
+    highest smoothed discharge (refine's channel): ``(pi, pj, ok)``; ``ok``
+    False where the block has no land cell (the pick is then -1)."""
+    n = ci_c.size
+    di, dj = np.meshgrid(np.arange(R), np.arange(R), indexing="ij")
+    I = ci_c[:, None] * R + di.ravel()[None, :]
+    J = cj_c[:, None] * R + dj.ravel()[None, :]
+    v = np.where(land[I, J], q_s[I, J].astype(np.float64), -np.inf)
+    a = np.argmax(v, axis=1)  # first maximum: deterministic on a flat block
+    rows = np.arange(n)
+    ok = np.isfinite(v[rows, a])
+    pi = np.where(ok, I[rows, a], -1)
+    pj = np.where(ok, J[rows, a], -1)
+    return pi, pj, ok
+
+
+def _walk_to_shore(ci: np.ndarray, cj: np.ndarray, target, land: np.ndarray, R: int, at_start: bool):
+    """Extend a fine chain from its start / end straight towards the centre
+    of the coarse lake cell ``target`` ``(i, j)``, keeping only the land
+    cells before the first non-land one, so the river meets the shore
+    instead of stopping a coarse cell short of it."""
+    if target is None or ci.size == 0:
+        return ci, cj
+    end = np.array([ci[0], cj[0]]) if at_start else np.array([ci[-1], cj[-1]])
+    goal = np.array([target[0] * R + R // 2, target[1] * R + R // 2])
+    ei, ej = join_8connected(np.stack([end, goal]))
+    ei, ej = ei[1:], ej[1:]  # the chain end itself
+    bad = np.nonzero(~land[ei, ej])[0]
+    if bad.size:
+        ei, ej = ei[: bad[0]], ej[: bad[0]]
+    if ei.size == 0:
+        return ci, cj
+    if at_start:
+        return np.concatenate([ei[::-1], ci]), np.concatenate([ej[::-1], cj])
+    return np.concatenate([ci, ei]), np.concatenate([cj, ej])
+
+
+def _split_on(ci: np.ndarray, cj: np.ndarray, keep: np.ndarray, min_len: int = 2) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Cut a chain at the cells where ``keep`` is False; runs of >= ``min_len`` cells."""
+    out = []
+    if ci.size == 0:
+        return out
+    brk = np.ones(ci.size, dtype=bool)
+    brk[1:] = ~keep[1:] | ~keep[:-1]
+    starts = np.nonzero(brk)[0]
+    ends = np.append(starts[1:], ci.size)
+    for a, b in zip(starts, ends):
+        if keep[a] and b - a >= min_len:
+            out.append((ci[a:b], cj[a:b]))
+    return out
+
+
+def trace_reach(piece: dict, q_s: np.ndarray, land: np.ndarray, R: int) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Fine chains (``ci, cj`` int64, >= 2 cells, downstream order) of one
+    edge piece (:func:`edge_face_pieces`) on one face.
+
+    Per coarse cell the trace takes the land fine cell of its block with
+    the highest smoothed discharge (refine cut the channel there); the
+    picks are joined 8-connectedly, walked to the shore of the lake the
+    reach enters / leaves (``ext0 / ext1``), re-clipped on ``land`` (a
+    straight join may cut a lake corner; the fine lake can be larger than
+    the coarse one) and, where the reach continues on another face,
+    extended to the face border so the two faces' polylines meet."""
+    Nf = q_s.shape[0]
+    ci_c = np.asarray(piece["ci"], dtype=np.int64)
+    cj_c = np.asarray(piece["cj"], dtype=np.int64)
+    if ci_c.size == 0:
+        return []
+    pi, pj, ok = _block_picks(ci_c, cj_c, q_s, land, R)
+    n = ok.size
+    # runs of consecutive coarse cells whose block has a land cell
+    brk = np.ones(n, dtype=bool)
+    brk[1:] = ~ok[1:] | ~ok[:-1]
+    starts = np.nonzero(brk)[0]
+    ends = np.append(starts[1:], n)
+    chains = []
+    for a, b in zip(starts, ends):
+        if not ok[a]:
+            continue
+        ci, cj = join_8connected(np.stack([pi[a:b], pj[a:b]], axis=1))
+        if a == 0:
+            ci, cj = _walk_to_shore(ci, cj, piece.get("ext0"), land, R, at_start=True)
+        if b == n:
+            ci, cj = _walk_to_shore(ci, cj, piece.get("ext1"), land, R, at_start=False)
+        # one-cell runs are kept here so that a reach with a single coarse
+        # cell on this face (the cell where it crosses the cube edge) can be
+        # extended to the border first; anything still under 2 cells is dropped
+        runs = _split_on(ci, cj, land[ci, cj], min_len=1)
+        for k, (ri, rj) in enumerate(runs):
+            f0 = bool(piece.get("free0")) and a == 0 and k == 0 and ri[0] == ci[0] and rj[0] == cj[0]
+            f1 = bool(piece.get("free1")) and b == n and k == len(runs) - 1 and ri[-1] == ci[-1] and rj[-1] == cj[-1]
+            if f0 or f1:
+                ri, rj = extend_to_border(ri, rj, Nf, f0, f1, R, land)
+            if ri.size >= 2:
+                chains.append((ri, rj))
+    return chains
+
+
+def extract_graph_rivers(face: int, pieces: list[dict], q_s: np.ndarray, surface: np.ndarray, land: np.ndarray, dp, R: int, fine_cell_size_m: float, Q_ref: float):
+    """Rivers of one fine face from the coarse drainage graph: every piece
+    (:func:`edge_face_pieces`) traced with :func:`trace_reach`, carrying
+    the edge's Strahler order, id and mean discharge, a constant width in
+    metres (:func:`reach_width_m`), and Catmull-Rom smoothed like the
+    discharge path.  Returns ``(river_mask uint8 (Nf, Nf), rivers, info)``
+    with the same record shape and info keys as
+    :func:`extract_face_rivers` (plus ``reaches`` and ``dropped_in_lake``).
+    The mask is painted ``width_m / 2`` around the centreline but at least
+    the centreline cell itself, so a 30 m stream still shows at 4.9 km."""
+    Nf = q_s.shape[0]
+    land = np.asarray(land, dtype=bool)
+    surf = np.asarray(surface, dtype=np.float32)
+    river_mask = np.zeros((Nf, Nf), dtype=np.uint8)
+    info = {"mask_cells": 0, "skeleton_cells": 0, "segments": 0, "rivers": 0, "graph_matched": 0, "reaches": len(pieces), "dropped_in_lake": 0}
+    rivers = []
+    all_i, all_j, all_half = [], [], []
+    for piece in pieces:
+        if int(piece["order"]) < dp.min_river_order:
+            continue
+        chains = trace_reach(piece, q_s, land, R)
+        if not chains:
+            info["dropped_in_lake"] += 1
+            continue
+        w_m = reach_width_m(piece["Q"], Q_ref, dp)
+        w_cells = w_m / float(fine_cell_size_m)
+        for ci, cj in chains:
+            info["segments"] += 1
+            all_i.append(ci)
+            all_j.append(cj)
+            all_half.append(np.full(ci.size, max(w_cells * 0.5, 0.5), dtype=np.float32))
+            hz = np.minimum.accumulate(surf[ci, cj].astype(np.float64))  # water surface: never rises downstream
+            pts, wq, hq = catmull_rom(np.stack([ci, cj], axis=1).astype(np.float64), np.full(ci.size, w_cells), float(R), float(dp.river_point_step), values=hz)
+            u = np.clip((pts[:, 0] + 0.5) / Nf, 0.0, (Nf - 0.5) / Nf)
+            v = np.clip((pts[:, 1] + 0.5) / Nf, 0.0, (Nf - 0.5) / Nf)
+            wm = wq * fine_cell_size_m
+            rivers.append(
+                {
+                    "id": len(rivers),
+                    "edge_id": int(piece["edge_id"]),
+                    "order": int(piece["order"]),
+                    "face": int(face),
+                    "cells": int(ci.size),
+                    "length_m": float(np.sum(np.hypot(np.diff(ci), np.diff(cj))) * fine_cell_size_m),
+                    "discharge": None if not np.isfinite(piece["Q"]) else float(piece["Q"]),
+                    "points": [[int(face), round(float(a), 6), round(float(b), 6), round(float(c), 1), round(float(d), 2)] for a, b, c, d in zip(u, v, wm, hq)],
+                }
+            )
+    if all_i:
+        pi = np.concatenate(all_i).astype(np.int32)
+        pj = np.concatenate(all_j).astype(np.int32)
+        half = np.concatenate(all_half).astype(np.float32)
+        paint_mask(river_mask, pi, pj, half)
+        river_mask[~land] = 0
+    info["mask_cells"] = int(np.count_nonzero(river_mask))
+    info["rivers"] = len(rivers)
+    info["graph_matched"] = len(rivers)
+    return river_mask, rivers, info
+
+
 __all__ = [
     "RING_DI", "RING_DJ", "thin", "remove_redundant", "prune_spurs", "trace_segments", "paint_mask",
     "smooth_discharge", "log_histogram", "threshold_from_histogram", "river_fraction", "hysteresis_mask", "RiverConnectivity", "clean_mask", "skeletonize",
     "running_mean", "catmull_rom", "extend_to_border", "strahler_orders", "CoarseGraphIndex", "extract_face_rivers",
+    "edge_face_pieces", "join_8connected", "reach_width_m", "trace_reach", "extract_graph_rivers",
 ]

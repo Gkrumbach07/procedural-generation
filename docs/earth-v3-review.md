@@ -266,8 +266,15 @@ both inside the existing per-particle sample.
 > docs/lakes-in-erosion.md: `erosion.lake_balance` (lake level as erosion
 > state, delta at the shore, no erosion below the level, closed lakes as
 > seas), the refine cap at the coarse level, and the derive lake
-> exclusion. Rivers in derive are still thresholded discharge, not the
-> traced graph.
+> exclusion. Rivers in derive are now the traced graph
+> (`derive.river_source = graph`, `derive/rivers.py`): each reach cut at
+> the lake pieces derive keeps and walked to the shore, the graph's
+> Strahler order, `width_m = max(30, 30·sqrt(Q/Q_ref))`, one centreline
+> cell in the mask at least. Measured on `small` seed 1 from a clean
+> checkout: 49 reaches, 36 rivers on 31 of them (the rest lie inside lakes
+> but for their node cell), coarse channel coverage 0.95, no river point
+> inside a fine lake, widths 30-122 m. The thresholded path is kept as
+> `derive.river_source = discharge`.
 
 ### What the viewer does now
 
@@ -308,8 +315,10 @@ connectivity.
 > it shows was never refine's noise; and with the deposition floor in
 > metres it is still there, and the tectonics-only bakes have it before
 > erosion runs. It is the continental margin as the segment cloud splats
-> it -- see docs/lakes-in-erosion.md section 4. The two fixes here are
-> still right for what they fix. The satellite layer shades shallow water by depth so the
+> it -- see docs/lakes-in-erosion.md section 4, and docs/coast-fringe.md
+> for the attempt in tectonics (`tectonics.margin_sigma_factor`, which
+> ships off: it shallowed the sea rather than smoothing the edge). The two
+> fixes here are still right for what they fix. The satellite layer shades shallow water by depth so the
 fringe reads as a shelf rather than as a delta, but the fringe is data and
 the render only changes what it looks like.
 

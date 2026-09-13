@@ -3,11 +3,13 @@ grid with checkpoints, resume and periodic quicklooks.
 
 Inputs (coarse fields): ``bedrock``, ``uplift``, ``hardness`` (tectonics),
 ``precip``, ``evap`` (climate).  Outputs: ``height``, ``sediment``,
-``discharge``, ``momentum`` (docs/DEVELOPING.md).  Sediment parked in land
-pits at the end of the run (``ErosionState.pending``) is not part of the
-outputs; its total is reported as ``pending_total_m`` in the stage info,
-next to ``lost_offshore_m`` (load that submarine fans could not place: it
-left the modelled surface for the deep ocean).
+``discharge``, ``momentum`` (docs/DEVELOPING.md).  Sediment still parked
+at the end of the run (``ErosionState.pending``: land pits and seafloor
+stockpiles) is not part of the outputs; its total is reported as
+``pending_total_m`` in the stage info, the submerged part of it as
+``pending_sea_m``, next to ``lost_offshore_m`` (the
+``erosion.offshore_writeoff`` share of the load submarine fans could not
+place: it left the modelled surface for the deep ocean).
 
 ``land_fraction`` (reported next to ``land_fraction_bedrock``) is held at
 ``world.land_fraction`` throughout the run: uplift is applied mean-free and
@@ -263,6 +265,9 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         "sediment_mean_m": float(state.sediment[state.interior].mean() * state.height_unit_m),
         "sediment_p99_m": float(np.percentile(state.sediment[state.interior], 99) * state.height_unit_m),
         "pending_total_m": float(state.pending[state.interior].sum() * state.height_unit_m),
+        # the part of it still walking on the seafloor (a sea death's surplus
+        # less the write-off); like the land part it is absent from the outputs
+        "pending_sea_m": float(state.pending[state.interior][surf < state.base[state.interior]].sum() * state.height_unit_m),
         "clamped_entries": clamped,
         # metres of surface drift the in-loop datum hold removed over the run
         # (positive = the planet would have inflated by this much); the same

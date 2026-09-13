@@ -3,6 +3,9 @@ presets; the whole file takes well under a minute once numba caches are
 warm."""
 from __future__ import annotations
 
+import copy
+import dataclasses
+import math
 import time
 
 import numpy as np
@@ -16,9 +19,10 @@ from globe.io.world_store import WorldStore
 from globe.pipeline import bake
 from globe.tectonics import intraplate
 from globe.tectonics import run as tect
-from globe.tectonics.collision import build_tree, collide, label_map, label_map_fast, relax_segments, spread_collisions, weighted_quantile
+from globe.tectonics.collision import SmoothSplat, build_tree, collide, label_map, label_map_fast, relax_segments, spread_collisions, weighted_quantile
 from globe.tectonics.plates import Plates, cluster_plates, rotate_segments
 from globe.tectonics.segments import Segments, best_candidate_sphere, greedy_accept, mean_spacing
+from scripts.coastline import isoline_metrics, shelf_edge_level
 
 
 @pytest.fixture(scope="module")
@@ -343,6 +347,82 @@ def test_shelf_sea_level_cuts_the_continental_crust():
     # and the two populations are still separated in the finalised bed: the
     # median land cell sits well above the median ocean cell
     assert np.median(bed[land]) - np.median(bed[~land]) > 0.5 * np.ptp(bed[~land])
+
+
+def _with_margin_sigma(sim, f: float):
+    """The same finished simulation, finalised with another `margin_sigma_factor`
+    (the knob is read at finalise time only)."""
+    s = copy.copy(sim)
+    s.params = sim.params.with_overrides(tectonics={"margin_sigma_factor": f})
+    s.tp = s.params.tectonics
+    return s
+
+
+def test_margin_ramp_raises_only_the_oceanic_side(tiny_sim, tiny_out):
+    """The margin ramp re-positions the continental/oceanic step with a wide
+    kernel and fills the oceanic side up to it; everything else is the
+    narrow blend, bit for bit.  Off, it *is* the narrow blend."""
+    sim = tiny_sim
+    tp, grid, seg = sim.tp, sim.grid, sim.seg
+    tree = build_tree(seg)
+    blend = SmoothSplat(tree, grid, tp.splat_sigma_factor * sim.spacing, int(tp.splat_knn))
+    h = seg.height() + tect.ridge_buoyancy(seg, tp)
+    off = dataclasses.replace(tp, margin_sigma_factor=0.0)
+    bed_off, c_off, lift_off = tect.margin_ramp(grid, blend, seg, h, off, sim.spacing)
+    assert np.array_equal(bed_off, blend(h)) and not lift_off.any()
+    on = dataclasses.replace(tp, margin_sigma_factor=2.5)
+    bed, c, lift = tect.margin_ramp(grid, blend, seg, h, on, sim.spacing)
+    # the crust-type boundary is the narrow blend either way
+    assert np.array_equal(c, c_off) and np.array_equal(c, blend(seg.kind.astype(np.float64)))
+    # raise-only, and it does raise something on a world with both crusts
+    assert (lift >= 0).all() and lift.any()
+    assert np.array_equal(bed, bed_off + lift)
+    # the continental interior -- every nearest segment continental: land,
+    # cratons and belts -- is untouched, so are cells the wide kernel sees
+    # no differently from the narrow one
+    assert not lift[c >= 1.0].any()
+    # the raise sits on the oceanic side of the boundary: where the wide
+    # fraction exceeds the narrow one, i.e. within a few spacings of the
+    # margin on oceanic crust
+    assert (c[lift > 0] < 1.0).all()
+    assert np.median(c[lift > 0]) < 0.5
+    # through finalise: crust_kind (the shelf mask) is identical to the
+    # knob-0 run, the land fraction is the same by construction, and the
+    # ramp is confined below sea level -- the land median moves by less
+    # than a coarse-grid rounding of the relief
+    out0 = tect.finalise(_with_margin_sigma(sim, 0.0))   # the default: the knob is off
+    out1 = tect.finalise(_with_margin_sigma(sim, 2.5))
+    assert np.array_equal(out1["crust_kind"].data, out0["crust_kind"].data)
+    b1, b0 = out1["bedrock"].interior.astype(np.float64), out0["bedrock"].interior.astype(np.float64)
+    assert abs((b1 > 0).mean() - (b0 > 0).mean()) < 0.005
+    assert abs(out1["_sea_level_units"] - out0["_sea_level_units"]) < 1e-3
+    land = (b0 > 0) & (b1 > 0)
+    assert abs(np.median(b1[land]) - np.median(b0[land])) < 0.01 * relief_target(WorldParams.tiny_world())
+    # and the sea got shallower near the margins, nowhere deeper
+    assert np.median(b1[~land]) >= np.median(b0[~land])
+    assert out1["_margin_raised_fraction"] > 0 and out0["_margin_raised_fraction"] == 0
+
+
+def test_margin_ramp_smooths_the_shelf_edge():
+    """On `small` the shelf-edge isoline (the outer edge of the viewer's
+    light band) is less convoluted with the ramp than without, while the
+    coastline and the crust-type boundary are what they were (measured:
+    L/sqrt(A) 7.79 -> 6.38 at the shelf edge, 12.92 -> 12.91 at the coast,
+    docs/coast-fringe.md)."""
+    p = WorldParams.small_world()
+    sim = tect.simulate(p, log=None)
+    out0 = tect.finalise(_with_margin_sigma(sim, 0.0))
+    out1 = tect.finalise(_with_margin_sigma(sim, 2.5))
+    crust = out0["crust_kind"].interior.astype(bool)
+    assert np.array_equal(crust, out1["crust_kind"].interior.astype(bool))
+    b0, b1 = out0["bedrock"].interior.astype(np.float64), out1["bedrock"].interior.astype(np.float64)
+    r = 0.5 * sim.spacing * p.N_c / (math.pi / 2)  # half a segment spacing, coarse cells
+    edge = shelf_edge_level(b0, crust)
+    assert np.isfinite(edge) and edge < 0
+    before, after = isoline_metrics(b0, edge, r), isoline_metrics(b1, edge, r)
+    assert after["ratio"] < 0.9 * before["ratio"], (before["ratio"], after["ratio"])
+    coast0, coast1 = isoline_metrics(b0, 0.0, r), isoline_metrics(b1, 0.0, r)
+    assert abs(coast1["ratio"] - coast0["ratio"]) < 0.02 * coast0["ratio"], (coast0["ratio"], coast1["ratio"])
 
 
 def test_plate_vel_is_rigid_rotation_of_each_plate(tiny_sim, tiny_out):

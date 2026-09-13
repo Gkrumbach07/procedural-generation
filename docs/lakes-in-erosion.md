@@ -67,10 +67,13 @@ half of the coast fringe in the review's section 3; the refine half
   coarse water surface (the balance, upsampled) rather than refilling the
   depression to its spill point. `earth-v3` had 510,341 fine lake cells
   against 124,276 coarse ones for that reason.
-* `derive/run.py`: lake cells are excluded from the river candidate mask
-  in both the connectivity pass and the extraction, so a river ends at a
-  shore and starts again at the outlet instead of being skeletonised
-  across the flat and the land bridges between a lake's pieces.
+* `derive/run.py`: rivers are the drainage graph's reaches traced through
+  the fine grid (`derive.river_source = graph`), each cut on hydro's lake
+  mask and walked to the shore, so a river ends at a shore and starts
+  again at the outlet; the older thresholded path (`discharge`, kept for
+  comparison) excludes lake cells from its candidate mask instead of
+  being skeletonised across the flat and the land bridges between a
+  lake's pieces.
 
 ## 4. Measured: `worlds/earth-v5`
 
@@ -90,7 +93,7 @@ the ones this change moves.
 | mean sediment thickness | 129 m | 59 m | **175 m** |
 | sediment on the shelf (−200..0 m by eroded surface), share / concentration | -- | 12.5 % / 0.98x | **56.4 % / 11.4x** |
 | sediment on land (> 50 m) | -- | 17.2 % / 1.05x | 10.5 % / 0.41x |
-| `lost_offshore` (mass deleted) | 1142 Mm | 1052 Mm | **3141 Mm** |
+| `lost_offshore` (mass deleted; parked instead since kernel 8, docs/sea-death-stockpile.md) | 1142 Mm | 1052 Mm | **3141 Mm** |
 
 What the numbers say, and what the viewer shows:
 
@@ -116,7 +119,14 @@ What the numbers say, and what the viewer shows:
   which `apply_changes` deletes -- triples. The deletion is the defect
   (that mass should go to `pending`, as it does on land), and the 1 m
   floodplain ceiling at 9.8 km cells is a 1e-4 gradient, which is a
-  real floodplain but a slow one. Both are for the next erosion pass.
+  real floodplain but a slow one. The deletion is fixed in kernel 8
+  (`erosion.offshore_writeoff`, docs/sea-death-stockpile.md: the
+  surplus is parked less a write-off), which also corrects the seafloor
+  half of this reading: a seafloor step's ceiling is the previous cell
+  minus `fan_slope` whatever the floor, and what strands the load is a
+  shelf filled to the floor -- the 1 m floor's part in the tripling is
+  the flux it sends to the shelf. The floodplain ceiling is for the
+  next erosion pass.
 * **The coast fringe is not erosion's.** With the floor in metres the
   spiky light band along every coast is still there, and the
   tectonics-only bakes in docs/plate-forces.md show it before erosion
@@ -128,3 +138,11 @@ What the numbers say, and what the viewer shows:
   tectonics stage's splat. A smoother margin (a wider splat kernel at the
   margin, or a taper in the label map rather than per segment) is the
   fix, in `tectonics/run.py`.
+
+  > **Tried, and off** (`tectonics.margin_sigma_factor = 0`, `margin_ramp`
+  > in `tectonics/run.py`): re-positioning the continental/oceanic step
+  > with a wide kernel and filling the oceanic side up to it shallowed the
+  > sea near every margin without smoothing the edge at equal area. The
+  > diagnosis and the instrument (`scripts/coastline.py`) are in
+  > docs/coast-fringe.md; the lace at the coastline is the narrow splat
+  > resolving per-segment history, still open.

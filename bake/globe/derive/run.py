@@ -19,16 +19,20 @@ pre-erosion *bedrock* surface: derive removes its lapse term and re-applies
 it at the final surface (coarse) and at every fine cell, so peaks are
 classified at the temperature of the terrain that is actually rendered.
 
-Rivers are derived from the *fine* discharge (``derive/rivers.py``); the
-coarse drainage graph only supplies Strahler orders / reach ids where a
-coarse channel lies under a fine polyline.  Fine biomes are recomputed
-from bilinearly upsampled temperature / precipitation with the overrides
-(cliff, alpine, riparian, wetland, lake) evaluated on the fine data.
-Faces are processed one at a time in three passes (discharge threshold +
-blob connectivity across cube edges; rivers + lakes; biomes + vegetation
-reading the neighbouring faces' cells through thin pads), so no output
-stops at a cube edge except the river-mask discs.  No random numbers are
-drawn.
+Rivers (``derive/rivers.py``) come from one of two sources, chosen by
+``derive.river_source``: the coarse drainage graph's reaches traced
+through the fine grid, split at the lakes, with the graph's Strahler order
+and a width in metres from the reach's mean discharge (``'graph'``, the
+default; it falls back to the other source when the graph has no edges),
+or the *fine* discharge thresholded and skeletonised, the coarse graph
+only supplying orders / reach ids under a fine polyline
+(``'discharge'``).  Fine biomes are recomputed from bilinearly upsampled
+temperature / precipitation with the overrides (cliff, alpine, riparian,
+wetland, lake) evaluated on the fine data.  Faces are processed one at a
+time in three passes (discharge threshold + blob connectivity across cube
+edges, discharge source only; rivers + lakes; biomes + vegetation reading
+the neighbouring faces' cells through thin pads), so no output stops at a
+cube edge except the river-mask discs.  No random numbers are drawn.
 """
 from __future__ import annotations
 
@@ -173,6 +177,17 @@ def run(store, params, log=print) -> dict:
     chan_frac = float(chan_c.sum() / max(int(land_c.sum()), 1))
     lake_c = lakes_mod.lake_mask(surface_c, ws.interior, depth, ocean=ocean_c)
     coarse_lab, n_coarse_lakes = lakes_mod.coarse_lake_labels(lake_c, ws.interior, grid)
+    # river source: the graph's reaches, unless there are none to trace
+    # (stub hydro; a world too small for any catchment to pass hydro's
+    # river_threshold), then the discharge threshold as before
+    source = str(dp.river_source)
+    if source not in ("graph", "discharge"):
+        raise ValueError(f"derive.river_source must be 'graph' or 'discharge', got {source!r}")
+    if source == "graph" and not (drainage and drainage.get("edges")):
+        log("[derive] drainage graph has no edges: rivers fall back to the discharge threshold")
+        source = "discharge"
+    info["river_source"] = source
+    face_pieces = rivers_mod.edge_face_pieces(drainage, N, lake_c) if source == "graph" else None
     surf_field = FaceField.from_interior(grid, surface_c, name="surface")
     slope_c = surf_field.gradient().vec_norm().interior
     cliff_slope = biomes.effective_cliff_slope(slope_c[land_c], dp)
@@ -203,52 +218,62 @@ def run(store, params, log=print) -> dict:
         f"median land slope {info['land_slope_median'] if info['land_slope_median'] is None else round(info['land_slope_median'], 3)}), alpine above {alpine_min:.0f} m"
     )
 
-    # ---- fine pass 1: global discharge threshold + blob connectivity -----
+    lake_min_cells = max(1, int(round(dp.lake_min_cells * R * R)))
+    # ---- fine pass 1 (discharge source): global threshold + blob connectivity
     if not has_fine(store, "height"):
         raise FileNotFoundError(f"derive needs fine/height.f*.npy (refine output) in {store.root}")
-    t = time.time()
-    counts = np.zeros(rivers_mod.LOG_HIST_BINS, dtype=np.int64)
-    n_land = 0
-    for f in range(6):
-        q_s = rivers_mod.smooth_discharge(_fine_optional(store, "discharge", f, Nf, 0.0), dp.discharge_smooth_cells)
-        land_f = ~fine_ocean(_fine_surface(store, f, Nf), sea_near_c, f, R)
-        c, n = rivers_mod.log_histogram(q_s, land_f)
-        counts += c
-        n_land += n
-    frac = rivers_mod.river_fraction(dp, chan_frac)
-    q_thr = rivers_mod.threshold_from_histogram(counts, n_land, frac)
-    q_low = rivers_mod.threshold_from_histogram(counts, n_land, frac * max(float(dp.river_hysteresis), 1.0))
-    q_low = min(q_low, q_thr)
-    graph_index = rivers_mod.CoarseGraphIndex(drainage, N, dp.graph_match_cells)
-    # the keep decision (blob has a high cell, blob size) is taken on the
-    # blobs joined across cube edges, so rivers are not cut at face edges
-    conn = rivers_mod.RiverConnectivity(Nf, int(round(dp.min_river_cells * R * R)))
-    for f in range(6):
-        q_s = rivers_mod.smooth_discharge(_fine_optional(store, "discharge", f, Nf, 0.0), dp.discharge_smooth_cells)
-        surface_f = _fine_surface(store, f, Nf)
-        ocean_f = fine_ocean(surface_f, sea_near_c, f, R)
-        # a lake is not a river: the flood fills a depression with high
-        # discharge across its whole flat, and thresholding that painted a
-        # centreline straight through every lake and across the land bridges
-        # between its pieces (docs/earth-v3-review.md section 2)
-        lake_f = lakes_mod.lake_mask(surface_f, _fine_optional(store, "water_surface", f, Nf, 0.0), depth, ocean=ocean_f)
-        land_f = ~ocean_f & ~lake_f
-        conn.add_face(f, (q_s > q_low) & land_f, (q_s > q_thr) & land_f)
-    conn.finalize()
-    info["river_fraction"] = frac
-    info["discharge_threshold"] = q_thr
-    info["discharge_threshold_low"] = q_low
-    info["fine_land_cells"] = int(n_land)
-    info["river_blobs"] = int(conn.n_labels)
-    info["river_blobs_kept"] = int(conn.keep.sum()) if conn.keep is not None else 0
-    info["t_threshold_s"] = time.time() - t
-    log(f"[derive] discharge threshold {q_thr:.3f} (connectivity {q_low:.3f}) for {frac:.4f} of {n_land:,} fine land cells; {info['river_blobs_kept']}/{info['river_blobs']} blobs kept ({info['t_threshold_s']:.1f}s); coarse graph edges {graph_index.n_edges}")
+    q_thr = q_low = frac = None
+    conn = graph_index = None
+    info["river_fraction"] = info["discharge_threshold"] = info["discharge_threshold_low"] = None
+    info["fine_land_cells"] = info["river_blobs"] = info["river_blobs_kept"] = 0
+    info["t_threshold_s"] = 0.0
+    if source == "discharge":
+        t = time.time()
+        counts = np.zeros(rivers_mod.LOG_HIST_BINS, dtype=np.int64)
+        n_land = 0
+        for f in range(6):
+            q_s = rivers_mod.smooth_discharge(_fine_optional(store, "discharge", f, Nf, 0.0), dp.discharge_smooth_cells)
+            land_f = ~fine_ocean(_fine_surface(store, f, Nf), sea_near_c, f, R)
+            c, n = rivers_mod.log_histogram(q_s, land_f)
+            counts += c
+            n_land += n
+        frac = rivers_mod.river_fraction(dp, chan_frac)
+        q_thr = rivers_mod.threshold_from_histogram(counts, n_land, frac)
+        q_low = rivers_mod.threshold_from_histogram(counts, n_land, frac * max(float(dp.river_hysteresis), 1.0))
+        q_low = min(q_low, q_thr)
+        graph_index = rivers_mod.CoarseGraphIndex(drainage, N, dp.graph_match_cells)
+        # the keep decision (blob has a high cell, blob size) is taken on the
+        # blobs joined across cube edges, so rivers are not cut at face edges
+        conn = rivers_mod.RiverConnectivity(Nf, int(round(dp.min_river_cells * R * R)))
+        for f in range(6):
+            q_s = rivers_mod.smooth_discharge(_fine_optional(store, "discharge", f, Nf, 0.0), dp.discharge_smooth_cells)
+            surface_f = _fine_surface(store, f, Nf)
+            ocean_f = fine_ocean(surface_f, sea_near_c, f, R)
+            # a lake is not a river: the flood fills a depression with high
+            # discharge across its whole flat, and thresholding that painted a
+            # centreline straight through every lake and across the land bridges
+            # between its pieces (docs/earth-v3-review.md section 2)
+            lake_f = lakes_mod.kept_lake_mask(
+                lakes_mod.lake_mask(surface_f, _fine_optional(store, "water_surface", f, Nf, 0.0), depth, ocean=ocean_f),
+                lake_min_cells)
+            land_f = ~ocean_f & ~lake_f
+            conn.add_face(f, (q_s > q_low) & land_f, (q_s > q_thr) & land_f)
+        conn.finalize()
+        info["river_fraction"] = frac
+        info["discharge_threshold"] = q_thr
+        info["discharge_threshold_low"] = q_low
+        info["fine_land_cells"] = int(n_land)
+        info["river_blobs"] = int(conn.n_labels)
+        info["river_blobs_kept"] = int(conn.keep.sum()) if conn.keep is not None else 0
+        info["t_threshold_s"] = time.time() - t
+        log(f"[derive] discharge threshold {q_thr:.3f} (connectivity {q_low:.3f}) for {frac:.4f} of {n_land:,} fine land cells; {info['river_blobs_kept']}/{info['river_blobs']} blobs kept ({info['t_threshold_s']:.1f}s); coarse graph edges {graph_index.n_edges}")
+    else:
+        log(f"[derive] rivers from the drainage graph: {sum(len(p) for p in face_pieces)} reach pieces outside lakes on {len(drainage['edges'])} edges, width_m = max({dp.river_width_min_m:g}, {dp.river_width_m_a:g} (Q/{thr:.3g})^{dp.river_width_b:g})")
 
     # ---- fine pass 2: per face ---------------------------------------------
     Pcm_field = FaceField.from_interior(grid, Pcm_c, name="P_cm")
     T0_field = FaceField.from_interior(grid, T0_c, name="T0")  # sea-level temperature: the lapse is re-applied per fine cell
     stencil = int(dp.slope_stencil) if dp.slope_stencil > 0 else R
-    lake_min_cells = max(1, int(round(dp.lake_min_cells * R * R)))
     all_rivers: list[dict] = []
     pieces: list[dict] = []
     frames: list[np.ndarray] = []
@@ -260,11 +285,19 @@ def run(store, params, log=print) -> dict:
         ws_f = _fine_optional(store, "water_surface", f, Nf, 0.0)
         q_s = rivers_mod.smooth_discharge(_fine_optional(store, "discharge", f, Nf, 0.0), dp.discharge_smooth_cells)
         ocean_f = fine_ocean(surface_f, sea_near_c, f, R)
-        lake_f = lakes_mod.lake_mask(surface_f, ws_f, depth, ocean=ocean_f)
+        # only the lake pieces derive keeps clip a river (kept_lake_mask): a
+        # one-cell water pocket refine left is not a shore, and a reach
+        # clipped on it was cut in two
+        lake_f = lakes_mod.kept_lake_mask(lakes_mod.lake_mask(surface_f, ws_f, depth, ocean=ocean_f), lake_min_cells)
         land_f = ~ocean_f & ~lake_f
-        # rivers (never through a lake: see the connectivity pass above)
-        keep_f = conn.mask(f, (q_s > q_low) & land_f)
-        river_mask, rivers, rinfo = rivers_mod.extract_face_rivers(f, q_s, surface_f, land_f, q_thr, dp, R, cs_f, graph_index, q_low=q_low, mask=keep_f)
+        # rivers (never through a lake: land_f excludes them, so a traced
+        # reach stops at the shore and a thresholded blob is cut there)
+        if source == "graph":
+            river_mask, rivers, rinfo = rivers_mod.extract_graph_rivers(f, face_pieces[f], q_s, surface_f, land_f, dp, R, cs_f, thr)
+            keep_f = None
+        else:
+            keep_f = conn.mask(f, (q_s > q_low) & land_f)
+            river_mask, rivers, rinfo = rivers_mod.extract_face_rivers(f, q_s, surface_f, land_f, q_thr, dp, R, cs_f, graph_index, q_low=q_low, mask=keep_f)
         write_face(store, "river_mask", f, river_mask)
         for r in rivers:
             r["id"] = len(all_rivers)
@@ -285,7 +318,10 @@ def run(store, params, log=print) -> dict:
         dt = time.time() - t
         fi = {"face": f, "seconds_rivers_lakes": dt, "lake_pieces": len(pcs), **rinfo}
         face_info.append(fi)
-        log(f"[derive] face {f}: mask {rinfo['mask_cells']:,} cells -> skeleton {rinfo['skeleton_cells']:,} -> {rinfo['rivers']} rivers ({rinfo['graph_matched']} matched to coarse reaches), {len(pcs)} lake pieces, {dt:.1f}s")
+        if source == "graph":
+            log(f"[derive] face {f}: {rinfo['reaches']} reach pieces -> {rinfo['rivers']} rivers ({rinfo['dropped_in_lake']} lost to lakes / sea), mask {rinfo['mask_cells']:,} cells, {len(pcs)} lake pieces, {dt:.1f}s")
+        else:
+            log(f"[derive] face {f}: mask {rinfo['mask_cells']:,} cells -> skeleton {rinfo['skeleton_cells']:,} -> {rinfo['rivers']} rivers ({rinfo['graph_matched']} matched to coarse reaches), {len(pcs)} lake pieces, {dt:.1f}s")
 
     # ---- fine pass 3: biomes + vegetation per face -------------------------
     # (after every face's river mask exists: the riparian / wetland bands,
@@ -342,17 +378,24 @@ def run(store, params, log=print) -> dict:
     lakes = lakes_mod.assemble_lakes(pieces, Nf, coarse_lakes, coarse_lab, groups=groups)
     info["coarse_channel_coverage"] = float(chan_covered / max(int(chan_c.sum()), 1)) if chan_c.any() else None
     store.write_json("graph/lakes.json", {"lakes": lakes, "lake_min_depth": depth, "N_fine": Nf, "coordinates": "corner lattice u = i / N_fine"})
+    if source == "graph":
+        width_law = {"a_m": dp.river_width_m_a, "min_m": dp.river_width_min_m, "b": dp.river_width_b, "Q_ref": thr,
+                     "unit": "metres; width_m = max(min_m, a_m * (Q / Q_ref)^b), Q = the reach's mean_discharge; drawn into fine/river_mask as at least the centreline cell"}
+    else:
+        width_law = {"a": dp.river_width_a, "b": dp.river_width_b, "unit": "fine cells of (Q / threshold)^b, width_m = cells * fine_cell_size_m"}
     store.write_json(
         "graph/rivers.json",
         {
             "rivers": all_rivers,
             "N_fine": Nf,
+            "river_source": source,
             "discharge_threshold": q_thr,
             "discharge_threshold_low": q_low,
             "river_fraction": frac,
-            "width": {"a": dp.river_width_a, "b": dp.river_width_b, "unit": "fine cells of (Q / threshold)^b, width_m = cells * fine_cell_size_m"},
+            "width": width_law,
             "coordinates": "cell centre u = (i + 0.5) / N_fine",
             "point": ["face", "u", "v", "width_m", "height_m (water surface, non-increasing downstream)"],
+            "edge_id": "graph/drainage.json edge (-1 = none); a reach crossing a cube edge is one record per face",
         },
     )
     info["faces"] = face_info
@@ -362,7 +405,7 @@ def run(store, params, log=print) -> dict:
     info["max_order"] = int(max((r["order"] for r in all_rivers), default=0))
     info["t_total_s"] = time.time() - t0
     cov = info["coarse_channel_coverage"]
-    log(f"[derive] {len(all_rivers)} rivers ({info['n_river_points']:,} points, max order {info['max_order']}; coarse channel coverage {cov if cov is None else round(cov, 3)}), {len(lakes)} lakes ({sum(1 for L in lakes if L['outlet'] is not None)} with outlet) in {info['t_total_s']:.1f}s")
+    log(f"[derive] {len(all_rivers)} rivers from the {source} ({info['n_river_points']:,} points, max order {info['max_order']}; coarse channel coverage {cov if cov is None else round(cov, 3)}), {len(lakes)} lakes ({sum(1 for L in lakes if L['outlet'] is not None)} with outlet) in {info['t_total_s']:.1f}s")
     return info
 
 

@@ -28,9 +28,11 @@ Model notes (PLAN milestone 2 tuning, docs/erosion-tuning.md):
   rills, so long profiles are concave, valleys widen downstream and a
   channel survives on a floodplain.  With the saturating erf law every
   plain became an alluvial fan and nothing could meander.
-* Sediment a submarine fan cannot place (a shelf filled to sea level, which
-  never becomes land) is lost to the deep ocean (``lost_offshore`` in the
-  iteration stats) instead of accumulating in ``pending`` forever.
+* Sediment a submarine fan cannot place (a shelf filled to the waterline
+  floor, which never becomes land) is parked in the death cell's
+  ``pending`` like a land pit's, less the ``erosion.offshore_writeoff``
+  share written off to the deep ocean (``lost_offshore`` in the iteration
+  stats), so it walks again next iteration without accumulating forever.
 """
 from __future__ import annotations
 
@@ -84,7 +86,7 @@ class ErosionState:
     mom_track: np.ndarray = field(default=None, repr=False)
     samp: np.ndarray = field(default=None, repr=False)  # packed float32 samples (F, NE, NE, NS), rebuilt every iteration
     acc: np.ndarray = field(default=None, repr=False)  # float64 net terrain change of the current iteration (cell units), zero between iterations
-    pending: np.ndarray = field(default=None, repr=False)  # float64 sediment stockpile per cell (cell units) that found no room this iteration (particle.apply_changes); re-injected as a loaded particle next iteration; part of the mass balance
+    pending: np.ndarray = field(default=None, repr=False)  # float64 sediment stockpile per cell (cell units) that found no room this iteration (particle.apply_changes: land pits, and the seafloor less the offshore write-off); re-injected as a loaded particle next iteration; part of the mass balance
     base: np.ndarray = field(default=None, repr=False)  # float64 local base level per cell (cell units); see `refresh_base`.  0 everywhere until it is refreshed, which is exactly the old "sea = surface < 0" behaviour
     _owner: np.ndarray = field(default=None, repr=False)
     iteration: int = 0
@@ -638,6 +640,7 @@ def run_iteration(
             cell_units(ep, "iter_deposit", state.height_unit_m),
             float(ep.fan_slope), state.route is not None,
             cell_units(ep, "dep_floor_m", state.height_unit_m),
+            float(ep.offshore_writeoff),
         )
         n_clamp += int(nc)
         to_pending += tp
@@ -656,7 +659,7 @@ def run_iteration(
     stats["released"] = float(released)
     stats["pending_total"] = float(state.pending[state.interior].sum())
     stats["deficit_out"] = lost
-    stats["lost_offshore"] = lost_offshore  # load a seafloor walk could not place: left the modelled surface (deep ocean)
+    stats["lost_offshore"] = lost_offshore  # the offshore_writeoff share of the load seafloor walks could not place: left the modelled surface (deep ocean); the rest is in pending_total
     stats["seconds_trace"] = t_trace
     stats["seconds_apply"] = t_apply
     stats["chunk"] = int(chunk)

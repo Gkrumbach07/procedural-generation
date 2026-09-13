@@ -57,7 +57,7 @@ MASK_FROZEN = 2
 
 #: bumped whenever a kernel change alters results: part of the checkpoint
 #: hash, so stale checkpoints are never resumed after a code change
-KERNEL_VERSION = 7
+KERNEL_VERSION = 8
 
 #: a dying particle deposits its remaining load at the cell it died in; the
 #: excess over that cell's caps moves back up its last SPREAD active cells
@@ -317,8 +317,10 @@ def trace_particles(
     the last ``SPREAD`` active cells of its path (newest first) with delta
     0 — overflow slots that :func:`apply_changes` fills with whatever the
     death cell cannot take (a pit fills to the level of the path).  A load
-    that reached the sea is offered to the ocean cell only; the excess
-    is lost to the deep ocean (see :func:`apply_changes`).  Frozen cells (mask 2) are transparent: sampled, never
+    that reached the sea is offered to the ocean cell only (``nout = 1``:
+    it never comes back on land, so it has no overflow slots); the excess
+    is parked in that cell's ``pending`` less a write-off, and walks
+    again next iteration (see :func:`apply_changes`).  Frozen cells (mask 2) are transparent: sampled, never
     written, no sediment exchange.  Returns nothing; ``cl_count[p]`` is the
     number of entries of particle p, ``cl_lo[p]..cl_hi[p]`` the range of
     flat cell indices they touch and ``sp_death[p]`` why it stopped
@@ -683,7 +685,8 @@ def trace_particles(
                 # the whole load, the older path cells are overflow slots
                 # (delta 0) that apply_changes fills with the clamped excess.
                 # A load reaching the sea never comes back on land: only the
-                # ocean cell is listed, the excess goes offshore (pending).
+                # ocean cell is listed; its overflow slot is the pending
+                # stockpile of that cell (apply_changes, offshore_writeoff).
                 load = sed * vol / volume0
                 nout = 1 if cause == DEATH_OCEAN else nring
                 for r in range(nout):
@@ -707,7 +710,7 @@ def trace_particles(
 def apply_changes(
     cl_cell, cl_delta, cl_vol, cl_mom, cl_count, cap,
     height, sediment, acc, pending, samp, disch_track, mom_track, mask,
-    iter_erode, iter_deposit, fan_slope, use_route, dep_floor,
+    iter_erode, iter_deposit, fan_slope, use_route, dep_floor, offshore_writeoff,
 ):
     """Apply a change list serially in particle order against the live
     terrain.  This is the single place where physical limits are enforced
@@ -740,10 +743,18 @@ def apply_changes(
       the surface as submarine fans).
       The excess becomes the *surplus*
       offered to the next entries; whatever is left after the last entry
-      goes to ``pending`` of the death cell when that cell is land (a submerged death cell — a shelf filled to sea level that never becomes land — loses it to the deep ocean instead, as PLAN 8.2's ``into ocean: break`` does; reported as ``lost_offshore``) — a per-cell stockpile that the
+      goes to ``pending`` of the death cell — a per-cell stockpile that the
       next iteration re-injects as a particle starting with that load (in
       seafloor mode if the cell is submerged), so parked mass keeps moving
-      until it finds room.
+      until it finds room.  A submerged death cell (a shelf filled to the
+      waterline floor, which never becomes land) parks only ``1 -
+      offshore_writeoff`` of it and writes the rest off as ``lost_offshore``:
+      parking all of it would let a stockpile that can never be placed grow
+      without bound, deleting all of it (PLAN 8.2's ``into ocean: break``,
+      the rule until kernel 8) removed 3141 Mm of crust from the earth-v5
+      bake.  The write-off makes a stockpile that keeps failing decay
+      geometrically, so seafloor pending is bounded by inflow /
+      ``offshore_writeoff``; 1.0 reproduces the old rule exactly.
 
     With ``use_route`` the ``S_RFLAG`` channel of every touched cell is
     kept equal to ``route != live surface`` (the kernel skips the route
@@ -753,7 +764,7 @@ def apply_changes(
     velocity`` for land step entries (volume > 0; seafloor steps carry
     volume 0, final deposits -1).
     Returns ``(clamped entries, mass sent to pending, mass of deficits
-    left at the end of a list, mass lost offshore)``.
+    left at the end of a list, mass written off offshore)``.
     """
     F, NE, _ = height.shape
     total = F * NE * NE
@@ -864,10 +875,19 @@ def apply_changes(
             if death >= 0:
                 if hflat[death] + sflat[death] + aflat[death] < pflat[death, S_BASE]:
                     # a load the seafloor walk could not place (a shelf
-                    # filled to sea level) leaves the modelled surface for
-                    # the deep ocean: parking it would deadlock, since sea
-                    # never turns into land (PLAN 8.2 drops it outright)
-                    lost_offshore += surplus
+                    # filled to the waterline floor): park most of it to
+                    # walk again next iteration, write the rest off to the
+                    # deep ocean so a stockpile that never finds room
+                    # decays instead of growing (sea never turns into land)
+                    keep = surplus * (1.0 - offshore_writeoff)
+                    if keep < 1e-4:
+                        # dust: a geometric write-off never reaches zero, and
+                        # a stockpile under the kernel's own load floor would
+                        # spawn a particle that dies at step 0 every iteration
+                        keep = 0.0
+                    pdflat[death] += keep
+                    to_pending += keep
+                    lost_offshore += surplus - keep
                 else:
                     pdflat[death] += surplus
                     to_pending += surplus

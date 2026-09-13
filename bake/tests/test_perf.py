@@ -60,7 +60,10 @@ def test_erosion_iteration_cost_at_n512(scratch):
         t0 = time.time()
         st = step(state, p, it)
         ts.append(time.time() - t0)
-        assert st["particles"] == round(p.erosion.particles_per_cell * 6 * N_C * N_C)
+        rain = round(p.erosion.particles_per_cell * 6 * N_C * N_C)
+        # the re-injected stockpiles (land pits, and since kernel 8 the
+        # seafloor) are appended after the rain: a few per cent on top of it
+        assert rain <= st["particles"] <= 1.1 * rain, (st["particles"], rain)
     mean = float(np.mean(ts))
     print(f"\n[perf] N_c={N_C}, {get_num_threads()} threads: {mean:.2f} s/iteration {ts}")
     assert mean < MAX_SECONDS, (mean, ts)

@@ -277,6 +277,8 @@ def main() -> int:
             "land_median_m": float(np.median(surf[land]) * state.height_unit_m) if land.any() else 0.0,
             "above2km_pct": float(np.mean(surf[land] * state.height_unit_m > 2000) * 100) if land.any() else 0.0,
             "glacial": st.get("glacial"),
+            "pending": st.get("pending_total"),  # the stockpile (land pits + seafloor) after this iteration, cell units
+            "lost_offshore": st.get("lost_offshore"),
             "seconds": st.get("seconds_total"),
         }
         hist.append(row)

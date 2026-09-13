@@ -118,9 +118,13 @@ plain upsampled coarse fields so `derive`/`tiles` can be developed alone.
 * `graph/lakes_coarse.json` (hydro) and `graph/lakes.json` (derive, fine):
   `{"lakes": [{"id", "surface_m", "area_m2", "outlet": [f,i,j] or null,
   "polygon": [[f,u,v], ...]}]}`
-* `graph/rivers.json` (derive): `{"rivers": [{"id", "edge_id", "order",
+* `graph/rivers.json` (derive): `{"river_source": "graph|discharge", "width": {...the width law...},
+  "rivers": [{"id", "edge_id", "order", "face", "cells", "length_m", "discharge",
   "points": [[f,u,v,width_m,height_m], ...]}]}` (`height_m` = water surface,
-  non-increasing downstream; polylines are per face and meet at cube edges)
+  non-increasing downstream; polylines are per face and meet at cube edges, so
+  a `drainage.json` reach crossing one is two records with the same `edge_id`;
+  under the `graph` source every record is a reach outside the lakes and
+  `width_m` is constant along it, `discharge` its `mean_discharge`)
 
 ## Erosion kernel contract (`globe/erosion/particle.py`)
 
@@ -138,13 +142,19 @@ particle by `volume *= 1 − dt·erosion.evap_rate·evap[cell]`.  PLAN 8.2's
 `evap_at_pos` reads as `evap_rate·evap(pos)`, so the ★ `evap_rate` keeps
 its published meaning.
 
-Mass: the kernel is conservative on a closed window *except* for load a
-submarine fan cannot place.  A shelf already filled to sea level can take
-nothing more (the fan-slope descent and the sea-level ceiling both bind)
-and sea never becomes land, so that load leaves the modelled surface for
-the deep ocean instead of deadlocking in `pending`; the per-iteration
-total is `lost_offshore` (stage info `lost_offshore_m`).  `pending` is a
-per-cell stockpile for **land** pits only.
+Mass: the kernel is conservative on a closed window *except* for the
+`erosion.offshore_writeoff` share of load a submarine fan cannot place.
+A shelf already filled to `dep_floor_m` below the waterline can take
+nothing more and sea never becomes land, so a particle that dies there
+loaded parks `1 - offshore_writeoff` of its surplus in the death cell's
+`pending` (re-injected next iteration as a seafloor particle, like a land
+pit's stockpile) and writes the rest off to the deep ocean; the
+per-iteration write-off is `lost_offshore` (stage info `lost_offshore_m`,
+and what is still parked on the seafloor at the end is `pending_sea_m`).
+The write-off is what keeps a stockpile that never finds room from
+growing without bound (it decays geometrically, so seafloor `pending` is
+bounded by inflow / w); 1.0 is the old rule, which deleted the whole
+surplus (docs/sea-death-stockpile.md).
 
 Uplift: `apply_uplift` subtracts the active-interior mean of `uplift`
 before adding it, but only on the **global** 6-face state, whose `z = 0`
@@ -332,8 +342,15 @@ pre-erosion field.
 `fine/vegetation` is `255 · sqrt(min(P/100, 1)) · sqrt(1 − min(slope/cliff_slope, 1))
 · biome_factor · soil_factor` (biome factors in `biomes.BIOMES`, soil factor
 `0.7 + 0.3·min(sediment/derive.soil_full_depth_m, 1)` from `derive/soil.py`).
-`fine/river_mask` is 255 within `w/2` of a river centreline, `w = a·(Q/Q_thr)^b`
-fine cells (`Q_thr` = the discharge threshold recorded in `graph/rivers.json`).
+`fine/river_mask` is 255 within `w/2` of a river centreline but at least the
+centreline cell itself. With `derive.river_source = graph` (default) the
+centrelines are the drainage graph's reaches traced through the fine grid
+and cut at the lakes, and `w = max(river_width_min_m, river_width_m_a ·
+(Q/Q_ref)^b)` metres (`Q` the reach's `mean_discharge`, `Q_ref` hydro's
+`river_threshold_volume`, both in `graph/rivers.json`); at 4.9 km cells every
+river is sub-cell and the mask is a one-cell line. With `discharge` the rivers
+are the thresholded fine discharge skeletonised and `w = a·(Q/Q_thr)^b` fine
+cells (`Q_thr` = the discharge threshold recorded in `graph/rivers.json`).
 `graph/rivers.json` polylines use cell-centre `u = (i+0.5)/N_fine`;
 `graph/lakes.json` rings use the corner lattice `u = i/N_fine` (closed,
 counter-clockwise outer rings, clockwise holes; `rings` lists every face

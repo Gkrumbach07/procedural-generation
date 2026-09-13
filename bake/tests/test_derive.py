@@ -2,8 +2,11 @@
 upstream stages plus a synthetic river valley / lake on fine face 0:
 biome codes, vegetation range, river mask aligned with high discharge,
 rivers.json geometry (inside faces, descending, widths grow with
-discharge, Strahler from the fine graph and from a coarse graph), lakes.json
-polygons, determinism, runtime at N_fine = 256 with an estimate for 4096."""
+discharge, Strahler from the fine graph and from a coarse graph), rivers
+traced from a fake drainage graph (stop at the lake, cross a cube edge,
+widths in metres, fallback to the discharge path on an empty graph),
+lakes.json polygons, determinism, runtime at N_fine = 256 with an estimate
+for 4096."""
 import dataclasses
 import json
 import time
@@ -173,6 +176,63 @@ def fake_drainage(params):
         "nodes": [{"id": 0, "cell": cells[0], "kind": "source", "acc": 1.0}, {"id": 1, "cell": cells[-1], "kind": "outlet", "acc": 9.0}],
         "edges": [{"id": 7, "from": 0, "to": 1, "order": 3, "length_m": 1.0, "mean_discharge": 5.0, "cells": cells}],
     }
+
+
+FAKE_Q_REF = 10.0  # river_threshold_volume of the lake fake graph (edge 7's 5.0 sits under it, so its width is the floor)
+LAKE_EDGES = {"in": 8, "through": 9, "out": 10}
+
+
+def coarse_lake_box(params):
+    """Coarse cells fully inside the synthetic lake block of face 0:
+    ``(r0, r1, c0, c1)`` inclusive rows / columns."""
+    Nf, R = params.N_fine, params.world.R
+    li0, li1, lj0, lj1 = synthetic_face(Nf)[3]
+    return -(-li0 // R), li1 // R - 1, -(-lj0 // R), lj1 // R - 1
+
+
+def fake_drainage_with_lake(params):
+    """The valley reach plus a chain through the synthetic lake block along
+    one coarse column: source -> lake_in (8), lake_in -> lake_out (9, all
+    lake but its last cell), lake_out -> outlet (10)."""
+    d = fake_drainage(params)
+    N = params.coarse_grid().N
+    r0, r1, c0, c1 = coarse_lake_box(params)
+    col = (c0 + c1) // 2
+    r_in, r_out = r0, r1 + 1
+    line = lambda a, b: [[0, r, col] for r in range(a, b + 1)]  # noqa: E731
+    d["nodes"] += [
+        {"id": 2, "cell": [0, r_in - 7, col], "kind": "source", "acc": 1.0},
+        {"id": 3, "cell": [0, r_in, col], "kind": "lake_in", "acc": 1.0},
+        {"id": 4, "cell": [0, r_out, col], "kind": "lake_out", "acc": 1.0},
+        {"id": 5, "cell": [0, N - 1, col], "kind": "outlet", "acc": 1.0},
+    ]
+    d["edges"] += [
+        {"id": LAKE_EDGES["in"], "from": 2, "to": 3, "order": 1, "length_m": 1.0, "mean_discharge": 4 * FAKE_Q_REF, "cells": line(r_in - 7, r_in)},
+        {"id": LAKE_EDGES["through"], "from": 3, "to": 4, "order": 1, "length_m": 1.0, "mean_discharge": 4 * FAKE_Q_REF, "cells": line(r_in, r_out)},
+        {"id": LAKE_EDGES["out"], "from": 4, "to": 5, "order": 1, "length_m": 1.0, "mean_discharge": 9 * FAKE_Q_REF, "cells": line(r_out, N - 1)},
+    ]
+    d["river_threshold_volume"] = FAKE_Q_REF
+    return d
+
+
+def add_coarse_lake(store, params):
+    """Raise the coarse water surface over the synthetic lake block so the
+    coarse lake mask (what made hydro's lake_in / lake_out nodes) holds the
+    cells the fake graph runs through."""
+    grid = params.coarse_grid()
+    H = grid.H
+    r0, r1, c0, c1 = coarse_lake_box(params)
+    hc = store.load_field("height", grid)
+    wc = store.load_field("water_surface", grid)
+    wc.data[0, r0 + H : r1 + 1 + H, c0 + H : c1 + 1 + H] = hc.data[0, r0 + H : r1 + 1 + H, c0 + H : c1 + 1 + H] + 20.0
+    wc.exchange_halos()
+    store.save_field(wc)
+
+
+def build_lake_graph_world(path, params):
+    store = build_world(path, params, drainage=fake_drainage_with_lake(params))
+    add_coarse_lake(store, params)
+    return store
 
 
 @pytest.fixture(scope="module")
@@ -427,13 +487,150 @@ def test_rivers_json_geometry(tiny):
     assert rj["discharge_threshold"] > 0
 
 
-def test_coarse_graph_supplies_order_and_edge_id(scratch):
+@pytest.mark.parametrize("source", ["graph", "discharge"])
+def test_coarse_graph_supplies_order_and_edge_id(scratch, source):
     params = WorldParams.tiny_world(seed=3)
-    store = build_world(scratch / "derive_graph", params, drainage=fake_drainage(params))
-    derive_run.run(store, params, _log)
-    on0 = [r for r in store.read_json("graph/rivers.json")["rivers"] if r["face"] == 0]
+    params.derive = dataclasses.replace(params.derive, river_source=source)
+    store = build_world(scratch / f"derive_graph_{source}", params, drainage=fake_drainage(params))
+    info = derive_run.run(store, params, _log)
+    rj = store.read_json("graph/rivers.json")
+    assert info["river_source"] == source and rj["river_source"] == source
+    on0 = [r for r in rj["rivers"] if r["face"] == 0]
     main = max(on0, key=lambda r: len(r["points"]))
     assert main["edge_id"] == 7 and main["order"] == 3
+    if source == "graph":
+        # the traced reach *is* the river: one record, the whole valley, the width floor (5.0 < Q_ref)
+        assert [r["edge_id"] for r in rj["rivers"]] == [7]
+        pts = np.asarray(main["points"])
+        R, Nf = params.world.R, params.N_fine
+        assert pts[0, 1] * Nf < R + 1 and pts[-1, 1] * Nf > Nf - R - 1  # from the first coarse cell to the last
+        assert np.allclose(pts[:, 3], params.derive.river_width_min_m, atol=0.06)
+        assert rj["width"]["Q_ref"] > 0 and rj["discharge_threshold"] is None
+    else:
+        assert rj["discharge_threshold"] > 0
+
+
+def test_graph_source_falls_back_without_edges(tiny):
+    """Stub hydro writes an empty graph: nothing to trace, so the default
+    'graph' source yields the discharge rivers (and says so)."""
+    store, params, info = tiny
+    assert params.derive.river_source == "graph"
+    assert info["river_source"] == "discharge" and info["n_rivers"] > 0
+    assert store.read_json("graph/rivers.json")["river_source"] == "discharge"
+
+
+def test_graph_rivers_stop_at_the_lake(scratch):
+    params = WorldParams.tiny_world(seed=3)
+    store = build_lake_graph_world(scratch / "derive_lake_graph", params)
+    info = derive_run.run(store, params, _log)
+    Nf, R = params.N_fine, params.world.R
+    li0, li1, lj0, lj1 = synthetic_face(Nf)[3]
+    rj = store.read_json("graph/rivers.json")
+    assert rj["river_source"] == "graph" and info["river_source"] == "graph"
+    by_edge = {}
+    for r in rj["rivers"]:
+        by_edge.setdefault(r["edge_id"], []).append(r)
+    # the reach inside the lake is gone; the ones into and out of it exist once each
+    assert LAKE_EDGES["through"] not in by_edge
+    assert len(by_edge[LAKE_EDGES["in"]]) == 1 and len(by_edge[LAKE_EDGES["out"]]) == 1 and len(by_edge[7]) == 1
+    up = np.asarray(by_edge[LAKE_EDGES["in"]][0]["points"])
+    down = np.asarray(by_edge[LAKE_EDGES["out"]][0]["points"])
+    # the inflow ends at the upstream shore, the outflow starts at the downstream one
+    assert abs(up[-1, 1] * Nf - li0) < 1.5 and abs(down[0, 1] * Nf - li1) < 1.5
+    assert lj0 < up[-1, 2] * Nf < lj1 and lj0 < down[0, 2] * Nf < lj1
+    q_of = {e["id"]: e["mean_discharge"] for e in fake_drainage_with_lake(params)["edges"]}
+    dp = params.derive
+    sf = np.asarray(load_face(store, "height", 0)) + np.asarray(load_face(store, "sediment", 0))
+    lake = lakes.lake_mask(sf, np.asarray(load_face(store, "water_surface", 0)), params.hydro.lake_min_depth)
+    rm = np.asarray(load_face(store, "river_mask", 0)) > 0
+    for r in rj["rivers"]:
+        pts = np.asarray(r["points"])
+        assert r["face"] == 0 and r["order"] == (3 if r["edge_id"] == 7 else 1)
+        assert r["discharge"] == q_of[r["edge_id"]]
+        w = max(dp.river_width_min_m, dp.river_width_m_a * (q_of[r["edge_id"]] / FAKE_Q_REF) ** dp.river_width_b)
+        assert np.allclose(pts[:, 3], w, atol=0.06) and w >= 30.0
+        assert (np.diff(pts[:, 4]) <= 1e-6).all()
+        i = np.minimum((pts[:, 1] * Nf).astype(int), Nf - 1)
+        j = np.minimum((pts[:, 2] * Nf).astype(int), Nf - 1)
+        assert not lake[i, j].any(), r["edge_id"]
+        # every point has river mask under it (a 30 m stream still gets its centreline cell)
+        near = np.zeros(len(i), bool)
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                near |= rm[np.clip(i + di, 0, Nf - 1), np.clip(j + dj, 0, Nf - 1)]
+        assert near.all(), r["edge_id"]
+    assert not (rm & lake).any()
+    assert rm.sum() >= sum(r["cells"] for r in rj["rivers"])
+    # the wider reach paints a wider line than the floor-width one
+    assert by_edge[LAKE_EDGES["out"]][0]["cells"] < rm[li1:, lj0:lj1].sum()
+    assert rj["width"]["Q_ref"] == FAKE_Q_REF and rj["width"]["min_m"] == dp.river_width_min_m
+
+
+def test_graph_river_crosses_face_edge(scratch):
+    """A reach whose cells continue from the neighbour face onto face 0 is
+    two records with the same edge id that meet at the cube edge."""
+    params = WorldParams.tiny_world(seed=3)
+    Nf, R = params.N_fine, params.world.R
+    ef = edge_features(params)
+    A = ef["A"]
+    ii, jj, _, _ = ef["river"][4]  # centre line on A, from the edge inward
+    cells = []
+    for i, j in zip(ii[::-1], jj[::-1]):
+        c = [A, int(i) // R, int(j) // R]
+        if not cells or cells[-1] != c:
+            cells.append(c)
+    for i in range(0, Nf // 4, R):
+        cells.append([0, i // R, int(_valley_centre(i, Nf)) // R])
+    drainage = {
+        "nodes": [{"id": 0, "cell": cells[0], "kind": "source", "acc": 1.0}, {"id": 1, "cell": cells[-1], "kind": "junction", "acc": 1.0}],
+        "edges": [{"id": 11, "from": 0, "to": 1, "order": 2, "length_m": 1.0, "mean_discharge": 4 * FAKE_Q_REF, "cells": cells}],
+        "river_threshold_volume": FAKE_Q_REF,
+    }
+    store = build_world(scratch / "derive_cross_graph", params, drainage=drainage)
+    derive_run.run(store, params, _log)
+    rivers_ = store.read_json("graph/rivers.json")["rivers"]
+    assert sorted(r["face"] for r in rivers_) == sorted([0, A]) and all(r["edge_id"] == 11 and r["order"] == 2 for r in rivers_)
+    for r in rivers_:
+        pts = np.asarray(r["points"])[:, 1:3] * Nf
+        d_edge = np.minimum.reduce([pts[:, 0], Nf - pts[:, 0], pts[:, 1], Nf - pts[:, 1]])
+        assert d_edge.min() < 1.5, r["face"]
+        assert np.allclose(np.asarray(r["points"])[:, 3], 2 * params.derive.river_width_m_a, atol=0.06)
+    rmA = np.asarray(load_face(store, "river_mask", A)) > 0
+    assert rmA[ii[:-2], jj[:-2]].mean() > 0.8  # the mask follows the channel refine cut, not the block centres
+
+
+def test_graph_pieces_and_chain_helpers():
+    """edge_face_pieces splits at faces and lakes and skips a to-node stub the
+    next edge traces; join_8connected steps one cell; reach_width_m floors."""
+    N = 8
+    lake = np.zeros((6, N, N), bool)
+    lake[0, 4, 2] = lake[0, 5, 2] = True
+    cells = [[1, 7, 2], [0, 0, 2], [0, 1, 2], [0, 2, 2], [0, 3, 2], [0, 4, 2], [0, 5, 2], [0, 6, 2]]
+    drainage = {
+        "nodes": [],
+        "edges": [
+            {"id": 3, "from": 0, "to": 1, "order": 2, "mean_discharge": 1.0, "cells": cells},  # source -> lake_out (crosses a face, then the lake)
+            {"id": 4, "from": 1, "to": 2, "order": 2, "mean_discharge": 1.0, "cells": [[0, 6, 2], [0, 7, 2]]},  # lake_out -> outlet
+        ],
+    }
+    pieces = rivers.edge_face_pieces(drainage, N, lake)
+    assert [len(p) for p in pieces] == [2, 1, 0, 0, 0, 0]
+    p1 = pieces[1][0]
+    assert p1["edge_id"] == 3 and p1["ci"].tolist() == [7] and not p1["free0"] and p1["free1"] and p1["ext0"] is None and p1["ext1"] is None
+    a, b = pieces[0]  # edge 3 up to the lake (walks on to its shore); the lake_out cell alone is left to edge 4, which starts from the lake
+    assert a["edge_id"] == 3 and a["ci"].tolist() == [0, 1, 2, 3] and a["free0"] and not a["free1"] and a["ext0"] is None and a["ext1"] == (4, 2)
+    assert b["edge_id"] == 4 and b["ci"].tolist() == [6, 7] and b["ext0"] == (5, 2) and b["ext1"] is None and not b["free0"] and not b["free1"]
+    pieces = rivers.edge_face_pieces(drainage, N, None)
+    assert [len(p) for p in pieces] == [2, 1, 0, 0, 0, 0]
+    p0 = pieces[0][0]
+    assert p0["edge_id"] == 3 and p0["ci"].tolist() == list(range(7)) and p0["free0"] and not p0["free1"]
+    ci, cj = rivers.join_8connected(np.array([[0, 0], [3, 7], [3, 7], [5, 6]]))
+    assert ci[0] == 0 and cj[0] == 0 and ci[-1] == 5 and cj[-1] == 6
+    assert (np.maximum(np.abs(np.diff(ci)), np.abs(np.diff(cj))) == 1).all()
+    dp = WorldParams.tiny_world().derive
+    assert rivers.reach_width_m(0.0, 10.0, dp) == dp.river_width_min_m
+    assert rivers.reach_width_m(40.0, 10.0, dp) == pytest.approx(2 * dp.river_width_m_a)
+    assert rivers.reach_width_m(float("nan"), 10.0, dp) == max(dp.river_width_min_m, dp.river_width_m_a)
 
 
 def test_lakes_json_polygons(tiny):
@@ -609,11 +806,14 @@ def test_slope_pads_remove_edge_seam():
 
 
 def test_determinism(scratch):
+    """Byte-equal outputs on the graph path (the discharge fallback is
+    covered by test_pipeline's full tiny bakes)."""
     params = WorldParams.tiny_world(seed=5)
     outs = []
     for k in range(2):
-        store = build_world(scratch / f"derive_det{k}", params)
-        derive_run.run(store, params, _log)
+        store = build_lake_graph_world(scratch / f"derive_det{k}", params)
+        info = derive_run.run(store, params, _log)
+        assert info["river_source"] == "graph"
         blobs = {}
         for name in derive_run.OUTPUTS:
             if store.has_field(name):

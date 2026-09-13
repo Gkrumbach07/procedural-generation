@@ -154,6 +154,7 @@ class TectonicsParams:
     overlap_fraction: float = 0.5  # segments of different plates closer than this × collision radius collide even when not approaching (no interleaving along transform boundaries)
     splat_sigma_factor: float = 1.0  # sigma (x mean segment spacing) of the Gaussian blend used to reconstruct the tect grid from the segment cloud. Must be >= the spacing: a reconstruction kernel narrower than its samples resolves the samples, and Poisson-disc packing has a characteristic length, so the bedrock came out covered in worms. Measured at Earth defaults, 0.5 gave 84 m of relief at the segment scale and 1.0 gives 42 m, saturating past 1.5 -- and once erosion drops the land median to ~40 m those worms *are* the coastline, which is where the lacy shorelines came from
     splat_knn: int = 12
+    margin_sigma_factor: float = 0.0  # x mean segment spacing: sigma of the wide kernel that re-positions the continental/oceanic step at the margin (globe/tectonics/run.py margin_ramp). The narrow splat above resolves the individual boundary segments, so the shelf edge came out scalloped one segment at a time -- on earth-v5 the -500..-2000 m isolines sit a median 0.4-0.7 spacings from the crust-type boundary, and the viewer's light band along every coast is that step. Raise-only: the oceanic side climbs to the smooth ramp (a continental rise), land, belts and sea level are untouched. Measured on `small` seed 0: shelf-edge isoline L/sqrt(A) 7.79 -> 6.38, coastline and crust-type boundary unchanged. 0 = off (bit-identical bedrock)
     cascade_rate: float = 0.3  # ★
     cascade_threshold: float = 0.05  # bedrock units (thickness·(1−density)) per cell of neighbour distance on the tect grid
     cascade_passes: int = 3
@@ -285,9 +286,10 @@ class ErosionParams:
     iter_erode: float = 25.0  # net erosion a cell may receive per iteration (cell units), enforced against the live terrain in apply order; the shortfall cancels the particle's later deposits (erosion/particle.py apply_changes)
     iter_deposit: float = 50.0  # net deposition a cell may receive per iteration (cell units); the excess moves back up the particle's path, the remainder waits in the per-cell `pending` stockpile (released at this rate)
     ocean_deposition_rate: float = 0.3  # a particle that reaches the sea keeps walking downslope on the seafloor, deposit-only, dropping this fraction of its load per step (submarine fan); no erosion, no discharge track below sea level
-    ocean_steps: int = 64  # at most this many seafloor steps (then the rest waits in the cell's pending stockpile, re-injected next iteration)
+    ocean_steps: int = 64  # at most this many seafloor steps; what is still carried is offered to the last sea cell, and the surplus splits between that cell's pending stockpile and `lost_offshore` (`offshore_writeoff`)
     fan_room: float = 50.0  # a seafloor step may settle at most this much (cell units) on a flat sea floor per particle-step (the drop to the previous cell when larger); the sea-level ceiling, the fan_slope descent and iter_deposit still bound the pile in apply_changes.  0.02 (= DEP_FLOOR) throttled offshore dispersal to ~1 cell unit per stockpile and iteration, so river mouths parked most of their load in `pending`
-    fan_slope: float = 0.05  # a submarine fan descends at least this much per cell away from its source (cell units per cell): the deposit ceiling of a seafloor step is the previous path cell minus this, and never above -DEP_FLOOR
+    fan_slope: float = 0.05  # a submarine fan descends at least this much per cell away from its source (cell units per cell): the deposit ceiling of a seafloor step is the previous path cell minus this, and never above the waterline floor (`dep_floor_m`).  Setting it to 0 recovers 11 % of the offshore loss on the small preset: it clamps the walk, but what strands the load is a shelf already filled to the floor (a sea death has no fan ceiling; docs/sea-death-stockpile.md)
+    offshore_writeoff: float = 0.25  # a particle that dies in the sea with a load its cell will not take (a shelf filled to `dep_floor_m` below the waterline, or the `iter_deposit` rate cap) parks (1 - this) of the surplus in the death cell's `pending`, to be re-injected next iteration as a seafloor particle, and writes this fraction off as `lost_offshore`.  1.0 is the old rule (delete the whole surplus: 3141 Mm of crust over the earth-v5 bake, docs/lakes-in-erosion.md); 0 would let the stockpile on a full shelf grow without bound (the deadlock commit b4f24d4 removed).  In between, a stockpile that keeps failing decays geometrically, so pending on the seafloor is bounded by inflow / this.  Measured on the small preset (docs/sea-death-stockpile.md): 0.25 keeps 25 % of what the old rule deleted at 60 iterations and 33 % at 120 (a parked stockpile gets more chances the longer the run), seafloor pending plateaus at ~5 k m on ~900 of 74 k sea cells, ocean deaths +3-4 %, seconds per iteration unchanged
     glacial_every: int = 10  # run the glacial pass (erosion/glacial.py) every k iterations; 0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion).  Ice is where the mean annual temperature is at or below freezing (evap <= 0), which at the defaults is ~9 % of land, close to Earth's glaciated fraction
     ice_evap: float = 0.0  # ice forms where the climate field `evap` is at or below this.  `evap` is k_evap*max(T,0), so 0 is exactly the freezing line and a positive value is a warmer equilibrium-line altitude (more of the world glaciated).  This is the FIRST-ORDER control on lakes: measured across three seeds, lake area swung 5x with the seed (0.14 %, 0.31 %, 0.74 % of land) but at most 43 % with glacial_from/glacial_every, and one seed had no land below +1.6 C at all, so no ice and no glacial lakes were possible however the other knobs were set
     glacial_from: float = 0.75  # start glaciating this far through the run (fraction of erosion.iterations); 0 = glaciate throughout.  Earth is lake-rich because glaciation was *recent* — the basins ice cut ~10 ka ago have not had time to fill, and lake lifetime is short next to landscape evolution time.  Carving throughout instead gives the fluvial system the whole rest of the run to drain and backfill every basin
@@ -372,13 +374,18 @@ class RefineParams:
 
 @dataclass
 class DeriveParams:
-    """PLAN section 11 knobs (globe/derive).  Rivers come from the *fine*
-    discharge: cells above a discharge threshold chosen so that a given
-    fraction of the land is river (density matched to the coarse channel
-    network by default), thinned to centrelines."""
+    """PLAN section 11 knobs (globe/derive).  Rivers come from one of two
+    sources (``river_source``): the coarse drainage graph, each reach traced
+    through the fine grid and clipped at the lakes (the default), or the
+    *fine* discharge thresholded so that a given fraction of the land is
+    river and thinned to centrelines (the earlier path, kept for
+    comparison)."""
 
-    river_width_a: float = 2.0  # w = a * (Q / Q_thr)^b fine cells (Q_thr = the river discharge threshold)
-    river_width_b: float = 0.5
+    river_source: str = "graph"  # 'graph': rivers are graph/drainage.json's reaches traced through the fine grid, split at the lakes, width in metres from the reach's mean discharge (falls back to 'discharge' when the graph has no edges, e.g. stub hydro or a tiny world with no catchment over hydro.river_threshold); 'discharge': threshold the fine discharge and skeletonise (docs/earth-v3-review.md section 2: hair-thin rivers unrelated to the hydro flood, no respect for lakes)
+    river_width_m_a: float = 30.0  # graph source: width_m = max(river_width_min_m, a * (Q / Q_ref)^river_width_b) with Q_ref = hydro's river_threshold_volume, so a reach at the channel threshold is a metres, not one fine cell. Leopold & Maddock's w ~ Q^0.5
+    river_width_min_m: float = 30.0  # graph source: a first-order stream is tens of metres, not a cell; drawn into fine/river_mask as at least the centreline cell whatever the cell size (4.9 km at Earth)
+    river_width_a: float = 2.0  # discharge source: w = a * (Q / Q_thr)^b fine cells (Q_thr = the river discharge threshold)
+    river_width_b: float = 0.5  # exponent of both width laws
     riparian_cells: int = 3  # coarse cells from a channel / river mask cell (x R at fine resolution)
     wetland_cells: int = 3  # coarse cells from a lake cell
     min_river_order: int = 1  # rivers of lower Strahler order are dropped from rivers.json / the mask
@@ -452,6 +459,10 @@ class WorldParams:
         resamples).  Called on construction and again by ``bake()`` because
         presets and ``--set`` mutate params after construction."""
         w = self.world
+        ow = float(self.erosion.offshore_writeoff)
+        if not (0.0 < ow <= 1.0):
+            raise ValueError(f"erosion.offshore_writeoff must be in (0, 1] (got {ow}): 0 re-creates the unbounded "
+                             "seafloor stockpile the write-off exists to prevent, and a value above 1 drains pending below zero")
         if w.N_c < 1 or w.R < 1 or w.T < 1:
             raise ValueError(f"world.N_c, world.R and world.T must be >= 1 (got N_c={w.N_c}, R={w.R}, T={w.T})")
         n_fine = self.N_fine
