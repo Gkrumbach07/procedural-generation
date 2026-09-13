@@ -92,7 +92,7 @@ class TectonicsParams:
     N_tect: int = 256
     segments: int = 20000
     initial_plates: int = 8  # plates at step 0: ONE for the assembled supercontinent, the rest tiling the ocean. A supercontinent is a single rigid block -- nothing inside it collides until it breaks up -- so rifting is what raises this count, which is the right causal order
-    steps: int = 1500
+    steps: int = 3000  # 1500 ended the bake mid-dispersal with no belt younger than the breakup; 3000 is past the first reassembly (docs/plate-forces.md section 7)
     convection: float = 10.0  # ★
     growth: float = 0.0  # ★ k_G (thickness units per step).  0: continental crust changes by tectonics, not by crystallising out of the mantle everywhere -- 0.05 inflated the median thickness to 2x its birth value over a run
     dissolution_factor: float = 0.05  # ★
@@ -137,7 +137,7 @@ class TectonicsParams:
     oceanic_density: float = 0.88  # Airy height 0.024 -- the ~7.5x gap that makes the histogram bimodal
     arc_accretion: float = 0.15  # fraction of a subducting *oceanic* slab welded onto the overriding plate as an arc; the rest returns to the mantle. 1.0 (the old behaviour) makes the crust a monotone accumulator
     shelf_fraction: float = 0.275  # if > 0, sea level drowns this fraction of the CONTINENTAL crust and the land area falls out, instead of `world.land_fraction` of the surface being forced dry. Earth is ~0.275 (continental crust incl. shelves ~40 % of the globe, land 29 %). Required once the hypsometry is bimodal: an area quantile has to cut a hump whose size varies +-0.1 between seeds, and when it misses it lands in the trough (measured: land under 1 km of 78.0 / 75.6 / 17.4 % across three seeds of one configuration)
-    orogen_decay: float = 0.008  # per step, the fraction of a belt's height above `orogen_floor_m` that goes back to the mantle. An orogen is only high while convergence feeds it; without this every belt a world ever built stays at full height and 31.2 % of the land ends up above 2 km against Earth's ~11 %
+    orogen_decay: float = 0.004  # per step, the fraction of a belt's height above `orogen_floor_m` that goes back to the mantle. An orogen is only high while convergence feeds it; without this every belt a world ever built stays at full height and 31.2 % of the land ends up above 2 km against Earth's ~11 %
     orogen_floor_m: float = 1200.0  # the height a dead belt settles at -- the `ural` profile's crest. The Urals and the Appalachians are low welts, not nothing
     flat_slab_age: float = 60.0  # a subducting slab younger than this (steps) is buoyant enough to shallow out, which jumps deformation far inland and builds a wide, low `laramide` belt instead of a narrow `andean` one. The Farallon flat slab under North America is the type case
     orogen_along_strike: float = 1.5  # how far, in segment spacings, one collision's cross-section fades out of its own plane. A ball query is a disc, so without this an isolated event paints a 3300 km circle of plateau instead of a point on a belt
