@@ -350,3 +350,35 @@ median of 655 m against ~350 -- too much of the crust is standing at
 decay is a knob with two numbers now and wants sweeping between 0.004
 and 0.008 on the full bake.
 
+### The decay sweep, on the full bake
+
+`worlds/sweep-od006` and `sweep-od008`: the `earth` preset baked end to
+end with only `orogen_decay` changed (the same source as `earth-v5`,
+which is the 0.004 arm). Eroded surface at iteration 800:
+
+| band | Earth | 0.004 (`earth-v5`) | 0.006 | 0.008 |
+|---|---|---|---|---|
+| 0-1 km | 71.6 | 67.7 | 84.6 | 91.2 |
+| 1-2 | 15.4 | 18.7 | 9.3 | 6.8 |
+| 2-3 | 7.5 | **6.4** | 2.3 | 0.8 |
+| 3-4 | 3.8 | **2.8** | 1.2 | 0.6 |
+| 4-5 | 1.7 | 2.3 | 0.8 | 0.3 |
+| >5 | 0.3 | 2.1 | 1.8 | 0.2 |
+| land median | ~350 m | 655 | **359** | 157 |
+| max | 8849 m | 9862 | 14,780 | 6674 |
+| ocean median | -3700 m | -3247 | -3373 | -3286 |
+
+0.008 is the world before this work: no mountains. 0.006 lands the
+median on Earth's and empties the 2-4 km bands to a third of Earth's;
+0.004 fills those bands and lifts the median to 655 m. The two cannot be
+had from this knob alone, and **the excess above 5 km is not the decay's
+either**: 0.006 keeps 1.8 % of the land above 5 km with a highest point
+of 14.8 km, where 0.004 tops out at 9.9 km. A few peaks that high are a
+defect of their own -- a belt that goes on being uplifted through erosion
+(the `uplift` field is the last 100 tectonic steps' rate, applied for all
+800 iterations) or a stack of overlapping profiles at a reassembly -- and
+belongs to the next erosion pass, measured on the peaks themselves.
+0.004 stays the default: the 2-4 km bands are what a viewer sees as
+mountains, and the median is the 1-2 km band's problem to fix by
+erosion, not by taking the belts down faster.
+
