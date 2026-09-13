@@ -225,7 +225,14 @@ def run(store, params, log=print) -> dict:
     conn = rivers_mod.RiverConnectivity(Nf, int(round(dp.min_river_cells * R * R)))
     for f in range(6):
         q_s = rivers_mod.smooth_discharge(_fine_optional(store, "discharge", f, Nf, 0.0), dp.discharge_smooth_cells)
-        land_f = ~fine_ocean(_fine_surface(store, f, Nf), sea_near_c, f, R)
+        surface_f = _fine_surface(store, f, Nf)
+        ocean_f = fine_ocean(surface_f, sea_near_c, f, R)
+        # a lake is not a river: the flood fills a depression with high
+        # discharge across its whole flat, and thresholding that painted a
+        # centreline straight through every lake and across the land bridges
+        # between its pieces (docs/earth-v3-review.md section 2)
+        lake_f = lakes_mod.lake_mask(surface_f, _fine_optional(store, "water_surface", f, Nf, 0.0), depth, ocean=ocean_f)
+        land_f = ~ocean_f & ~lake_f
         conn.add_face(f, (q_s > q_low) & land_f, (q_s > q_thr) & land_f)
     conn.finalize()
     info["river_fraction"] = frac
@@ -253,8 +260,9 @@ def run(store, params, log=print) -> dict:
         ws_f = _fine_optional(store, "water_surface", f, Nf, 0.0)
         q_s = rivers_mod.smooth_discharge(_fine_optional(store, "discharge", f, Nf, 0.0), dp.discharge_smooth_cells)
         ocean_f = fine_ocean(surface_f, sea_near_c, f, R)
-        land_f = ~ocean_f
-        # rivers
+        lake_f = lakes_mod.lake_mask(surface_f, ws_f, depth, ocean=ocean_f)
+        land_f = ~ocean_f & ~lake_f
+        # rivers (never through a lake: see the connectivity pass above)
         keep_f = conn.mask(f, (q_s > q_low) & land_f)
         river_mask, rivers, rinfo = rivers_mod.extract_face_rivers(f, q_s, surface_f, land_f, q_thr, dp, R, cs_f, graph_index, q_low=q_low, mask=keep_f)
         write_face(store, "river_mask", f, river_mask)

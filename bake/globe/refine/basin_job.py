@@ -353,7 +353,14 @@ def _run_basin(root, basin, params, log, t0, bid, rp, grid, fields, derived, win
     flood_active = (mask > 0) | ocean
     drain = exit_cells(basin, win, (NE, NE)) | ocean
     wsp = local_flood(plain, drain, flood_active, mask)
-    lake = (wsp - plain > lake_min) & (up["depth"] > 0.0) & active
+    # The spill-point flood says how full a depression *can* be; the coarse
+    # water surface (hydro's evaporation balance, upsampled) says how full
+    # it *is*.  Cap the fine level at the coarse one, so a closed basin that
+    # hydro drew down stays drawn down here instead of re-filling to its rim
+    # (earth-v3: 510,341 fine lake cells against 124,276 coarse).
+    coarse_lake = up["depth"] > 0.0
+    wsp = np.where(coarse_lake, np.minimum(wsp, np.maximum(ws0, plain)), wsp).astype(np.float32)
+    lake = (wsp - plain > lake_min) & coarse_lake & active
     del up["depth"]
     lake_labels, n_lakes = ndimage.label(lake, structure=np.ones((3, 3), bool))
     lake_idx = np.flatnonzero(lake)
@@ -433,6 +440,9 @@ def _run_basin(root, basin, params, log, t0, bid, rp, grid, fields, derived, win
     t2 = time.time()
     surface = (height + sediment).astype(np.float32)
     ws = local_flood(surface, drain, flood_active, mask)
+    # the same cap on the final surface: the fine flood may not stand
+    # higher than the coarse balance where the coarse grid has a lake
+    ws = np.where(coarse_lake, np.maximum(surface, np.minimum(ws, ws0)), ws).astype(np.float32)
     # lake give-back: a filled lake cell left shallower than lake_min_depth
     # returns its deposit down to the plain floor (lowering a cell inside a
     # depression never changes the flood level, so ws stays valid)
