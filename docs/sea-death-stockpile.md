@@ -12,8 +12,30 @@ is 0.25; 1.0 is the old rule and reproduces it bit for bit.
 
 Everything below is the small preset (N_c 128, 50 m cells, seed 0, 60
 erosion iterations unless stated), the real kernel, no instrumentation.
-Earth is a one-hour bake and is not measured here: the first bake on
-kernel 8 (earth-v6) is where the 3141 Mm gets its after-number.
+Earth is a one-hour bake; the first bake on kernel 8 is `worlds/earth-v6`
+(same tectonics as earth-v5, hash 1e0618134ba4586a, so the pair isolates
+kernel 8 and the graph rivers of the same commit):
+
+| | earth-v5 (kernel 7) | **earth-v6 (kernel 8)** |
+|---|---|---|
+| `lost_offshore` (deleted) | 3141 Mm | **1988 Mm** (-37 %) |
+| `pending_sea` still walking at iteration 800 | -- | 4.99 Mm |
+| `pending_total` | 3.09 Mm | 8.21 Mm |
+| mean sediment thickness | 175 m | **367 m** |
+| sediment on the shelf (-200..0 m by eroded surface), share / conc. | 56.4 % / 11.4x | 54.0 % / 8.1x |
+| sediment on land (> 50 m) | 10.5 % / 0.41x | 6.0 % / 0.23x |
+| land above 2 km / above 5 km | 11.5 % / 2.1 % | 11.9 % / 2.2 % |
+| ocean median | -3247 m | -3194 m |
+| erosion stage | 3389 s | 3799 s (+12 %) |
+
+A third of the deleted mass is kept, and it lands where it should: the
+mean sediment doubles (the 1153 Mm difference over 6.3 M cells is 183 m
+of it) with the shelf's *concentration* falling from 11.4x to 8.1x as the
+kept load spreads over the deeper zones. The hypsometry does not move.
+The cost is the +12 % on the erosion stage that the re-injected
+stockpile's particles are, as the review predicted, and the 5 Mm still
+in flight at the end, which is the price of a stockpile that decays
+rather than vanishes.
 
 ## The rule, and why a write-off
 
