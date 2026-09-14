@@ -36,6 +36,15 @@ in the tree); nothing at Earth scale was re-baked. The fix is measured on the sm
 > `uplift` is derived, for another pass. The tables below are the 1 m/it
 > measurements as taken.
 
+> **Measured at Earth scale** (`worlds/earth-v7`, the 2 m/it default on
+> earth-v5's tectonics, with kernel 8, graph rivers and the cross-face
+> basins of the same commit): 77,451 cells capped; land above 5 km
+> 2.2 -> **1.6 %**, highest point 9862 -> **9195 m**, the 2-3 / 3-4 / 4-5
+> km bands 6.4 / 2.8 / 2.3 -> 6.9 / 3.1 / 2.5 % (Earth 7.5 / 3.8 / 1.7),
+> land median 655 -> 695 m, ocean median -3247 -> -3195 m. The static
+> estimate (1.6 %, ~9070 m) was right to the digit on the share and 1 %
+> on the maximum.
+
 ## The answer in one paragraph
 
 The `uplift` field tectonics writes is the height a segment gained over

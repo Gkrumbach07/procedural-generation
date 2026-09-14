@@ -215,3 +215,16 @@ that measurement, not here.
   multi-face on small; the shipped kernel gives 149 / 24 because it counts
   each cross-face contact once (the prototype counted it from both sides,
   doubling the cross-face boundary weights).
+
+## Measured at Earth scale
+
+`worlds/earth-v7` (the first full bake with this partition): **422
+basins, 48 of them spanning two or more cube faces**, against 477 and
+none on `earth-v5`; the viewer's basin layer no longer has a straight
+meridian through every continent. Refine ran its per-piece jobs in 295 s
+against 286 s on `earth-v6` (same tectonics and erosion kernel): the
+redundant off-face erosion is a few percent, as the small-preset estimate
+said. Lakes (1536), rivers (4614) and the hypsometry are those of
+`earth-v6` to within noise, which is the expected null for a change to
+the partition alone.
+
