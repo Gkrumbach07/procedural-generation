@@ -26,10 +26,12 @@ def main() -> int:
     ap.add_argument("--frame-res", type=int, default=None, help="downsample timeline frames to this many cells per face")
     ap.add_argument("--max-frames", type=int, default=None, help="thin the timeline to about this many frames")
     ap.add_argument("--single", action="store_true", help="also write standalone.html with every frame inlined")
+    ap.add_argument("--refined", action="store_true", default=None,
+                    help="draw the final frame from the refined grid (fine/) at full resolution (default: render.viewer_refined)")
     ap.add_argument("--formats", default="", help="extra exports: equirect, anim (comma separated)")
     args = ap.parse_args()
     p = export_viewer(args.world, args.out, formats=args.formats, final_res=args.final_res, frame_res=args.frame_res,
-                      max_frames=args.max_frames, single=args.single)
+                      max_frames=args.max_frames, single=args.single, refined=args.refined)
     print(p)
     return 0
 

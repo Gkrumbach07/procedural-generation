@@ -55,6 +55,85 @@ def test_height_encoding_round_trips():
     assert np.abs(back - h).max() <= 0.5 * (h1 - h0) / 65535 + 1e-9
 
 
+def test_height_encoding_keeps_the_sign_of_every_cell():
+    """Sea level sits exactly on a code and no cell crosses it in the
+    rounding: a coastal plain 0.05 m above the water used to decode below
+    it, so the shader drew the cell as sea (docs/viewer: the stair-stepped
+    coasts of earth-v9)."""
+    h = np.array([-5700.0, -0.04, -1e-6, 0.0, 1e-6, 0.05, 7834.0]).reshape(1, 1, 7) * np.ones((6, 1, 1))
+    hi, lo, h0, h1 = vw.encode_height(h)
+    back = h0 + (hi.astype(np.float64) * 256 + lo) / 65535.0 * (h1 - h0)
+    step = (h1 - h0) / 65535.0
+    assert np.all((back < 0) == (h < 0)), back[0, 0]
+    assert np.abs(back - h).max() <= step + 1e-9
+    assert h0 <= h.min() and h1 >= h.max()
+
+
+def test_lake_depth_is_signed_so_the_shore_falls_between_cells():
+    """A lake cell carries its depth, a dry neighbour the lake level less its
+    ground (< 0), everything else the far value -- so the bilinear 0
+    crossing is where the ground meets the water."""
+    surf = np.zeros((6, 5, 5), np.float32) + 50.0
+    surf[0, 2, 2] = 10.0                              # a one-cell lake ...
+    surf[0, 2, 3] = 40.0                              # ... whose neighbour stands 10 m above its water
+    ws = surf.copy()                                  # dry ground: water surface = ground
+    ws[0, 2, 2] = 30.0                                # the lake's level
+    code = vw.water_code(surf, None, ws, 0.5)
+    d = vw.lake_depth(surf, ws, code)
+    assert d[0, 2, 2] == 20.0 and d[0, 2, 3] == -10.0 and d[0, 2, 1] == -20.0
+    assert d[0, 0, 0] == -vw.LAKE_DEPTH_RANGE_M and d[3, 2, 2] == -vw.LAKE_DEPTH_RANGE_M
+    # linear between the lake centre and the neighbour: the shore 2/3 of the way
+    t = 20.0 / (20.0 + 10.0)
+    assert abs(t - 2.0 / 3.0) < 1e-9
+
+
+def test_smooth_mask_rounds_corners_but_keeps_single_cells():
+    """The coast is the 0.5 contour of the smoothed ocean mask: a corner cell
+    is pulled towards 0.5, and a one-cell island or inlet stays on its side."""
+    ocean = np.zeros((6, 12, 12), bool)
+    ocean[0, :6, :6] = True                           # a square bay: its corner should round
+    ocean[1, 4, 4] = True                             # a one-cell inlet
+    s = vw.smooth_mask(ocean)
+    assert s[0, 5, 5] >= 0.6 and s[0, 5, 5] < 0.75    # corner cell: still sea, but only just
+    assert s[0, 6, 6] <= 0.4 and s[0, 6, 6] > 0.05    # diagonal land neighbour: land, pulled up
+    assert s[1, 4, 4] >= 0.6 and s[1, 3, 3] <= 0.4
+    assert np.all(s[~ocean] <= 0.4) and np.all(s[ocean] >= 0.6)
+
+
+def test_refined_final_frame_uses_derives_sea_and_lake_rules(tmp_path):
+    """``refined=True`` draws the final frame from ``fine/`` at full
+    resolution, with derive's water rules: sea is fine ground below 0 in a
+    coarse ocean cell or one touching it, so a refined cell poking above the
+    water offshore is land and a hollow below 0 far inland is not sea; and
+    coarse-only channels are repeated onto the fine grid."""
+    N, R = 8, 2
+    root = tmp_path / "w"
+    (root / "coarse").mkdir(parents=True)
+    (root / "fine").mkdir()
+    (root / "manifest.json").write_text(json.dumps({"stages": {}, "params": {"hydro": {"lake_min_depth": 0.5}}}))
+    hc = np.full((6, N, N), 100.0, np.float32)
+    hc[0, :, :3] = -50.0                               # a strip of ocean on face 0
+    fd = np.zeros((6, N, N), np.uint8)
+    fd[hc < 0] = 255
+    hf = np.repeat(np.repeat(hc, R, axis=1), R, axis=2).copy()
+    hf[0, 2, 1] = 3.0                                  # a refined speck above the water, offshore
+    hf[3, 8, 8] = -1.0                                 # a hollow below 0, far from any ocean
+    for f in range(6):
+        for name, a in (("height", hc), ("sediment", np.zeros_like(hc)), ("flow_dir", fd), ("water_surface", np.maximum(hc, 0)),
+                        ("discharge", np.ones_like(hc)), ("temperature", np.full_like(hc, 10.0))):
+            np.save(root / "coarse" / f"{name}.f{f}.npy", a[f])
+        for name, a in (("height", hf), ("sediment", np.zeros_like(hf)), ("water_surface", np.maximum(hf, 0)),
+                        ("discharge", np.ones_like(hf))):
+            np.save(root / "fine" / f"{name}.f{f}.npy", a[f])
+    coarse, _ = vw.collect_frames(root, None, log=lambda m: None)
+    fine, _ = vw.collect_frames(root, None, log=lambda m: None, refined=True)
+    assert coarse[-1].res == N and fine[-1].res == N * R
+    w = fine[-1].ch["water"]
+    assert w[0, 0, 0] == vw.WATER_OCEAN and w[0, 2, 1] == vw.WATER_LAND   # the speck is land
+    assert w[3, 8, 8] == vw.WATER_LAND                                     # the inland hollow is not sea
+    assert fine[-1].ch["temperature"].shape == (6, N * R, N * R)
+
+
 def test_equirect_has_its_pole_on_z():
     """Latitude follows +Z, as in Grid.latitude and the climate stage: a field
     that depends only on z is constant along every equirect row."""
@@ -95,6 +174,11 @@ def test_bake_captures_frames_and_exports_a_viewer(tmp_path):
     assert "plate" in meta["frames"][0]["layers"]
     assert "discharge" in meta["frames"][-1]["layers"]
     assert "water" in meta["frames"][-1]["layers"]  # what the elevation view colours as water
+    # rivers on the final frame are the particles' discharge in texture 0's B,
+    # eased in over a byte span, as on the erosion frames
+    fin = meta["frames"][-1]
+    assert fin["layers"]["discharge"] == [0, 2] and fin["river_span_byte"] >= 1
+    assert meta["channels"]["ocean"]["hidden"] and fin["layers"]["ocean"][1] == 2
 
 
 def test_water_code_tells_lakes_from_sea_and_from_closed_basins():

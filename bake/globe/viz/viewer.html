@@ -181,8 +181,14 @@ uniform vec2 uPrecipRange;     // precip byte -> x land mean (log lo, hi)
 uniform sampler2D uOT;         // Strahler order (final frame only): colours the river overlay
 uniform vec3 uOGeo;
 uniform int uOCh, uHasOrder;
+uniform sampler2D uST;         // shoreline texture (final frame only): G signed lake depth, B smoothed ocean mask
+uniform vec3 uSGeo;
+uniform int uHasShore;
+uniform float uLakeRange;      // metres at byte 255 of the signed lake depth (byte 127.5 = the shore)
 uniform int uRivers;           // 1 when frame a carries discharge in B
-uniform float uRiverMin;       // byte threshold
+uniform float uRiverMin;       // byte at which a river starts to fade in
+uniform float uRiverSpan;      // bytes from there to full strength
+uniform float uRiverZoom;      // bytes the fade-in moves up per doubling of cells per screen pixel
 uniform int uGrid, uCoast;
 uniform float uTexelRad;       // one texel of frame a, radians
 const float PI = 3.14159265358979;
@@ -321,8 +327,21 @@ void main(){
   float scale = 1.0 / (2.0 * d * uRplanet);
   vec2 g = vec2(hE - hW, hN - hS) * scale;
   // hydro's verdict on the final frame; on the timeline frames, which are
-  // captured before hydro has run, the height sign is all there is
-  float wcode = uHasWater == 1 ? byteNearest(uWT, uWGeo, uWCh, p) : (h < uSea ? 2.0 : 0.0);
+  // captured before hydro has run, the height sign is all there is.  With
+  // the shoreline texture the verdict is placed between cells: the sea is
+  // the 0.5 contour of the (binomially smoothed) ocean mask, which rounds
+  // the cell corners -- the height sign would not, because erosion leaves
+  // coastal plains a metre above the water next to a shelf filled to a few
+  // metres below it, and that contour hugs the land cells' centres -- and a
+  // lake is wherever the interpolated signed lake depth is above 0
+  float wcode;
+  if (uHasShore == 1) {
+    float oc = byteLinear(uST, uSGeo, 2, p);
+    float ld = (byteLinear(uST, uSGeo, 1, p) / 127.5 - 1.0) * uLakeRange;
+    wcode = oc > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
+  } else {
+    wcode = uHasWater == 1 ? byteNearest(uWT, uWGeo, uWCh, p) : (h < uSea ? 2.0 : 0.0);
+  }
   bool wet = wcode > 0.5;
   float ex = uExag * (wet ? 0.35 : 1.0);
   vec3 nrm = normalize(vec3(-g.x * ex, -g.y * ex, 1.0));
@@ -346,15 +365,18 @@ void main(){
   }
   col *= mix(1.0, shade, uShadeAmt);
 
+  // Rivers: the particles' discharge, interpolated and eased in from
+  // uRiverMin over uRiverSpan (McDonald's stream-map rendering), so a channel
+  // has soft banks and the fainter paths beside it show.  Zoomed out past
+  // one cell per pixel the fade-in moves up, so only the larger rivers stay
+  // visible at continent scale -- as on a real map
   if (uRivers == 1 && !wet) {
     float b = byteLinear(uT0a, uGeoA, 2, p);
-    float w = smoothstep(uRiverMin - 6.0, uRiverMin + 6.0, b);
-    vec3 rc = vec3(0.16, 0.40, 0.90);
-    if (uHasOrder == 1) {
-      float o = byteNearest(uOT, uOGeo, uOCh, p);
-      if (o > 0.5) rc = orderColor(o);
-    }
-    col = mix(col, rc, w * clamp(0.45 + (b - uRiverMin) / 60.0, 0.45, 0.9));
+    float cpp = max(1.0 / (uScale * uTexelRad), 1.0);
+    float t = clamp((b - uRiverMin - uRiverZoom * log2(cpp)) / max(uRiverSpan, 1.0), 0.0, 1.0);
+    float w = t * t * (3.0 - 2.0 * t);
+    vec3 rc = mix(vec3(0.42, 0.62, 0.80), vec3(0.14, 0.34, 0.70), w);
+    col = mix(col, rc, w * 0.9);
   }
   if (uCoast == 1) {
     float w = fwidth(h);
@@ -492,7 +514,7 @@ readHash();
 // ---------------------------------------------------------------------------
 const CHANNELS = Object.assign({ elevation: { label: "Elevation", unit: "m" } }, META.channels || {});
 const CMAPS = { thermal: 0, rain: 1, plates: 2, biome: 3, viridis: 4, sediment: 5, satellite: 6, order: 7 };
-const layerNames = ["elevation", ...Object.keys(META.channels || {}).filter(k => k !== "discharge_overlay")];
+const layerNames = ["elevation", ...Object.keys(META.channels || {}).filter(k => k !== "discharge_overlay" && !META.channels[k].hidden)];
 const sel = $("layer");
 layerNames.forEach((k, idx) => { const o = document.createElement("option"); o.value = k;
   o.textContent = (idx < 9 ? (idx + 1) + "  " : "") + CHANNELS[k].label; sel.appendChild(o); });
@@ -585,6 +607,15 @@ function draw() {
   const rb = FA.river_min_byte ?? META.river_byte_min;
   gl.uniform1i(U.uRivers, state.rivers && rb != null ? 1 : 0);
   gl.uniform1f(U.uRiverMin, rb ?? 255);
+  gl.uniform1f(U.uRiverSpan, FA.river_span_byte ?? 12);
+  gl.uniform1f(U.uRiverZoom, 10.0);
+  // shoreline texture: lake depth and ocean mask, interpolated (final frame only)
+  const lk = (FA.layers || {}).lake_depth, ocn = (FA.layers || {}).ocean;
+  const shore = lk && ocn && lk[0] === ocn[0] && lk[1] === 1 && ocn[1] === 2;
+  bindTex(4, tex[a][shore ? lk[0] : 0], "uST");
+  gl.uniform3fv(U.uSGeo, geoOf(FA, shore ? lk[0] : 0));
+  gl.uniform1i(U.uHasShore, shore ? 1 : 0);
+  gl.uniform1f(U.uLakeRange, (CHANNELS.lake_depth || {}).hi ?? 200);
   const ord = (FA.layers || {}).order;
   bindTex(5, tex[a][ord ? ord[0] : 0], "uOT");
   gl.uniform3fv(U.uOGeo, geoOf(FA, ord ? ord[0] : 0));
@@ -681,7 +712,7 @@ function readout(px, py) {
   const hq = d0[o0] * 256 + d0[o0 + 1];
   rows.push(["elevation", fmtM(f.h0 + hq / 65535 * (f.h1 - f.h0))]);
   for (const [name, [k, c]] of Object.entries(f.layers || {})) {
-    const ch = CHANNELS[name]; if (!ch || name === "satellite") continue;
+    const ch = CHANNELS[name]; if (!ch || ch.hidden || name === "satellite") continue;
     const [x, y] = texel(f, k, p), b = pix[k].d[4 * (y * pix[k].w + x) + c];
     let v = decodeByte(ch, b);
     if (ch.kind === "category") v = ch.names ? (ch.names[b] ?? b) : (b === 0 ? "—" : b - (ch.offset ?? 0));

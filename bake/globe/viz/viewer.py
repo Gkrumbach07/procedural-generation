@@ -16,10 +16,16 @@ from the neighbouring face so bilinear filtering is seamless.  Pixel
 ``(x, y) = (1 + i, 1 + j)`` of a tile is cell ``(i, j)``.  Texture 0 is
 ``R, G`` = 16-bit height over the frame's ``[h0, h1]`` metres and ``B`` = an
 overlay byte (plate id in tectonics frames, log erosion discharge in erosion
-frames, log hydro flow accumulation on the final frame -- so the rivers
-drawn there are the reaches of ``graph/drainage.json`` and agree with the
-lakes by construction); the final frame adds climate/biome,
-plate/sediment/crust and water/river-order/basin textures, and a
+frames and on the final frame).  Rivers are drawn from that discharge: the
+particles' time-averaged stream map, a bundle of paths that fades out at its
+edges, which the shader interpolates and eases the way McDonald renders his
+stream map -- not hydro's D8 flow accumulation, which is one cell wide by
+construction and can only step in 45-degree increments (the staircases and
+dotted rivers of earth-v9).  The final frame adds climate/biome,
+plate/sediment/crust and water/river-order/basin textures, a shoreline
+texture (D8 flow, signed lake depth, ocean mask) from which the shader
+places coasts and lake shores between cells instead of painting whole
+cells, and a
 ``satellite`` layer that colours the ground continuously from the climate
 channels.  The
 shader (``viewer.html``) maps every pixel to a direction on the sphere and
@@ -105,12 +111,31 @@ def atlas(channels: list[np.ndarray]) -> np.ndarray:
 
 
 def encode_height(h: np.ndarray):
-    """Padded metres -> (hi byte, lo byte, h0, h1)."""
+    """Padded metres -> (hi byte, lo byte, h0, h1).
+
+    When the range spans sea level, 0 m is placed exactly on a code and
+    every cell keeps its sign through the rounding.  On an Earth frame one
+    code is ~0.2 m, and a quarter of the land cells on the coast stand under
+    1 m (erosion fills the shelf to `dep_floor_m` below the water and plains
+    to just above it): plain rounding put some of them below 0, the shader
+    drew the whole cell as sea, and the coast came out as a staircase along
+    cell centres."""
     h = np.asarray(h, np.float64)
     h0, h1 = float(np.floor(h.min())), float(np.ceil(h.max()))
     if h1 <= h0:
         h1 = h0 + 1.0
-    q = np.clip(np.round((h - h0) / (h1 - h0) * 65535.0), 0, 65535).astype(np.uint16)
+    if h0 < 0.0 < h1:
+        # one code of slack, so moving h0 down onto the grid through 0
+        # (by less than a code) cannot push the top value out of range
+        step = (h1 - h0) / 65534.0
+        z = math.ceil(-h0 / step)
+        h0 = -z * step
+        h1 = h0 + 65535.0 * step
+        q = np.round((h - h0) / step)
+        q = np.where(h < 0.0, np.minimum(q, z - 1), np.maximum(q, z))
+    else:
+        q = np.round((h - h0) / (h1 - h0) * 65535.0)
+    q = np.clip(q, 0, 65535).astype(np.uint16)
     return (q >> 8).astype(np.uint8), (q & 255).astype(np.uint8), h0, h1
 
 
@@ -225,6 +250,106 @@ def water_code(surface: np.ndarray, flow_dir: np.ndarray | None, water_surface: 
     return code
 
 
+#: signed lake depth encoding: metres of lake level above the ground, clipped
+#: to +-LAKE_DEPTH_RANGE_M, so byte 127.5 is the shoreline
+LAKE_DEPTH_RANGE_M = 200.0
+
+
+def _dilate_max(a: np.ndarray, fill: float) -> np.ndarray:
+    """3x3 maximum of a ``(6, r, r)`` field, reading across face edges."""
+    f, i, j = _pad_index(a.shape[1], 1)
+    p = a[f, i, j]
+    out = np.full_like(a, fill)
+    r = a.shape[1]
+    for di in (0, 1, 2):
+        for dj in (0, 1, 2):
+            np.maximum(out, p[:, di:di + r, dj:dj + r], out=out)
+    return out
+
+
+def smooth_mask(mask: np.ndarray, passes: int = 2) -> np.ndarray:
+    """``(6, r, r)`` boolean -> float in [0, 1]: 3x3 binomial passes across
+    face edges.  Its 0.5 contour, interpolated, is a coastline that rounds
+    the cell corners instead of tracing them.  Every cell centre is then
+    held on its own side of 0.5 (by 0.1), so the blur rounds a one-cell
+    island or strait instead of erasing it."""
+    m = np.asarray(mask, bool)
+    a = m.astype(np.float32)
+    r = a.shape[1]
+    w = (1.0, 2.0, 1.0)
+    for _ in range(passes):
+        f, i, j = _pad_index(r, 1)
+        p = a[f, i, j]
+        out = np.zeros_like(a)
+        for di in (0, 1, 2):
+            for dj in (0, 1, 2):
+                out += (w[di] * w[dj] / 16.0) * p[:, di:di + r, dj:dj + r]
+        a = out
+    return np.where(m, np.maximum(a, 0.6), np.minimum(a, 0.4)).astype(np.float32)
+
+
+def lake_depth(surface: np.ndarray, water_surface: np.ndarray | None, code: np.ndarray) -> np.ndarray | None:
+    """Signed metres of lake level above the ground, per cell, for placing a
+    shore *between* cells.
+
+    A lake cell carries its own depth (``water_surface - surface``, > 0).  A
+    cell next to a lake carries the highest neighbouring lake level less its
+    own ground (< 0 where the ground stands above the water).  Interpolated
+    bilinearly, that crosses 0 where the terrain meets the lake level, so the
+    shoreline follows the ground instead of the cell grid; everything
+    farther from a lake is ``-LAKE_DEPTH_RANGE_M``.  Unsigned depth would not
+    do: between a lake cell and a dry one it never reaches 0, so the shore
+    would sit on the dry cell's centre whatever the slope.
+    """
+    if water_surface is None:
+        return None
+    surf = np.asarray(surface, np.float64)
+    lake = code == WATER_LAKE
+    far = -LAKE_DEPTH_RANGE_M
+    level = np.where(lake, np.asarray(water_surface, np.float64), -np.inf)
+    near = _dilate_max(level, -np.inf)
+    d = np.where(lake, level - surf, np.where(np.isfinite(near), near - surf, far))
+    d[code == WATER_OCEAN] = far
+    return np.clip(d, -LAKE_DEPTH_RANGE_M, LAKE_DEPTH_RANGE_M).astype(np.float32)
+
+
+def _fine_final(root: Path, manifest: dict, surf_c: np.ndarray, flow_dir_c: np.ndarray | None, log=print) -> dict | None:
+    """The final state on the refined grid (``fine/``), or None when refine
+    has not run.  Sea and lakes follow derive's rules, so the viewer draws the
+    water derive's rivers were clipped against: the sea is fine ground below
+    0 in a coarse cell that is ocean or touches one
+    (:func:`globe.derive.run.fine_ocean`), and a lake is a piece of fine
+    water deeper than ``hydro.lake_min_depth`` that derive keeps
+    (:func:`globe.derive.lakes.kept_lake_mask`)."""
+    from ..derive import lakes as lakes_mod
+
+    h = _load_faces(root, "height", "fine")
+    if h is None:
+        return None
+    sed = _load_faces(root, "sediment", "fine")
+    surf = (h + sed) if sed is not None else h
+    N, Nf = surf_c.shape[1], surf.shape[1]
+    if Nf % N:
+        return None
+    R = Nf // N
+    params = manifest.get("params", {}) or {}
+    depth = float((params.get("hydro", {}) or {}).get("lake_min_depth", 0.5))
+    min_cells = max(1, int(round(float((params.get("derive", {}) or {}).get("lake_min_cells", 1.0)) * R * R)))
+    ocean_c = (np.asarray(flow_dir_c) == 255) if flow_dir_c is not None else (surf_c < 0.0)
+    sea_near = _dilate_max(ocean_c.astype(np.float32), 0.0) > 0.0
+    ws = _load_faces(root, "water_surface", "fine")
+    water = np.zeros(surf.shape, np.uint8)
+    for f in range(6):
+        ocean = (surf[f] < 0.0) & np.repeat(np.repeat(sea_near[f], R, axis=0), R, axis=1)
+        water[f][ocean] = WATER_OCEAN
+        if ws is not None:
+            lake = lakes_mod.kept_lake_mask(lakes_mod.lake_mask(surf[f], ws[f], depth, ocean=ocean), min_cells)
+            water[f][lake] = WATER_LAKE
+    return {"surf": surf, "sed": sed, "ws": ws, "water": water,
+            "discharge": _load_faces(root, "discharge", "fine"), "biome": _load_faces(root, "biome", "fine"),
+            "basin": _load_faces(root, "basin_id", "fine")}
+
+
 class _Frame:
     """One timeline entry before encoding: metres + optional channels."""
 
@@ -246,7 +371,7 @@ def _thin(items: list, n: int) -> list:
 
 
 def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int | None = None,
-                   max_frames: int | None = None) -> tuple[list[_Frame], dict]:
+                   max_frames: int | None = None, refined: bool = False) -> tuple[list[_Frame], dict]:
     manifest = json.loads((root / "manifest.json").read_text())
     stages = manifest.get("stages", {})
     frames: list[_Frame] = []
@@ -272,7 +397,8 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
             frames.append(_Frame("erosion", key, f"erosion · iteration {key} / {meta.get('of', '?')}",
                                  lo(z["height"]), discharge=lo(z["discharge"], "max")))
 
-    # the final state, from the coarse fields at (up to) full resolution
+    # the final state, from the coarse fields -- or the refined grid with
+    # ``refined`` (render.viewer_refined) -- at (up to) full resolution
     h = _load_faces(root, "height")
     if h is not None:
         sed = _load_faces(root, "sediment")
@@ -285,7 +411,12 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
     if surf is None:
         raise FileNotFoundError(f"{root}: no height or bedrock on the coarse grid -- has tectonics run?")
     N = surf.shape[1]
-    r = min(N, int(final_res or N))
+    fine = _fine_final(root, manifest, surf, _load_faces(root, "flow_dir"), log) if (refined and h is not None) else None
+    Nsrc = fine["surf"].shape[1] if fine is not None else N
+    R = Nsrc // N
+    r = min(Nsrc, int(final_res or Nsrc))
+    # coarse-only channels are repeated onto the refined grid first
+    up = (lambda a: None if a is None else np.repeat(np.repeat(a, R, axis=1), R, axis=2)) if R > 1 else (lambda a: a)
     ds = lambda a, how="mean": None if a is None else vf.downsample(a, r, how)
     plate = _load_faces(root, "plate_id")
     if plate is not None:
@@ -294,25 +425,33 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
             plate = np.asarray(alive_last, np.int64)[np.maximum(plate, 0)]  # compact ids -> raw, as in the frames
         plate = plate + 1
     crust = _load_faces(root, "crust_kind", "diagnostics")
-    ws = _load_faces(root, "water_surface")
-    water = water_code(surf, _load_faces(root, "flow_dir"), ws,
-                       float((manifest.get("params", {}).get("hydro", {}) or {}).get("lake_min_depth", 0.5)))
-    basin = _load_faces(root, "basin_id")
+    if fine is not None:
+        surf, sed, ws, water = fine["surf"], fine["sed"], fine["ws"], fine["water"]
+        discharge, biome, basin = fine["discharge"], fine["biome"], fine["basin"]
+    else:
+        ws = _load_faces(root, "water_surface")
+        water = water_code(surf, _load_faces(root, "flow_dir"), ws,
+                           float((manifest.get("params", {}).get("hydro", {}) or {}).get("lake_min_depth", 0.5)))
+        discharge, biome, basin = _load_faces(root, "discharge"), _load_faces(root, "biome"), _load_faces(root, "basin_id")
+    ldepth = lake_depth(surf, ws, water)
     frames.append(_Frame(
-        "final", N, label, ds(surf),
+        "final", Nsrc, label, ds(surf),
         water=ds(water, "nearest"),
-        discharge=ds(_load_faces(root, "discharge"), "max"),
-        flow=ds(_load_faces(root, "flow_acc"), "max"),
-        order=ds(order_raster(root, N), "max"),
+        lake_depth=ds(ldepth, "nearest"),
+        ocean=ds(smooth_mask(water == WATER_OCEAN)),
+        discharge=ds(discharge, "max"),
+        flow=ds(up(_load_faces(root, "flow_acc")), "max"),
+        order=ds(up(order_raster(root, N)), "max"),
         basin=ds(None if basin is None else (basin.astype(np.int64) + 1).clip(0), "nearest"),
-        temperature=ds(_load_faces(root, "temperature")),
-        precip=ds(_load_faces(root, "precip")),
-        biome=ds(_load_faces(root, "biome"), "nearest"),
-        plate=ds(plate, "nearest"),
+        temperature=ds(up(_load_faces(root, "temperature"))),
+        precip=ds(up(_load_faces(root, "precip"))),
+        biome=ds(biome, "nearest"),
+        plate=ds(up(plate), "nearest"),
         sediment=ds(sed),
-        crust=ds(crust, "nearest") if crust is not None else None,
+        crust=ds(up(crust), "nearest") if crust is not None else None,
     ))
-    log(f"[viewer] {len(tect) if scale else 0} tectonics + {sum(f.stage == 'erosion' for f in frames)} erosion frames + final ({r}² per face)")
+    src = f"refined grid, R={R}" if fine is not None else "coarse grid"
+    log(f"[viewer] {len(tect) if scale else 0} tectonics + {sum(f.stage == 'erosion' for f in frames)} erosion frames + final ({r}² per face, {src})")
     return frames, manifest
 
 
@@ -354,8 +493,11 @@ def channel_specs(final: _Frame, river_threshold: float | None = None) -> dict:
         ql = q[land & (q > 0)]
         lo = max(_pctl(ql, 50, 1.0), 1e-6)
         hi = max(float(q.max()), lo * 10)
+        # rivers fade in from the 85th percentile of land discharge and are
+        # full strength by the 99.5th: an eased ramp, not a threshold, so a
+        # channel has soft banks and the faint paths beside it show
         specs["discharge"] = {"label": "Discharge", "kind": "log", "lo": lo, "hi": hi, "unit": "", "cmap": "viridis",
-                              "river_min": _pctl(ql, 97, lo * 4)}
+                              "river_min": _pctl(ql, 85, lo * 2), "river_full": _pctl(ql, 99.5, lo * 40)}
     if "temperature" in final.ch:
         specs["temperature"] = {"label": "Temperature", "kind": "linear", "lo": -45.0, "hi": 35.0, "unit": "°C", "cmap": "thermal"}
     if "precip" in final.ch:
@@ -374,6 +516,12 @@ def channel_specs(final: _Frame, river_threshold: float | None = None) -> dict:
         specs["crust"] = {"label": "Crust", "kind": "category", "cmap": "plates", "names": ["oceanic", "continental"]}
     if "water" in final.ch:
         specs["water"] = {"label": "Water", "kind": "category", "cmap": "plates", "names": ["land", "lake", "ocean"]}
+    # read by the shader to place shores between cells, not offered as layers
+    if "lake_depth" in final.ch:
+        specs["lake_depth"] = {"label": "Lake level above ground", "kind": "linear", "lo": -LAKE_DEPTH_RANGE_M,
+                               "hi": LAKE_DEPTH_RANGE_M, "unit": "m", "cmap": "viridis", "hidden": True}
+    if "ocean" in final.ch:
+        specs["ocean"] = {"label": "Ocean", "kind": "linear", "lo": 0.0, "hi": 1.0, "unit": "", "cmap": "viridis", "hidden": True}
     return specs
 
 
@@ -391,20 +539,23 @@ def _byte(name: str, a: np.ndarray, specs: dict) -> np.ndarray:
 
 # textures beyond texture 0 on the final frame: (R, G, B) channel names
 # (short tuples are padded with zero channels)
-FINAL_TEXTURES = (("temperature", "precip", "biome"), ("plate", "sediment", "crust"), ("water", "order", "basin"))
+FINAL_TEXTURES = (("temperature", "precip", "biome"), ("plate", "sediment", "crust"), ("water", "order", "basin"),
+                  ("flow", "lake_depth", "ocean"))
 
 
 def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
     """-> ([atlas images], frame meta)."""
     hi, lo, h0, h1 = encode_height(pad_faces(fr.height))
     zero = np.zeros_like(hi)
-    over = "plate" if fr.stage == "tectonics" else ("flow" if "flow" in fr.ch and "flow" in specs else "discharge")
+    over = "plate" if fr.stage == "tectonics" else "discharge"
     b = pad_faces(_byte(over, fr.ch[over], specs)) if over in fr.ch and over in specs else zero
     images = [atlas([hi, lo, b])]
     layers = {over: [0, 2]} if over in fr.ch and over in specs else {}
-    river_min_byte = None
+    river_min_byte = river_full_byte = None
     if over in layers and "river_min" in specs[over]:
-        river_min_byte = int(log_byte(np.array([specs[over]["river_min"]]), specs[over]["lo"], specs[over]["hi"])[0])
+        s = specs[over]
+        river_min_byte = int(log_byte(np.array([s["river_min"]]), s["lo"], s["hi"])[0])
+        river_full_byte = int(log_byte(np.array([s.get("river_full", s["river_min"])]), s["lo"], s["hi"])[0])
     if fr.stage == "final":
         for names in FINAL_TEXTURES:
             present = [n for n in names if n in fr.ch and n in specs]
@@ -423,6 +574,7 @@ def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
             "h0": h0, "h1": h1, "layers": layers, "stats": frame_stats(fr.height)}
     if river_min_byte is not None:
         meta["river_min_byte"] = river_min_byte
+        meta["river_span_byte"] = max(river_full_byte - river_min_byte, 1)
     return images, meta
 
 
@@ -431,14 +583,18 @@ def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
 # --------------------------------------------------------------------------
 def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | None = None,
                   frame_res: int | None = None, max_frames: int | None = None,
-                  single: bool = False, log=print) -> Path:
+                  single: bool = False, refined: bool | None = None, log=print) -> Path:
     """``frame_res`` / ``max_frames`` downsample and thin the captured
     timeline -- a light export for a slow link or a phone."""
     t0 = time.time()
     root = Path(world_dir)
     out = Path(out) if out else root / "viewer"
-    frames, manifest = collect_frames(root, final_res or _render_param(manifest_of(root), "viewer_final_res", 1024), log,
-                                      frame_res=frame_res, max_frames=max_frames)
+    m0 = manifest_of(root)
+    refined = bool(_render_param(m0, "viewer_refined", False)) if refined is None else bool(refined)
+    # the refined frame is asked for to see the refined grid: full resolution unless told otherwise
+    fres = final_res if final_res else (0 if refined else _render_param(m0, "viewer_final_res", 0))
+    frames, manifest = collect_frames(root, fres, log,
+                                      frame_res=frame_res, max_frames=max_frames, refined=refined)
     final = frames[-1]
     hydro_info = (manifest.get("stages", {}).get("hydro", {}) or {}).get("info", {}) or {}
     specs = channel_specs(final, hydro_info.get("river_threshold_volume"))

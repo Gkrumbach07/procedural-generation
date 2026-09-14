@@ -435,8 +435,16 @@ class RenderParams:
     erosion_frame_every: int = 10
     #: cells per face of a timeline frame
     frame_res: int = 256
-    #: cells per face of the final frame (capped at N_c)
-    viewer_final_res: int = 1024
+    #: cells per face of the final frame: 0 = the full resolution of its
+    #: source (N_c, or N_c x R with viewer_refined)
+    viewer_final_res: int = 0
+    #: draw the final frame from the refined grid (fine/) instead of the
+    #: coarse one.  Off: at earth-v9 the fine frame shows refine's own
+    #: defects the coarse frame hides -- land specks offshore where the
+    #: refined surface pokes above 0 in a sea cell, and discharge that does
+    #: not line up across basin windows, so a river can stop short of the
+    #: coast while a separate channel reaches it (docs/viewer-rivers.md)
+    viewer_refined: bool = False
 
 
 @dataclass
