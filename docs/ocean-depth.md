@@ -131,3 +131,63 @@ costs: > 5 km overshoots Earth's 0.3 % on three seeds (0.7-1.4 %, before
 erosion, which takes the most off the highest ground), and the 2-3 km band
 stays thin at 4.4-6.9 % against 7.5. 2.5 thins 2-3 km further and puts 1.6-
 2.0 % above 5 km on seeds 0 and 3, with a 9.4 km peak on seed 3.
+
+## Measured at Earth scale: `worlds/earth-v9`
+
+The full `earth` bake of seed 0 at commit 029d917's defaults. Tectonics
+leaves 28.2 % of the cells as land, and the start hold moved the replayed
+surface +160 m, against earth-v8's +712 m to 30 %. Hydro's re-quantile
+shifted the finished surface +0.00 m. Eroded surface at iteration 800:
+
+| | Earth | earth-v8 | earth-v9 bedrock | **earth-v9** |
+|---|---|---|---|---|
+| 0-1 km | 71.6 | 69.2 | 62.5 | **81.8** |
+| 1-2 km | 15.4 | 18.5 | 25.9 | **11.7** |
+| 2-3 km | 7.5 | 7.7 | 6.9 | **3.7** |
+| 3-4 km | 3.8 | 3.5 | 2.7 | **1.8** |
+| 4-5 km | 1.7 | 0.8 | 1.3 | **0.7** |
+| > 5 km | 0.3 | 0.4 | 0.7 | **0.4** |
+| land % of globe (area) | 29.2 | 29 | 27 | **27** |
+| land median | ~350 m | 636 | 576 | **236** |
+| highest point | 8849 m | 7666 | 6745 | **7834** |
+| ocean median | ~-4070 m | -2763 | -4290 | **-4333** |
+| ocean mean | -3688 m | -2518 | -3960 | **-3903** |
+| within ±50 m of sea level | 1-2 % | 8 | 1 | **10** |
+| oceanic crust median | ~-4300 m (abyssal) | | -4543 | |
+| `lost_offshore` | | 1798 Mm | | 1110 Mm |
+
+**The ocean is fixed.** Median -4333 m and mean -3903 m against Earth's
+-4070 / -3688, with the oceanic crust at -4543 m against an abyssal plain
+near -4300.
+
+**The land is not, and this round did not cause that.** Surface minus
+bedrock, with the hold's global offset (read over the deep ocean, where
+nothing erodes) removed (`scratch/abyss/wear.py`):
+
+| bedrock band | earth-v8 median / mean | earth-v9 median / mean |
+|---|---|---|
+| hold offset | +565 m | -26 m |
+| 0-1 km | -272 / -360 m | -48 / -129 |
+| 1-2 km | -611 / -724 | -597 / -638 |
+| 2-3 km | -522 / -752 | -585 / -798 |
+| 3-4 km | -516 / -708 | -503 / -732 |
+| 4-5 km | -529 / -801 | -638 / -854 |
+| > 5 km | -392 / -623 | -309 / -625 |
+
+Erosion takes the same 500-650 m (median) off every band above 1 km in both
+runs. In earth-v8 the 30 % hold's +565 m lift paid most of it back, so
+earth-v8's land bands were on Earth's partly by accident of seed 0's land
+fraction. On seeds 1-3 the old hold lowered the land instead, so it could
+not have hidden the wear there. earth-v9 shows the wear. The 4-5 km band of the bedrock
+went from 0.9 to 1.3 % and erosion took it back to 0.7.
+
+What is left is the balance between wear and uplift, not tectonics: under
+replay the stage supplies only the last `uplift_window` = 100 tectonic
+steps of *net* thickening, and an orogen near steady state should gain
+little net -- its accretion is balanced by `orogen_decay`, which stands in
+for the wear that particle erosion then applies a second time (reasoning,
+not yet measured).
+Candidates, none measured: replay the window's gross accretion (the
+orogen decay removed from the uplift), or a longer `uplift_window` so more
+of the final relief is built during erosion rather than worn by all of it.
+Either needs Earth-scale erosion to judge (~55 min a run).
