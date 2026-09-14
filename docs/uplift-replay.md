@@ -342,6 +342,49 @@ the raw bedrock; seeds 1-3 leave 34-36 % land, so the hold lowers them
 instead, docs/land-median.md). Expect -2700 to -2800 m on the next Earth
 bake of seed 0.
 
+## Measured at Earth scale: `worlds/earth-v8`
+
+The full `earth` bake with replay and the cap off (commit 43577e1, with the
+seam blend of docs/cross-face-basins.md section 5), on earth-v7's
+tectonics (hash `1e0618134ba4586a` in both). The replay start lowered the
+fastest cell by 3674 m and raised the most subsided one by 1183 m; the
+reference-step crust had 19.9 % land and the start hold lifted it 712 m.
+Eroded surface at iteration 800:
+
+| | Earth | earth-v7 (stack, cap 2) | **earth-v8 (replay)** | estimate above |
+|---|---|---|---|---|
+| 0-1 km | 71.6 | 66.7 | **69.2** | 71.0 |
+| 1-2 km | 15.4 | 19.2 | **18.5** | 17.7 |
+| 2-3 km | 7.5 | 6.9 | **7.7** | 6.8 |
+| 3-4 km | 3.8 | 3.1 | **3.5** | 3.34 |
+| 4-5 km | 1.7 | 2.5 | **0.8** | 0.80 |
+| > 5 km | 0.3 | 1.6 | **0.4** | 0.36 |
+| highest point | 8849 m | 9195 | **7666** | ~7470 |
+| land median | ~350 m | 695 | **636** | ~606 |
+| ocean median | -3700 m | -3195 | **-2763** | ~-2804 |
+| `lost_offshore` | | 1974 Mm | 1798 Mm | |
+| loop datum drift | | -755 m | -81 m | |
+| erosion stage | | 3652 s | 3459 s | |
+
+The estimate was right to within a tenth of a point on every band and
+40 m on the ocean. Five of the six bands move towards Earth's, the land
+above 5 km lands on the bedrock's own 0.4 %, and the highest point comes
+down 1.5 km. It is still 919 m above the bedrock's maximum (6747 m): the
+no-erosion invariant says a column ends at its bedrock only when nothing
+moves mass, and with erosion on, the flexural isostatic rebound lifts the
+ground around incised valleys and the datum hold shifts the whole
+surface, so a crest can end above its bedrock. That is ~920 m against the
+~2450 m the double count added on earth-v7, and it has not been split
+between the two causes. The small
+preset's worry did not carry over: the 2-4 km bands, what a viewer reads as
+mountains, went *up* (6.9 / 3.1 -> 7.7 / 3.5), because at Earth scale
+erosion barely touches the crests while the double count had been
+inflating the 4-5 km band at the 2-3 km band's expense. The 4-5 km band is
+now half of Earth's, and the ocean is 560 m shallower than Earth's, both
+properties of the bedrock (docs/land-median.md lists the seed-dependent
+ones). The datum hold, which had to pull the planet down 755 m under stack,
+now moves it 81 m.
+
 ## Side effects to know about
 
 * **Changing `iterations` recomputes erosion.** In replay mode
