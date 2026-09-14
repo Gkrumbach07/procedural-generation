@@ -27,6 +27,14 @@ measurement it was tuned against (docs/coast-fringe.md).  The crust-boundary
 row is the control: the ramp must not move it, and the coastline row should
 not move either -- the ramp is raise-only and works below sea level.
 
+``--equal-area`` adds a row per world after the first: the level at which
+that world has the *first* world's land cell count (``bed > level``), and
+the metrics there.  L/sqrt(A) is not area-free for a fixed level -- a
+change that shallows the sea grows the 0 m mask and shortens the isoline
+whatever its shape -- so a before/after pair is read at equal area, and
+the physical coast (0 m) is still printed beside it (docs/coast-fringe.md
+sections 3 and 5).
+
 The segment spacing comes from the manifest (``stages.tectonics.info
 .spacing_rad``); the metric itself only needs ``coarse/bedrock`` and
 ``diagnostics/crust_kind``.
@@ -96,7 +104,17 @@ def load_world(root: str):
     return bed, crust, spacing
 
 
-def report(name: str, bed_m: np.ndarray, crust: np.ndarray, spacing_cells: float, shelf_edge: float) -> None:
+def equal_area_level(bed_m: np.ndarray, n_land: int) -> float:
+    """The level at which exactly ``n_land`` cells of ``bed_m`` lie above it
+    (the ``n_land``-th highest cell; ``bed_m > level`` has that count unless
+    ties sit at the level)."""
+    flat = np.sort(bed_m.ravel())[::-1]
+    n = int(min(max(n_land, 1), flat.size))
+    return float(flat[n - 1]) - 1e-9
+
+
+def report(name: str, bed_m: np.ndarray, crust: np.ndarray, spacing_cells: float, shelf_edge: float,
+           equal_area: int | None = None) -> None:
     r = 0.5 * spacing_cells
     own = shelf_edge_level(bed_m, crust)
     print(f"--- {name}")
@@ -110,6 +128,12 @@ def report(name: str, bed_m: np.ndarray, crust: np.ndarray, spacing_cells: float
         d = isoline_metrics(bed_m, lv, r)
         print(f"    {lab:>14s} @ {lv:8.1f} m : L/sqrt(A) {d['ratio']:6.3f}  fingers {d['fingers'] * 100:5.2f} %  "
               f"inlets {d['inlets'] * 100:5.2f} %  necks {d['necks'] * 100:4.1f} %  coast cells {d['coast']}")
+    if equal_area is not None:
+        lv = equal_area_level(bed_m, equal_area)
+        d = isoline_metrics(bed_m, lv, r)
+        print(f"    {'equal-area':>14s} @ {lv:8.1f} m : L/sqrt(A) {d['ratio']:6.3f}  fingers {d['fingers'] * 100:5.2f} %  "
+              f"inlets {d['inlets'] * 100:5.2f} %  necks {d['necks'] * 100:4.1f} %  coast cells {d['coast']}   "
+              f"(land cells {int((bed_m > lv).sum())}, the first world's {equal_area})")
     d = isoline_metrics(crust.astype(np.float64), 0.5, r)
     print(f"    {'crust boundary':>14s}            : L/sqrt(A) {d['ratio']:6.3f}  fingers {d['fingers'] * 100:5.2f} %  "
           f"inlets {d['inlets'] * 100:5.2f} %  necks {d['necks'] * 100:4.1f} %  boundary cells {d['coast']}")
@@ -122,8 +146,13 @@ def main():
                     help="metres: measure this isoline as the 'shelf edge' in every world (default: the first "
                          "world's own shelf edge, so a before/after pair is read at one level -- filling the "
                          "oceanic side raises the level a world derives for itself)")
+    ap.add_argument("--equal-area", action="store_true",
+                    help="for every world after the first, also measure the isoline at which it has the first "
+                         "world's land cell count (a change that shallows the sea grows the 0 m mask and "
+                         "shortens the coast whatever its shape)")
     args = ap.parse_args()
     shelf_edge = args.shelf_edge
+    n_land = None
     for w in args.worlds:
         try:
             bed, crust, spacing = load_world(w)
@@ -132,7 +161,10 @@ def main():
             continue
         if shelf_edge is None:
             shelf_edge = shelf_edge_level(bed, crust)
-        report(os.path.basename(w.rstrip("/")) or w, bed, crust, spacing, shelf_edge)
+        report(os.path.basename(w.rstrip("/")) or w, bed, crust, spacing, shelf_edge,
+               equal_area=n_land if args.equal_area else None)
+        if n_land is None:
+            n_land = int((bed > 0).sum())
 
 
 if __name__ == "__main__":

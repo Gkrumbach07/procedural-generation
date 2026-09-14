@@ -11,8 +11,10 @@ divides) and per-cell changes stay within the detail cap + kernel budget;
 coarse lakes survive as fine lakes and lake floors never rise above their
 ceiling; the flooded water surface is >= the surface; a window crossing a
 face edge upsamples without NaNs or seams; every land cell is written
-exactly once; rivers continue across split outlets; the whole stage is
-deterministic.
+exactly once; a basin on two faces is refined as one job per face piece
+whose mask follows the basin across the edge; rivers continue across
+split outlets and across face edges; the fine surface has no crease at
+the cube edges; the whole stage is deterministic.
 """
 from __future__ import annotations
 
@@ -101,25 +103,33 @@ def test_job_invariants(world):
         # divide cells: exactly the plain upsample (height, sediment, discharge)
         for name, ref in (("height", "height0"), ("sediment", "sediment0"), ("discharge", "discharge0")):
             assert np.array_equal(a[name][frozen], a[ref][frozen]), name
-        # no inside cell is 8-adjacent to an outside cell / the border
+        # no on-face inside cell is 8-adjacent to an outside cell / the
+        # border (the off-face strip of a basin that continues across the
+        # edge may reach the window border; the kernel's extended array is
+        # frozen there by build_mask)
         inside = m == pk.MASK_ACTIVE
         grown = ndimage.binary_dilation(m == pk.MASK_OUTSIDE, structure=np.ones((3, 3), bool), border_value=True)
-        assert not (grown & inside).any()
+        assert not (grown & inside & _on_face_mask(res.win, params.N_fine)).any()
         # basin id: this id inside the mask, nearest-upsampled elsewhere
         assert (a["basin_id"][m > 0] == b["id"]).all()
         assert not (a["basin_id"][m == 0] == b["id"]).any()
-        # every exit block lies inside the mask and touches the outside
-        # (its downstream cell is outside the basin) through a frozen cell
+        # every exit block on this face lies inside the mask; an ocean /
+        # basin exit touches the outside (its downstream cell is outside
+        # the basin) through a frozen cell, a face exit does not have to
+        # (the basin continues across the edge, see test_piece_mask_crosses_the_face_edge)
         win = res.win
         R = win.R
         assert b["exits"] and b["exits"][0] == b["outlet"]
-        for f, i, j in b["exits"]:
-            assert f == win.face
+        on_face = [(e, k) for e, k in zip(b["exits"], b["exit_kinds"]) if e[0] == win.face]
+        assert on_face
+        for (f, i, j), kind in on_face:
             a0, b0 = (i - win.ci0) * R, (j - win.cj0) * R
             blk = m[a0 : a0 + R, b0 : b0 + R]
-            assert blk.shape == (R, R) and (blk > 0).all() and (blk == pk.MASK_FROZEN).any()
+            assert blk.shape == (R, R) and (blk > 0).all()
+            if kind != "face":
+                assert (blk == pk.MASK_FROZEN).any()
         ex = bj.exit_cells(b, win, (win.NE, win.NE))
-        assert ex.sum() == len(b["exits"]) * R * R
+        assert ex.sum() == len(on_face) * R * R
         # flooded water surface >= surface everywhere, finite everywhere
         surf = a["height"] + a["sediment"]
         assert (a["water_surface"] >= surf - 1e-4).all()
@@ -366,16 +376,32 @@ def test_window_across_face_edge_is_seamless():
     assert _seam_metric_2d(metric[..., 0], col) < 3.0
 
 
+def _on_face_mask(win, N_fine):
+    on = np.zeros((win.n, win.n), bool)
+    sl = rz.window_face_slices(win, N_fine)
+    if sl is not None:
+        on[sl[2], sl[3]] = True
+    return on
+
+
 def test_edge_basin_job_runs_clean(world):
-    """A basin whose bbox touches the face boundary (window past the edge
+    """A piece whose bbox touches the face boundary (window past the edge
     and the halo) refines without NaNs; the parts of its window beyond the
-    face are not written (rasterize clips to the face)."""
+    face are not written (rasterize clips to the face), and the window is
+    padded towards the face interior (never further past the edge than the
+    halo)."""
     store, params, basins = world["store"], world["params"], world["basins"]
-    N = params.N_c
+    N, R, halo = params.N_c, params.world.R, params.refine.halo_cells
     b = _pick(basins, lambda b: b["bbox"][0] == 0 or b["bbox"][1] == 0 or b["bbox"][2] == N or b["bbox"][3] == N)
-    win = basin_window(b, params.world.R, params.refine.halo_cells)
+    win = basin_window(b, R, halo, N=N)
     assert win.ci0 < 0 or win.cj0 < 0 or win.ci1 > N or win.cj1 > N
+    # past the edge by at most the halo, unless the padded square is wider
+    # than the face (a thin piece on a long side of a tiny face)
+    assert win.nc > N or (win.ci0 >= -halo and win.cj0 >= -halo and win.ci1 <= N + halo and win.cj1 <= N + halo)
+    assert win.nc == max(b["bbox"][2] - b["bbox"][0], b["bbox"][3] - b["bbox"][1]) + 2 * halo
+    assert win.ci0 <= b["bbox"][0] - halo and win.ci1 >= b["bbox"][2] + halo and win.cj0 <= b["bbox"][1] - halo and win.cj1 >= b["bbox"][3] + halo
     res = bj.run_basin(store.root, b, params)
+    assert res.win == win
     for v in res.arrays.values():
         assert np.isfinite(v).all()
     sl = rz.window_face_slices(win, params.N_fine)
@@ -383,7 +409,69 @@ def test_edge_basin_job_runs_clean(world):
     fi, fj, li, lj = sl
     assert fi.start >= 0 and fj.start >= 0 and fi.stop <= params.N_fine and fj.stop <= params.N_fine
     own = res.arrays["basin_id"] == b["id"]
-    assert own[li, lj].sum() == own.sum()  # all of the basin's cells lie on the face
+    on = _on_face_mask(win, params.N_fine)
+    assert (own & on).sum() == b["pieces"][[p["face"] for p in b["pieces"]].index(win.face)]["area_cells"] * R * R
+    # a record without pieces (stub / older worlds) is one piece on its face
+    legacy = {k: v for k, v in b.items() if k not in ("pieces", "faces")}
+    assert basin_window(legacy, R, halo, N=N) == win
+    with pytest.raises(KeyError):
+        basin_window(legacy, R, halo, face=(b["face"] + 1) % 6, N=N)
+
+
+def _multi_face_basin(basins):
+    for b in basins:
+        if len(b.get("pieces") or ()) > 1:
+            return b
+    pytest.skip("no basin on more than one face in this world")
+
+
+def test_piece_mask_crosses_the_face_edge(world):
+    """For a basin on two faces, the piece job on either face has active
+    (mask 1) cells beyond the face edge — the frozen ring sits on the true
+    divide, not on the seam — so a river crossing the edge keeps flowing;
+    every cardinal face exit's flow continues into mask > 0 across the
+    edge; the rasteriser writes only the piece's own on-face cells and the
+    feather weight is 0 on the seam row (the two pieces meet on the plain
+    upsample, as at a divide)."""
+    store, params, basins = world["store"], world["params"], world["basins"]
+    R, N = params.world.R, params.N_c
+    b = _multi_face_basin(basins)
+    fd = store.load_field("flow_dir", params.coarse_grid()).interior
+    from globe.hydro.d8 import D8_DI, D8_DJ
+
+    n_crossing_exits = 0
+    for p in b["pieces"]:
+        res = bj.run_basin(store.root, b, params, face=p["face"])
+        m = res.arrays["mask"]
+        win = res.win
+        on = _on_face_mask(win, params.N_fine)
+        assert ((m == pk.MASK_ACTIVE) & ~on).any(), "the mask stops at the face edge"
+        assert (res.arrays["basin_id"][~on] == b["id"]).any()
+        # the on-face seam row of the piece: some active cells (not all frozen)
+        for (f, i, j), kind in zip(b["exits"], b["exit_kinds"]):
+            if f != win.face or kind != "face":
+                continue
+            code = int(fd[f, i, j])
+            di, dj = int(D8_DI[code]), int(D8_DJ[code])
+            a0, b0 = (i - win.ci0) * R, (j - win.cj0) * R
+            assert (m[a0 : a0 + R, b0 : b0 + R] > 0).all()
+            if abs(di) + abs(dj) == 1:  # cardinal crossing: the extension block beyond the edge is the downstream cell
+                a1, b1 = a0 + di * R, b0 + dj * R
+                assert (m[a1 : a1 + R, b1 : b1 + R] > 0).any()
+                n_crossing_exits += 1
+        # write only the on-face own cells; the seam row is the plain upsample
+        out, own = rz.blend_result(res.arrays, b["id"], int(params.refine.feather_cells), on)
+        own_on = own & on
+        assert own_on.sum() == p["area_cells"] * R * R
+        seam = own_on & ~ndimage.binary_erosion(on, structure=np.ones((3, 3), bool), border_value=0)
+        if seam.any():
+            assert np.array_equal(out["height"][seam], res.arrays["height0"][seam])
+        assert rz.write_result(store.root, params, res) == int(own_on.sum())  # rewrites the same cells with the same values
+    assert n_crossing_exits > 0
+    # the piece of the other face got its own rng stream
+    a0 = bj.run_basin_arrays(store.root, b, params)
+    a1 = bj.run_basin(store.root, b, params, face=b["pieces"][1]["face"] if b["pieces"][0]["face"] == b["face"] else b["pieces"][0]["face"]).arrays
+    assert a0["height"].shape != a1["height"].shape or not np.array_equal(a0["height"], a1["height"])
 
 
 # --------------------------------------------------------------------------
@@ -476,6 +564,62 @@ def test_rivers_continue_across_split_outlets(world):
     assert np.median(ratios) > 0.3
 
 
+def test_rivers_continue_across_face_edges(world):
+    """At every coarse cell whose downstream cell is on another face, the
+    fine discharge on the two sides of the seam is comparable (the pieces
+    on both faces erode the river through the edge)."""
+    store, params = world["store"], world["params"]
+    R = params.world.R
+    grid = params.coarse_grid()
+    N = grid.N
+    NN = N * N
+    from globe.hydro.d8 import OCEAN, downstream_table
+
+    fd = store.load_field("flow_dir", grid).interior
+    down = downstream_table(np.ascontiguousarray(fd), grid.owner, grid.H)
+    land = fd.reshape(-1) != OCEAN
+    dn = np.maximum(down, 0)
+    cross = np.nonzero(land & (down >= 0) & land[dn] & (dn // NN != np.arange(6 * NN) // NN))[0]
+    if cross.size == 0:
+        pytest.skip("no drainage across a face edge in this world")
+    q = [_fine(world, "discharge", f) for f in range(6)]
+    ratios = []
+    for c in cross.tolist():
+        d = int(down[c])
+        f0, i0, j0 = c // NN, (c % NN) // N, c % N
+        f1, i1, j1 = d // NN, (d % NN) // N, d % N
+        q0 = float(q[f0][i0 * R : (i0 + 1) * R, j0 * R : (j0 + 1) * R].max())
+        q1 = float(q[f1][i1 * R : (i1 + 1) * R, j1 * R : (j1 + 1) * R].max())
+        ratios.append(min(q0, q1) / max(max(q0, q1), 1e-9))
+    assert np.median(ratios) > 0.3
+
+
+def test_fine_seam_step_matches_inside_step(world):
+    """The fine surface has no crease along the cube edges: the mean |step|
+    between the two land cells straddling an edge is within 1.5x the mean
+    |step| between the first two cells inside the face (the seam row is the
+    plain upsample on both faces, as every divide is)."""
+    from globe.refine.lod import edge_links, neighbour_ring, side_row
+
+    params = world["params"]
+    N_fine = params.N_fine
+    surf = [_fine(world, "height", f) + _fine(world, "sediment", f) for f in range(6)]
+    bid = [_fine(world, "basin_id", f) for f in range(6)]
+    links = edge_links(N_fine)
+    seam, inside = [], []
+    for f in range(6):
+        for s in range(4):
+            own0, own1 = side_row(surf[f], s, 0), side_row(surf[f], s, 1)
+            nb0 = neighbour_ring(lambda F, S, d: side_row(surf[F], S, d), links, f, s, 0)
+            l0, l1 = side_row(bid[f], s, 0) >= 0, side_row(bid[f], s, 1) >= 0
+            ln0 = neighbour_ring(lambda F, S, d: side_row(bid[F], S, d), links, f, s, 0) >= 0
+            seam.append(np.abs(own0 - nb0)[l0 & ln0])
+            inside.append(np.abs(own0 - own1)[l0 & l1])
+    seam, inside = np.concatenate(seam), np.concatenate(inside)
+    assert seam.size > 50 and inside.size > 50
+    assert seam.mean() <= 1.5 * inside.mean(), (seam.mean(), inside.mean())
+
+
 def test_stage_deterministic(world, tmp_path):
     """Running the stage again (fresh raster, one worker) reproduces every
     fine face byte for byte."""
@@ -500,6 +644,7 @@ def test_quicklooks_and_runtime(world, tmp_path):
     assert out is not None and out.exists()
     assert len(info["quicklooks"]) == min(refine_run.N_BASIN_QUICKLOOKS, info["n_basins"])
     assert info["n_basins"] == len(world["basins"]) and info["deaths"]["exit"] > 0
+    assert info["n_pieces"] == len(refine_run.basin_pieces(world["basins"])) == sum(len(b["pieces"]) for b in world["basins"]) >= info["n_basins"]
     assert world["seconds"] < 60.0
 
 

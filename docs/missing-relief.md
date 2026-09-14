@@ -379,6 +379,10 @@ that looked obvious at the start:
    falling at iteration 800. Uplift delivers 952 m to the high ground over
    the run; that is the number to move, and `uplift_scale` is the knob.
    It acts from iteration 1, so it needs a full re-bake to test: ~2.5 hours.
+   (The 952 m is the belts' flanks and interiors, where particles erode.
+   At the ridge crests the same field is unopposed and had no ceiling --
+   the other half of the story, and why a proportional `uplift_scale` is
+   the wrong tool for the peaks: docs/uplift-ceiling.md.)
 2. **Then the glacial units.** The fix is mechanical (the
    `LENGTH_PARAMS_M` pattern) but it should land *after* (1), because
    correcting it today trades a 1440 m improvement in the maximum for a

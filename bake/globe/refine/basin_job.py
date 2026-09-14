@@ -83,7 +83,7 @@ from ..erosion import particle as pk
 from ..erosion.maps import ErosionState, height_unit, step
 from ..hydro.priority_flood import priority_flood_flat
 from ..io.world_store import WorldStore
-from .upsample import COARSE_INPUTS, Window, basin_window, coarse_derived, detail_noise, upsample_window
+from .upsample import COARSE_INPUTS, Window, basin_piece, basin_window, coarse_derived, detail_noise, upsample_window
 
 #: arrays a job returns over its fine window (n x n), plus ``mask`` (u8),
 #: ``lake`` (bool, the lake cells of the module docstring) and the
@@ -297,22 +297,26 @@ def block_drift(delta: np.ndarray, cells: np.ndarray, R: int, tol: float = 0.05,
 # --------------------------------------------------------------------------
 # the job
 # --------------------------------------------------------------------------
-def run_basin(root: str | Path, basin: dict, params: WorldParams, log=None, threads: int | None = None) -> BasinResult:
-    """Refine one basin (see module docstring).  Returns the fine window
-    arrays (``n x n``, kernel halo stripped): ``height``, ``sediment``,
+def run_basin(root: str | Path, basin: dict, params: WorldParams, log=None, threads: int | None = None, face: int | None = None) -> BasinResult:
+    """Refine one face piece of a basin (see module docstring; ``face``
+    defaults to the outlet face).  Returns the fine window arrays (``n x
+    n``, kernel halo stripped): ``height``, ``sediment``,
     ``water_surface``, ``discharge``, ``hardness``, ``basin_id`` (this id
     inside the mask, the nearest-upsampled ids elsewhere), ``mask``,
     ``lake`` and the plain-upsample references ``height0``, ``sediment0``,
-    ``water_surface0``, ``discharge0``.  ``threads``: numba threads for
-    the kernel (default :func:`job_threads` of the window; the result does
-    not depend on it); the previous count is restored afterwards."""
+    ``water_surface0``, ``discharge0``.  The mask follows the basin across
+    the face edge (the frozen ring sits on the true divide), so a river
+    crossing the edge keeps flowing; the rasteriser writes only the cells
+    on ``face``.  ``threads``: numba threads for the kernel (default
+    :func:`job_threads` of the window; the result does not depend on it);
+    the previous count is restored afterwards."""
     import numba
 
     t0 = time.time()
     bid = int(basin["id"])
     rp = params.refine
     grid, fields, derived = coarse_inputs(root, params)
-    win = basin_window(basin, params.world.R, rp.halo_cells)
+    win = basin_window(basin, params.world.R, rp.halo_cells, face=face, N=grid.N)
     H, n, NE = win.H, win.n, win.NE
     prev_threads = int(numba.get_num_threads())
     n_threads = job_threads(NE) if threads is None else max(1, int(threads))
@@ -335,7 +339,7 @@ def _run_basin(root, basin, params, log, t0, bid, rp, grid, fields, derived, win
 
     mask = build_mask(up["basin_id"], bid)
     active = mask == pk.MASK_ACTIVE
-    gen = params.rng("refine", bid)
+    gen = params.rng("refine", bid, win.face)  # one stream per (basin, face) piece
     noise = detail_noise(win, up["slope"], up["relief"], up["hardness"], rp.detail_amp, grid.cell_size_m, gen,
                          surface=up["height0"] + up["sediment0"], coast_taper_m=float(rp.coast_taper_m))
     del up["slope"], up["relief"]
@@ -351,7 +355,18 @@ def _run_basin(root, basin, params, log, t0, bid, rp, grid, fields, derived, win
     ws0 = (plain + up["depth"]).astype(np.float32)
     ocean = up["basin_id"] < 0
     flood_active = (mask > 0) | ocean
-    drain = exit_cells(basin, win, (NE, NE)) | ocean
+    # drains: every exit's fine cells, the ocean and, where the basin
+    # continues past the face edge, the frozen ring of that off-face strip
+    # (mask 2 beyond the face): the strip is eroded for continuity but never
+    # written, and without a drain of its own it would pond up to the level
+    # of the face exits it lies below
+    on_face = np.zeros((NE, NE), dtype=bool)
+    N_fine = grid.N * R
+    a0, a1 = max(0, H - win.fi0), min(NE, H - win.fi0 + N_fine)
+    b0, b1 = max(0, H - win.fj0), min(NE, H - win.fj0 + N_fine)
+    if a0 < a1 and b0 < b1:
+        on_face[a0:a1, b0:b1] = True
+    drain = exit_cells(basin, win, (NE, NE)) | ocean | (~on_face & (mask == pk.MASK_FROZEN))
     wsp = local_flood(plain, drain, flood_active, mask)
     # The spill-point flood says how full a depression *can* be; the coarse
     # water surface (hydro's evaporation balance, upsampled) says how full
@@ -479,11 +494,12 @@ def _run_basin(root, basin, params, log, t0, bid, rp, grid, fields, derived, win
         "id": bid,
         "face": win.face,
         "area_cells": int(basin.get("area_cells", 0)),
+        "piece_cells": int(basin_piece(basin, win.face).get("area_cells", 0)),
         "window": [win.ci0, win.cj0, win.ci1, win.cj1],
         "n_fine": n,
         "active_cells": n_active,
         "frozen_cells": int((mask == pk.MASK_FROZEN).sum()),
-        "lake_cells": int(lake.sum()),
+        "lake_cells": int((lake & on_face).sum()),   # the off-face strip is another piece's to count
         "lakes": int(n_lakes),
         "lake_discarded_m": float(lake_discarded),
         "iterations": n_iter,
@@ -563,8 +579,9 @@ def job(args: dict) -> dict:
     """Pool target (importable, picklable arguments).
 
     ``{"kind": "basin", "root", "params": WorldParams, "basin": record,
-    "quicklook": path or None}`` runs :func:`run_basin` and rasterises the
-    result into the ``fine/`` memmaps (:func:`rasterize.write_result`);
+    "face": piece face or None (outlet face), "quicklook": path or None}``
+    runs :func:`run_basin` on that face piece and rasterises the result
+    into the ``fine/`` memmaps (:func:`rasterize.write_result`);
     ``{"kind": "face", "root", "params", "face"}`` writes the plain
     upsample of a whole face (:func:`rasterize.write_base_face`).  Returns
     the job's stats dict (``kind`` set)."""
@@ -580,7 +597,7 @@ def job(args: dict) -> dict:
         return {"kind": "face", "face": int(args["face"]), "cells": cells, "seconds": time.time() - t0}
     if kind != "basin":
         raise ValueError(f"unknown job kind {kind!r}")
-    res = run_basin(root, args["basin"], params)
+    res = run_basin(root, args["basin"], params, face=args.get("face"))
     written = rasterize.write_result(root, params, res)
     res.stats["written_cells"] = written
     qp = args.get("quicklook")
@@ -594,4 +611,4 @@ def job(args: dict) -> dict:
     return res.stats
 
 
-__all__ = ["BasinResult", "RESULT_FIELDS", "CELLS_PER_THREAD", "coarse_inputs", "build_mask", "settle_lakes", "local_flood", "block_drift", "BasinErosionParams", "basin_erosion_params", "thread_budget", "job_threads", "exit_cells", "run_basin", "run_basin_arrays", "basin_quicklook", "pool_init", "job"]
+__all__ = ["BasinResult", "RESULT_FIELDS", "CELLS_PER_THREAD", "coarse_inputs", "build_mask", "settle_lakes", "local_flood", "block_drift", "BasinErosionParams", "basin_erosion_params", "thread_budget", "job_threads", "exit_cells", "run_basin", "run_basin_arrays", "basin_quicklook", "pool_init", "job", "basin_piece", "basin_window"]

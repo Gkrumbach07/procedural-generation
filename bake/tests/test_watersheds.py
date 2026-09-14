@@ -1,7 +1,8 @@
 """Watershed partition tests (PLAN.md section 10.1 / 15): the partition
 covers all land exactly once, basins respect the size bounds (documented
-exceptions carry a reason), never cross a face edge, the hierarchy is a
-tree, bbox / tiles / outlets are right, and the stage is deterministic."""
+exceptions carry a reason), follow the drainage across cube-face edges
+(per-face pieces with their own bbox / tiles), the hierarchy is a tree,
+outlets / exits are right, and the stage is deterministic."""
 import numpy as np
 import pytest
 
@@ -51,24 +52,33 @@ def _check_partition(basin_id, basins, flow_dir, grid, max_cells, min_cells, R, 
     assert sum(b["area_cells"] for b in basins) == int(land.sum())
     down = downstream_table(np.ascontiguousarray(flow_dir), grid.owner, H)
     by_id = {b["id"]: b for b in basins}
+    n_multi_face = 0
     for b in basins:
         bid = b["id"]
         sel = basin_id == bid
-        f_cells = np.unique(np.nonzero(sel)[0])
-        assert f_cells.size == 1 and int(f_cells[0]) == b["face"]  # never crosses a face edge
         assert b["area_cells"] == int(sel.sum()) == counts[bid]
         assert b["area_cells"] <= max_cells
         if b["area_cells"] < min_cells:
-            assert b["undersized_reason"] in ("island", "edge", "max")
-        # bbox (exclusive) is tight
-        _, ii, jj = np.nonzero(sel)
-        assert b["bbox"] == [int(ii.min()), int(jj.min()), int(ii.max()) + 1, int(jj.max()) + 1]
-        # tiles: every LOD-0 tile touched by the basin's fine cells, exactly
-        fi = np.concatenate([ii * R + r for r in range(R)])
-        fj = np.concatenate([jj * R + r for r in range(R)])
-        tiles = {(int(x), int(y)) for x, y in zip(fi // T, fj // T)}
-        assert {tuple(t) for t in b["tiles"]} == tiles
-        # outlet is in the basin; its downstream cell is outside (ocean / other basin / other face)
+            assert b["undersized_reason"] in ("island", "max")
+        # pieces: one per face the basin has cells on, in face order, tight
+        # bbox (exclusive) and exactly the LOD-0 tiles the piece's fine cells touch
+        f_cells = np.unique(np.nonzero(sel)[0]).tolist()
+        assert [p["face"] for p in b["pieces"]] == f_cells == b["faces"]
+        assert b["face"] in f_cells
+        n_multi_face += len(f_cells) > 1
+        assert sum(p["area_cells"] for p in b["pieces"]) == b["area_cells"]
+        for p in b["pieces"]:
+            ii, jj = np.nonzero(sel[p["face"]])
+            assert p["area_cells"] == ii.size
+            assert p["bbox"] == [int(ii.min()), int(jj.min()), int(ii.max()) + 1, int(jj.max()) + 1]
+            fi = np.concatenate([ii * R + r for r in range(R)])
+            fj = np.concatenate([jj * R + r for r in range(R)])
+            tiles = {(int(x), int(y)) for x, y in zip(fi // T, fj // T)}
+            assert {tuple(t) for t in p["tiles"]} == tiles
+        # the top-level face / bbox / tiles are the outlet face's piece
+        op = next(p for p in b["pieces"] if p["face"] == b["face"])
+        assert b["bbox"] == op["bbox"] and b["tiles"] == op["tiles"]
+        # outlet is in the basin; its downstream cell is outside (ocean / other basin)
         of, oi, oj = b["outlet"]
         assert basin_id[of, oi, oj] == bid and of == b["face"]
         oc = (of * N + oi) * N + oj
@@ -92,14 +102,16 @@ def _check_partition(basin_id, basins, flow_dir, grid, max_cells, min_cells, R, 
             seen.add(x)
             x = by_id[x]["parent"]
     assert any(b["parent"] == -1 for b in basins)
-    # exits: exactly the cells whose downstream lies outside the basin,
-    # outlet first, kinds right; every cell of a basin reaches one of its
-    # listed exits without leaving the basin (refine floods / sinks there)
+    # exits: exactly the cells whose downstream lies outside the basin or
+    # on another face (the last cell of a face piece), outlet first, kinds
+    # right; every cell of a basin reaches one of its listed exits without
+    # leaving the basin (refine floods / sinks there, per face piece)
     lab = basin_id.reshape(-1)
     landf = land.reshape(-1)
     land_idx = np.nonzero(landf)[0]
     d = down[land_idx]
-    is_exit = (d < 0) | (lab[np.maximum(d, 0)] != lab[land_idx])
+    dk = np.maximum(d, 0)
+    is_exit = (d < 0) | (lab[dk] != lab[land_idx]) | (dk // NN != land_idx // NN)
     exit_cells = land_idx[is_exit]
     exit_of_basin = {}
     for c in exit_cells.tolist():
@@ -113,7 +125,11 @@ def _check_partition(basin_id, basins, flow_dir, grid, max_cells, min_cells, R, 
         for c, kind in zip(ex, b["exit_kinds"]):
             dc = int(down[c])
             want = "ocean" if (dc < 0 or lab[dc] < 0) else ("face" if dc // NN != c // NN else "basin")
-            assert kind == want and (dc < 0 or lab[dc] != b["id"])
+            assert kind == want
+            if kind == "face":
+                assert lab[dc] == b["id"]  # a face exit stays inside its basin
+            else:
+                assert dc < 0 or lab[dc] != b["id"]
         n_multi += len(ex) > 1
         if b["downstream_basin"] == -1:
             assert b["exit_kinds"][0] == "ocean"
@@ -123,12 +139,19 @@ def _check_partition(basin_id, basins, flow_dir, grid, max_cells, min_cells, R, 
     reach = ws_stage._label_outlets(down, ws_stage.topological_order(down, landf), is_exit_full)
     assert (reach[land_idx] >= 0).all()
     assert np.array_equal(lab[reach[land_idx]], lab[land_idx])  # exit reached lies in the same basin
-    return n_multi
+    assert reach[land_idx].reshape(-1).size == land_idx.size and (reach[land_idx] // NN == land_idx // NN).all()  # and on the same face
+    # drainage across a face edge is inside a basin unless the crossing
+    # cell is a (split) outlet: face edges are no longer cuts
+    cross = land_idx[(d >= 0) & landf[dk] & (dk // NN != land_idx // NN)]
+    outlets = {(f * N + i) * N + j for f, i, j in (b["outlet"] for b in basins)}
+    for c in cross.tolist():
+        assert lab[c] == lab[down[c]] or c in outlets
+    return n_multi, n_multi_face, int(cross.size)
 
 
 # --------------------------------------------------------------------------
 # synthetic world: big drainage system crossing the +X/+Z edge -> splits,
-# edge cuts, merges of coastal micro-basins
+# basins on two faces, merges of coastal micro-basins
 # --------------------------------------------------------------------------
 def _synthetic_world(N=32):
     g = Grid(N, 4, 50.0)
@@ -151,29 +174,32 @@ def synthetic():
     return _synthetic_world()
 
 
-def test_partition_synthetic_splits_and_edge_cuts(synthetic):
+def test_partition_synthetic_splits_and_cross_face_basins(synthetic):
     g, surface, fd = synthetic
     N = g.N
     max_cells, min_cells = 150, 9
     R, T = 2, 16
     part = partition(fd, g, max_cells, min_cells, R=R, T=T)
     basins = part.basins
-    n_multi = _check_partition(part.basin_id, basins, fd, g, max_cells, min_cells, R, T)
+    n_multi, n_multi_face, n_cross = _check_partition(part.basin_id, basins, fd, g, max_cells, min_cells, R, T)
     land = fd != OCEAN
     assert part.info["n_splits"] > 0 and part.info["n_merges"] > 0
     assert n_multi == part.info["n_multi_exit"] > 0  # merged coastal strips have several exits
     assert len(basins) >= land.sum() // max_cells
-    # channels crossing a face edge produce child basins whose outlet's
-    # downstream cell is on another face
+    # the land cap straddles the +X/+Z edge: drainage crosses it inside basins
+    assert n_cross > 0
+    assert n_multi_face == part.info["n_multi_face"] > 0
+    assert part.info["n_pieces"] == sum(len(b["pieces"]) for b in basins) == len(basins) + sum(len(b["faces"]) - 1 for b in basins)
+    assert part.info["cells_in_multi_face_basins"] == sum(b["area_cells"] for b in basins if len(b["faces"]) > 1) > 0
+    # face exits: the last cell of a face piece before the flow crosses the edge
     down = downstream_table(np.ascontiguousarray(fd), g.owner, g.H)
-    edge_children = [b for b in basins if b["downstream_basin"] >= 0 and b["outlet_downstream"][0] != b["face"]]
-    assert edge_children
-    for b in edge_children:
-        of, oi, oj = b["outlet"]
-        d = int(down[(of * N + oi) * N + oj])
-        assert d // (N * N) != of
-    # split children: outlet's downstream cell is in another basin on the same face
-    split_children = [b for b in basins if b["downstream_basin"] >= 0 and b["outlet_downstream"][0] == b["face"]]
+    face_exits = [(b, e) for b in basins for e, k in zip(b["exits"], b["exit_kinds"]) if k == "face"]
+    assert face_exits
+    for b, (f, i, j) in face_exits:
+        d = int(down[(f * N + i) * N + j])
+        assert d // (N * N) != f and part.basin_id.reshape(-1)[d] == b["id"]
+    # split children: outlet's downstream cell is in another basin
+    split_children = [b for b in basins if b["downstream_basin"] >= 0]
     assert split_children
     # the split point sits on a channel: Strahler order is recorded from the
     # network when given
@@ -202,7 +228,7 @@ def test_partition_lake_cells_avoided_as_split_points(synthetic):
     lake &= fd != OCEAN
     part = partition(fd, g, 150, 9, lake=lake, R=2, T=16)
     for b in part.basins:
-        if b["downstream_basin"] >= 0 and b["outlet_downstream"][0] == b["face"]:
+        if b["downstream_basin"] >= 0:
             of, oi, oj = b["outlet"]
             assert not lake[of, oi, oj]
 
@@ -235,9 +261,9 @@ def test_stage_partition_invariants(tiny_world):
     fd = store.load_field("flow_dir", grid).interior
     basins = store.read_json("graph/basins.json")["basins"]
     wp = params.watersheds
-    _check_partition(bid.interior, basins, fd, grid, wp.basin_max_cells, wp.basin_min_cells, params.world.R, params.world.T)
-    assert info["n_basins"] == len(basins)
-    assert set(basins[0]) >= {"id", "parent", "face", "outlet", "downstream_basin", "area_cells", "bbox", "order", "tiles"}
+    _, n_multi_face, _ = _check_partition(bid.interior, basins, fd, grid, wp.basin_max_cells, wp.basin_min_cells, params.world.R, params.world.T)
+    assert info["n_basins"] == len(basins) and info["n_multi_face"] == n_multi_face
+    assert set(basins[0]) >= {"id", "parent", "face", "faces", "outlet", "downstream_basin", "area_cells", "bbox", "order", "tiles", "pieces", "exits", "exit_kinds"}
 
 
 def test_stage_determinism(scratch, tiny_world):

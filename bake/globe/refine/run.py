@@ -61,6 +61,15 @@ def load_basins(store: WorldStore) -> list[dict]:
     return basins
 
 
+def basin_pieces(basins: list[dict]) -> list[tuple[dict, dict]]:
+    """One ``(basin, piece)`` per face a basin has cells on (a record
+    without ``pieces`` is one piece on its face), largest piece first,
+    ties by (id, face)."""
+    out = [(b, p) for b in basins for p in (b.get("pieces") or [bj.basin_piece(b, b["face"])])]
+    out.sort(key=lambda t: (-int(t[1].get("area_cells", 0)), int(t[0]["id"]), int(t[1]["face"])))
+    return out
+
+
 def _run_jobs(jobs: list[dict], params: WorldParams, root: Path, workers: int, log, label: str, progress_every: float = 0.1) -> list[dict]:
     """Run ``jobs`` through :func:`basin_job.job` (in-process for one
     worker, else a spawned pool), logging progress.  Returns the stats in
@@ -112,11 +121,12 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     root = store.root
     rp = params.refine
     basins = load_basins(store)
+    pieces = basin_pieces(basins)
     workers = params.workers()
-    log(f"[refine] {len(basins)} basins, R={params.world.R}, N_fine={params.N_fine}, {rp.refine_iterations} iterations/basin, {workers} workers")
-    if basins:
+    log(f"[refine] {len(basins)} basins ({len(pieces)} face pieces), R={params.world.R}, N_fine={params.N_fine}, {rp.refine_iterations} iterations/piece, {workers} workers")
+    if pieces:
         # jobs run largest first, so the first `workers` windows are resident together
-        ne = sorted((bj.basin_window(b, params.world.R, rp.halo_cells).NE for b in basins), reverse=True)[:workers]
+        ne = sorted((bj.basin_window(b, params.world.R, rp.halo_cells, face=p["face"], N=params.N_c).NE for b, p in pieces), reverse=True)[:workers]
         gb = sum(n * n for n in ne) * BYTES_PER_WINDOW_CELL / 1e9
         log(f"[refine] largest window {ne[0]}² fine cells; estimated peak job memory {gb:.1f} GB for {workers} workers (+ coarse inputs per worker); lower refine.workers if that exceeds the machine")
     rz.create_fine(root, params)
@@ -126,15 +136,17 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     face_stats = _run_jobs(face_jobs, params, root, workers, log, "base")
     t_base = time.time() - t0
 
+    # one job per (basin, face) piece; quicklooks for the outlet-face piece of the largest basins
+    quick = {int(b["id"]) for b in basins[:N_BASIN_QUICKLOOKS]}
     jobs = []
-    for k, b in enumerate(basins):
-        qp = store.quicklook_path("refine", f"basin{int(b['id'])}") if k < N_BASIN_QUICKLOOKS else None
-        jobs.append({"kind": "basin", "root": str(root), "params": params, "basin": b, "quicklook": None if qp is None else str(qp)})
+    for b, p in pieces:
+        qp = store.quicklook_path("refine", f"basin{int(b['id'])}") if int(b["id"]) in quick and int(p["face"]) == int(b["face"]) else None
+        jobs.append({"kind": "basin", "root": str(root), "params": params, "basin": b, "face": int(p["face"]), "quicklook": None if qp is None else str(qp)})
     t1 = time.time()
     stats = _run_jobs(jobs, params, root, workers, log, "basin")
     t_basins = time.time() - t1
 
-    stats.sort(key=lambda s: (-int(s.get("area_cells", 0)), int(s["id"])))
+    stats.sort(key=lambda s: (-int(s.get("area_cells", 0)), int(s["id"]), int(s.get("face", 0))))
     deaths: dict[str, int] = {}
     for s in stats:
         for k, v in (s.get("deaths") or {}).items():
@@ -144,6 +156,8 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     land_fine = int(sum(int(b.get("area_cells", 0)) for b in basins)) * params.world.R ** 2
     info = {
         "n_basins": len(basins),
+        "n_pieces": len(pieces),
+        "n_multi_face": sum(1 for b in basins if len(b.get("pieces") or ()) > 1),
         "workers": workers,
         "iterations": int(rp.refine_iterations),
         "cells_written": written,
@@ -169,7 +183,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     if written != land_fine:
         log(f"[refine] WARNING: {written} basin cells written, {land_fine} fine land cells expected")
     log(
-        f"[refine] base pass {t_base:.1f}s; {len(basins)} basins in {t_basins:.1f}s wall ({seconds_jobs:.1f}s cpu, {workers} workers); "
+        f"[refine] base pass {t_base:.1f}s; {len(basins)} basins / {len(pieces)} face pieces in {t_basins:.1f}s wall ({seconds_jobs:.1f}s cpu, {workers} workers); "
         f"{written} cells refined; deaths {deaths}; {info['lake_cells']} lake cells in {info['lakes']} lakes ({info['lake_discarded_m']:.0f} m·cells of lake deposits discarded); max coarse-scale drift removed {info['drift_max_m']:.0f} m"
     )
     return info
@@ -226,4 +240,4 @@ def quicklook(store: WorldStore, params: WorldParams, path, max_px: int = 1024) 
     return ql.save_image(path, img)
 
 
-__all__ = ["OUTPUTS", "run", "quicklook", "load_basins", "N_BASIN_QUICKLOOKS"]
+__all__ = ["OUTPUTS", "run", "quicklook", "load_basins", "basin_pieces", "N_BASIN_QUICKLOOKS"]

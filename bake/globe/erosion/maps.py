@@ -706,8 +706,9 @@ def _mass_wasting_pass(state: ErosionState, talus: np.ndarray, rate: float, cap:
     state.sediment[...] = new_s
 
 
-def apply_uplift(state: ErosionState) -> None:
-    """Add the per-iteration uplift, **mean-free** over the active interior.
+def apply_uplift(state: ErosionState, cap: float | None = None) -> None:
+    """Add the per-iteration uplift, **mean-free** over the active interior,
+    each cell's share bounded by ``cap`` (cell units) when one is given.
 
     The raw tectonic uplift has a positive area mean (it is a growth rate,
     not a redistribution), so adding it verbatim inflates the whole planet
@@ -730,13 +731,37 @@ def apply_uplift(state: ErosionState) -> None:
     subside the basin against a base level it does not own.  Refine passes
     ``uplift = 0``; a windowed run with a real uplift field must be handed
     one that is already mean-free over the whole sphere.
+
+    The field itself has no ceiling: tectonics writes the height a segment
+    gained over its last ``uplift_window`` steps divided by the iteration
+    count, so a belt still rising at the last tectonic step keeps rising at
+    that rate for the whole stage, and at a ridge crest -- no discharge, no
+    talus failure at Earth's cell size, the glacial carve tapering to zero
+    -- nothing opposes it (earth-v5: 4.51 m/it x 800 iterations = 3.6 km on
+    top of a 6.7 km bedrock; docs/uplift-ceiling.md).  ``cap`` is that
+    ceiling (``erosion.uplift_max_m`` in cell units): the field is clipped
+    *before* the mean is taken, so the applied change is still exactly
+    mass-free.  It is a guard on the tectonics field and belongs to the
+    global pass; :func:`step` passes it only for a ``spherical`` state (the
+    window tests hand in their own synthetic field, refine passes 0).  With
+    ``cap=None`` this is byte-identical to the uncapped rule.
     """
     act = state.mask == pk.MASK_ACTIVE
+    u = state.uplift if cap is None else np.minimum(state.uplift, float(cap))
     mean = 0.0
     if state.spherical:
         iact = state.mask[state.interior] == pk.MASK_ACTIVE
-        mean = float(state.uplift[state.interior][iact].mean()) if iact.any() else 0.0
-    state.height[act] += state.uplift[act] - mean
+        mean = float(u[state.interior][iact].mean()) if iact.any() else 0.0
+    state.height[act] += u[act] - mean
+
+
+def uplift_cap(state: ErosionState, ep) -> float | None:
+    """``erosion.uplift_max_m`` in this state's cell units, or ``None`` when
+    it does not apply: off (``<= 0``) or a window state (the cap guards the
+    tectonics field the global pass applies; see :func:`apply_uplift`)."""
+    if not state.spherical or float(getattr(ep, "uplift_max_m", 0.0)) <= 0.0:
+        return None
+    return cell_units(ep, "uplift_max_m", state.height_unit_m)
 
 
 _KAPPA_CACHE: dict = {}
@@ -916,7 +941,7 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
         # only what surface processes moved: uplift and the datum shift are
         # not loads, and must not be compensated
         state.iso_acc += (state.height + state.sediment) - s0
-    apply_uplift(state)
+    apply_uplift(state, uplift_cap(state, ep))
     # Glacial carving: the only pass that may leave a closed depression, so
     # the only one that can produce a lake.  Global pass only — a refinement
     # window inherits the coarse result rather than re-carving it.

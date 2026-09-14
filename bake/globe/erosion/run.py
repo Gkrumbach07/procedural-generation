@@ -47,8 +47,8 @@ import numpy as np
 from ..config import WorldParams
 from ..field import FaceField
 from ..io.world_store import WorldStore
-from .maps import ErosionState, step
-from .particle import KERNEL_VERSION
+from .maps import ErosionState, step, uplift_cap
+from .particle import KERNEL_VERSION, MASK_ACTIVE
 
 OUTPUTS = ["height", "sediment", "discharge", "momentum"]
 
@@ -208,6 +208,13 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         load_checkpoint(state, *ck)
         log(f"[erosion] resumed from {ck[0].name} (iteration {state.iteration})")
     log(f"[erosion] {grid.describe()}; heights in units of {state.height_unit_m:.1f} m; {n_iter} iterations, {ep.particles_per_cell} particles/cell")
+    # the uplift ceiling (maps.apply_uplift): how many cells it touches is the
+    # number the next Earth bake's after-number is read from
+    cap = uplift_cap(state, ep)
+    iact = state.mask[state.interior] == MASK_ACTIVE
+    n_capped = int(np.sum(state.uplift[state.interior][iact] > cap)) if cap is not None else 0
+    log(f"[erosion] uplift cap {0.0 if cap is None else ep.uplift_max_m:g} m/iteration"
+        f" ({n_capped} of {int(iact.sum())} active cells above it; field max {state.uplift[state.interior][iact].max() * state.height_unit_m:.2f} m/iteration)")
     # viewer timeline frames (hash-exempt, read-only).  Frames past the
     # resume point belong to whichever run wrote them, not to this one.
     from ..viz import frames as vf
@@ -274,6 +281,11 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         # sign convention as hydro's ``height_shift_m``
         "datum_drift_m": datum_shift * state.height_unit_m,
         "lost_offshore_m": lost_offshore * state.height_unit_m,
+        # the ceiling on the per-iteration uplift (0 = off) and the number of
+        # active interior cells whose field exceeds it, i.e. how much of the
+        # tectonics field the stage refused (docs/uplift-ceiling.md)
+        "uplift_cap_m_per_iter": 0.0 if cap is None else float(ep.uplift_max_m),
+        "uplift_capped_cells": n_capped,
     }
     if sea is not None:
         # what the kernel called sea at the last refresh (maps.refresh_base):

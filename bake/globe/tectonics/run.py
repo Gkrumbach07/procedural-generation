@@ -36,11 +36,19 @@ Units
   0, see :func:`finalise`.
 * The tect grid is reconstructed from the cloud by a Gaussian blend of the
   ``splat_knn`` nearest segments (sigma ``splat_sigma_factor`` spacings).
-  At a continental margin that resolves the individual boundary segments,
-  so :func:`margin_ramp` re-positions the continental/oceanic step with a
-  kernel ``margin_sigma_factor`` spacings wide and fills the oceanic side
-  up to it (raise-only: land, belts and sea level are as the blend made
-  them).
+  The kernel is truncated: at sigma = 1 spacing the 12th neighbour still
+  carries ~3 % of the weight, so the blend jumps where a segment enters or
+  leaves the twelve, and on the flank of the continental/oceanic step those
+  jumps are the lacy coastline.  With ``splat_knn_base > splat_knn`` the
+  *base* height (``min(h, belt height)`` on continental crust, all of
+  oceanic) is blended from the wider neighbourhood at the same sigma and
+  only the orogenic excess from the ``splat_knn`` nearest, so belts keep
+  their width; the crust-type fraction ``c`` stays on the narrow blend
+  (docs/coast-fringe.md section 5).  At a continental margin the narrow
+  blend resolves the individual boundary segments, so :func:`margin_ramp`
+  can also re-position the continental/oceanic step with a kernel
+  ``margin_sigma_factor`` spacings wide and fill the oceanic side up to it
+  (raise-only: land, belts and sea level are as the blend made them).
 * The heat field lives on a coarser grid (``N_tect / heat_grid_divisor``).
 * ``uplift`` is *metres per erosion iteration*: the per-segment height
   gained since the reference step (``steps - uplift_window``) in metres,
@@ -48,7 +56,9 @@ Units
   erosion stage applying it every iteration reproduces the window's
   tectonic uplift over its run.  The difference is Lagrangian (per
   segment, follows the moving crust) so plate translation does not
-  register as uplift/subsidence.
+  register as uplift/subsidence.  Nothing here bounds it: the ceiling on
+  what a cell may receive per iteration is ``erosion.uplift_max_m``
+  (erosion/maps.py ``apply_uplift``, docs/uplift-ceiling.md).
 * ``plate_vel`` is ``omega × pos`` per step expressed as contravariant
   coarse cell components (coarse cells per tectonic step).
 """
@@ -527,9 +537,9 @@ def frame_bed(sim, tree=None) -> np.ndarray:
 
     tp, grid = sim.tp, sim.grid
     tree = build_tree(sim.seg) if tree is None else tree
-    blend = SmoothSplat(tree, grid, tp.splat_sigma_factor * sim.spacing, int(tp.splat_knn))
+    blend, base_blend = splat_blends(tree, grid, tp, sim.spacing)
     buoy = ridge_buoyancy(sim.seg, tp)
-    raw, c, _ = margin_ramp(grid, blend, sim.seg, sim.seg.height() + buoy, tp, sim.spacing)
+    raw, c, _ = margin_ramp(grid, blend, sim.seg, sim.seg.height() + buoy, tp, sim.spacing, base_blend=base_blend)
     bed = _smooth_field(grid, raw, tp, cascade=True).interior
     cont = c > 0.5 if tp.shelf_fraction > 0 else None
     sea = sea_level(bed, grid.interior_cell_area.astype(np.float64), cont, sim.params)
@@ -643,11 +653,31 @@ def _smooth_field(grid: Grid, values: np.ndarray, tp, cascade: bool) -> FaceFiel
     return gaussian_smooth(f, float(tp.smooth_sigma))
 
 
-def margin_ramp(grid: Grid, blend: SmoothSplat, seg: Segments, h: np.ndarray, tp, spacing: float):
+def splat_blends(tree, grid: Grid, tp, spacing: float) -> tuple[SmoothSplat, SmoothSplat | None]:
+    """The narrow ``splat_knn`` blend that rasterises the segment cloud and,
+    when ``splat_knn_base > splat_knn``, the wider blend of the same sigma
+    for the base height (else ``None``).  One place, so :func:`finalise`
+    and :func:`frame_bed` build the same pair and the timeline's last frame
+    is the finished map."""
+    sigma = tp.splat_sigma_factor * spacing
+    blend = SmoothSplat(tree, grid, sigma, int(tp.splat_knn))
+    kb = int(tp.splat_knn_base)
+    base_blend = SmoothSplat(tree, grid, sigma, kb) if kb > int(tp.splat_knn) else None
+    return blend, base_blend
+
+
+def margin_ramp(grid: Grid, blend: SmoothSplat, seg: Segments, h: np.ndarray, tp, spacing: float,
+                base_blend: SmoothSplat | None = None):
     """Per-segment height ``h`` -> (6, N, N) bed on the tect grid with a
     smooth continental margin.  Returns ``(bed, c, lift)``: the bed, the
     narrow continental fraction ``c`` (the crust-type boundary, unchanged),
     and the raise that was applied (zeros when the knob is off).
+
+    ``base_blend`` (``tectonics.splat_knn_base``) is the same Gaussian over
+    more neighbours: when given, the bed is ``base_blend(h_base) + blend(h -
+    h_base)`` -- the base height without the kernel truncation's jumps, the
+    orogenic excess at the narrow resolution -- and ``c`` is still
+    ``blend(kind)``.  ``None`` is the old ``blend(h)``, bit for bit.
 
     ``blend(h)`` is exactly ``c * hc + (1 - c) * ho`` -- the continental
     fraction of the nearest segments times their mean height plus the
@@ -666,17 +696,20 @@ def margin_ramp(grid: Grid, blend: SmoothSplat, seg: Segments, h: np.ndarray, tp
     the interior of either crust.  Measured on `small`: shelf-edge isoline
     L/sqrt(A) 7.79 -> 6.38 with the coastline unchanged (docs/coast-fringe.md).
     """
-    bed0 = blend(h)
     kind = (seg.kind == CONTINENTAL).astype(np.float64)
+    # the nominal belt / craton height, the same product as the seeding
+    # (both float at 0.180); anything above it on continental crust is
+    # orogenic thickening and stays out of the step (and of the wide base)
+    h_belt = tp.continental_thickness * tp.belt_thickness * (1.0 - tp.continental_density)
+    h_base = np.where(kind > 0, np.minimum(h, h_belt), h)
+    if base_blend is None:
+        bed0 = blend(h)
+    else:
+        bed0 = base_blend(h_base) + blend(h - h_base)
     c = blend(kind)
     f = float(tp.margin_sigma_factor)
     if f <= 0.0:
         return bed0, c, np.zeros_like(bed0)
-    # the nominal belt / craton height, the same product as the seeding
-    # (both float at 0.180); anything above it on continental crust is
-    # orogenic thickening and stays out of the step
-    h_belt = tp.continental_thickness * tp.belt_thickness * (1.0 - tp.continental_density)
-    h_base = np.where(kind > 0, np.minimum(h, h_belt), h)
     cb = blend(kind * h_base)      # c * mean continental base height
     ob = blend((1.0 - kind) * h)   # (1 - c) * mean oceanic height
     sig = f * spacing * grid.N / (math.pi / 2)  # spacings -> tect cells
@@ -795,14 +828,17 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     idx, dist = label_map_fast(seg, grid, sim.r_cap, tree)
 
     # -- bedrock and uplift (bedrock units on the tect grid) --
-    blend = SmoothSplat(tree, grid, tp.splat_sigma_factor * sim.spacing, int(tp.splat_knn))
+    # the narrow blend rasterises everything; the wide one (splat_knn_base,
+    # None when off) only the base height, see margin_ramp.  dh, age and
+    # density stay on the narrow blend: uplift and hardness are untouched
+    blend, base_blend = splat_blends(tree, grid, tp, sim.spacing)
     # thermal buoyancy of young crust: ridges at rifts, subsidence with age
     elapsed = float(sim.step_index - sim.ref_step)
     buoy = ridge_buoyancy(seg, tp)
     ref = Segments(seg.pos, seg.thickness, seg.density, np.maximum(seg.age - elapsed, 0.0), seg.plate_id, seg.area, kind=seg.kind)
     buoy_ref = ridge_buoyancy(ref, tp)
     h = seg.height() + buoy
-    raw, c_t, lift = margin_ramp(grid, blend, seg, h, tp, sim.spacing)
+    raw, c_t, lift = margin_ramp(grid, blend, seg, h, tp, sim.spacing, base_blend=base_blend)
     bed_t = _smooth_field(grid, raw, tp, cascade=True)
     dh_t = _smooth_field(grid, blend(seg.height() - seg.h_ref + buoy - buoy_ref), tp, cascade=True)
     bed = _resample(bed_t).astype(np.float64)
@@ -919,7 +955,26 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
         # median raise (m at the final scale); 0 / 0 with the knob off
         "_margin_raised_fraction": float((lift > 0).mean()),
         "_margin_lift_median_m": float(np.median(lift[lift > 0]) * scale) if (lift > 0).any() else 0.0,
+        # which kernel rasterised the base height: the neighbour count of the
+        # base blend (splat_knn when off) and the share of the bed that came
+        # from the wide blend rather than the narrow excess term
+        "_splat_knn_base": int(base_blend.nb.shape[1]) if base_blend is not None else int(blend.nb.shape[1]),
+        "_splat_base_fraction": _base_fraction(seg, h, tp, blend, base_blend),
     }
+
+
+def _base_fraction(seg, h, tp, blend, base_blend) -> float:
+    """|base| / (|base| + |excess|) of the rasterised bed: 1.0 when every
+    segment sits at or below the nominal belt height, 0 with the knob off
+    (nothing was split)."""
+    if base_blend is None:
+        return 0.0
+    kind = (seg.kind == CONTINENTAL).astype(np.float64)
+    h_belt = tp.continental_thickness * tp.belt_thickness * (1.0 - tp.continental_density)
+    h_base = np.where(kind > 0, np.minimum(h, h_belt), h)
+    b = float(np.abs(base_blend(h_base)).sum())
+    e = float(np.abs(blend(h - h_base)).sum())
+    return b / max(b + e, 1e-300)
 
 
 # --------------------------------------------------------------------------
@@ -978,6 +1033,8 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         "sea_level_units": float(out["_sea_level_units"]),
         "margin_raised_fraction": float(out["_margin_raised_fraction"]),
         "margin_lift_median_m": float(out["_margin_lift_median_m"]),
+        "splat_knn_base": int(out["_splat_knn_base"]),
+        "splat_base_fraction": float(out["_splat_base_fraction"]),
         "collisions_total": int(sum(s["collisions"] for s in sim.stats)),
         "spawned_total": int(sum(s["spawned"] for s in sim.stats)),
         "final_mass": float(last.get("mass", 0.0)),

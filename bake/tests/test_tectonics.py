@@ -22,7 +22,7 @@ from globe.tectonics import run as tect
 from globe.tectonics.collision import SmoothSplat, build_tree, collide, label_map, label_map_fast, relax_segments, spread_collisions, weighted_quantile
 from globe.tectonics.plates import Plates, cluster_plates, rotate_segments
 from globe.tectonics.segments import Segments, best_candidate_sphere, greedy_accept, mean_spacing
-from scripts.coastline import isoline_metrics, shelf_edge_level
+from scripts.coastline import equal_area_level, isoline_metrics, shelf_edge_level
 
 
 @pytest.fixture(scope="module")
@@ -349,13 +349,23 @@ def test_shelf_sea_level_cuts_the_continental_crust():
     assert np.median(bed[land]) - np.median(bed[~land]) > 0.5 * np.ptp(bed[~land])
 
 
-def _with_margin_sigma(sim, f: float):
-    """The same finished simulation, finalised with another `margin_sigma_factor`
-    (the knob is read at finalise time only)."""
+def _with_tectonics(sim, **overrides):
+    """The same finished simulation with other tectonics parameters, for the
+    knobs that are read at finalise time only (`margin_sigma_factor`,
+    `splat_knn_base`)."""
     s = copy.copy(sim)
-    s.params = sim.params.with_overrides(tectonics={"margin_sigma_factor": f})
+    s.params = sim.params.with_overrides(tectonics=dict(overrides))
     s.tp = s.params.tectonics
     return s
+
+
+def _with_margin_sigma(sim, f: float):
+    return _with_tectonics(sim, margin_sigma_factor=f)
+
+
+@pytest.fixture(scope="module")
+def small_sim():
+    return tect.simulate(WorldParams.small_world(), log=None)
 
 
 def test_margin_ramp_raises_only_the_oceanic_side(tiny_sim, tiny_out):
@@ -403,14 +413,14 @@ def test_margin_ramp_raises_only_the_oceanic_side(tiny_sim, tiny_out):
     assert out1["_margin_raised_fraction"] > 0 and out0["_margin_raised_fraction"] == 0
 
 
-def test_margin_ramp_smooths_the_shelf_edge():
+def test_margin_ramp_smooths_the_shelf_edge(small_sim):
     """On `small` the shelf-edge isoline (the outer edge of the viewer's
     light band) is less convoluted with the ramp than without, while the
     coastline and the crust-type boundary are what they were (measured:
     L/sqrt(A) 7.79 -> 6.38 at the shelf edge, 12.92 -> 12.91 at the coast,
     docs/coast-fringe.md)."""
-    p = WorldParams.small_world()
-    sim = tect.simulate(p, log=None)
+    sim = small_sim
+    p = sim.params
     out0 = tect.finalise(_with_margin_sigma(sim, 0.0))
     out1 = tect.finalise(_with_margin_sigma(sim, 2.5))
     crust = out0["crust_kind"].interior.astype(bool)
@@ -423,6 +433,90 @@ def test_margin_ramp_smooths_the_shelf_edge():
     assert after["ratio"] < 0.9 * before["ratio"], (before["ratio"], after["ratio"])
     coast0, coast1 = isoline_metrics(b0, 0.0, r), isoline_metrics(b1, 0.0, r)
     assert abs(coast1["ratio"] - coast0["ratio"]) < 0.02 * coast0["ratio"], (coast0["ratio"], coast1["ratio"])
+
+
+def test_splat_knn_base_off_is_bit_identical(tiny_sim, tiny_out):
+    """`splat_knn_base = 0` (the default) is the old path byte for byte: the
+    narrow blend of the whole height, no base/excess split, through
+    `margin_ramp` and through `finalise` (tiny_out is the default)."""
+    sim = tiny_sim
+    tp, grid, seg = sim.tp, sim.grid, sim.seg
+    assert tp.splat_knn_base == 0
+    tree = build_tree(seg)
+    blend, base_blend = tect.splat_blends(tree, grid, tp, sim.spacing)
+    assert base_blend is None
+    # a count no wider than splat_knn is off too
+    assert tect.splat_blends(tree, grid, dataclasses.replace(tp, splat_knn_base=int(tp.splat_knn)), sim.spacing)[1] is None
+    h = seg.height() + tect.ridge_buoyancy(seg, tp)
+    bed, c, lift = tect.margin_ramp(grid, blend, seg, h, tp, sim.spacing, base_blend=None)
+    assert np.array_equal(bed, blend(h)) and not lift.any()
+    out0 = tect.finalise(_with_tectonics(sim, splat_knn_base=0))
+    for name in ("bedrock", "uplift", "hardness", "crust_kind", "collision_zone"):
+        assert np.array_equal(out0[name].data, tiny_out[name].data), name
+    assert out0["_splat_knn_base"] == tp.splat_knn and out0["_splat_base_fraction"] == 0.0
+    # and with the knob on, the crust-type fraction (hence crust_kind and the
+    # shelf mask) is still the narrow blend, and the bed is the split sum
+    on = dataclasses.replace(tp, splat_knn_base=48)
+    blend48, base48 = tect.splat_blends(tree, grid, on, sim.spacing)
+    assert base48 is not None and base48.nb.shape[1] == min(48, seg.M)
+    bed48, c48, _ = tect.margin_ramp(grid, blend48, seg, h, on, sim.spacing, base_blend=base48)
+    assert np.array_equal(c48, c)
+    kind = (seg.kind == 1).astype(np.float64)
+    h_belt = tp.continental_thickness * tp.belt_thickness * (1.0 - tp.continental_density)
+    h_base = np.where(kind > 0, np.minimum(h, h_belt), h)
+    assert np.allclose(bed48, base48(h_base) + blend48(h - h_base))
+    assert not np.array_equal(bed48, bed)
+
+
+def _knob_pair(sim, knn_base: int):
+    """(baseline, with the knob) finalised bedrock in metres, crust masks,
+    belt masks, and the half-spacing opening radius in coarse cells."""
+    out0 = tect.finalise(_with_tectonics(sim, splat_knn_base=0))
+    out1 = tect.finalise(_with_tectonics(sim, splat_knn_base=knn_base))
+    r = 0.5 * sim.spacing * sim.params.N_c / (math.pi / 2)
+    return out0, out1, r
+
+
+def _check_knob(sim, out0, out1, r, max_ratio, scale_tol=0.02):
+    crust = out0["crust_kind"].data
+    assert np.array_equal(crust, out1["crust_kind"].data)
+    b0, b1 = out0["bedrock"].interior.astype(np.float64), out1["bedrock"].interior.astype(np.float64)
+    assert abs((b1 > 0).mean() - (b0 > 0).mean()) < 0.005, ((b0 > 0).mean(), (b1 > 0).mean())
+    # top of the land (the 99.9th land percentile in bedrock units, read
+    # through the vertical scale that pins it to relief_spacings) and the
+    # belts' p99 (m) within tolerance: the orogenic excess kept the narrow
+    # kernel, so the peaks are where they were
+    s0, s1 = out0["_scale_m_per_unit"], out1["_scale_m_per_unit"]
+    assert abs(s1 - s0) < scale_tol * s0, (s0, s1)
+    # (collision-zone land, the belt population docs/coast-fringe.md quotes)
+    zone = out0["collision_zone"].interior.astype(bool) & (b0 > 0) & (b1 > 0)
+    assert zone.any()
+    p0, p1 = np.percentile(b0[zone], 99), np.percentile(b1[zone], 99)
+    assert abs(p1 - p0) < 0.02 * max(p0, 1.0), (p0, p1)
+    # the coast at equal area is less convoluted
+    n_land = int((b0 > 0).sum())
+    lv = equal_area_level(b1, n_land)
+    before, after = isoline_metrics(b0, 0.0, r), isoline_metrics(b1, lv, r)
+    assert abs(int((b1 > lv).sum()) - n_land) <= 1
+    assert after["ratio"] < max_ratio * before["ratio"], (before["ratio"], after["ratio"])
+    assert out1["_splat_knn_base"] == 48 and 0.5 < out1["_splat_base_fraction"] <= 1.0
+    return before["ratio"], after["ratio"]
+
+
+def test_splat_knn_base_smooths_the_coast_at_equal_area(small_sim):
+    """With the base height blended from 48 neighbours (the excess from 12)
+    the crust-type boundary is bit-identical, the land fraction and the
+    belts' p99 are within 2 %, the top of the land (in units) moves by
+    -0.5 % on `small` seed 0 and +3.7 % on seed 1 -- where the lever hurts,
+    the wide base pulls a few of the highest cells down -- and the coastline
+    at equal area is less convoluted: measured 12.917 -> 12.195 (0.944x) on
+    seed 0 and 13.497 -> 13.108 (0.971x) on seed 1 (docs/coast-fringe.md
+    section 5)."""
+    out0, out1, r = _knob_pair(small_sim, 48)
+    _check_knob(small_sim, out0, out1, r, 0.98, scale_tol=0.02)
+    sim1 = tect.simulate(WorldParams.small_world(seed=1), log=None)
+    out0, out1, r = _knob_pair(sim1, 48)
+    _check_knob(sim1, out0, out1, r, 0.99, scale_tol=0.05)
 
 
 def test_plate_vel_is_rigid_rotation_of_each_plate(tiny_sim, tiny_out):

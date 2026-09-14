@@ -371,6 +371,17 @@ down would make the land worse, not better. Leave it.
    and a 12 769 m summit against 8849. Erosion applies tectonic uplift with
    no ceiling, and the fixed tectonics did not change that: 12 915 →
    12 769 m.
+
+   > **Fixed since.** `erosion.uplift_max_m` (default 1 m per iteration,
+   > `LENGTH_PARAMS_M`) caps what a cell may receive from the field per
+   > iteration, before the mean is removed. Measured on earth-v5's
+   > checkpoints the excess is the field and nothing else: the maximum
+   > climbs linearly through all 800 iterations, the last 50 add +134 m at
+   > the >5 km cells against 50 × uplift = +137 m, and isostasy, the
+   > glacial pass and the stacked profiles are ruled out with numbers
+   > (docs/uplift-ceiling.md). Static estimate for earth-v5's tectonics
+   > at the cap: ~8290 m and 0.78 % above 5 km (from 9862 / 2.20 %); the
+   > Earth after-number is the next bake's.
 3. **The −4018 m pin** on fully subsided sea floor, now that it is the only
    thing left between this ocean and Earth's.
 

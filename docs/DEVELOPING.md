@@ -19,7 +19,7 @@ All `Grid`s share `R_planet` (derived from the coarse grid).
 | stage | field | dtype | units / meaning |
 |---|---|---|---|
 | tectonics | `bedrock` | f32 | metres; shifted so `land_fraction` of cells are ≥ 0, and scaled so the 99.9th percentile of land sits at `tectonics.relief_spacings` mean segment spacings (`relief_m` metres when set) — the vertical scale follows the horizontal one, so the land does not stand at the talus angle at every preset |
-| | `uplift` | f32 | metres per **erosion iteration** (already divided by `erosion.iterations`, scaled by `uplift_scale`).  The global erosion pass applies it *mean-free* (`apply_uplift`): its area mean is a rise of the whole planet against the kernel's fixed base level, not relief, and would leave hydro's re-quantile to drown the lowlands |
+| | `uplift` | f32 | metres per **erosion iteration** (already divided by `erosion.iterations`, scaled by `uplift_scale`).  The global erosion pass applies it *mean-free* (`apply_uplift`): its area mean is a rise of the whole planet against the kernel's fixed base level, not relief, and would leave hydro's re-quantile to drown the lowlands.  Each cell receives at most `erosion.uplift_max_m` metres of it per iteration (global pass only, clipped before the mean): the field is the last `uplift_window` tectonic steps' rate with no bound of its own, and a belt still rising at the last step would otherwise climb through the whole erosion stage (docs/uplift-ceiling.md) |
 | | `hardness` | f32 | [0,1], 1 = hardest |
 | | `plate_id` | i16 | plate index; every cell has one |
 | | `plate_vel` | f32 (2) | contravariant coarse cells per tectonic step (vector field) |
@@ -89,27 +89,33 @@ plain upsampled coarse fields so `derive`/`tiles` can be developed alone.
 
 ## Basins
 
-* Basins never cross a cube-face edge: a channel crossing an edge is cut
-  there and the upstream part becomes a child basin whose outlet is the
-  first cell on the other face.  A refinement window is therefore a
-  rectangle on one face (plus a halo that may extend past the edge; sample
-  it with `FaceField.sample_window`).
-* `graph/basins.json`: `{"basins": [{"id", "parent" (−1 root), "face",
-  "outlet": [face, i, j], "downstream_basin" (id or −1 ocean), "area_cells",
-  "bbox": [i0, j0, i1, j1] (exclusive), "order" (Strahler at outlet),
-  "tiles": [[lod0_x, lod0_y], ...]}]}`
+* Basins are drainage basins of the cross-face flow graph: outlets are
+  the land cells whose downstream cell is ocean, and a channel crossing a
+  cube-face edge stays inside its basin (docs/cross-face-basins.md).  A
+  basin's cells on one face are a *piece*; refine runs one job per
+  (basin, face) piece, each a square window on that face (plus a halo that
+  may extend past the edge; sample it with `FaceField.sample_window`)
+  whose mask follows the basin across the edge, and writes only the cells
+  on its face.
+* `graph/basins.json`: `{"basins": [{"id", "parent" (−1 root), "face"
+  (outlet face), "faces": [f, ...], "outlet": [face, i, j],
+  "downstream_basin" (id or −1 ocean), "area_cells", "bbox": [i0, j0, i1,
+  j1] (exclusive, the outlet face's piece), "order" (Strahler at outlet),
+  "tiles": [[lod0_x, lod0_y], ...] (outlet face's piece),
+  "pieces": [{"face", "bbox", "area_cells", "tiles"}, ...] (one per face,
+  in face order)}]}`
 * Each basin record also carries `"exits": [[f,i,j], ...]` — every cell of
-  the basin whose downstream cell lies outside it (ocean, another face or
-  another basin), `outlet` first — with a parallel `"exit_kinds"`
-  (`"ocean" | "face" | "basin"`), plus `"outlet_downstream"` ([f,i,j] or
-  null).  Merged coastal strips and face-edge slivers have many exits, so
-  **refine seeds its basin-local priority flood with every exit cell and
-  treats every exit as a particle sink**; using `outlet` alone would dam the
-  other exits.  Basins smaller than `basin_min_cells` carry
-  `"undersized_reason"`: `"max"` (every same-face neighbour would exceed
-  the maximum), `"edge"` (no same-face neighbour but land across a cube
-  edge — refine may process such a sliver together with the basin across
-  the edge) or `"island"` (no land neighbour at all).
+  the basin whose downstream cell lies outside it (ocean or another basin)
+  or on another face (the last cell of a face piece), `outlet` first — with
+  a parallel `"exit_kinds"` (`"ocean" | "face" | "basin"`), plus
+  `"outlet_downstream"` ([f,i,j] or null).  Merged coastal strips have
+  many exits, so **refine seeds its piece-local priority flood with every
+  exit cell on its face and treats ocean / basin exits as particle
+  sinks**; a `"face"` exit is inside the basin and particles cross it into
+  the neighbouring face's strip of the window.  Basins smaller than
+  `basin_min_cells` carry `"undersized_reason"`: `"max"` (every
+  neighbouring basin, on any face, would exceed the maximum) or
+  `"island"` (no land neighbour at all).
 
 ## Graph JSON
 

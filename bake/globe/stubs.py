@@ -138,7 +138,9 @@ def stub_watersheds(store: WorldStore, params: WorldParams, log=print) -> dict:
     for b in np.unique(bid.interior):
         if b < 0:
             continue
-        basins.append({"id": int(b), "parent": -1, "face": int(b // 100), "outlet": [int(b // 100), 0, 0], "area_cells": int((bid.interior == b).sum()), "bbox": [0, 0, N, N], "order": 1})
+        f, area = int(b // 100), int((bid.interior == b).sum())
+        piece = {"face": f, "bbox": [0, 0, N, N], "area_cells": area, "tiles": []}
+        basins.append({"id": int(b), "parent": -1, "face": f, "faces": [f], "outlet": [f, 0, 0], "area_cells": area, "bbox": [0, 0, N, N], "order": 1, "pieces": [piece]})
     store.write_json("graph/basins.json", {"basins": basins, "stub": True})
     return {"stub": True, "n_basins": len(basins)}
 

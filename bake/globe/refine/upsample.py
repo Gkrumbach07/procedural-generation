@@ -89,22 +89,54 @@ class Window:
         return (i - self.ci0) * self.R + self.H, (j - self.cj0) * self.R + self.H
 
 
-def basin_window(basin: dict, R: int, halo_cells: int) -> Window:
-    """Window of a ``basins.json`` record: bbox (exclusive) grown by
-    ``halo_cells`` and padded symmetrically to a square."""
-    i0, j0, i1, j1 = (int(x) for x in basin["bbox"])
-    ci0, ci1, cj0, cj1 = i0 - halo_cells, i1 + halo_cells, j0 - halo_cells, j1 + halo_cells
-    wi, wj = ci1 - ci0, cj1 - cj0
-    n = max(wi, wj)
-    if wi < n:
-        pad = n - wi
-        ci0 -= pad // 2
-        ci1 += pad - pad // 2
-    if wj < n:
-        pad = n - wj
-        cj0 -= pad // 2
-        cj1 += pad - pad // 2
-    return Window(int(basin["face"]), ci0, ci1, cj0, cj1, int(R))
+def basin_piece(basin: dict, face: int) -> dict:
+    """The ``pieces`` entry (``face``, ``bbox``, ``area_cells``, ``tiles``)
+    of a ``basins.json`` record on ``face``.  A record without ``pieces``
+    (stub watersheds, worlds baked before basins crossed faces) is one
+    piece on ``basin["face"]`` with the record's ``bbox``."""
+    for p in basin.get("pieces") or ():
+        if int(p["face"]) == int(face):
+            return p
+    if int(face) == int(basin["face"]):
+        return {"face": int(face), "bbox": list(basin["bbox"]), "area_cells": int(basin.get("area_cells", 0))}
+    raise KeyError(f"basin {basin.get('id')} has no piece on face {face}")
+
+
+def _square_range(lo: int, hi: int, n: int, N: int | None) -> tuple[int, int]:
+    """``[lo, hi)`` padded to length ``n``: symmetrically, then (when the
+    face size ``N`` is given) shifted towards the face interior ``[0, N)``
+    by as much as the padding on the outer side allows — ``[lo, hi)``
+    itself never moves, so the window still covers bbox + halo.  Without
+    the shift a thin piece hugging a face edge would put up to half its
+    long side beyond the edge, where the gnomonic extension of the face is
+    increasingly distorted (``window_metric`` blows up ``N/2`` cells out)."""
+    pad = n - (hi - lo)
+    pl = pad // 2
+    pr = pad - pl
+    a, b = lo - pl, hi + pr
+    if N is not None:
+        if a < 0 and b < N:
+            s = min(-a, pl, N - b)
+            a += s
+            b += s
+        elif b > N and a > 0:
+            s = min(b - N, pr, a)
+            a -= s
+            b -= s
+    return a, b
+
+
+def basin_window(basin: dict, R: int, halo_cells: int, face: int | None = None, N: int | None = None) -> Window:
+    """Window of one face piece of a ``basins.json`` record (``face``
+    defaults to the outlet face): the piece's bbox (exclusive) grown by
+    ``halo_cells`` and padded to a square (:func:`_square_range`; pass the
+    coarse face size ``N`` to keep the padding on the face)."""
+    face = int(basin["face"]) if face is None else int(face)
+    i0, j0, i1, j1 = (int(x) for x in basin_piece(basin, face)["bbox"])
+    n = max(i1 - i0, j1 - j0) + 2 * halo_cells
+    ci0, ci1 = _square_range(i0 - halo_cells, i1 + halo_cells, n, N)
+    cj0, cj1 = _square_range(j0 - halo_cells, j1 + halo_cells, n, N)
+    return Window(face, ci0, ci1, cj0, cj1, int(R))
 
 
 # --------------------------------------------------------------------------

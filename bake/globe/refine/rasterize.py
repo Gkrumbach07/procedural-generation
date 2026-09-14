@@ -154,12 +154,17 @@ def window_face_slices(win: Window, N_fine: int) -> tuple[slice, slice, slice, s
     return slice(a0, a1), slice(b0, b1), slice(a0 - fi0, a1 - fi0), slice(b0 - fj0, b1 - fj0)
 
 
-def blend_result(arrays: dict[str, np.ndarray], bid: int, feather_cells: int) -> tuple[dict[str, np.ndarray], np.ndarray]:
+def blend_result(arrays: dict[str, np.ndarray], bid: int, feather_cells: int, on_face: np.ndarray | None = None) -> tuple[dict[str, np.ndarray], np.ndarray]:
     """Feathered output arrays of a job over its window and the ``own``
-    mask (cells whose fine basin id is ``bid``).  Pure (no I/O) so tests
-    can check the blend."""
+    mask (cells whose fine basin id is ``bid``).  With ``on_face`` (bool,
+    the window cells lying on the job's face) the feather weight is
+    computed on ``own & on_face``, so where the basin continues across a
+    cube edge the face edge is treated like a divide: the seam row is the
+    plain upsample on both faces and the two independently eroded pieces
+    meet there without a crease.  Pure (no I/O) so tests can check the
+    blend."""
     own = arrays["basin_id"] == int(bid)
-    w = feather_weight(own, feather_cells)
+    w = feather_weight(own if on_face is None else (own & on_face), feather_cells)
     out = {}
     for name, ref in FEATHERED:
         a = arrays[name].astype(np.float32)
@@ -179,7 +184,9 @@ def write_result(root: str | Path, params: WorldParams, res) -> int:
     if sl is None:
         return 0
     fi, fj, li, lj = sl
-    out, own = blend_result(res.arrays, res.id, int(params.refine.feather_cells))
+    on_face = np.zeros(res.arrays["basin_id"].shape, dtype=bool)
+    on_face[li, lj] = True
+    out, own = blend_result(res.arrays, res.id, int(params.refine.feather_cells), on_face)
     own_l = own[li, lj]
     n = int(own_l.sum())
     if n == 0:

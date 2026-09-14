@@ -342,7 +342,7 @@ well). The eroded surface at iteration 800:
 
 Four to six continents with mountain belts on their collision margins,
 an ocean nearly at Earth's depth, and a hypsometric curve that is on
-Earth's from 0 to 4 km. Two things stand out on the other side: 2.1 % of
+Earth's from 0 to 4 km. Two things stand out on the other side: 2.2 % of
 the land above 5 km against Earth's 0.3 (the reassembly belts at 0.004
 are now too well kept, or erosion is not reaching them), and a land
 median of 655 m against ~350 -- too much of the crust is standing at
@@ -374,10 +374,15 @@ median on Earth's and empties the 2-4 km bands to a third of Earth's;
 had from this knob alone, and **the excess above 5 km is not the decay's
 either**: 0.006 keeps 1.8 % of the land above 5 km with a highest point
 of 14.8 km, where 0.004 tops out at 9.9 km. A few peaks that high are a
-defect of their own -- a belt that goes on being uplifted through erosion
-(the `uplift` field is the last 100 tectonic steps' rate, applied for all
-800 iterations) or a stack of overlapping profiles at a reassembly -- and
-belongs to the next erosion pass, measured on the peaks themselves.
+defect of their own, and it has since been measured on the peaks
+themselves (docs/uplift-ceiling.md): it is the `uplift` field -- the last
+100 tectonic steps' rate, applied for all 800 iterations with no ceiling
+onto ridge crests nothing erodes -- and not a stack of overlapping
+profiles, except for the 1.0 % of od006's *bedrock* that already stands
+above 5 km (max 8612 m) before erosion starts. The top cell of 0.004 is
+5798 m of bedrock + 3162 m of applied uplift + 866 m of datum hold; od006's
+is 8544 + 6855 - 619 m of net erosion. `erosion.uplift_max_m` (2 m per
+iteration) is the ceiling, and halves the excess (docs/uplift-ceiling.md).
 0.004 stays the default: the 2-4 km bands are what a viewer sees as
 mountains, and the median is the 1-2 km band's problem to fix by
 erosion, not by taking the belts down faster.

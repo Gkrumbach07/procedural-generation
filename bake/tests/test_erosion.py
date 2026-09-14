@@ -27,7 +27,7 @@ from globe.field import FaceField
 from globe.erosion import glacial
 from globe.erosion import particle as pk
 from globe.erosion import run as erosion_run
-from globe.erosion.maps import ErosionState, apply_isostasy, apply_uplift, hold_datum, run_iteration, step
+from globe.erosion.maps import ErosionState, apply_isostasy, apply_uplift, hold_datum, run_iteration, step, uplift_cap
 from globe.hydro import run as hydro_run
 from globe.io.world_store import WorldStore
 from globe.stubs import stub_climate, stub_tectonics
@@ -546,6 +546,78 @@ def test_uplift_is_mean_free_on_the_sphere(scratch):
     assert abs((w.total_mass() - m0) - up) <= 1e-9 * max(abs(m0), 1.0)
 
 
+def test_uplift_cap_bounds_the_rise_and_stays_mean_free(scratch):
+    """``erosion.uplift_max_m`` (maps.apply_uplift ``cap``): the tectonic
+    uplift field has no ceiling -- earth-v5's fastest cell carried
+    4.51 m/it for all 800 iterations, 3.6 km on a 6.7 km bedrock, and the
+    highest point ended at 9862 m against a 6747 m bedrock maximum
+    (docs/uplift-ceiling.md).  With the cap on, no cell rises by more than
+    the cap (less the datum), the applied change is still exactly
+    mass-free, cells under the cap get exactly their own uplift, cap off
+    reproduces the old rule bit for bit, and a window state (its own
+    synthetic field, refine's zeros) is never capped by ``step``."""
+    p = WorldParams.small_world(0)  # 50 m cells: 2 m/it = 0.04 cell units
+    grid = p.coarse_grid()
+    store = _stub_world(scratch, "uplift_cap", p)
+    f = {n: store.load_field(n, grid) for n in ("bedrock", "hardness", "precip", "evap", "uplift")}
+    # the stub uplift is ~1e-3 m/it: scale it to ~0.3 m/it (the real
+    # stage's land median is 0.07, its 2-4 km band 0.5; x1000 as
+    # test_datum_is_held_through_the_run does would put the whole world at
+    # 1.1-1.3 m/it, over the cap) and plant a belt core at 5 m/it,
+    # sweep-od006's 8.5 m/it order of magnitude
+    f["uplift"].data *= 300.0
+    f["uplift"].interior[2, 20:40, 30:50] = 5.0  # metres per iteration; from_grid divides by the 50 m unit
+    f["uplift"].exchange_halos()
+    st = ErosionState.from_grid(grid, f["bedrock"], f["hardness"], f["precip"], f["evap"], f["uplift"], p.erosion)
+    cap = cell_units(p.erosion, "uplift_max_m", st.height_unit_m)
+    assert cap == pytest.approx(2.0 / 50.0) and float(p.erosion.uplift_max_m) == 2.0
+    ia = st.mask[st.interior] == pk.MASK_ACTIVE
+    u = st.uplift[st.interior]
+    assert (u[ia] > cap).sum() >= 20 * 20  # the belt core really is above the cap
+    assert (u[ia] < cap).sum() > 0.9 * ia.sum()  # and the rest of the world is not
+
+    m0 = st.total_mass()
+    h0 = st.height.copy()
+    apply_uplift(st, cap)
+    d = (st.height - h0)[st.interior]
+    uc = np.minimum(u, cap)
+    mean = float(uc[ia].mean())
+    assert abs(st.total_mass() - m0) <= 1e-9 * max(abs(m0), 1.0)  # (b) mass-free
+    assert d[ia].max() <= cap - mean + 1e-12  # (a) bounded
+    assert np.allclose(d[ia], uc[ia] - mean, atol=1e-12)  # the capped field, less the datum
+    under = ia & (u < cap)
+    assert np.allclose(d[under], u[under] - mean, atol=1e-12)  # (c) under the cap: exactly its own uplift
+    core = ia & (u > cap)
+    assert np.allclose(d[core], cap - mean, atol=1e-12)  # the core is pinned at the cap
+    # the cap bit: the same belt uncapped would have risen 2.5x as far
+    assert (5.0 / 50.0) - mean > 2.0 * d[core].max()
+
+    # (d) cap off is the old rule, bit for bit
+    a = ErosionState.from_grid(grid, f["bedrock"], f["hardness"], f["precip"], f["evap"], f["uplift"], p.erosion)
+    b = ErosionState.from_grid(grid, f["bedrock"], f["hardness"], f["precip"], f["evap"], f["uplift"], p.erosion)
+    apply_uplift(a)
+    apply_uplift(b, None)
+    assert np.array_equal(a.height, b.height)
+    p_off = p.with_overrides(erosion={"uplift_max_m": 0.0})
+    assert uplift_cap(a, p_off.erosion) is None
+    assert uplift_cap(a, p.erosion) == pytest.approx(cap)
+    # and the uncapped rise at the core is the raw field less the raw mean
+    da = (a.height - h0)[st.interior]
+    assert np.allclose(da[core], (5.0 / 50.0) - float(u[ia].mean()), atol=1e-12)
+
+    # (e) a window is never capped: its synthetic field (2.7-5 m/it here,
+    # far above the 1 m/it ceiling) is applied as given by step()
+    w = make_window(48, "dome", p, iters=10, uplift_total=8.0)
+    assert uplift_cap(w, p.erosion) is None
+    assert float(w.uplift[w.interior].max()) > cap
+    w2 = make_window(48, "dome", p, iters=10, uplift_total=8.0)
+    w2.uplift[...] = 0.0
+    step(w, p, 0)
+    step(w2, p, 0)
+    dw = (w.surface() - w2.surface())[w.interior]
+    assert dw.max() > 2.0 * cap  # the dome's uplift survived at its own rate, not the cap's
+
+
 def _point_load(st, face, i, j, size=4):
     st.iso_acc = np.zeros_like(st.height)
     H = st.H
@@ -634,7 +706,7 @@ def test_datum_is_held_through_the_run(scratch):
     why the other global-pass tests cannot see this).
     """
     p = WorldParams.tiny_world(3)
-    p.erosion = dataclasses.replace(p.erosion, iterations=20, checkpoint_every=0, quicklook_every=0, resume=False)
+    p.erosion = dataclasses.replace(p.erosion, iterations=20, checkpoint_every=0, quicklook_every=0, resume=False, uplift_max_m=0.0)  # about the datum, not the ceiling: uncapped so the x1000 stub uplift is the forcing it documents
     store = _stub_world(scratch, "erosion_datum", p)
     grid = p.coarse_grid()
     upl = store.load_field("uplift", grid)

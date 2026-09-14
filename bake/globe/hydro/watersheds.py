@@ -2,34 +2,41 @@
 
 Pipeline:
 
-1. **Outlets**: a land cell is a *cut* cell if its downstream cell is ocean
-   or lies on another cube face.  ``basin = cells draining to the same cut
-   cell``, so no basin ever crosses a face edge; the upstream part of a
-   channel that crosses an edge is its own basin whose outlet is the last
-   cell on its face and whose ``outlet_downstream`` / ``downstream_basin``
-   is the first cell / basin across the edge.
+1. **Outlets**: a land cell is a *cut* cell if its downstream cell is
+   ocean.  ``basin = cells draining to the same cut cell`` on the
+   cross-face flow graph (``downstream_table`` follows ``flow_dir`` across
+   cube edges), so a basin is a drainage basin whatever faces its cells lie
+   on; a channel crossing an edge stays one basin (docs/cross-face-basins.md).
 2. **Split** every basin larger than ``basin_max_cells`` at the cell whose
    upstream sub-tree (inside the basin) is closest to half the basin's
    area; the sub-tree becomes a new basin with that cell as outlet
    (Pfafstetter-style), the remainder keeps the id.  Lake cells are avoided
    as split points when any other candidate exists.
-3. **Merge** every basin smaller than ``basin_min_cells`` into the same-face
-   neighbour sharing the longest boundary, smallest basins first, provided
-   the union stays ``<= basin_max_cells`` and no drainage cycle between
-   basins results.  Micro-basins along a coast therefore agglomerate into
-   coastal strips or join the basin behind them.  Basins that cannot be
-   merged (islands smaller than the minimum, or every neighbour too large)
-   stay undersized and carry an ``undersized_reason``.
-4. Ids are renumbered densely in (face, outlet i, outlet j) order.
+3. **Merge** every basin smaller than ``basin_min_cells`` into the
+   D8-neighbouring basin sharing the longest boundary (same-face and
+   cross-face contacts count alike), smallest basins first, provided the
+   union stays ``<= basin_max_cells`` and no drainage cycle between basins
+   results.  Micro-basins along a coast therefore agglomerate into coastal
+   strips or join the basin behind them.  Basins that cannot be merged
+   (islands smaller than the minimum, or every neighbour too large) stay
+   undersized and carry an ``undersized_reason``.
+4. Ids are renumbered densely in (outlet face, outlet i, outlet j) order.
 
 Hierarchy: ``parent`` is the basin a basin drains into (``downstream_basin``;
 -1 for coastal roots), so the hierarchy is the drainage tree.  Endorheic
 basins do not exist after priority flood (every lake spills), so every
 root drains to the ocean.
 
+Faces: a basin's cells on one face are a *piece* (``pieces`` in the
+record: ``face``, ``bbox``, ``area_cells``, ``tiles`` per face); refine
+runs one job per piece, and ``face`` / ``bbox`` / ``tiles`` at the top
+level are the outlet face's piece.  A cell whose downstream cell lies on
+another face is an ``exit`` of kind ``"face"`` of its piece (still inside
+the basin): refine's per-face flood drains there.
+
 Outputs: ``basin_id`` (i32, -1 ocean), ``graph/basins.json`` (DEVELOPING.md
-schema plus ``outlet_downstream``, ``exits``, ``exit_kinds``,
-``undersized_reason``, ``basin_max_cells`` / ``basin_min_cells``).
+schema plus ``outlet_downstream``, ``exits``, ``exit_kinds``, ``pieces``,
+``faces``, ``undersized_reason``, ``basin_max_cells`` / ``basin_min_cells``).
 """
 from __future__ import annotations
 
@@ -40,7 +47,7 @@ import numpy as np
 from numba import njit
 
 from ..field import FaceField
-from .d8 import OCEAN, cid_fij, downstream_table, neighbor_cid
+from .d8 import D8_DI, D8_DJ, OCEAN, cid_fij, downstream_table, is_neighbor, neighbor_cid
 from .routing import channel_network, topological_order
 from .run import river_threshold_volume
 
@@ -134,25 +141,47 @@ def _boundary_pairs(label3):
 
 
 @njit(cache=True)
-def _cross_face_land_contact(bid, owner, N, H, nb):
-    """out[b] = True if basin b has a cell whose D8 neighbour across a
-    cube-face edge is land (basin id >= 0).  Only face-border cells can."""
-    out = np.zeros(nb, dtype=np.bool_)
+def _cross_face_boundary_pairs(label3, owner, N, H):
+    """Cross-face counterpart of :func:`_boundary_pairs`: label pairs of
+    D8-adjacent land cells on *different* faces (only face-border cells
+    have such neighbours), weight 2 for a shared edge and 1 for a diagonal
+    contact, so a sliver on one face ranks its neighbour across the edge
+    like one beside it.  A contact is counted once, from its lower cell id
+    (the cross-face neighbour map is symmetric on the cubed sphere; a
+    one-way link is counted from the side that sees it)."""
     NN = N * N
+    cap = 6 * 4 * N * 8
+    a = np.empty(cap, dtype=np.int64)
+    b = np.empty(cap, dtype=np.int64)
+    w = np.empty(cap, dtype=np.int64)
+    n = 0
     for f in range(6):
         for i in range(N):
             for j in range(N):
                 if i != 0 and i != N - 1 and j != 0 and j != N - 1:
                     continue
-                x = bid[(f * N + i) * N + j]
+                x = label3[f, i, j]
                 if x < 0:
                     continue
+                c = (f * N + i) * N + j
                 for k in range(8):
                     q = neighbor_cid(owner, N, H, f, i, j, k)
-                    if q // NN != f and bid[q] >= 0:
-                        out[x] = True
-                        break
-    return out
+                    f2 = q // NN
+                    if f2 == f:
+                        continue
+                    r = q - f2 * NN
+                    i2 = r // N
+                    j2 = r - i2 * N
+                    y = label3[f2, i2, j2]
+                    if y < 0 or y == x:
+                        continue
+                    if q < c and is_neighbor(owner, N, H, f2, i2, j2, c):
+                        continue  # counted from the other side
+                    a[n] = min(x, y)
+                    b[n] = max(x, y)
+                    w[n] = 2 if (D8_DI[k] == 0 or D8_DJ[k] == 0) else 1
+                    n += 1
+    return a[:n], b[:n], w[:n]
 
 
 # --------------------------------------------------------------------------
@@ -185,9 +214,8 @@ def partition(flow_dir, grid, basin_max_cells: int, basin_min_cells: int, lake=N
     topo = topological_order(down, land)  # upstream first; raises on cycles
     topo_pos = np.full(M, -1, dtype=np.int64)
     topo_pos[topo] = np.arange(topo.size)
-    cell_face = np.arange(M) // NN
     dn = np.maximum(down, 0)
-    cut = land & ((down < 0) | ~land[dn] | (cell_face[dn] != cell_face))
+    cut = land & ((down < 0) | ~land[dn])  # outlets: the last land cell before the sea, on whatever face
     label = _label_outlets(down, topo, cut)  # cut-cell id per cell, -1 ocean
     lk = np.zeros(M, dtype=bool) if lake is None else np.ascontiguousarray(lake, dtype=bool).reshape(-1)
     info = {"n_initial": int(cut.sum())}
@@ -246,7 +274,10 @@ def partition(flow_dir, grid, basin_max_cells: int, basin_min_cells: int, lake=N
     K = len(ids)
     area_k = np.bincount(lab[land], minlength=K).astype(np.int64)
     outlet_k = np.array([outlet_of[b] for b in ids], dtype=np.int64)
-    pa, pb, pw = _boundary_pairs(lab.reshape(6, N, N))
+    lab3 = lab.reshape(6, N, N)
+    pa, pb, pw = _boundary_pairs(lab3)
+    xa, xb, xw = _cross_face_boundary_pairs(lab3, grid.owner, N, H)
+    pa, pb, pw = np.concatenate([pa, xa]), np.concatenate([pb, xb]), np.concatenate([pw, xw])
     key = pa * K + pb
     uk, inv = np.unique(key, return_inverse=True)
     cnt = np.bincount(inv, weights=pw).astype(np.int64)
@@ -325,7 +356,7 @@ def partition(flow_dir, grid, basin_max_cells: int, basin_min_cells: int, lake=N
 
     # ---- final ids ----------------------------------------------------------
     roots = np.unique(root)
-    # order by (face, outlet i, outlet j)
+    # order by (outlet face, outlet i, outlet j)
     ofij = np.array([cid_fij(int(outlet_k[r]), N) for r in roots], dtype=np.int64).reshape(-1, 3)
     order_idx = np.lexsort((ofij[:, 2], ofij[:, 1], ofij[:, 0]))
     roots = roots[order_idx]
@@ -343,15 +374,18 @@ def partition(flow_dir, grid, basin_max_cells: int, basin_min_cells: int, lake=N
     order_cells = np.argsort(b_of, kind="stable")
     bounds = np.searchsorted(b_of[order_cells], np.arange(nb_final + 1))
     co = np.zeros(M, dtype=np.int16) if cell_order is None else np.ascontiguousarray(cell_order, dtype=np.int16).reshape(-1)
-    # exit cells: downstream is ocean, another face or another basin
+    # exit cells: downstream is ocean, another basin, or another face (the
+    # last cell of a face piece: still inside the basin, but refine's
+    # per-face job drains and sinks there)
     d_l = down[land_idx]
     d_ok = np.maximum(d_l, 0)
-    is_exit = (d_l < 0) | (bid[d_ok] != b_of)
-    exit_kind = np.where((d_l < 0) | (bid[d_ok] < 0), 0, np.where(d_ok // NN != ff, 1, 2))  # ocean / face / basin
+    is_exit = (d_l < 0) | (bid[d_ok] != b_of) | (d_ok // NN != ff)
+    # ocean > basin > face: a split outlet whose downstream cell lies on
+    # another face drains into another basin, and is a basin exit, not a
+    # face exit (a face exit is inside its basin by definition)
+    exit_kind = np.where((d_l < 0) | (bid[d_ok] < 0), 0, np.where(bid[d_ok] != b_of, 2, 1))  # ocean / face / basin
     KINDS = ("ocean", "face", "basin")
-    edge_contact = _cross_face_land_contact(bid, grid.owner, N, H, nb_final)
     basins = []
-    N_fine = N * R
     for b in range(nb_final):
         sel = order_cells[bounds[b] : bounds[b + 1]]
         r = roots[b]
@@ -365,28 +399,34 @@ def partition(flow_dir, grid, basin_max_cells: int, basin_min_cells: int, lake=N
         else:
             downstream_cell = None
             downstream_basin = -1
-        bi = ii[sel]
-        bj = jj[sel]
-        tx0 = (bi * R) // T
-        tx1 = ((bi + 1) * R - 1) // T
-        ty0 = (bj * R) // T
-        ty1 = ((bj + 1) * R - 1) // T
-        tiles = set()
-        for x0, x1, y0, y1 in zip(tx0.tolist(), tx1.tolist(), ty0.tolist(), ty1.tolist()):
-            for x in range(x0, x1 + 1):
-                for y in range(y0, y1 + 1):
-                    tiles.add((x, y))
+        # per-face pieces (sel is in cell-id order, so already grouped by face)
+        pieces = []
+        for f in np.unique(ff[sel]).tolist():
+            ps = sel[ff[sel] == f]
+            bi = ii[ps]
+            bj = jj[ps]
+            pieces.append(
+                {
+                    "face": int(f),
+                    "bbox": [int(bi.min()), int(bj.min()), int(bi.max()) + 1, int(bj.max()) + 1],
+                    "area_cells": int(ps.size),
+                    "tiles": _tiles(bi, bj, R, T),
+                }
+            )
+        outlet_piece = next(p for p in pieces if p["face"] == int(of))
         rec = {
             "id": b,
             "parent": downstream_basin,
             "face": int(of),
+            "faces": [p["face"] for p in pieces],
             "outlet": [int(of), int(oi), int(oj)],
             "outlet_downstream": downstream_cell,
             "downstream_basin": downstream_basin,
             "area_cells": int(sel.size),
-            "bbox": [int(bi.min()), int(bj.min()), int(bi.max()) + 1, int(bj.max()) + 1],
+            "bbox": outlet_piece["bbox"],
             "order": int(co[oc]),
-            "tiles": sorted(list(t) for t in tiles),
+            "tiles": outlet_piece["tiles"],
+            "pieces": pieces,
         }
         ex = sel[is_exit[sel]]  # cell-id order = (f, i, j) order
         ex_c = land_idx[ex]
@@ -396,17 +436,32 @@ def partition(flow_dir, grid, basin_max_cells: int, basin_min_cells: int, lake=N
         rec["exits"] = [[int(ff[e]), int(ii[e]), int(jj[e])] for e in ex]
         rec["exit_kinds"] = [KINDS[int(exit_kind[e])] for e in ex]
         if sel.size < basin_min_cells:
-            why = reason.get(int(r), "max")
-            if why == "island" and edge_contact[b]:
-                why = "edge"
-            rec["undersized_reason"] = why
+            rec["undersized_reason"] = reason.get(int(r), "max")
         basins.append(rec)
     info["n_basins"] = nb_final
     info["n_undersized"] = sum(1 for b in basins if "undersized_reason" in b)
-    info["undersized_reasons"] = {k: sum(1 for b in basins if b.get("undersized_reason") == k) for k in ("island", "edge", "max")}
+    info["undersized_reasons"] = {k: sum(1 for b in basins if b.get("undersized_reason") == k) for k in ("island", "max")}
     info["n_multi_exit"] = sum(1 for b in basins if len(b["exits"]) > 1)
+    info["n_multi_face"] = sum(1 for b in basins if len(b["pieces"]) > 1)
+    info["n_pieces"] = sum(len(b["pieces"]) for b in basins)
+    info["cells_in_multi_face_basins"] = sum(b["area_cells"] for b in basins if len(b["pieces"]) > 1)
     info["max_area"] = max((b["area_cells"] for b in basins), default=0)
     return Partition(basin_id.reshape(6, N, N), basins, info)
+
+
+def _tiles(bi, bj, R, T) -> list[list[int]]:
+    """Sorted LOD-0 tile coordinates ``[x, y]`` (tiles of ``T`` fine cells,
+    face refined ``R x``) touched by the coarse cells ``(bi, bj)``."""
+    tx0 = (bi * R) // T
+    tx1 = ((bi + 1) * R - 1) // T
+    ty0 = (bj * R) // T
+    ty1 = ((bj + 1) * R - 1) // T
+    tiles = set()
+    for x0, x1, y0, y1 in zip(tx0.tolist(), tx1.tolist(), ty0.tolist(), ty1.tolist()):
+        for x in range(x0, x1 + 1):
+            for y in range(y0, y1 + 1):
+                tiles.add((x, y))
+    return sorted(list(t) for t in tiles)
 
 
 def _areas(label, land):
@@ -440,7 +495,8 @@ def run(store, params, log=print) -> dict:
     log(
         f"[watersheds] {info['n_basins']} basins from {info['n_initial']} outlets "
         f"({info['n_splits']} splits, {info['n_merges']} merges, {info['n_undersized']} undersized {info['undersized_reasons']}, "
-        f"{info['n_multi_exit']} multi-exit, max {info['max_area']} cells) in {info['t_total_s']:.1f}s"
+        f"{info['n_multi_exit']} multi-exit, {info['n_multi_face']} on more than one face ({info['n_pieces']} face pieces, "
+        f"{info['cells_in_multi_face_basins']} cells), max {info['max_area']} cells) in {info['t_total_s']:.1f}s"
     )
     return info
 
