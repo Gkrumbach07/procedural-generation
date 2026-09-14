@@ -611,7 +611,7 @@ def run_iteration(
                 float(ep.slope_saturation),
                 float(ep.erodibility),
                 cell_units(ep, "cover_depth", state.height_unit_m),
-                cell_units(ep, "min_volume", state.height_unit_m),
+                float(ep.min_volume_frac) * float(volume0),
                 int(max_steps),
                 cell_units(ep, "max_erode", state.height_unit_m),
                 float(chunk / (volume0 * P)),

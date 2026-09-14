@@ -7,13 +7,14 @@ connectivity, relief and lakes (docs/zoom-windows.md).
     python scripts/window_bake.py --world worlds/earth-v9 --outlet 5 58 868 \
         --R 2 8 32 --iters 150 --out scratch/window/runs
     python scripts/window_bake.py --world worlds/earth-v9 --outlet 5 67 873 \
-        --R 128 --detail-amp 3 --erosion min_volume=1e-6 --save --out ...
+        --R 128 --iters 60 --relief drainage --no-block-drift --erosion creep_rate=0 --save --out ...
 
 The window is the D8 catchment upstream of ``--outlet`` (face, i, j on the
 coarse grid), confined to one face, handed to ``refine.basin_job._run_basin``
-as a synthetic basin whose only exit is the outlet cell.  Nothing in the
-kernel is changed: this measures what the existing refine machinery does at
-finer R.
+as a synthetic basin whose only exit is the outlet cell.  ``--relief
+drainage`` swaps the job's detail noise for ``scripts/drainage_relief.py``
+and ``--no-block-drift`` its per-coarse-cell drift correction (both
+monkeypatched in: prototypes, not the refine stage).
 """
 import argparse
 import json
@@ -89,6 +90,16 @@ def channel_metrics(q, active, cell_km, per_km2, outlet_cells):
     return out
 
 
+def block_drift_stats(delta, act, R):
+    """|mean(surface - plain upsample)| per coarse cell (fully active blocks):
+    how far the refined surface left the parent at the parent's own scale."""
+    n = (delta.shape[0] // R) * R
+    d = np.where(act, delta, 0.0)[:n, :n].reshape(n // R, R, n // R, R)
+    c = act[:n, :n].reshape(n // R, R, n // R, R).sum(axis=(1, 3))
+    m = np.abs(d.sum(axis=(1, 3)) / np.maximum(c, 1))[c == R * R]
+    return [round(float(x), 1) for x in (np.percentile(m, [50, 90]).tolist() + [m.max()])] if m.size else []
+
+
 def relief_stats(surf, act, cell_m, L_m):
     """Local relief (max - min) in a square of side L_m around each active
     cell: the p50 / p90 over the catchment, metres."""
@@ -144,6 +155,10 @@ def main():
     ap.add_argument("--tag", default="")
     ap.add_argument("--detail-amp", type=float, default=None)
     ap.add_argument("--erosion", nargs="*", default=[], help="erosion overrides k=v (floats)")
+    ap.add_argument("--relief", choices=["noise", "drainage"], default="noise")
+    ap.add_argument("--no-block-drift", action="store_true", help="skip the job's per-coarse-cell drift correction")
+    ap.add_argument("--relief-elev", type=float, default=0.1, help="drainage relief: valley depth per metre of elevation")
+    ap.add_argument("--relief-rel", type=float, default=0.5, help="drainage relief: valley depth per metre of coarse 3x3 relief")
     ap.add_argument("--save", action="store_true", help="write the window arrays (float32 npz)")
     a = ap.parse_args()
     world = Path(a.world)
@@ -196,6 +211,34 @@ def main():
             return st
 
         bj.step = step
+        real_build_mask, real_detail, real_drift = bj.build_mask, bj.detail_noise, bj.block_drift
+        if a.no_block_drift:
+            bj.block_drift = lambda delta, cells, R_, **kw: np.zeros_like(delta)
+        dstats = {}
+        if a.relief == "drainage":
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from drainage_relief import drainage_relief
+            stash = {}
+
+            def build_mask(bid_up, bid):
+                stash["bid_up"] = np.asarray(bid_up)
+                stash["mask"] = real_build_mask(bid_up, bid)
+                return stash["mask"]
+
+            def detail(win_, slope, relief, hardness, detail_amp, cell_size_m, gen, surface=None, coast_taper_m=0.0):
+                mask = stash["mask"]
+                act_ = mask == pk.MASK_ACTIVE
+                amp = (a.relief_elev * np.maximum(surface, 0.0) + a.relief_rel * np.maximum(relief, 0.0)) * (0.5 + 0.5 * np.clip(hardness, 0, 1))
+                if coast_taper_m > 0:
+                    t = np.clip(np.abs(surface) / coast_taper_m, 0, 1)
+                    amp = amp * t * t * (3 - 2 * t)
+                # drain where the job drains: the exit cells (and ocean, i.e.
+                # outside the basin, never through the frozen divide ring)
+                drain = bj.exit_cells(basin, win_, mask.shape) | (stash.get("bid_up") is not None and (stash["bid_up"] < 0))
+                Z = drainage_relief(surface, act_ | drain, drain, win_.R, cell_size_m / win_.R, gen, amp, stats=dstats)
+                return np.where(act_, Z - surface, 0.0).astype(np.float32)
+
+            bj.build_mask, bj.detail_noise = build_mask, detail
         numba.set_num_threads(min(a.threads, numba.config.NUMBA_NUM_THREADS))
         ru0 = resource.getrusage(resource.RUSAGE_SELF)
         t0 = time.time()
@@ -204,6 +247,7 @@ def main():
                                 win.H, win.n, win.NE, up_threads=numba.get_num_threads())
         finally:
             bj.step = real_step
+            bj.build_mask, bj.detail_noise, bj.block_drift = real_build_mask, real_detail, real_drift
         wall = time.time() - t0
         ru1 = resource.getrusage(resource.RUSAGE_SELF)
         cpu = (ru1.ru_utime - ru0.ru_utime) + (ru1.ru_stime - ru0.ru_stime)
@@ -236,8 +280,10 @@ def main():
             "drift_max_m": round(s["drift_max_m"], 2),
             "lakes": int(nl), "lake_area_km2": round(float(lsizes.sum()), 2),
             "lake_sizes_km2_p50_p90_max": [round(float(x), 3) for x in (np.percentile(lsizes, [50, 90]).tolist() + [lsizes.max()])] if nl else [],
+            "coarse_drift_p50_p90_max_m": block_drift_stats(surf - plain, act, R),
             "relief_3km_p50_p90_m": relief_stats(surf, act, cell_m, 3000.0),
             "relief_3km_plain_p50_p90_m": relief_stats(plain, act, cell_m, 3000.0),
+            "relief_mode": a.relief, "relief_elev": a.relief_elev, "relief_rel": a.relief_rel, "drainage_stats": dstats,
             "channels": channel_metrics(q, act, cell_m / 1000.0, float(q[outlet].max()) / (m.sum() * coarse_km ** 2), outlet),
             "convergence": conv[:: max(1, len(conv) // 30)] + conv[-1:],
         }

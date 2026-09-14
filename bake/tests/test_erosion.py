@@ -126,6 +126,27 @@ def make_window(N: int, mode: str, params: WorldParams, seed: int = 0, relief: f
     )
 
 
+def test_evaporation_floor_follows_the_spawn_volume():
+    """A fine cell spawns rain in proportion to its area, so the spawn volume
+    at R = 128 is 1/16384 of the coarse one.  The evaporation floor
+    (``erosion.min_volume_frac``) is a fraction of that spawn volume, so the
+    same window with its rain scaled down walks as far as before.  With the
+    floor as a length (the retired ``min_volume``: 0.5 m / cell size) every
+    particle of the scaled window was born below it and died of evaporation
+    at once -- the 76 m zoom window of docs/zoom-windows.md eroded nothing."""
+    p = WorldParams.small_world(0)
+    runs = {}
+    for scale in (1.0, 1.0 / 16384.0):
+        st = make_window(48, "tilt", p, seed=3)
+        st.precip *= np.float32(scale)
+        s = step(st, p, 0)
+        n = max(sum(s["deaths"].values()), 1)
+        runs[scale] = (s["steps_mean"], s["deaths"]["evap"] / n)
+    (steps1, evap1), (steps2, evap2) = runs[1.0], runs[1.0 / 16384.0]
+    assert steps2 > 0.5 * steps1 and steps2 > 5.0, runs
+    assert evap2 <= evap1 + 0.05, runs
+
+
 def channel_mask(state: ErosionState) -> np.ndarray:
     """Top 5 % discharge cells of the land (window face 0)."""
     q = state.discharge[state.interior][0]

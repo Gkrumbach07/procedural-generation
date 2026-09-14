@@ -274,7 +274,8 @@ class ErosionParams:
     thermal_max: float = 50.0  # cap on the material a cell sheds per thermal pass (cell units): a tectonic cliff relaxes at a bounded rate instead of collapsing in one iteration
     talus_slope_soft: float = 0.6  # rise/run
     talus_slope_hard: float = 1.2
-    min_volume: float = 0.5  # ★
+    min_volume: float = 0.5  # retired, ignored: kept only so manifests written before `min_volume_frac` still load.  It was a length (metres, divided by the cell size) standing in for a *volume*, which shrinks with the cell area: at 76 m cells every particle was born below it and died in 3 steps (docs/zoom-windows.md)
+    min_volume_frac: float = 5e-5  # a particle dies of evaporation once its volume falls below this fraction of the iteration's spawn volume.  Relative, so it means the same at every cell size: the spawn volume is the rain per cell over particles per cell, which scales with the cell area.  5e-5 is the margin the old 0.5 m had on the earth preset's 9.8 km grid (earth-v9: spawn volume 0.91, 0.5 / 9773 = 5.1e-5 cell units = 5.6e-5 of it) -- ln(1 / 5e-5) / (dt * evap_rate) ~ 8,300 steps at evap 1, past max_steps, so the planet pass is unchanged in practice
     max_steps: int = 0  # 0 -> 2 * N
     checkpoint_every: int = 50
     quicklook_every: int = 50
@@ -342,7 +343,7 @@ class ErosionParams:
 #: ``fan_slope``), rates and ratios are genuinely dimensionless and carry over
 #: untouched.
 LENGTH_PARAMS_M = ("cover_depth", "max_erode", "iter_erode", "iter_deposit",
-                   "thermal_max", "fan_room", "min_volume", "route_eps",
+                   "thermal_max", "fan_room", "route_eps",
                    "glacial_rate", "glacial_max", "uplift_max_m")
 
 

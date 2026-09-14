@@ -109,3 +109,93 @@ spacing (the detail-10 and 76 m quicklooks).
 
 Iteration count (6) and per-level erosion constants come after these: none
 of the measured problems were about how long erosion ran.
+
+## Item 1 done: the evaporation floor follows the spawn volume
+
+`erosion.min_volume_frac` (5e-5 of the iteration's spawn volume) replaces
+`min_volume` (retired, ignored, kept so old manifests load), and
+`KERNEL_VERSION` is 10. 5e-5 is the margin the old floor had on earth-v9's
+planet grid (spawn volume 0.91, floor 5.1e-5 cell units = 5.6e-5 of it), so
+the planet pass is unchanged in practice. `test_evaporation_floor_follows_the_spawn_volume`
+steps one window with its rain at 1 and at 1/16384 (R = 128) and requires
+the scaled one to walk at least half as far without more evaporation deaths;
+with the old floor it walked 2.9 steps against 34 and 97 % of its particles
+evaporated.
+
+## Item 2, first prototype: relief that drains, measured
+
+`scripts/drainage_relief.py`, swapped in for the job's detail noise with
+`window_bake.py --relief drainage`:
+
+1. perturb the plain upsample with smooth fbm (0.35 x the amplitude);
+2. priority-flood it towards the job's own drains (the exit cells and
+   the sea -- the first try drained through the frozen divide ring, which
+   the job treats as a wall, and ponded 600 lakes against it);
+3. accumulate upstream area along the flood tree;
+4. carve each cell by a depth rising with log upstream area, to the
+   amplitude at one coarse cell of area: a child never has more area than
+   its parent or a lower filled level, so the carve cannot make a pit;
+5. subtract a Gaussian low-pass (sigma one coarse cell) of the change to
+   hold the parent's elevation, then raise any cell below its parent + 1 cm.
+
+Amplitude: 0.1 x elevation + 0.5 x the coarse 3x3 relief, times
+(0.5 + 0.5 hardness), faded at the coast.
+
+**Before erosion it drains.** trib at 305 m, 0 iterations: 7 lakes (the
+catchment's own) with the job's drift correction off, relief over 3 km
+190 / 350 m (p50 / p90) against the plain upsample's 29 / 43. With the drift
+correction on, the same surface has **190** lakes: `block_drift`'s bilinear
+per-coarse-cell correction cuts pits into a surface that has relief at the
+coarse-cell scale (item 4).
+
+**Erosion halves that relief and puts the pits back within five
+iterations**, and no knob tried takes the pits out (trib, 305 m, drift
+correction off; 0 iterations is 190 / 350 m and 7 lakes):
+
+| erosion | iterations | relief 3 km | lakes / km^2 | pit deaths | ≥100 km^2 channels on the outlet's network |
+|---|---|---|---|---|---|
+| shipped | 5 | 96 / 152 m | 570 / 674 | 20 % | 100 % |
+| shipped | 150 | 37 / 65 m | 100 / 100 | 6 % | 72 % |
+| creep 0 | 40 | 108 / 178 m | 995 / 1,267 | 17 % | 85 % |
+| creep 0 | 150 | 86 / 145 m | 774 / 669 | 13 % | 75 % |
+| creep 0, thermal 0.1 | 150 | 85 / 145 m | 715 / 676 | 14 % | 68 % |
+| creep 0, routing flood every iteration | 60 | 107 / 186 m | 933 / 1,285 | 15 % | 49 % |
+| creep 0, `iter_deposit` 5 m | 60 | 110 / 183 m | 903 / 1,031 | 22 % | 69 % |
+| creep 0, `deposition_rate` 0.02 | 60 | 139 / 229 m | 834 / 1,188 | 21 % | 58 % |
+| creep 0, metre caps x 305 / 9773 | 60 | 147 / 274 m | 488 / 469 | 34 % | 25 % |
+
+Creep is what wears the relief away (37 against 86 m after 150 iterations):
+it is a diffusion in cell units, so at any cell size it erases features a
+few cells wide. Without it the pits stay, and neither refreshing the
+routing surface every iteration, nor less deposition, nor caps scaled to
+the cell removes them -- so they are not sediment dams the router fails to
+see. Where in the kernel they come from is the next thing to find.
+
+**At 76 m** (trib, creep 0, drift correction off, 60 iterations), against the
+noise run above:
+
+| | relief 3 km | lakes (median size) | pit deaths | ≥100 km^2 channels on the outlet's network | CPU µs / cell / it |
+|---|---|---|---|---|---|
+| detail noise 3 | 52 / 121 m | 663 (0.017 km^2) | 62 % | 26 % | 5.8 |
+| drainage relief | 69 / 101 m | **10,670** (0.017 km^2) | 37 % | 52 % | 12.6 |
+
+The numbers improve and the picture gets worse. Pit deaths fall and twice
+as much of the network reaches the outlet, but the surface is fine parallel
+grooves peppered with 1-3-cell lakes: on a smooth regional ramp the flood
+tree's flow lines run parallel, and carving each cell by its own upstream
+area cuts a one-cell groove along each instead of branching valleys. The
+routing noise is too weak to make flow converge, and a valley has no
+cross-section -- its depth is a per-cell function of area, not of distance
+from a channel. Longer walks (509 steps) also doubled the cost per cell.
+
+### What the next prototype needs
+
+* valleys with a cross-section: depth from distance to the channel network
+  at a few stream orders, width growing with upstream area, rather than a
+  per-cell function of area;
+* routing noise at the coarse-cell wavelength strong enough to make flow
+  converge into a branching network before carving;
+* the kernel's pit source found (a death-cell census of where particles
+  die in pits and what the terrain did there in the preceding iterations);
+* a drift correction that does not print pits (item 4), e.g. the Gaussian
+  low-pass the relief step already uses.
