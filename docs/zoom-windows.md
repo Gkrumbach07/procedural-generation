@@ -216,9 +216,9 @@ trib at 305 m, drainage relief, creep 0, drift correction off:
 | 4 | 1,430 | 585 | 97 % | 7.5 m | 7.3 / 45 m |
 | 8 | 1,338 | 438 | 92 % | 3.2 m | 10 / 61 m |
 
-**The pits are dams built by the particle pass**: under 3 % are dug, the
-thermal pass makes essentially none, and a depression's rim goes up tens
-of metres in a single iteration. Ruled out, each by measurement on the same
+**The pits are dams built by the particle pass**: under 3 % are dug, dams
+by the thermal pass are 1-6 %, and a depression's rim goes up tens of
+metres in a single iteration. Ruled out, each by measurement on the same
 census:
 
 | candidate | test | new depressions, iteration 1 |
@@ -242,7 +242,8 @@ off the hillslopes and onto the valley floors -- the per-iteration caps
 are metres, which bind hard on the planet grid (9.8 km cells) and barely
 at all here -- and a particle that meets the resulting bar climbs for
 `pit_steps` and dies, dropping its load into the pit behind it, so a dam
-never gets incised. The planet pass has machinery for exactly this that
+never gets incised (reasoning from the 13-22 % pit-death shares, not traced
+particle by particle). The planet pass has machinery for exactly this that
 windows do not use: `ErosionState.refresh_lakes` turns every depression
 into a lake with a level, particles cross it without touching the bed and
 drop their load at its shore, and an overflowing lake spills downstream.
