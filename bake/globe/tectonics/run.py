@@ -499,7 +499,7 @@ def ridge_buoyancy(seg, tp) -> np.ndarray:
     """
     tau = max(float(tp.ridge_age), 1.0)
     b = float(tp.ridge_height) * np.maximum(0.0, 1.0 - np.sqrt(np.maximum(seg.age, 0.0) / tau))
-    return np.where(seg.kind == OCEANIC, b, 0.0)
+    return np.where(seg.kind == OCEANIC, b - float(tp.abyss_depth), 0.0)
 
 
 def sea_level(bed, area, continental, params) -> float:

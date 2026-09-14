@@ -727,6 +727,40 @@ def test_datum_is_held_through_the_run(scratch):
     assert abs(hinfo["land_fraction"] - p.world.land_fraction) < 0.02
 
 
+def test_shelf_mode_holds_the_bedrock_land_fraction(scratch):
+    """In shelf mode (``tectonics.shelf_fraction > 0``) the land area is an
+    output of tectonics, so erosion and hydro hold the bedrock's own land
+    fraction (``maps.datum_land_fraction``) instead of forcing
+    ``world.land_fraction`` onto it: holding 30 % lifted seed 0's 24 %-land
+    Earth by ~550 m (docs/ocean-depth.md).  The stub bedrock is lowered to
+    18 % land, far enough from 30 % that either rule is unmistakable."""
+    p = WorldParams.tiny_world(3).with_overrides(tectonics={"shelf_fraction": 0.275})
+    p.erosion = dataclasses.replace(p.erosion, iterations=10, checkpoint_every=0, quicklook_every=0, resume=False)
+    store = _stub_world(scratch, "erosion_shelf_datum", p)
+    grid = p.coarse_grid()
+    bed = store.load_field("bedrock", grid)
+    bed.data -= np.float32(np.quantile(bed.interior, 1.0 - 0.18))
+    store.save_field(bed)
+    target = float(np.mean(bed.interior >= 0))
+    assert abs(target - p.world.land_fraction) > 0.1
+    assert emaps.datum_land_fraction(p, bed.interior) == target
+    assert emaps.datum_land_fraction(WorldParams.tiny_world(3), bed.interior) == p.world.land_fraction
+
+    # the replay start holds it too, not only the loop from iteration 1
+    st0 = erosion_run.build_state(store, p)
+    assert abs(float(np.mean(st0.surface()[st0.interior] >= 0)) - target) < 2.0 / bed.interior.size
+    # a shelf-mode state the driver did not build is refused, not held at 30 %
+    st0.land_target = None
+    with pytest.raises(ValueError, match="shelf mode"):
+        emaps.held_land_fraction(st0, p)
+
+    info = erosion_run.run(store, p, _log)
+    assert abs(info["land_fraction"] - target) < 0.02, (info["land_fraction"], target)
+    hinfo = hydro_run.run(store, p, _log)
+    assert hinfo["land_fraction_target"] == target
+    assert abs(hinfo["height_shift_m"]) < 5.0, hinfo["height_shift_m"]
+
+
 def _uplift_world(scratch, name: str, p: WorldParams) -> WorldStore:
     """A stub world whose uplift is the size of the real stage's: the stub
     field x1000 (~1 m/it, net positive) and a 6 x 6 belt core at 5 m/it, so

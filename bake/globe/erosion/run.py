@@ -12,14 +12,15 @@ stockpiles) is not part of the outputs; its total is reported as
 place: it left the modelled surface for the deep ocean).
 
 ``land_fraction`` (reported next to ``land_fraction_bedrock``) is held at
-``world.land_fraction`` throughout the run: uplift is applied mean-free and
+:func:`globe.erosion.maps.datum_land_fraction` throughout the run --
+``world.land_fraction``, or in shelf mode the bedrock's own land fraction: uplift is applied mean-free and
 every iteration ends with :func:`globe.erosion.maps.hold_datum`, a rigid
 shift of ``height`` onto the land-fraction order statistic of the surface.
 Without it the datum drifts (uplift is a forcing, and mass leaves the
 surface for the deep ocean), and hydro's one-shot re-quantile then drops
 sea level onto terrain that was sculpted against a different base level.
 The drift it removed is reported as ``datum_drift_m``; the residual
-``land_fraction`` differs from ``world.land_fraction`` only by the
+``land_fraction`` differs from that target only by the
 tie/rounding of a cell or two.
 
 Checkpoints: ``checkpoints/erosion_iterNNNN.npz`` (extended state arrays in
@@ -56,7 +57,7 @@ import numpy as np
 from ..config import WorldParams
 from ..field import FaceField
 from ..io.world_store import WorldStore
-from .maps import ErosionState, start_replay, step, uplift_cap
+from .maps import ErosionState, datum_land_fraction, start_replay, step, uplift_cap
 from .particle import KERNEL_VERSION, MASK_ACTIVE
 
 OUTPUTS = ["height", "sediment", "discharge", "momentum"]
@@ -210,6 +211,7 @@ def build_state(store: WorldStore, params: WorldParams, replay: bool = True) -> 
     pr = store.load_field("precip", grid)
     ev = store.load_field("evap", grid)
     state = ErosionState.from_grid(grid, bed, hard, pr, ev, upl, params.erosion)
+    state.land_target = datum_land_fraction(params, bed.interior)
     if replay:
         start_replay(state, params)
     return state

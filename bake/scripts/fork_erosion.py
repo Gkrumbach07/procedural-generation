@@ -226,7 +226,15 @@ def main() -> int:
         ck = Path(args.checkpoint) if args.checkpoint else pick_checkpoint(store, args.at)
         if not ck.exists():
             raise SystemExit(f"no such checkpoint: {ck}")
-        erun.load_checkpoint(state, ck, json.loads(ck.with_suffix(".json").read_text()))
+        meta = json.loads(ck.with_suffix(".json").read_text())
+        # the pick ignores the hash on purpose, but a checkpoint from another
+        # kernel version is another model, not another parameter set: kernel 9
+        # moved the shelf-mode datum, and a kernel-8 checkpoint of a 24 %-land
+        # Earth re-holds ~550 m lower at the fork's first iteration
+        if f":k{erun.KERNEL_VERSION}:" not in str(meta.get("params_hash", "")) + ":":
+            print(f"[fork] WARNING: {ck.name} was written by another erosion kernel version "
+                  f"(hash {meta.get('params_hash')}, running k{erun.KERNEL_VERSION}); the fork is not a like-for-like continuation")
+        erun.load_checkpoint(state, ck, meta)
     start = state.iteration
     end = start + int(args.iterations)
     # `glacial_from` is a *fraction of erosion.iterations*, so the gate in

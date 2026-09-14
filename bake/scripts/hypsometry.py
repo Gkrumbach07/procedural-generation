@@ -53,7 +53,12 @@ EARTH_BANDS = ((0, 1000, 20.9), (1000, 2000, 4.5), (2000, 3000, 2.2),
 EARTH_LAND = 29.2
 EARTH_SCALARS = (("land % of globe", "29.2"), ("land mean m", "840"),
                  ("land median m", "~350"), ("max m", "8849"),
-                 ("ocean median m", "-3700"), ("+-50 m of sea %", "1-2"))
+                 ("ocean median m", "~-4070"), ("ocean mean m", "-3688"), ("+-50 m of sea %", "1-2"))
+#: the ocean median is read off the depth half of the same classic curve (% of
+#: the surface: 0..-200 m 5.4, -1000 3.6, -2000 4.0, -3000 6.8, -4000 14.0,
+#: -5000 22.8, -6000 12.5, deeper 1.7), 7 % into the -4000..-5000 m band;
+#: -3700, which this table carried until docs/ocean-depth.md, is the ocean's
+#: *mean* depth
 
 
 def measure(bed_m, area, halo_stripped=True):
@@ -70,6 +75,7 @@ def measure(bed_m, area, halo_stripped=True):
         "land median m": float(np.percentile(bed_m[land], 50)),
         "max m": float(bed_m.max()),
         "ocean median m": float(np.percentile(bed_m[~land], 50)),
+        "ocean mean m": float((bed_m[~land] * area[~land]).sum() / area[~land].sum()),
         "+-50 m of sea %": area[np.abs(bed_m) < 50].sum() / A * 100,
     }
 

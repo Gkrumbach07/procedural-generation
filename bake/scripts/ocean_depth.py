@@ -3,8 +3,8 @@
 
     python3 scripts/ocean_depth.py <world> [<world> ...]
 
-Our ocean median runs around -2900 m after tectonics against Earth's
--3700, and the obvious reading -- "the abyssal plain is not deep enough" --
+Our ocean median ran around -2900 m after tectonics against Earth's
+~-4070 (the classic curve's median; -3700 is the mean depth), and the obvious reading -- "the abyssal plain is not deep enough" --
 conflates two different populations.  ``tectonics.shelf_fraction`` places
 sea level by drowning a fixed share of the *continental* crust, so a large
 part of what the hypsometry calls ocean is submerged continent: shelf, not
@@ -17,7 +17,9 @@ the problem: drowned continent is 15 % of the ocean by area and lifts the
 median by +124 m of an 840 m gap.  The sea floor itself sits high, and it
 cannot do otherwise -- fully subsided ocean floor is pinned at
 ``(h_ocean - sea_level) * height_scale_m`` = -4018 m, which is where Earth's
-abyssal plain *starts*.  See docs/crust-audit.md.
+abyssal plain *starts*.  See docs/crust-audit.md.  (That was the floor
+until ``tectonics.abyss_depth``, which puts fully cooled sea floor at
+GDH1's -5650 m: docs/ocean-depth.md.)
 
 Needs ``diagnostics/crust_kind`` (written by the tectonics stage; 1 =
 continental).  Worlds baked before that field existed are reported without
@@ -35,7 +37,7 @@ from globe.config import PRESETS, WorldParams  # noqa: E402
 #: Earth, for the two populations separately.  The abyssal sea floor runs
 #: -3000 to -6000 m with a median near -4300; the shelves are -200 m to 0
 #: and are ~8 % of the surface.
-EARTH = {"ocean median m": -3700, "abyssal median m": -4300, "shelf % of globe": 8.0}
+EARTH = {"ocean median m": -4070, "abyssal median m": -4300, "shelf % of globe": 8.0}
 
 
 def load(world: str, params: WorldParams):

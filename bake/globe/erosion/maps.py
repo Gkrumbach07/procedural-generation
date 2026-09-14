@@ -90,6 +90,7 @@ class ErosionState:
     base: np.ndarray = field(default=None, repr=False)  # float64 local base level per cell (cell units); see `refresh_base`.  0 everywhere until it is refreshed, which is exactly the old "sea = surface < 0" behaviour
     _owner: np.ndarray = field(default=None, repr=False)
     iteration: int = 0
+    land_target: float | None = None  # the land fraction `hold_datum` holds (`datum_land_fraction`, set by erosion.run.build_state); None = world.land_fraction
     deposit_on_exit: bool = False  # window mode: deposit the load at the last active cell when leaving
 
     def __post_init__(self):
@@ -809,7 +810,7 @@ def start_replay(state: ErosionState, params) -> dict | None:
     will add back over the run -- refreshes the halos, and holds the datum
     on the result (:func:`hold_datum`, a rigid shift), so the coastline
     iteration 0's sea mask and routing flood see is the reference step's at
-    ``world.land_fraction``, which is what the loop holds from iteration 1
+    the held land fraction (:func:`held_land_fraction`), which is what the loop holds from iteration 1
     on.  With no surface process the stage then ends at ``bedrock`` less a
     single global constant (the accumulated datum hold).
 
@@ -830,7 +831,7 @@ def start_replay(state: ErosionState, params) -> dict | None:
     info = {"replay_max": float(total[inter].max()), "replay_min": float(total[inter].min()),
             "land_fraction": float(np.mean((state.height + state.sediment)[inter] >= 0)), "datum_shift": 0.0}
     if isinstance(params, WorldParams):
-        info["datum_shift"] = hold_datum(state, params.world.land_fraction)
+        info["datum_shift"] = hold_datum(state, held_land_fraction(state, params))
     return info
 
 
@@ -916,6 +917,39 @@ def apply_isostasy(state: ErosionState, params) -> dict:
     return {"sigma_cells": sig, "diffusion_steps": n, "kappa": kappa, "load_abs_cells": moved,
             "rebound_max": float((f.data[state.interior] - mean).max()),
             "rebound_min": float((f.data[state.interior] - mean).min())}
+
+
+def datum_land_fraction(params: WorldParams, bedrock) -> float:
+    """The land fraction the planetary datum is held at, erosion and hydro.
+
+    ``world.land_fraction`` while ``tectonics.shelf_fraction`` is 0.  In
+    shelf mode tectonics places sea level against the continental crust and
+    the land area is an output (:class:`globe.config.WorldGroup`,
+    docs/crust-types.md), so the hold keeps the area tectonics produced: the
+    share of cells whose ``bedrock`` is at or above 0 (any units -- only the
+    sign is read; unused, and may be None, with shelf mode off).  A share of
+    *cells*, the order statistic the hold works on, not of area:
+    `scripts/hypsometry.py`'s "land % of globe" is area-weighted and reads
+    ~0.8 points lower on the Earth grid.  Holding ``world.land_fraction`` there instead re-placed
+    sea level on every seed: it lifted seed 0's 24 %-land Earth by ~550 m
+    and lowered seeds 1-3 (34-36 %), and against a sea floor at its
+    half-space depth it lifted seed 0 by ~1 km (docs/ocean-depth.md)."""
+    if float(params.tectonics.shelf_fraction) > 0.0:
+        return float(np.mean(np.asarray(bedrock) >= 0))
+    return float(params.world.land_fraction)
+
+
+def held_land_fraction(state: ErosionState, params: WorldParams) -> float:
+    """``state.land_target`` when the driver set it, else ``world.land_fraction``
+    -- which is the wrong rule in shelf mode, so a shelf-mode state that was
+    not built by :func:`globe.erosion.run.build_state` is refused rather
+    than held at a sea level tectonics did not put there."""
+    if state.land_target is not None:
+        return float(state.land_target)
+    if float(params.tectonics.shelf_fraction) > 0.0:
+        raise ValueError("shelf mode holds the bedrock's land fraction: set state.land_target "
+                         "(erosion.maps.datum_land_fraction) or build the state with erosion.run.build_state")
+    return float(params.world.land_fraction)
 
 
 def hold_datum(state: ErosionState, land_fraction: float) -> float:
@@ -1025,7 +1059,7 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
     if iso and (state.iteration + 1) % max(int(getattr(ep, "isostasy_every", 10)), 1) == 0:
         st["isostasy"] = apply_isostasy(state, params)
     if state.spherical and isinstance(params, WorldParams):
-        st["datum_shift"] = hold_datum(state, params.world.land_fraction)
+        st["datum_shift"] = hold_datum(state, held_land_fraction(state, params))
     state.exchange_halos()
     state.iteration += 1
     if st_base is not None:

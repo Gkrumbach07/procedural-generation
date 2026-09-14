@@ -11,8 +11,9 @@ Outputs: ``water_surface`` (f32, 0 on ocean), ``flow_dir`` (u8, 255 ocean),
 ``flow_acc`` (f32 accumulated precip volume), ``graph/drainage.json``,
 ``graph/lakes_coarse.json`` (``graph/lakes.json`` is derive's fine
 version; consumers that run before derive read the coarse file).  With ``hydro.requantile_land_fraction`` the stage
-also shifts ``height`` (not ``sediment``) so that exactly
-``world.land_fraction`` of the coarse cells have ``surface >= 0`` and
+also shifts ``height`` (not ``sediment``) so that exactly the land fraction
+erosion held (:func:`globe.erosion.maps.datum_land_fraction`: ``world.land_fraction``,
+or in shelf mode the bedrock's own) of the coarse cells have ``surface >= 0`` and
 writes ``height`` back (not listed in ``OUTPUTS`` — it is an upstream
 field that must survive ``clear_outputs``).
 """
@@ -124,12 +125,17 @@ def run(store, params, log=print) -> dict:
 
     # 1. sea level
     if hp.requantile_land_fraction:
-        new_h, shift = requantile_height(h.interior, sed.interior, params.world.land_fraction)
+        # the fraction erosion held (erosion.maps.datum_land_fraction)
+        from ..erosion.maps import datum_land_fraction
+        bed = store.load_field("bedrock", grid).interior if params.tectonics.shelf_fraction > 0 else None
+        target = datum_land_fraction(params, bed)
+        new_h, shift = requantile_height(h.interior, sed.interior, target)
         h.interior[...] = new_h
         h.exchange_halos()
         store.save_field(h)
         info["height_shift_m"] = float(shift)
-        log(f"[hydro] re-quantiled height: shift {shift:+.2f} m so land fraction = {params.world.land_fraction}")
+        info["land_fraction_target"] = target
+        log(f"[hydro] re-quantiled height: shift {shift:+.2f} m so land fraction = {target:.4f}")
     surface = (h.interior + sed.interior).astype(np.float32)
     # the sea is what the sea is connected to; a closed basin below sea level
     # is land with a lake in it (see `open_ocean`)
