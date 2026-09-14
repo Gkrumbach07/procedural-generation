@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""One catchment of a baked world refined at R = 2 / 8 / 32 / 128 (4.9 km /
+1.2 km / 305 m / 76 m on the earth preset; R must be a power of two), through
+the refine stage's own basin job, measuring cost, convergence, river
+connectivity, relief and lakes (docs/zoom-windows.md).
+
+    python scripts/window_bake.py --world worlds/earth-v9 --outlet 5 58 868 \
+        --R 2 8 32 --iters 150 --out scratch/window/runs
+    python scripts/window_bake.py --world worlds/earth-v9 --outlet 5 67 873 \
+        --R 128 --detail-amp 3 --erosion min_volume=1e-6 --save --out ...
+
+The window is the D8 catchment upstream of ``--outlet`` (face, i, j on the
+coarse grid), confined to one face, handed to ``refine.basin_job._run_basin``
+as a synthetic basin whose only exit is the outlet cell.  Nothing in the
+kernel is changed: this measures what the existing refine machinery does at
+finer R.
+"""
+import argparse
+import json
+import os
+import resource
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+from scipy import ndimage
+
+sys.path.insert(0, os.environ.get("BAKE") or os.path.join(os.path.dirname(__file__), ".."))
+import numba  # noqa: E402
+
+from globe.config import WorldParams  # noqa: E402
+from globe.erosion import particle as pk  # noqa: E402
+from globe.io.world_store import WorldStore  # noqa: E402
+from globe.refine import basin_job as bj  # noqa: E402
+from globe.refine.upsample import basin_window  # noqa: E402
+
+D8 = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
+BID = 900_000
+
+
+def catchment(world: Path, f: int, oi: int, oj: int) -> np.ndarray:
+    fd = np.load(world / "coarse" / f"flow_dir.f{f}.npy").astype(np.int64)
+    N = fd.shape[0]
+    di = np.array([d[0] for d in D8]); dj = np.array([d[1] for d in D8])
+    ii, jj = np.meshgrid(np.arange(N), np.arange(N), indexing="ij")
+    ok = fd < 8
+    k = np.minimum(fd, 7)
+    ti, tj = ii + di[k], jj + dj[k]
+    inside = ok & (ti >= 0) & (ti < N) & (tj >= 0) & (tj < N)
+    down = np.where(inside, ti * N + tj, -1).ravel()
+    up = np.zeros(N * N, bool)
+    up[oi * N + oj] = True
+    while True:
+        nxt = (down >= 0) & up[np.maximum(down, 0)] & ~up
+        if not nxt.any():
+            return up.reshape(N, N)
+        up |= nxt
+
+
+def channel_metrics(q, active, cell_km, per_km2, outlet_cells):
+    """Channels at upstream-area thresholds.  ``per_km2`` is the outlet's
+    discharge divided by the catchment's area, so a threshold of A km^2 is
+    q > A x per_km2 whatever the discharge units, precipitation or losses."""
+    out = {}
+    area_km2 = active.sum() * cell_km ** 2
+    for A in (1000.0, 100.0, 10.0, 1.0, 0.1):
+        if A < 4.0 * cell_km ** 2:   # a threshold below a few cells' own area marks every cell
+            continue
+        thr = A * per_km2
+        ch = (q > thr) & active
+        n = int(ch.sum())
+        if n == 0:
+            out[f"{A:g}km2"] = {"channel_cells": 0}
+            continue
+        lab, nlab = ndimage.label(ch, structure=np.ones((3, 3), bool))
+        sizes = np.bincount(lab.ravel())[1:]
+        out_lab = np.unique(lab[outlet_cells & ch])
+        out_lab = out_lab[out_lab > 0]
+        conn = float(sizes[out_lab - 1].sum() / n) if out_lab.size else 0.0
+        dist = ndimage.distance_transform_edt(~ch)
+        out[f"{A:g}km2"] = {
+            "channel_cells": n,
+            "drainage_density_km_per_km2": round(n * cell_km / area_km2, 4),
+            "components": int(nlab),
+            "share_connected_to_outlet": round(conn, 4),
+            "mean_distance_to_channel_km": round(float(dist[active].mean() * cell_km), 3),
+        }
+    return out
+
+
+def relief_stats(surf, act, cell_m, L_m):
+    """Local relief (max - min) in a square of side L_m around each active
+    cell: the p50 / p90 over the catchment, metres."""
+    k = max(3, int(round(L_m / cell_m)) | 1)
+    mx = ndimage.maximum_filter(surf, size=k)
+    mn = ndimage.minimum_filter(surf, size=k)
+    r = (mx - mn)[act]
+    return [round(float(x), 1) for x in np.percentile(r, [50, 90])] if r.size else []
+
+
+def quicklook(res, path, cell_m, crop=800):
+    from PIL import Image
+
+    a = res.arrays
+    surf = (a["height"] + a["sediment"]).astype(np.float64)
+    q = a["discharge"].astype(np.float64)
+    act = a["mask"] > 0
+    lake = (a["water_surface"] - surf > 0.5) & act
+    gy, gx = np.gradient(surf, cell_m)
+    ex = 3.0
+    nrm = np.stack([-gx * ex, -gy * ex, np.ones_like(surf)], -1)
+    nrm /= np.linalg.norm(nrm, axis=-1, keepdims=True)
+    L = np.array([-0.6, 0.6, 0.75]); L /= np.linalg.norm(L)
+    shade = np.clip(nrm @ L / L[2], 0, 1.6)[..., None]
+    lo, hi = np.percentile(surf[act], [2, 99.5]) if act.any() else (0, 1)
+    t = np.clip((surf - lo) / max(hi - lo, 1), 0, 1)[..., None]
+    base = (np.array([0.33, 0.52, 0.30]) * (1 - t) + np.array([0.80, 0.74, 0.60]) * t) * shade * 0.85
+    base = np.where(act[..., None], base, base * 0.35)
+    v = np.log1p(q)
+    ql = v[act] if act.any() else v.ravel()
+    vlo, vhi = np.percentile(ql, [85, 99.7])
+    x = np.clip((v - vlo) / max(vhi - vlo, 1e-9), 0, 1)
+    x = (x * x * (3 - 2 * x))[..., None]
+    img = base * (1 - 0.9 * x) + np.array([0.16, 0.36, 0.74]) * 0.9 * x
+    img = np.where(lake[..., None], np.array([0.22, 0.42, 0.72]), img)
+    img8 = (np.clip(img, 0, 1) * 255).astype(np.uint8)
+    im = Image.fromarray(img8)
+    full = im.resize((min(1400, im.width), min(1400, im.height)), Image.BILINEAR) if im.width > 1400 else im
+    full.save(path.parent / (path.name + ".full.png"))
+    c0 = max(0, im.width // 2 - crop // 2)
+    im.crop((c0, c0, c0 + min(crop, im.width), c0 + min(crop, im.height))).save(path.parent / (path.name + ".crop.png"))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--world", required=True)
+    ap.add_argument("--outlet", type=int, nargs=3, required=True)
+    ap.add_argument("--R", type=int, nargs="+", default=[2, 10, 40])
+    ap.add_argument("--iters", type=int, default=150)
+    ap.add_argument("--halo", type=int, default=2)
+    ap.add_argument("--threads", type=int, default=20)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--tag", default="")
+    ap.add_argument("--detail-amp", type=float, default=None)
+    ap.add_argument("--erosion", nargs="*", default=[], help="erosion overrides k=v (floats)")
+    ap.add_argument("--save", action="store_true", help="write the window arrays (float32 npz)")
+    a = ap.parse_args()
+    world = Path(a.world)
+    out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
+    store = WorldStore(world)
+    base = WorldParams.from_dict(store.manifest["params"])
+    f, oi, oj = a.outlet
+    m = catchment(world, f, oi, oj)
+    idx = np.argwhere(m)
+    i0, j0 = idx.min(0); i1, j1 = idx.max(0)
+    basin = {"id": BID, "face": f, "faces": [f], "outlet": [f, oi, oj], "exits": [[f, oi, oj]],
+             "area_cells": int(m.sum()), "bbox": [int(i0), int(j0), int(i1) + 1, int(j1) + 1],
+             "pieces": [{"face": f, "bbox": [int(i0), int(j0), int(i1) + 1, int(j1) + 1], "area_cells": int(m.sum())}]}
+    print(f"catchment of {a.outlet}: {m.sum()} coarse cells, bbox {basin['bbox']}", flush=True)
+
+    grid, fields, derived = bj.coarse_inputs(world, base)
+    bid_field = fields["basin_id"]
+    H = grid.H
+    inter = bid_field.data[f, H:-H, H:-H]
+    inter[m] = BID
+    inter[(inter == BID) & ~m] = -2  # (never: BID is unused in the world)
+    bid_field.exchange_halos()
+
+    coarse_km = grid.cell_size_m / 1000.0
+    for R in a.R:
+        ro = {"halo_cells": int(a.halo), "refine_iterations": int(a.iters)}
+        if a.detail_amp is not None:
+            ro["detail_amp"] = float(a.detail_amp)
+        eo = {k: float(v) for k, v in (x.split("=") for x in a.erosion)}
+        p = base.with_overrides(world={"R": int(R)}, refine=ro, erosion=eo)
+        win = basin_window(basin, R, a.halo, face=f, N=grid.N)
+        conv = []
+        prev = {}
+
+        real_step = bj.step
+
+        def step(state, ep, it, **kw):
+            st = real_step(state, ep, it, **kw)
+            Hk = state.H
+            s = (state.height[0, Hk:-Hk, Hk:-Hk] + state.sediment[0, Hk:-Hk, Hk:-Hk]) * state.height_unit_m
+            q = state.discharge[0, Hk:-Hk, Hk:-Hk]
+            act = state.mask[0, Hk:-Hk, Hk:-Hk] == pk.MASK_ACTIVE
+            if "s" in prev:
+                conv.append({"it": it + 1,
+                             "mean_abs_dz_m": float(np.abs(s - prev["s"])[act].mean()),
+                             "rel_dq": float(np.abs(q - prev["q"])[act].sum() / max(np.abs(q)[act].sum(), 1e-12)),
+                             "steps_mean": float(st.get("steps_mean", 0.0)),
+                             "seconds": float(st.get("seconds_total", 0.0))})
+            prev["s"], prev["q"] = s.copy(), q.copy()
+            return st
+
+        bj.step = step
+        numba.set_num_threads(min(a.threads, numba.config.NUMBA_NUM_THREADS))
+        ru0 = resource.getrusage(resource.RUSAGE_SELF)
+        t0 = time.time()
+        try:
+            res = bj._run_basin(world, basin, p, None, t0, BID, p.refine, grid, fields, derived, win,
+                                win.H, win.n, win.NE, up_threads=numba.get_num_threads())
+        finally:
+            bj.step = real_step
+        wall = time.time() - t0
+        ru1 = resource.getrusage(resource.RUSAGE_SELF)
+        cpu = (ru1.ru_utime - ru0.ru_utime) + (ru1.ru_stime - ru0.ru_stime)
+        s = res.stats
+        cell_m = grid.cell_size_m / R
+        arr = res.arrays
+        act = arr["mask"] == pk.MASK_ACTIVE
+        # outlet: the fine block of the exit cell, and the frozen ring next to it
+        outlet = np.zeros(act.shape, bool)
+        a0 = (oi - win.ci0) * R; b0 = (oj - win.cj0) * R
+        outlet[max(a0 - R, 0):a0 + 2 * R, max(b0 - R, 0):b0 + 2 * R] = True
+        q, q0 = arr["discharge"].astype(np.float64), arr["discharge0"].astype(np.float64)
+        surf = arr["height"] + arr["sediment"]
+        plain = arr["height0"] + arr["sediment0"]
+        lake = (arr["water_surface"] - surf > 0.5) & (arr["mask"] > 0)
+        llab, nl = ndimage.label(lake, structure=np.ones((3, 3), bool))
+        lsizes = np.bincount(llab.ravel())[1:] * (cell_m / 1000.0) ** 2 if nl else np.array([])
+        n_it = max(s["iterations"], 1)
+        rec = {
+            "R": R, "cell_m": cell_m, "window_fine": win.n, "kernel_cells": win.NE ** 2,
+            "active_cells": s["active_cells"], "iterations": s["iterations"],
+            "wall_s": round(wall, 1), "cpu_s": round(cpu, 1), "erosion_s": round(s["seconds_erosion"], 1),
+            "upsample_s": round(s["seconds_upsample"], 1), "threads": numba.get_num_threads(),
+            "cpu_us_per_active_cell_iter": round(cpu / (s["active_cells"] * n_it) * 1e6, 3),
+            "wall_us_per_active_cell_iter": round(s["seconds_erosion"] / (s["active_cells"] * n_it) * 1e6, 3),
+            "peak_rss_mb": s["peak_rss_mb"], "steps_mean": round(s["steps_mean"], 1), "deaths": s["deaths"],
+            "particles": s["particles"], "clamped": s["clamped"],
+            "outlet_discharge_ratio": round(float(q[outlet].max() / max(q0[outlet].max(), 1e-12)), 3),
+            "detail_std_m": round(float((surf - plain)[act].std()), 2), "noise_max_m": round(s["noise_max_m"], 1),
+            "drift_max_m": round(s["drift_max_m"], 2),
+            "lakes": int(nl), "lake_area_km2": round(float(lsizes.sum()), 2),
+            "lake_sizes_km2_p50_p90_max": [round(float(x), 3) for x in (np.percentile(lsizes, [50, 90]).tolist() + [lsizes.max()])] if nl else [],
+            "relief_3km_p50_p90_m": relief_stats(surf, act, cell_m, 3000.0),
+            "relief_3km_plain_p50_p90_m": relief_stats(plain, act, cell_m, 3000.0),
+            "channels": channel_metrics(q, act, cell_m / 1000.0, float(q[outlet].max()) / (m.sum() * coarse_km ** 2), outlet),
+            "convergence": conv[:: max(1, len(conv) // 30)] + conv[-1:],
+        }
+        name = f"{a.tag}R{R}"
+        if a.save:
+            np.savez_compressed(out / f"{name}.npz", **{k: arr[k] for k in ("height", "sediment", "discharge", "water_surface", "mask", "height0", "sediment0")})
+        (out / f"{name}.json").write_text(json.dumps(rec, indent=1))
+        quicklook(res, out / f"{name}", cell_m)
+        print(f"R={R:>3} cell {cell_m:7.1f} m  window {win.n}²  active {s['active_cells']:,}  wall {wall:7.1f}s  cpu {cpu:8.1f}s  "
+              f"cpu µs/cell-it {rec['cpu_us_per_active_cell_iter']:.2f}  wall µs {rec['wall_us_per_active_cell_iter']:.3f}  "
+              f"steps {rec['steps_mean']:.0f}  outlet q ratio {rec['outlet_discharge_ratio']}  lakes {nl}  rss {s['peak_rss_mb'][-1]:.0f} MB", flush=True)
+        del res
+
+
+if __name__ == "__main__":
+    main()
