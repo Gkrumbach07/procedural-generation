@@ -361,6 +361,29 @@ cells in, which may show as a faint band, and the discharge keeps the
 face-restricted feather, so within `feather_cells` of a crossed edge a
 river drawn from discharge can sit slightly off the refined valley.
 
+### 5.5 Measured at Earth scale
+
+`scripts/face_seams.py` on `worlds/earth-v7` (before the blend) and
+`worlds/earth-v8` (with it; replay erosion as well, same tectonics):
+
+| | earth-v7 | earth-v8 |
+|---|---|---|
+| detail at 0, 1, 2 ... 9 fine cells from the seam, same basin (m) | 0, .023, .084, .171, .292, .431, .613, .796, .920, .998 | **.429**, .443, .435, .480, .568, .573, .541, .554, .648, .661 |
+| seam / first-step-inside ratio, same basin | 0.974 | 0.983 |
+| same-basin pairs across seams | 18,836 | 18,692 |
+| seam cells blended / seam pass | -- | 146,232 / 0.09 s |
+| refine basin jobs wall | 287 s | 303 s |
+
+The zero-detail seam row is gone: 0.43 m on the row that touches the edge,
+flat across the first ten rows, and the step across the seam is no larger
+than the step just inside (0.983). Both worlds' near-edge rows sit well
+below their interior averages (earth-v7 1.0 m at row 9 against 3.3 m;
+earth-v8 0.66 against 2.5), so the interior average is not the reference
+for the edge rows at this scale: the cube edges run mostly through
+lowland and ocean margin while the interior average carries the belts.
+The faint band the review worried about wants a hillshade look at a seam
+in the viewer; the numbers do not show one.
+
 ## 6. Notes
 
 * `scripts/viewer_shot.py` takes `--layer basin` (the viewer's key; there
