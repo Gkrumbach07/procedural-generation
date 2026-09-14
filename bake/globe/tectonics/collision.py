@@ -145,22 +145,142 @@ def splat(values: np.ndarray, idx: np.ndarray) -> np.ndarray:
     return np.asarray(values)[idx]
 
 
-class SmoothSplat:
-    """Gaussian-weighted blend of the ``knn`` nearest segments for every
-    interior cell: ``v(cell) = Σ w_k v_k / Σ w_k``, ``w_k = exp(-d_k² /
-    2σ²)``.  Replaces the step function of the nearest-segment splat by a
-    surface that is smooth at the segment-spacing scale while keeping
-    features one spacing wide (belts).  Query once, splat many fields."""
+#: reconstruction kernels of :class:`SmoothSplat` (``tectonics.splat_kernel``)
+SPLAT_KERNELS = ("gaussian", "wendland", "tapered")
 
-    def __init__(self, tree: cKDTree, grid: Grid, sigma: float, knn: int = 12):
-        c = interior_centers_flat(grid)
+
+def wendland_support(sigma: float, knn: int, spacing: float) -> float:
+    """Support radius ``h`` (chord, unit sphere) of the Wendland C2 kernel
+    with the same *central weight* as the Gaussian of ``sigma`` truncated to
+    the ``knn`` nearest segments of mean spacing ``spacing``.
+
+    The truncated Gaussian is renormalised over the disc of radius ``R``
+    holding ``knn`` segments (``pi R^2 = knn spacing^2``), so its peak is ``1
+    / (2 pi sigma^2 (1 - exp(-R^2 / 2 sigma^2)))``; the 2-D Wendland C2's is
+    ``7 / (pi h^2)``.  Equal peaks: ``h^2 = 14 sigma^2 (1 - exp(-R^2 / 2
+    sigma^2))``, h = 3.454 sigma at sigma = 1 spacing and knn = 12.  The
+    peak is what a feature one spacing wide keeps, so this width leaves the
+    top of the land -- and the vertical scale derived from it -- where the
+    Gaussian put it; the discrete match (equal mean nearest-neighbour
+    weight over the tect cells) lands at 3.456-3.473 sigma on `small` and
+    `tiny`.  Matching the *untruncated* Gaussian's second moment instead (h
+    = 3.795 sigma; the half-weight radius gives 3.752) is a wider kernel
+    than the one in use -- at knn = 12 the truncation leaves the Gaussian
+    1.34 sigma^2 of its 2 sigma^2 -- and it raised the vertical scale
+    15-22 % (docs/coast-fringe.md section 6).  ``spacing`` is the design
+    spacing (``sqrt(4 pi / segments)``), so ``h`` is fixed for a world and
+    does not follow the segment count through the run."""
+    r2 = int(knn) * float(spacing) ** 2 / math.pi
+    return float(sigma) * math.sqrt(14.0 * (1.0 - math.exp(-r2 / (2.0 * float(sigma) ** 2))))
+
+
+_SPLAT_CHUNK = 1 << 16
+
+
+def _wendland_chunk(tree: cKDTree, pts: np.ndarray, h: float, kk: int) -> tuple[np.ndarray, np.ndarray, int]:
+    """Wendland C2 weights (unnormalised) of the points ``pts`` from a kNN
+    list of ``kk``, re-queried at twice the count while any row's farthest
+    listed neighbour is not beyond ``h``; columns past the chunk's last
+    in-support neighbour dropped.  Returns ``(nb, w, rows short at kk)``."""
+    m = pts.shape[0]
+    short0 = -1
+    while True:
+        d, nb = tree.query(pts, k=kk, workers=-1)
+        d = np.atleast_2d(d).reshape(m, kk)
+        nb = np.atleast_2d(nb).reshape(m, kk)
+        n_short = int((d[:, -1] <= h).sum())
+        short0 = n_short if short0 < 0 else short0
+        if n_short == 0 or kk >= tree.n:
+            break
+        kk = int(min(tree.n, 2 * kk))
+    keep = max(1, int((d < h).sum(axis=1).max(initial=1)))
+    q = d[:, :keep] / h
+    np.minimum(q, 1.0, out=q)
+    w = 1.0 - q
+    np.power(w, 4, out=w)
+    q *= 4.0
+    q += 1.0
+    w *= q
+    return np.ascontiguousarray(nb[:, :keep]), w, short0
+
+
+def splat_weights(tree: cKDTree, pts: np.ndarray, sigma: float, knn: int = 12, kernel: str = "gaussian",
+                  support: float | None = None) -> tuple[np.ndarray, np.ndarray, float]:
+    """Neighbour indices and normalised weights of the reconstruction
+    kernel at the (n, 3) points ``pts``: ``(nb, w, covered)``, rows sorted
+    by distance, ``v(p) = sum_k w_k v_k``.
+
+    * ``gaussian``: ``exp(-d^2 / 2 sigma^2)`` over the ``knn`` nearest,
+      renormalised.  Truncated: at sigma = 1 spacing the 12th neighbour
+      still carries 2.6 % mean / 5.7 % max of the weight, so the value
+      jumps where a segment enters or leaves the list.
+    * ``tapered``: the same Gaussian times ``(1 - (d / d_k)^2)^2`` with
+      ``d_k`` the ``knn``-th neighbour's distance, so the last listed
+      neighbour -- the one about to be swapped -- weighs exactly zero.
+    * ``wendland``: ``(1 - d/h)^4 (4 d/h + 1)`` for ``d < h``, ``h =
+      support`` (chord; default :func:`wendland_support` at the spacing
+      implied by ``tree.n``), gathered from a kNN list that is re-queried
+      wider (per chunk of cells) while any row's farthest listed neighbour
+      is not beyond ``h``, so the whole support is always inside the list;
+      columns past the last in-support neighbour are dropped (zero-weight
+      padding keeps the rows one width).
+
+    ``covered`` is the share of rows whose first kNN list already covered
+    the support (1.0 for the other kernels).  The nearest neighbour always
+    counts (a point with nothing in support takes its value)."""
+    if kernel not in SPLAT_KERNELS:
+        raise ValueError(f"tectonics.splat_kernel must be one of {SPLAT_KERNELS} (got {kernel!r})")
+    n = pts.shape[0]
+    sigma = float(sigma)
+    covered = 1.0
+    if kernel == "wendland":
+        h = wendland_support(sigma, knn, math.sqrt(4.0 * math.pi / tree.n)) if support is None else float(support)
+        # segments in the support disc at the mean density n_seg / 4 pi, with
+        # headroom for the Poisson-disc packing's local fluctuation
+        expect = h * h * tree.n / 4.0
+        kk = int(min(tree.n, max(int(knn), math.ceil(1.5 * expect + 16))))
+        parts, n_short = [], 0
+        for lo in range(0, n, _SPLAT_CHUNK):   # bounded transient memory at Earth's 6x256^2 cells
+            nb_c, w_c, short = _wendland_chunk(tree, pts[lo:lo + _SPLAT_CHUNK], h, kk)
+            parts.append((nb_c, w_c))
+            n_short += short
+        covered = 1.0 - n_short / max(n, 1)
+        keep = max(p[0].shape[1] for p in parts) if parts else 1
+        nb = np.zeros((n, keep), dtype=np.intp)
+        w = np.zeros((n, keep), dtype=np.float64)
+        lo = 0
+        for nb_c, w_c in parts:
+            nb[lo:lo + nb_c.shape[0], :nb_c.shape[1]] = nb_c
+            w[lo:lo + w_c.shape[0], :w_c.shape[1]] = w_c
+            lo += nb_c.shape[0]
+    else:
         kk = min(int(knn), tree.n)
-        d, nb = tree.query(c, k=kk, workers=-1)
-        d = np.atleast_2d(d).reshape(c.shape[0], kk)
-        self.nb = np.atleast_2d(nb).reshape(c.shape[0], kk)
-        w = np.exp(-(d * d) / (2.0 * float(sigma) ** 2))
-        w[:, 0] = np.maximum(w[:, 0], 1e-300)  # the nearest always counts
-        self.w = w / w.sum(axis=1, keepdims=True)
+        d, nb = tree.query(pts, k=kk, workers=-1)
+        d = np.atleast_2d(d).reshape(n, kk)
+        nb = np.atleast_2d(nb).reshape(n, kk)
+        w = np.exp(-(d * d) / (2.0 * sigma ** 2))
+        if kernel == "tapered":
+            dk = d[:, -1:]
+            t = np.clip(1.0 - (d / np.maximum(dk, 1e-300)) ** 2, 0.0, 1.0)
+            w = w * t * t
+    w[:, 0] = np.maximum(w[:, 0], 1e-300)  # the nearest always counts
+    return nb, w / w.sum(axis=1, keepdims=True), covered
+
+
+class SmoothSplat:
+    """Kernel-weighted blend of the nearest segments for every interior
+    cell: ``v(cell) = sum_k w_k v_k / sum_k w_k``; by default ``w_k =
+    exp(-d_k^2 / 2 sigma^2)`` over the ``knn`` nearest (``kernel``, see
+    :func:`splat_weights`).  Replaces the step function of the
+    nearest-segment splat by a surface that is smooth at the
+    segment-spacing scale while keeping features one spacing wide (belts).
+    Query once, splat many fields."""
+
+    def __init__(self, tree: cKDTree, grid: Grid, sigma: float, knn: int = 12, kernel: str = "gaussian",
+                 support: float | None = None):
+        self.nb, self.w, self.support_covered = splat_weights(
+            tree, interior_centers_flat(grid), sigma, knn, kernel, support)
+        self.kernel = kernel
         self.shape = (6, grid.N, grid.N)
 
     def __call__(self, values: np.ndarray) -> np.ndarray:
@@ -936,6 +1056,6 @@ def weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> floa
 
 __all__ = [
     "build_tree", "label_map", "label_map_fast", "cell_area_steradians", "accumulate_area", "splat",
-    "SmoothSplat", "deposit_density", "crystallise", "spawn_segments", "collide", "spread_collisions", "segment_cascade", "relax_segments",
+    "SmoothSplat", "splat_weights", "wendland_support", "SPLAT_KERNELS", "deposit_density", "crystallise", "spawn_segments", "collide", "spread_collisions", "segment_cascade", "relax_segments",
     "CellTree", "grid_cascade", "gaussian_smooth", "boundary_distance", "resample_to", "weighted_quantile",
 ]

@@ -44,11 +44,16 @@ Units
   oceanic) is blended from the wider neighbourhood at the same sigma and
   only the orogenic excess from the ``splat_knn`` nearest, so belts keep
   their width; the crust-type fraction ``c`` stays on the narrow blend
-  (docs/coast-fringe.md section 5).  At a continental margin the narrow
-  blend resolves the individual boundary segments, so :func:`margin_ramp`
-  can also re-position the continental/oceanic step with a kernel
-  ``margin_sigma_factor`` spacings wide and fill the oceanic side up to it
-  (raise-only: land, belts and sea level are as the blend made them).
+  (docs/coast-fringe.md section 5).  ``splat_kernel`` swaps the truncated
+  Gaussian for a kernel without the jump: ``'wendland'`` (compact support,
+  width matched to the truncated Gaussian's central weight, the whole
+  support always gathered) or ``'tapered'`` (the Gaussian times a taper to
+  zero at the ``splat_knn``-th neighbour); section 6.  At a continental
+  margin the narrow blend resolves the individual boundary segments, so
+  :func:`margin_ramp` can also re-position the continental/oceanic step
+  with a kernel ``margin_sigma_factor`` spacings wide and fill the oceanic
+  side up to it (raise-only: land, belts and sea level are as the blend
+  made them).
 * The heat field lives on a coarser grid (``N_tect / heat_grid_divisor``).
 * ``uplift`` is *metres per erosion iteration*: the per-segment height
   gained since the reference step (``steps - uplift_window``) in metres,
@@ -98,6 +103,7 @@ from .collision import (
     spread_collisions,
     splat,
     weighted_quantile,
+    wendland_support,
 )
 from .plates import (
     Plates,
@@ -658,11 +664,22 @@ def splat_blends(tree, grid: Grid, tp, spacing: float) -> tuple[SmoothSplat, Smo
     when ``splat_knn_base > splat_knn``, the wider blend of the same sigma
     for the base height (else ``None``).  One place, so :func:`finalise`
     and :func:`frame_bed` build the same pair and the timeline's last frame
-    is the finished map."""
+    is the finished map.  Both use ``tectonics.splat_kernel``; every field
+    :func:`finalise` rasterises from the cloud (height, the crust-type
+    fraction ``c``, ``dh`` for uplift, age and density for hardness) goes
+    through them, so crust_kind, uplift and hardness see the kernel the bed
+    does.  For ``'wendland'`` the support radius comes from the design
+    spacing (:func:`~globe.tectonics.collision.wendland_support`), not from
+    the current segment count, so it is the same in every frame."""
     sigma = tp.splat_sigma_factor * spacing
-    blend = SmoothSplat(tree, grid, sigma, int(tp.splat_knn))
-    kb = int(tp.splat_knn_base)
-    base_blend = SmoothSplat(tree, grid, sigma, kb) if kb > int(tp.splat_knn) else None
+    kernel = str(tp.splat_kernel)
+    knn, kb = int(tp.splat_knn), int(tp.splat_knn_base)
+
+    def support(k):  # the Wendland radius is fixed per world, not per frame
+        return wendland_support(sigma, k, spacing) if kernel == "wendland" else None
+
+    blend = SmoothSplat(tree, grid, sigma, knn, kernel, support(knn))
+    base_blend = SmoothSplat(tree, grid, sigma, kb, kernel, support(kb)) if kb > knn else None
     return blend, base_blend
 
 
@@ -960,6 +977,11 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
         # from the wide blend rather than the narrow excess term
         "_splat_knn_base": int(base_blend.nb.shape[1]) if base_blend is not None else int(blend.nb.shape[1]),
         "_splat_base_fraction": _base_fraction(seg, h, tp, blend, base_blend),
+        # the reconstruction kernel and, for 'wendland', the share of tect
+        # cells whose first kNN list already held the whole support (the
+        # rest were re-queried wider; 1.0 for the other kernels)
+        "_splat_kernel": str(blend.kernel),
+        "_splat_support_covered": float(blend.support_covered),
     }
 
 
@@ -1035,6 +1057,8 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         "margin_lift_median_m": float(out["_margin_lift_median_m"]),
         "splat_knn_base": int(out["_splat_knn_base"]),
         "splat_base_fraction": float(out["_splat_base_fraction"]),
+        "splat_kernel": out["_splat_kernel"],
+        "splat_support_covered": float(out["_splat_support_covered"]),
         "collisions_total": int(sum(s["collisions"] for s in sim.stats)),
         "spawned_total": int(sum(s["spawned"] for s in sim.stats)),
         "final_mass": float(last.get("mass", 0.0)),

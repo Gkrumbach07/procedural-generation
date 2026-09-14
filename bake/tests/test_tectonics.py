@@ -19,7 +19,9 @@ from globe.io.world_store import WorldStore
 from globe.pipeline import bake
 from globe.tectonics import intraplate
 from globe.tectonics import run as tect
-from globe.tectonics.collision import SmoothSplat, build_tree, collide, label_map, label_map_fast, relax_segments, spread_collisions, weighted_quantile
+from globe.tectonics.collision import (SmoothSplat, build_tree, collide, interior_centers_flat, label_map, label_map_fast,
+                                        relax_segments, splat_weights, spread_collisions, weighted_quantile,
+                                        wendland_support)
 from globe.tectonics.plates import Plates, cluster_plates, rotate_segments
 from globe.tectonics.segments import Segments, best_candidate_sphere, greedy_accept, mean_spacing
 from scripts.coastline import equal_area_level, isoline_metrics, shelf_edge_level
@@ -517,6 +519,162 @@ def test_splat_knn_base_smooths_the_coast_at_equal_area(small_sim):
     sim1 = tect.simulate(WorldParams.small_world(seed=1), log=None)
     out0, out1, r = _knob_pair(sim1, 48)
     _check_knob(sim1, out0, out1, r, 0.99, scale_tol=0.05)
+
+
+def test_splat_kernel_default_is_bit_identical(tiny_sim, tiny_out):
+    """`splat_kernel = 'gaussian'` (the default) is the old truncated kNN
+    Gaussian byte for byte: the weights as `SmoothSplat` used to compute
+    them inline, and every output of `finalise` (tiny_out is the default)."""
+    sim = tiny_sim
+    tp, grid, seg = sim.tp, sim.grid, sim.seg
+    assert tp.splat_kernel == "gaussian"
+    tree = build_tree(seg)
+    sigma = tp.splat_sigma_factor * sim.spacing
+    blend = SmoothSplat(tree, grid, sigma, int(tp.splat_knn))
+    c = interior_centers_flat(grid)
+    d, nb = tree.query(c, k=int(tp.splat_knn), workers=-1)
+    w = np.exp(-(d * d) / (2.0 * float(sigma) ** 2))
+    w[:, 0] = np.maximum(w[:, 0], 1e-300)
+    w = w / w.sum(axis=1, keepdims=True)
+    assert np.array_equal(blend.nb, nb) and np.array_equal(blend.w, w)
+    assert blend.kernel == "gaussian" and blend.support_covered == 1.0
+    out = tect.finalise(_with_tectonics(sim, splat_kernel="gaussian"))
+    for name in ("bedrock", "uplift", "hardness", "plate_id", "plate_vel", "crust_kind", "collision_zone"):
+        assert np.array_equal(out[name].data, tiny_out[name].data), name
+    assert tiny_out["_splat_kernel"] == "gaussian" and tiny_out["_splat_support_covered"] == 1.0
+    with pytest.raises(ValueError, match="splat_kernel"):
+        SmoothSplat(tree, grid, sigma, 12, "cubic")
+
+
+def _bisect_walk(p0, direction, unchanged, t_hi, eps=1e-12):
+    """Two points on the unit sphere ~``eps`` apart (in the walk parameter)
+    along ``p0 + t direction`` that straddle the first change of
+    ``unchanged(point)``, or None if nothing changed by ``t_hi``."""
+    def at(t):
+        p = p0 + t * direction
+        return p / np.linalg.norm(p)
+
+    if unchanged(at(t_hi)):
+        return None
+    lo, hi = 0.0, t_hi
+    while hi - lo > eps:
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if unchanged(at(mid)) else (lo, mid)
+    return at(lo), at(hi)
+
+
+def test_splat_kernel_weights_are_continuous(tiny_sim):
+    """Moving a query point across the moment a segment enters or leaves
+    the 12 nearest changes the truncated Gaussian's value by about the
+    departing neighbour's weight (a few per cent: the lace,
+    docs/coast-fringe.md section 5) and the tapered and Wendland kernels'
+    values by nothing measurable; the Wendland kernel is also continuous
+    where a segment crosses its support radius."""
+    sim = tiny_sim
+    tp, seg = sim.tp, sim.seg
+    tree = build_tree(seg)
+    sigma = tp.splat_sigma_factor * sim.spacing
+    knn = int(tp.splat_knn)
+    h = wendland_support(sigma, knn, sim.spacing)
+    rng = np.random.default_rng(7)
+    vals = rng.random(seg.M)
+
+    def jump(pair, kernel, sup=None):
+        nb, w, _ = splat_weights(tree, np.array(pair), sigma, knn, kernel, sup)
+        v = (vals[nb] * w).sum(axis=1)
+        return abs(v[0] - v[1])
+
+    # the knn-nearest set changes: walk towards the (knn+1)-th neighbour
+    knn_pairs = []
+    while len(knn_pairs) < 25:
+        p0 = rng.normal(size=3)
+        p0 /= np.linalg.norm(p0)
+        _, nb0 = tree.query(p0, k=knn + 1)
+        s0 = frozenset(nb0[:knn].tolist())
+        pair = _bisect_walk(p0, tree.data[nb0[knn]] - tree.data[nb0[knn - 1]],
+                            lambda p: frozenset(tree.query(p, k=knn)[1].tolist()) == s0, 1.0)
+        if pair is not None:
+            knn_pairs.append(pair)
+    g = max(jump(p, "gaussian") for p in knn_pairs)
+    assert g > 1e-3, g  # the test does see the truncation
+    assert max(jump(p, "tapered") for p in knn_pairs) < 1e-8
+    assert max(jump(p, "wendland", h) for p in knn_pairs) < 1e-8
+    # a segment crosses the Wendland support radius
+    sup_pairs = []
+    while len(sup_pairs) < 25:
+        p0 = rng.normal(size=3)
+        p0 /= np.linalg.norm(p0)
+        n0 = len(tree.query_ball_point(p0, h))
+        pair = _bisect_walk(p0, rng.normal(size=3), lambda p: len(tree.query_ball_point(p, h)) == n0, 0.2)
+        if pair is not None:
+            sup_pairs.append(pair)
+    assert max(jump(p, "wendland", h) for p in sup_pairs) < 1e-8
+
+
+def test_wendland_gathers_the_whole_support():
+    """The Wendland list holds every segment within the support radius: on
+    a cloud with a cap 20x denser than the mean -- where the kNN list sized
+    for the mean density falls short -- the re-query path gives the
+    brute-force radius-query weights (on `small` and `tiny` the first list
+    already covers every cell, the farthest listed neighbour >= 1.19 h)."""
+    rng = np.random.default_rng(3)
+    uni = best_candidate_sphere(400, rng)
+    cap = rng.normal(size=(1600, 3)) * 0.08 + np.array([0.0, 0.0, 1.0])
+    pos = np.concatenate([uni, cap / np.linalg.norm(cap, axis=1, keepdims=True)])
+    tree = build_tree(Segments(pos, 1.0, 0.5, 0.0, 0, 0.0))
+    s = mean_spacing(pos.shape[0])
+    h = wendland_support(s, 12, s)
+    pts = rng.normal(size=(500, 3)) * np.array([0.3, 0.3, 1.0]) + np.array([0.0, 0.0, 1.0])
+    pts /= np.linalg.norm(pts, axis=1, keepdims=True)
+    nb, w, covered = splat_weights(tree, pts, s, 12, "wendland", h)
+    assert covered < 0.999  # the dense cap does defeat the first list
+    for i in range(pts.shape[0]):
+        ref = np.array(tree.query_ball_point(pts[i], h), dtype=np.int64)
+        if ref.size == 0:
+            assert w[i, 0] == 1.0
+            continue
+        q = np.linalg.norm(pos[ref] - pts[i], axis=1) / h
+        wr = (1.0 - q) ** 4 * (4.0 * q + 1.0)
+        got = dict(zip(nb[i][w[i] > 0].tolist(), w[i][w[i] > 0].tolist()))
+        want = dict(zip(ref[wr > 0].tolist(), (wr[wr > 0] / wr.sum()).tolist()))
+        assert got.keys() == want.keys(), i
+        assert np.allclose([got[k] for k in want], list(want.values()), rtol=1e-10, atol=1e-15)
+
+
+def test_splat_kernel_wendland_on_small_seed0(small_sim):
+    """The shipping conditions (docs/coast-fringe.md sections 3, 5, 6) for
+    `splat_kernel = 'wendland'` on `small` seed 0, where they hold: the
+    coast at equal area is less convoluted (measured 12.917 -> 12.273,
+    0.950x) with fingers not worse (1.26 -> 1.11 %), the land fraction and
+    the vertical scale unchanged (+0.2 %), land / sea / belt medians and the
+    belt p99 within a few per cent (+3.1 %, 0.7 % shallower, +0.1 %,
+    +0.7 %), and the crust-type boundary moves on < 1 % of the cells
+    (0.28 %).  `tiny` seed 1 is where it fails (fingers 6.00 -> 6.37 %,
+    land and belt medians +8 %), so it is not the default."""
+    sim = small_sim
+    out0 = tect.finalise(_with_tectonics(sim, splat_kernel="gaussian"))
+    out1 = tect.finalise(_with_tectonics(sim, splat_kernel="wendland"))
+    assert out1["_splat_kernel"] == "wendland" and out1["_splat_support_covered"] > 0.999
+    r = 0.5 * sim.spacing * sim.params.N_c / (math.pi / 2)
+    b0, b1 = out0["bedrock"].interior.astype(np.float64), out1["bedrock"].interior.astype(np.float64)
+    assert (out0["crust_kind"].interior != out1["crust_kind"].interior).mean() < 0.01
+    l0, l1 = b0 > 0, b1 > 0
+    assert abs(l1.mean() - l0.mean()) < 0.005
+    s0, s1 = out0["_scale_m_per_unit"], out1["_scale_m_per_unit"]
+    assert abs(s1 - s0) < 0.02 * s0, (s0, s1)
+    lv = equal_area_level(b1, int(l0.sum()))
+    before, after = isoline_metrics(b0, 0.0, r), isoline_metrics(b1, lv, r)
+    assert after["ratio"] < 0.97 * before["ratio"], (before["ratio"], after["ratio"])
+    assert after["fingers"] <= before["fingers"], (before["fingers"], after["fingers"])
+    m0, m1 = np.median(b0[l0]), np.median(b1[l1])
+    assert abs(m1 - m0) < 0.05 * m0, (m0, m1)
+    q0, q1 = np.median(b0[~l0]), np.median(b1[~l1])
+    assert abs(q1 - q0) < 0.02 * abs(q0), (q0, q1)
+    zone = out0["collision_zone"].interior.astype(bool)
+    assert np.array_equal(zone, out1["collision_zone"].interior.astype(bool))
+    z0, z1 = b0[zone & l0], b1[zone & l1]
+    assert abs(np.median(z1) - np.median(z0)) < 0.03 * np.median(z0)
+    assert abs(np.percentile(z1, 99) - np.percentile(z0, 99)) < 0.03 * np.percentile(z0, 99)
 
 
 def test_plate_vel_is_rigid_rotation_of_each_plate(tiny_sim, tiny_out):
