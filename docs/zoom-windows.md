@@ -199,3 +199,52 @@ from a channel. Longer walks (509 steps) also doubled the cost per cell.
   die in pits and what the terrain did there in the preceding iterations);
 * a drift correction that does not print pits (item 4), e.g. the Gaussian
   low-pass the relief step already uses.
+
+## Item 3: where the pits come from
+
+`window_bake.py --census N` snapshots the surface before the particle pass,
+after it and after the thermal pass, floods the result towards the job's
+drains, and classifies every depression that is new that iteration: *dug*
+if its bottom went down by more than its spill cell (the lowest rim cell)
+came up, *dammed* otherwise, and by which pass (`scripts/pit_census.py`).
+trib at 305 m, drainage relief, creep 0, drift correction off:
+
+| iteration | depressions | new | dammed by the particle pass | spill cell raised (median) | new depth p50 / p90 |
+|---|---|---|---|---|---|
+| 1 | 1,252 | 1,252 | 98 % | 21 m (the bottom rose 9.7 m) | 4.0 / 17 m |
+| 2 | 1,437 | 903 | 99 % | 15 m | 5.0 / 29 m |
+| 4 | 1,430 | 585 | 97 % | 7.5 m | 7.3 / 45 m |
+| 8 | 1,338 | 438 | 92 % | 3.2 m | 10 / 61 m |
+
+**The pits are dams built by the particle pass**: under 3 % are dug, the
+thermal pass makes essentially none, and a depression's rim goes up tens
+of metres in a single iteration. Ruled out, each by measurement on the same
+census:
+
+| candidate | test | new depressions, iteration 1 |
+|---|---|---|
+| (baseline) | | 1,252 |
+| particles in a chunk depositing against the same frozen terrain | `chunk` 128 / 16 (from 2048) | 1,260 / 1,409 |
+| deposits of particles crossing a filled pit | `dep_floor_m` 0.001 (from 1) | 1,324 |
+| trunk channels left flat by the relief step (55 % of channels over one coarse cell had gradient < 0.001) | a minimum channel gradient, 0.003 at one coarse cell x area^-0.5 | 1,359 |
+| a deposit closing a neighbour's only outlet | a kernel rule forbidding it, in the trace and in `apply_changes` | 622 (but 965 lakes at 60 iterations against 930 without) |
+| (repair, not prevention) take back this iteration's deposit at each new dam's spill cell into `pending` | `--breach` | 60 iterations: 488 lakes, 79 % of the ≥100 km^2 network on the outlet |
+
+The no-pit rule halves the first iteration's dams but not the end state
+(depressions of a few cells get closed by raises no single-cell check
+sees), so it was reverted (`scratch/window/deposit-no-pits.diff`). The
+minimum channel gradient stays in `drainage_relief.py`: it is right for a
+river profile even though it was not the cause.
+
+What is left is magnitude. At 305 m on relief with 190 / 350 m over 3 km
+the particle pass moves tens of metres of material per cell per iteration
+off the hillslopes and onto the valley floors -- the per-iteration caps
+are metres, which bind hard on the planet grid (9.8 km cells) and barely
+at all here -- and a particle that meets the resulting bar climbs for
+`pit_steps` and dies, dropping its load into the pit behind it, so a dam
+never gets incised. The planet pass has machinery for exactly this that
+windows do not use: `ErosionState.refresh_lakes` turns every depression
+into a lake with a level, particles cross it without touching the bed and
+drop their load at its shore, and an overflowing lake spills downstream.
+That is the next step: lakes-in-erosion for windows, so a dam behaves like
+a lake that fills with sediment and spills, not like a trap.

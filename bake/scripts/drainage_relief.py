@@ -40,12 +40,14 @@ def _accumulate(pop_seq, parent, n):
 
 
 @njit(cache=True)
-def _descend(z, pop_seq, parent, eps):
+def _descend(z, pop_seq, parent, rise):
+    """Raise every cell to at least its parent + ``rise[c]`` (metres), in pop
+    order so a raised parent carries its children."""
     for k in range(pop_seq.size):
         c = pop_seq[k]
         p = parent[c]
-        if p >= 0 and z[c] < z[p] + eps:
-            z[c] = z[p] + eps
+        if p >= 0 and z[c] < z[p] + rise[c]:
+            z[c] = z[p] + rise[c]
     return z
 
 
@@ -61,7 +63,8 @@ def fbm(shape, base_wavelength, rng, min_wavelength=4.0, gain=0.55):
     return out / max(float(np.abs(out).max()), 1e-12)
 
 
-def drainage_relief(surface, active, drain, R, cell_m, rng, amp_m, route_frac=0.35, theta=0.5, eps_m=0.01, stats=None):
+def drainage_relief(surface, active, drain, R, cell_m, rng, amp_m, route_frac=0.35, theta=0.5, eps_m=0.01,
+                    s_ref=0.003, s_min=2e-4, stats=None):
     """``surface`` plain upsample (metres, NE x NE); ``active`` cells to
     shape; ``drain`` cells water leaves through; ``amp_m`` target valley
     depth (metres, NE x NE) for a channel draining one coarse cell.  Returns
@@ -88,7 +91,21 @@ def drainage_relief(surface, active, drain, R, cell_m, rng, amp_m, route_frac=0.
     w = ndimage.gaussian_filter(active.astype(np.float64), R)
     low = ndimage.gaussian_filter(d, R) / np.maximum(w, 1e-6)
     Z = np.where(active, Z - low, P)
-    Z = _descend(Z.reshape(-1).copy(), pop, parent, eps_m).reshape(shape)
+    # a channel keeps a gradient: s_ref at one coarse cell of upstream area,
+    # falling as area^-theta (never below s_min).  With only a 1 cm step the
+    # carve left 55 % of the trunk channels dead flat (the carve deepens
+    # downstream faster than the regional slope falls), and the first
+    # deposit on a flat channel dams everything above it
+    W = shape[1]
+    idx = np.arange(n)
+    par = parent
+    has = par >= 0
+    pi, pj = np.divmod(np.where(has, par, idx), W)
+    ci, cj = np.divmod(idx, W)
+    dist = np.hypot(pi - ci, pj - cj) * cell_m
+    grad = np.maximum(s_ref * (acc.reshape(-1) / ref) ** (-theta), s_min)
+    rise = np.maximum(dist * grad, eps_m)
+    Z = _descend(Z.reshape(-1).copy(), pop, parent, rise).reshape(shape)
     Z = np.where(active, Z, P)
     if stats is not None:
         stats.update({"acc_max": float(acc.max()), "carve_max_m": float(D[active].max()) if active.any() else 0.0,

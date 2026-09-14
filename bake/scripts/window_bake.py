@@ -7,14 +7,16 @@ connectivity, relief and lakes (docs/zoom-windows.md).
     python scripts/window_bake.py --world worlds/earth-v9 --outlet 5 58 868 \
         --R 2 8 32 --iters 150 --out scratch/window/runs
     python scripts/window_bake.py --world worlds/earth-v9 --outlet 5 67 873 \
-        --R 128 --iters 60 --relief drainage --no-block-drift --erosion creep_rate=0 --save --out ...
+        --R 32 --iters 8 --census 8 --relief drainage --no-block-drift --erosion creep_rate=0 --out ...
 
 The window is the D8 catchment upstream of ``--outlet`` (face, i, j on the
 coarse grid), confined to one face, handed to ``refine.basin_job._run_basin``
-as a synthetic basin whose only exit is the outlet cell.  ``--relief
-drainage`` swaps the job's detail noise for ``scripts/drainage_relief.py``
-and ``--no-block-drift`` its per-coarse-cell drift correction (both
-monkeypatched in: prototypes, not the refine stage).
+as a synthetic basin whose only exit is the outlet cell.  Prototypes, all
+monkeypatched in and none part of the refine stage: ``--relief drainage``
+(scripts/drainage_relief.py) replaces the detail noise, ``--no-block-drift``
+skips the per-coarse-cell drift correction, ``--census N`` classifies the
+depressions each of the first N iterations makes (scripts/pit_census.py) and
+``--breach`` takes back the deposits that dam them (scripts/dam_breach.py).
 """
 import argparse
 import json
@@ -157,6 +159,8 @@ def main():
     ap.add_argument("--erosion", nargs="*", default=[], help="erosion overrides k=v (floats)")
     ap.add_argument("--relief", choices=["noise", "drainage"], default="noise")
     ap.add_argument("--no-block-drift", action="store_true", help="skip the job's per-coarse-cell drift correction")
+    ap.add_argument("--breach", action="store_true", help="breach the dams each particle pass builds (scratch/window/dam_breach.py)")
+    ap.add_argument("--census", type=int, default=0, help="pit census for the first N iterations (scratch/window/pit_census.py)")
     ap.add_argument("--relief-elev", type=float, default=0.1, help="drainage relief: valley depth per metre of elevation")
     ap.add_argument("--relief-rel", type=float, default=0.5, help="drainage relief: valley depth per metre of coarse 3x3 relief")
     ap.add_argument("--save", action="store_true", help="write the window arrays (float32 npz)")
@@ -194,9 +198,55 @@ def main():
         prev = {}
 
         real_step = bj.step
+        from globe.erosion import maps as emaps
+        real_run_it, real_thermal = emaps.run_iteration, emaps.thermal_erosion
+        census_rows = []
+        snaps = {}
+        cstate = {"prev": None}
+        breach_stats = {"breached": 0, "not_breachable": 0, "moved_m": 0.0}
+        if a.census or a.breach:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import pit_census
+            import dam_breach
+
+            def run_it(state, *args_, **kw_):
+                Hk = state.H
+                snaps["s0"] = (state.height[0, Hk:-Hk, Hk:-Hk] + state.sediment[0, Hk:-Hk, Hk:-Hk]) * state.height_unit_m
+                r_ = real_run_it(state, *args_, **kw_)
+                if a.breach:
+                    mk = state.mask[0, Hk:-Hk, Hk:-Hk]
+                    if "drain" not in cstate:
+                        cstate["drain"] = bj.exit_cells(basin, win, (win.NE, win.NE))[Hk:-Hk, Hk:-Hk] | (mk == pk.MASK_OUTSIDE)
+                        cstate["fa"] = (mk > 0) | cstate["drain"]
+                    b_ = dam_breach.breach(state, snaps["s0"], cstate["drain"], cstate["fa"])
+                    for k_, v_ in b_.items():
+                        breach_stats[k_] += v_
+                    state.exchange_halos() if state.spherical else None
+                snaps["s1"] = (state.height[0, Hk:-Hk, Hk:-Hk] + state.sediment[0, Hk:-Hk, Hk:-Hk]) * state.height_unit_m
+                return r_
+
+            emaps.run_iteration = run_it
+            if not a.census:
+                a.census = 0
 
         def step(state, ep, it, **kw):
             st = real_step(state, ep, it, **kw)
+            if a.census and it < a.census:
+                Hk = state.H
+                s2 = (state.height[0, Hk:-Hk, Hk:-Hk] + state.sediment[0, Hk:-Hk, Hk:-Hk]) * state.height_unit_m
+                mk = state.mask[0, Hk:-Hk, Hk:-Hk]
+                act_c = mk == pk.MASK_ACTIVE
+                if "drain" not in cstate:
+                    drain_e = bj.exit_cells(basin, win, (win.NE, win.NE))[Hk:-Hk, Hk:-Hk]
+                    cstate["drain"] = drain_e | (mk == pk.MASK_OUTSIDE)
+                    cstate["fa"] = (mk > 0) | cstate["drain"]
+                if cstate.get("prev") is None:
+                    cstate["prev"] = pit_census.depressions(snaps["s0"], cstate["drain"], cstate["fa"], act_c, 0.1)[0]
+                cs_, pits = pit_census.census(snaps["s0"], snaps["s1"], s2, cstate["drain"], cstate["fa"], act_c, cstate["prev"])
+                cstate["prev"] = pits
+                cs_["it"] = it + 1
+                census_rows.append(cs_)
+                print("  census", json.dumps(cs_), flush=True)
             Hk = state.H
             s = (state.height[0, Hk:-Hk, Hk:-Hk] + state.sediment[0, Hk:-Hk, Hk:-Hk]) * state.height_unit_m
             q = state.discharge[0, Hk:-Hk, Hk:-Hk]
@@ -247,6 +297,7 @@ def main():
                                 win.H, win.n, win.NE, up_threads=numba.get_num_threads())
         finally:
             bj.step = real_step
+            emaps.run_iteration = real_run_it
             bj.build_mask, bj.detail_noise, bj.block_drift = real_build_mask, real_detail, real_drift
         wall = time.time() - t0
         ru1 = resource.getrusage(resource.RUSAGE_SELF)
@@ -283,6 +334,7 @@ def main():
             "coarse_drift_p50_p90_max_m": block_drift_stats(surf - plain, act, R),
             "relief_3km_p50_p90_m": relief_stats(surf, act, cell_m, 3000.0),
             "relief_3km_plain_p50_p90_m": relief_stats(plain, act, cell_m, 3000.0),
+            "census": census_rows, "breach": breach_stats,
             "relief_mode": a.relief, "relief_elev": a.relief_elev, "relief_rel": a.relief_rel, "drainage_stats": dstats,
             "channels": channel_metrics(q, act, cell_m / 1000.0, float(q[outlet].max()) / (m.sum() * coarse_km ** 2), outlet),
             "convergence": conv[:: max(1, len(conv) // 30)] + conv[-1:],
