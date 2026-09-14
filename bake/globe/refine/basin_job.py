@@ -307,7 +307,9 @@ def run_basin(root: str | Path, basin: dict, params: WorldParams, log=None, thre
     ``water_surface0``, ``discharge0``.  The mask follows the basin across
     the face edge (the frozen ring sits on the true divide), so a river
     crossing the edge keeps flowing; the rasteriser writes only the cells
-    on ``face``.  ``threads``: numba threads for the kernel (default
+    on ``face`` and the seam blend takes the off-face strip onto the
+    neighbouring face (``rasterize.seam_records``).  ``threads``: numba
+    threads for the kernel (default
     :func:`job_threads` of the window; the result does not depend on it);
     the previous count is restored afterwards."""
     import numba
@@ -357,9 +359,10 @@ def _run_basin(root, basin, params, log, t0, bid, rp, grid, fields, derived, win
     flood_active = (mask > 0) | ocean
     # drains: every exit's fine cells, the ocean and, where the basin
     # continues past the face edge, the frozen ring of that off-face strip
-    # (mask 2 beyond the face): the strip is eroded for continuity but never
-    # written, and without a drain of its own it would pond up to the level
-    # of the face exits it lies below
+    # (mask 2 beyond the face): the strip is eroded for continuity and
+    # enters the raster only through the seam blend (its surface, not its
+    # water surface), and without a drain of its own it would pond up to
+    # the level of the face exits it lies below
     on_face = np.zeros((NE, NE), dtype=bool)
     N_fine = grid.N * R
     a0, a1 = max(0, H - win.fi0), min(NE, H - win.fi0 + N_fine)
@@ -581,7 +584,10 @@ def job(args: dict) -> dict:
     ``{"kind": "basin", "root", "params": WorldParams, "basin": record,
     "face": piece face or None (outlet face), "quicklook": path or None}``
     runs :func:`run_basin` on that face piece and rasterises the result
-    into the ``fine/`` memmaps (:func:`rasterize.write_result`);
+    into the ``fine/`` memmaps (:func:`rasterize.write_result`); a piece of
+    a basin on several faces also returns its seam-blend inputs under
+    ``seam_records`` (:func:`rasterize.seam_records`, blended by the
+    driver after every job has written);
     ``{"kind": "face", "root", "params", "face"}`` writes the plain
     upsample of a whole face (:func:`rasterize.write_base_face`).  Returns
     the job's stats dict (``kind`` set)."""
@@ -597,9 +603,14 @@ def job(args: dict) -> dict:
         return {"kind": "face", "face": int(args["face"]), "cells": cells, "seconds": time.time() - t0}
     if kind != "basin":
         raise ValueError(f"unknown job kind {kind!r}")
-    res = run_basin(root, args["basin"], params, face=args.get("face"))
+    basin = args["basin"]
+    res = run_basin(root, basin, params, face=args.get("face"))
     written = rasterize.write_result(root, params, res)
     res.stats["written_cells"] = written
+    faces = [int(p["face"]) for p in basin.get("pieces") or ()]
+    if len(faces) > 1:
+        grid, fields, _ = coarse_inputs(root, params)
+        res.stats["seam_records"] = rasterize.seam_records(res, params, faces, fields["basin_id"].interior)
     qp = args.get("quicklook")
     if qp:
         try:

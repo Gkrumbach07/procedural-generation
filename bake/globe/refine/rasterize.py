@@ -6,8 +6,8 @@ hardness`` (f32) and ``basin_id`` (i32) are created once by the driver
 (:func:`create_fine`: zero-filled, ``basin_id`` -1) with
 ``np.lib.format.open_memmap`` so a face is never fully resident.
 
-Two writers, both usable from a worker process (every process maps the
-same files; writes go to disjoint cells):
+Three writers; the first two are usable from a worker process (every
+process maps the same files; writes go to disjoint cells):
 
 * :func:`write_base_face` — the plain upsample of a whole face in row
   strips (bicubic surface split into height/sediment, bilinear hardness /
@@ -30,7 +30,36 @@ same files; writes go to disjoint cells):
   the refined detail ramps in with zero slope at both ends over
   ``feather_cells`` cells (>= 2R, a coarse cell on each side, so the ramp
   is below the hillshade's resolution; a linear 2-cell ramp left a visible
-  crease at every divide).
+  crease at every divide).  ``own`` is taken over the whole window, off-face
+  strip included, so where the basin continues across a cube edge the seam
+  is not a divide and the weight there is that of the basin interior; where
+  the basin ends at the edge (a real divide, the coast) the cells across it
+  are not ``own`` and the seam row is the plain upsample as before.
+* :func:`write_seams` — the seam blend, run by the driver once after every
+  basin job (docs/cross-face-basins.md).  A piece of a basin on several
+  faces also returns :func:`seam_records`: its own refined detail
+  (``surface - plain``, ``sediment - plain sediment``) on its face's cells
+  within ``feather_cells`` of each cube edge the basin crosses, and its
+  refined off-face strip resampled bilinearly onto the neighbouring face's
+  fine lattice (cell centre -> ``to_sphere`` -> ``project_to_face`` of the
+  window face).  :func:`blend_seams` combines, per target cell, the pieces
+  of the cell's own basin with complementary weights —
+  :func:`seam_side_weight` ``smoothstep((dist + F) / 2F)`` for the piece
+  whose face it is and ``1 -`` that for the piece across the edge (times a
+  ramp to that piece's window border), ``dist`` the cell centre's distance
+  from the edge in cells — normalised to sum 1, so the seam row carries
+  both pieces' detail at 1/2 each and the combined detail is continuous
+  through the edge.  The result is ``plain + w * detail`` with ``w`` the
+  owning piece's divide feather, so divides stay pinned.  ``basin_id``,
+  ``hardness`` and ``discharge`` stay the owning piece's (the discharge
+  field is a river position, not a quantity to average, and keeps the
+  face-restricted feather: the seam row is the coarse-initialised
+  discharge on both faces, as before); the water surface
+  keeps the owning piece's level on its lake cells (``max(level,
+  surface)``, still under refine's lake-balance cap) and is the blended
+  surface on dry cells.  The records are sorted by ``(face, basin, kind,
+  source face)`` and summed in that order, so the raster does not depend
+  on which piece finished first.
 """
 from __future__ import annotations
 
@@ -40,6 +69,7 @@ import numpy as np
 from scipy import ndimage
 
 from ..config import WorldParams
+from ..cubesphere import project_to_face_v, to_sphere_v
 from ..field import FaceField
 from .upsample import Window, upsample_face
 
@@ -156,20 +186,25 @@ def window_face_slices(win: Window, N_fine: int) -> tuple[slice, slice, slice, s
 
 def blend_result(arrays: dict[str, np.ndarray], bid: int, feather_cells: int, on_face: np.ndarray | None = None) -> tuple[dict[str, np.ndarray], np.ndarray]:
     """Feathered output arrays of a job over its window and the ``own``
-    mask (cells whose fine basin id is ``bid``).  With ``on_face`` (bool,
-    the window cells lying on the job's face) the feather weight is
-    computed on ``own & on_face``, so where the basin continues across a
-    cube edge the face edge is treated like a divide: the seam row is the
-    plain upsample on both faces and the two independently eroded pieces
-    meet there without a crease.  Pure (no I/O) so tests can check the
-    blend."""
+    mask (cells whose fine basin id is ``bid``, on the face or beyond its
+    edge).  The feather weight of the surface and water surface is computed
+    on ``own`` over the whole window, so a cube edge the basin continues
+    across is not a divide (the pieces on the two faces are reconciled
+    there by :func:`blend_seams`) and an edge it ends at is.  With
+    ``on_face`` (bool, the window cells on the job's face) the *discharge*
+    feather is computed on ``own & on_face``: a river position cannot be
+    averaged between two pieces, so at the seam both faces fall back to the
+    coarse-initialised discharge, which is what carries a river across the
+    edge.  Pure (no I/O) so tests can check the blend."""
     own = arrays["basin_id"] == int(bid)
-    w = feather_weight(own if on_face is None else (own & on_face), feather_cells)
+    w = feather_weight(own, feather_cells)
+    wq = w if on_face is None else feather_weight(own & on_face, feather_cells)
     out = {}
     for name, ref in FEATHERED:
         a = arrays[name].astype(np.float32)
         b = arrays[ref].astype(np.float32)
-        out[name] = (w * a + (1.0 - w) * b).astype(np.float32)
+        ww = wq if name == "discharge" else w
+        out[name] = (ww * a + (1.0 - ww) * b).astype(np.float32)
     out["hardness"] = arrays["hardness"].astype(np.float32)
     out["basin_id"] = arrays["basin_id"].astype(np.int32)
     return out, own
@@ -200,4 +235,229 @@ def write_result(root: str | Path, params: WorldParams, res) -> int:
     return n
 
 
-__all__ = ["FINE_FIELDS", "FINE_FILL", "FEATHERED", "fine_dir", "fine_path", "create_fine", "open_fine", "fine_exists", "write_base_face", "feather_weight", "window_face_slices", "blend_result", "write_result"]
+# --------------------------------------------------------------------------
+# seam blend across cube-face edges
+# --------------------------------------------------------------------------
+#: record kinds (the owning piece sorts first within a basin)
+SEAM_NATIVE, SEAM_CROSS = 0, 1
+#: a native water surface this far above its surface (m) is a lake level to keep
+SEAM_LAKE_EPS_M = 1e-3
+
+
+def seam_side_weight(dist, feather_cells: int) -> np.ndarray:
+    """Weight of a piece's own refined detail at ``dist`` cells (cell centre
+    distance from a cube edge into the piece's face; negative beyond the
+    edge): ``smoothstep(clip((dist + F) / 2F, 0, 1))``.  The piece across
+    the edge sees the same point at ``-dist`` and gets ``1 -`` this (the
+    smoothstep is point-symmetric about 1/2), so the two sum to 1, both
+    are 1/2 on the edge and the ramp has zero slope ``F`` cells out on
+    either side.  ``F <= 0``: 1 on the own face, 0 beyond (float64)."""
+    d = np.asarray(dist, dtype=np.float64)
+    F = float(feather_cells)
+    if F <= 0.0:
+        return (d > 0.0).astype(np.float64)
+    return _smoothstep((d + F) / (2.0 * F))
+
+
+def _smoothstep(t) -> np.ndarray:
+    t = np.clip(np.asarray(t, dtype=np.float64), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def side_cells(side: int, n: int, depth: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``(i, j, k)`` of the cells of an ``n x n`` face within ``depth`` rows
+    of ``side`` (``globe.refine.lod`` numbering: 0 = +i, 1 = -i, 2 = +j,
+    3 = -j), ``k`` the row (0 = touching the edge)."""
+    depth = max(0, min(int(depth), n))
+    k = np.repeat(np.arange(depth, dtype=np.int64), n)
+    a = np.tile(np.arange(n, dtype=np.int64), depth)
+    if side == 0:
+        return n - 1 - k, a, k
+    if side == 1:
+        return k, a, k
+    if side == 2:
+        return a, n - 1 - k, k
+    return a, k, k
+
+
+def _bilinear(a: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Bilinear sample (float64) of ``a`` at fractional indices ``x, y`` in
+    ``[0, shape - 1]``."""
+    x0 = np.clip(np.floor(x).astype(np.int64), 0, a.shape[0] - 2)
+    y0 = np.clip(np.floor(y).astype(np.int64), 0, a.shape[1] - 2)
+    tx, ty = x - x0, y - y0
+    a = np.asarray(a, dtype=np.float64)
+    return ((1.0 - tx) * (1.0 - ty) * a[x0, y0] + tx * (1.0 - ty) * a[x0 + 1, y0]
+            + (1.0 - tx) * ty * a[x0, y0 + 1] + tx * ty * a[x0 + 1, y0 + 1])
+
+
+def strip_window_coords(win: Window, face: int, i: np.ndarray, j: np.ndarray, N_fine: int) -> tuple[np.ndarray, np.ndarray]:
+    """Fractional window indices ``(x, y)`` (into the window's ``n x n``
+    arrays, cell centres at integers) of the fine cells ``(i, j)`` of
+    ``face`` -- a face other than the window's: each cell centre goes to
+    the sphere and is projected onto the window's face plane.  The one
+    place the seam blend's resampling geometry lives, so a test can check
+    it against the neighbouring face's own upsample."""
+    p = to_sphere_v(np.full(np.shape(i), int(face)), (np.asarray(i) + 0.5) / N_fine, (np.asarray(j) + 0.5) / N_fine)
+    u, v = project_to_face_v(np.full(np.shape(i), int(win.face)), p)
+    return u * N_fine - 0.5 - win.fi0, v * N_fine - 0.5 - win.fj0
+
+
+def seam_records(res, params: WorldParams, piece_faces, basin_id_coarse: np.ndarray) -> list[dict]:
+    """The seam-blend inputs of one basin piece (module docstring); empty
+    unless the basin has a piece on a face across one of this face's
+    edges.  ``piece_faces``: the faces the basin has cells on;
+    ``basin_id_coarse``: the coarse ``basin_id`` interior ``(6, N, N)``
+    (picks this basin's cells on the neighbouring faces).  Records are dicts
+    of plain arrays (picklable; at most ``feather_cells`` x ``N_fine`` cells
+    per crossed edge):
+
+    * ``kind`` :data:`SEAM_NATIVE` — the basin's cells on the piece's face
+      within ``feather_cells`` of an edge to a face the basin has a piece
+      on: ``idx`` (flat fine index), ``dsurf``, ``dsed`` (refined minus
+      plain), ``beta`` (:func:`seam_side_weight`; near a cube corner the
+      smaller of the two edges'), ``w`` (the divide feather), ``surf0`` /
+      ``sed0`` (plain surface / sediment) and ``surf`` / ``ws`` (the surface
+      and water surface :func:`write_result` wrote there);
+    * ``kind`` :data:`SEAM_CROSS` — per crossed edge, the neighbouring
+      face's cells of the basin within ``feather_cells`` of the edge whose
+      centres project into the window: ``idx``, ``dsurf``, ``dsed``
+      (bilinear from the window) and ``beta`` = ``1 - seam_side_weight``
+      times a smoothstep ramp over ``feather_cells`` to the window border
+      (a window ending along the edge fades out instead of switching off)."""
+    from .lod import edge_links
+
+    win = res.win
+    f, bid, R = int(win.face), int(res.id), int(win.R)
+    N_fine = int(params.N_fine)
+    F = int(params.refine.feather_cells)
+    others = {int(g) for g in piece_faces} - {f}
+    if F <= 0 or not others:
+        return []
+    links = edge_links(N_fine)
+    sides = [s for s in range(4) if links[f * 4 + s].nb_face in others]
+    if not sides:
+        return []
+    a = res.arrays
+    n = win.n
+    out, own = blend_result(a, bid, F)
+    w = feather_weight(own, F)
+    surf0 = a["height0"].astype(np.float64) + a["sediment0"]
+    dsurf = a["height"].astype(np.float64) + a["sediment"] - surf0
+    dsed = a["sediment"].astype(np.float64) - a["sediment0"]
+    recs: list[dict] = []
+
+    # the piece's own face
+    idx_l, beta_l = [], []
+    for s in sides:
+        i, j, k = side_cells(s, N_fine, F)
+        li, lj = i - win.fi0, j - win.fj0
+        ok = (li >= 0) & (li < n) & (lj >= 0) & (lj < n)
+        ok[ok] = own[li[ok], lj[ok]]
+        idx_l.append(i[ok] * N_fine + j[ok])
+        beta_l.append(seam_side_weight(k[ok] + 0.5, F))
+    idx = np.concatenate(idx_l)
+    if idx.size:
+        beta = np.concatenate(beta_l)
+        order = np.lexsort((beta, idx))  # a cell in two strips (cube corner) keeps the smaller weight
+        idx, first = np.unique(idx[order], return_index=True)
+        beta = beta[order][first]
+        li, lj = idx // N_fine - win.fi0, idx % N_fine - win.fj0
+        recs.append({
+            "kind": SEAM_NATIVE, "face": f, "src": f, "bid": bid, "idx": idx,
+            "dsurf": dsurf[li, lj].astype(np.float32), "dsed": dsed[li, lj].astype(np.float32),
+            "beta": beta.astype(np.float32), "w": w[li, lj],
+            "surf0": surf0[li, lj].astype(np.float32), "sed0": a["sediment0"][li, lj].astype(np.float32),
+            "surf": (out["height"][li, lj] + out["sediment"][li, lj]).astype(np.float32),
+            "ws": out["water_surface"][li, lj],
+        })
+
+    # the refined off-face strip, resampled onto each neighbouring face's lattice
+    for s in sides:
+        ln = links[f * 4 + s]
+        g = int(ln.nb_face)
+        i, j, k = side_cells(ln.nb_side, N_fine, F)
+        ok = basin_id_coarse[g, i // R, j // R] == bid
+        i, j, k = i[ok], j[ok], k[ok]
+        if i.size == 0:
+            continue
+        x, y = strip_window_coords(win, g, i, j, N_fine)
+        border = np.minimum(np.minimum(x + 0.5, n - 0.5 - x), np.minimum(y + 0.5, n - 0.5 - y))
+        beta = (1.0 - seam_side_weight(k + 0.5, F)) * _smoothstep(border / F)
+        ok = (x >= 0.0) & (x <= n - 1) & (y >= 0.0) & (y <= n - 1) & (beta > 0.0)
+        if not ok.any():
+            continue
+        x, y = x[ok], y[ok]
+        recs.append({
+            "kind": SEAM_CROSS, "face": g, "src": f, "bid": bid, "idx": i[ok] * N_fine + j[ok],
+            "dsurf": _bilinear(dsurf, x, y).astype(np.float32), "dsed": _bilinear(dsed, x, y).astype(np.float32),
+            "beta": beta[ok].astype(np.float32),
+        })
+    return recs
+
+
+def blend_seams(records: list[dict], N_fine: int) -> dict[int, dict[str, np.ndarray]]:
+    """Combine the :func:`seam_records` of all pieces (module docstring).
+    On each target face the cells that have the owning piece's record, at
+    least one cross record and a nonzero divide feather ``w`` get ``surface
+    = plain + w * sum(beta dsurf) / sum(beta)``, ``sediment = max(plain
+    sediment + w * sum(beta dsed) / sum(beta), 0)``, ``height = surface -
+    sediment`` and the water surface of the module docstring.  Returns
+    ``{face: {"idx", "height", "sediment", "water_surface"}}`` (float32,
+    ``idx`` ascending).  Pure; the result does not depend on the order of
+    ``records`` (they are sorted before anything is summed)."""
+    recs = sorted(records, key=lambda r: (int(r["face"]), int(r["bid"]), int(r["kind"]), int(r["src"])))
+    result: dict[int, dict[str, np.ndarray]] = {}
+    for g in sorted({int(r["face"]) for r in recs}):
+        rg = [r for r in recs if int(r["face"]) == g]
+        nat = [r for r in rg if r["kind"] == SEAM_NATIVE]
+        if not nat or len(nat) == len(rg):
+            continue
+        idx = np.concatenate([r["idx"] for r in rg]).astype(np.int64)
+        cells, inv = np.unique(idx, return_inverse=True)
+        m = cells.size
+        beta = np.concatenate([r["beta"] for r in rg]).astype(np.float64)
+        cross = np.concatenate([np.full(r["idx"].size, r["kind"] == SEAM_CROSS) for r in rg])
+        den = np.bincount(inv, weights=beta, minlength=m)
+        den_x = np.bincount(inv, weights=np.where(cross, beta, 0.0), minlength=m)
+        num_s = np.bincount(inv, weights=beta * np.concatenate([r["dsurf"] for r in rg]), minlength=m)
+        num_d = np.bincount(inv, weights=beta * np.concatenate([r["dsed"] for r in rg]), minlength=m)
+        pos = np.searchsorted(cells, np.concatenate([r["idx"] for r in nat]).astype(np.int64))
+        nv = {}
+        for key in ("w", "surf0", "sed0", "surf", "ws"):
+            nv[key] = np.zeros(m, dtype=np.float64)
+            nv[key][pos] = np.concatenate([r[key] for r in nat])
+        has_nat = np.zeros(m, dtype=bool)
+        has_nat[pos] = True
+        sel = has_nat & (den_x > 0.0) & (nv["w"] > 0.0)
+        if not sel.any():
+            continue
+        w = nv["w"][sel]
+        surf = (nv["surf0"][sel] + w * (num_s[sel] / den[sel])).astype(np.float32)
+        sed = np.maximum(nv["sed0"][sel] + w * (num_d[sel] / den[sel]), 0.0).astype(np.float32)
+        height = (surf - sed).astype(np.float32)
+        surf = (height + sed).astype(np.float32)  # the surface as a reader of height + sediment sees it
+        lake = (nv["ws"][sel] - nv["surf"][sel]) > SEAM_LAKE_EPS_M
+        ws = np.where(lake, np.maximum(nv["ws"][sel].astype(np.float32), surf), surf).astype(np.float32)
+        result[g] = {"idx": cells[sel], "height": height, "sediment": sed, "water_surface": ws}
+    return result
+
+
+def write_seams(root: str | Path, params: WorldParams, records: list[dict]) -> int:
+    """Write :func:`blend_seams` into the memmaps (the driver, after every
+    basin job has written).  Returns the number of cells rewritten."""
+    N_fine = int(params.N_fine)
+    total = 0
+    for g, v in blend_seams(records, N_fine).items():
+        i, j = np.divmod(v["idx"], N_fine)
+        for name in ("height", "sediment", "water_surface"):
+            mm = open_fine(root, name, g, "r+")
+            mm[i, j] = v[name]
+            mm.flush()
+            del mm
+        total += int(v["idx"].size)
+    return total
+
+
+__all__ = ["FINE_FIELDS", "FINE_FILL", "FEATHERED", "fine_dir", "fine_path", "create_fine", "open_fine", "fine_exists", "write_base_face", "feather_weight", "window_face_slices", "blend_result", "write_result",
+           "SEAM_NATIVE", "SEAM_CROSS", "seam_side_weight", "side_cells", "strip_window_coords", "seam_records", "blend_seams", "write_seams"]

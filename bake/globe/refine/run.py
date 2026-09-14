@@ -6,6 +6,7 @@ Pipeline::
     create fine/ memmaps (rasterize.create_fine)
     base pass: plain upsample of every face (6 jobs)         -- fills every cell
     basin jobs, largest first (basin_job.job -> rasterize.write_result)
+    seam blend across the cube edges (rasterize.write_seams)  -- multi-face basins
     quicklooks: the 3 largest basins (refine_basin<id>.png), then the planet
 
 Workers (``refine.workers``, 0 = all cores) are a *spawned*
@@ -22,9 +23,12 @@ forever; the executor raises ``BrokenProcessPool`` instead.
 Determinism: a basin's arrays depend only on ``(seed, params, basin
 record)`` (``params.rng("refine", basin_id)``; the kernel is thread-count
 independent), every fine cell is written by exactly one basin job (its own
-cells) after the base pass, so the raster does not depend on the job
-scheduling.  ``OUTPUTS = ["fine"]`` is hashed by the manifest; nothing
-time-dependent is written there.
+cells) after the base pass, and the seam blend rewrites the cells within
+``feather_cells`` of a cube edge a basin crosses once, after every job,
+from the pieces' records sorted by (face, basin, kind, source face) — so
+the raster does not depend on the job scheduling.  ``OUTPUTS =
+["fine"]`` is hashed by the manifest; nothing time-dependent is written
+there.
 """
 from __future__ import annotations
 
@@ -146,6 +150,15 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     stats = _run_jobs(jobs, params, root, workers, log, "basin")
     t_basins = time.time() - t1
 
+    # seam blend across the cube edges: after every piece has written, from
+    # the records the pieces of multi-face basins returned (sorted inside)
+    t2 = time.time()
+    records = [r for s in stats for r in s.pop("seam_records", ())]
+    seam_cells = rz.write_seams(root, params, records)
+    seam_record_mb = sum(sum(v.nbytes for v in r.values() if isinstance(v, np.ndarray)) for r in records) / 1e6
+    del records
+    t_seams = time.time() - t2
+
     stats.sort(key=lambda s: (-int(s.get("area_cells", 0)), int(s["id"]), int(s.get("face", 0))))
     deaths: dict[str, int] = {}
     for s in stats:
@@ -171,6 +184,9 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         "drift_max_m": float(max([s.get("drift_max_m", 0.0) for s in stats] or [0.0])),
         "seconds_base": round(t_base, 2),
         "seconds_base_cpu": round(float(sum(s["seconds"] for s in face_stats)), 2),
+        "seam_cells_blended": int(seam_cells),
+        "seam_records_mb": round(seam_record_mb, 2),
+        "seconds_seams": round(t_seams, 2),
         "seconds_basins_wall": round(t_basins, 2),
         "seconds_basins_cpu": round(seconds_jobs, 2),
         "seconds_total": round(time.time() - t0, 2),
@@ -184,7 +200,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         log(f"[refine] WARNING: {written} basin cells written, {land_fine} fine land cells expected")
     log(
         f"[refine] base pass {t_base:.1f}s; {len(basins)} basins / {len(pieces)} face pieces in {t_basins:.1f}s wall ({seconds_jobs:.1f}s cpu, {workers} workers); "
-        f"{written} cells refined; deaths {deaths}; {info['lake_cells']} lake cells in {info['lakes']} lakes ({info['lake_discarded_m']:.0f} m·cells of lake deposits discarded); max coarse-scale drift removed {info['drift_max_m']:.0f} m"
+        f"{written} cells refined, {seam_cells} seam cells blended in {t_seams:.2f}s ({seam_record_mb:.1f} MB of records); deaths {deaths}; {info['lake_cells']} lake cells in {info['lakes']} lakes ({info['lake_discarded_m']:.0f} m·cells of lake deposits discarded); max coarse-scale drift removed {info['drift_max_m']:.0f} m"
     )
     return info
 

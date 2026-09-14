@@ -13,8 +13,13 @@ cells straddling an edge against the step between the first two cells
 inside the face (a crease shows as a ratio well above 1), the refined
 minus plain detail |d| by distance from the seam (the frozen / feathered
 strip shows as a detail deficit), and the fine discharge ratio across the
-face-crossing coarse links (the river continues or it does not).  Reads
-only; prints JSON.
+face-crossing coarse links (the river continues or it does not).  The
+``*_same_basin`` variants restrict the step and the detail to the seam
+positions where the basin continues across the edge (the seam-row cells on
+both faces carry the same basin id; a detail row at depth d counts where
+the cell still belongs to that basin) -- the cells the seam blend of
+``rasterize.blend_seams`` acts on; elsewhere the edge is a divide or the
+coast and keeps the divide feather.  Reads only; prints JSON.
 """
 import json
 import os
@@ -80,8 +85,11 @@ def main(root: str, fine: bool = True):
     links = edge_links(N * R)
     D = 4 * R + 2
     seam_step, in_step, ref_step = [], [], []
+    seam_same, in_same = [], []
     det_by_depth = np.zeros(D)
     det_cnt = np.zeros(D)
+    det_same = np.zeros(D)
+    det_same_cnt = np.zeros(D)
     det_interior, det_interior_n = 0.0, 0
     for f in range(6):
         for s in range(4):
@@ -93,6 +101,10 @@ def main(root: str, fine: bool = True):
             ln0 = neighbour_ring(lambda F, S, d: side_row(fbid[F], S, d), links, f, s, 0) >= 0
             seam_step.append(np.abs(own0 - nb0)[l0 & ln0])
             in_step.append(np.abs(own0 - own1)[l0 & l1])
+            b0 = side_row(fbid[f], s, 0)
+            same = (b0 >= 0) & (b0 == neighbour_ring(lambda F, S, d: side_row(fbid[F], S, d), links, f, s, 0))
+            seam_same.append(np.abs(own0 - nb0)[same])
+            in_same.append(np.abs(own0 - own1)[same & (side_row(fbid[f], s, 1) == b0)])
             r8, r9 = side_row(surf[f], s, 8), side_row(surf[f], s, 9)
             k8 = (side_row(fbid[f], s, 8) >= 0) & (side_row(fbid[f], s, 9) >= 0)
             ref_step.append(np.abs(r8 - r9)[k8])
@@ -101,6 +113,9 @@ def main(root: str, fine: bool = True):
                 lk = side_row(fbid[f], s, d) >= 0
                 det_by_depth[d] += row[lk].sum()
                 det_cnt[d] += lk.sum()
+                ls = same & (side_row(fbid[f], s, d) == b0)
+                det_same[d] += row[ls].sum()
+                det_same_cnt[d] += ls.sum()
         inner = detail[f][D:-D, D:-D]
         li = fbid[f][D:-D, D:-D] >= 0
         det_interior += inner[li].sum()
@@ -108,6 +123,8 @@ def main(root: str, fine: bool = True):
     seam_step = np.concatenate(seam_step)
     in_step = np.concatenate(in_step)
     ref_step = np.concatenate(ref_step)
+    seam_same = np.concatenate(seam_same)
+    in_same = np.concatenate(in_same)
     out["fine_seam"] = {
         "land_pairs_across_seams": int(seam_step.size),
         "mean_abs_step_across_seam_m": float(seam_step.mean()),
@@ -115,8 +132,13 @@ def main(root: str, fine: bool = True):
         "mean_abs_step_first_cell_inside_m": float(in_step.mean()),
         "mean_abs_step_8_cells_inside_m": float(ref_step.mean()),
         "seam_over_inside_ratio": float(seam_step.mean() / max(in_step.mean(), 1e-9)),
+        "same_basin_pairs_across_seams": int(seam_same.size),
+        "mean_abs_step_across_seam_same_basin_m": float(seam_same.mean()) if seam_same.size else None,
+        "mean_abs_step_first_cell_inside_same_basin_m": float(in_same.mean()) if in_same.size else None,
+        "seam_over_inside_ratio_same_basin": float(seam_same.mean() / max(in_same.mean(), 1e-9)) if in_same.size else None,
     }
     out["detail_by_depth_from_seam_m"] = [round(float(x), 3) for x in (det_by_depth / np.maximum(det_cnt, 1))]
+    out["detail_by_depth_from_seam_same_basin_m"] = [round(float(x), 3) for x in (det_same / np.maximum(det_same_cnt, 1))]
     out["detail_interior_m"] = float(det_interior / max(det_interior_n, 1))
     ratios = []
     for c in np.nonzero(cross)[0]:
@@ -133,7 +155,7 @@ def main(root: str, fine: bool = True):
         "frac_below_0.3": float((ratios < 0.3).mean()) if ratios.size else None,
     }
     ri = m["stages"].get("refine", {}).get("info", {})
-    out["refine"] = {k: ri.get(k) for k in ("n_basins", "n_pieces", "cells_written", "deaths", "seconds_total")}
+    out["refine"] = {k: ri.get(k) for k in ("n_basins", "n_pieces", "cells_written", "seam_cells_blended", "deaths", "seconds_basins_wall", "seconds_seams", "seconds_total")}
     print(json.dumps(out, indent=1))
 
 

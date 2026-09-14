@@ -15,6 +15,16 @@
 > (0 -> 0.05 m over 9 fine cells against 0.11 m in the interior on small;
 > 0 -> 0.85 m against 2.5 m on Earth).  Removing that strip needs a
 > seam-blend pass (section 5), which this change does not attempt.
+>
+> **Update: the seam blend (section 5) removes the strip.**  Each piece of
+> a multi-face basin returns its refined off-face strip resampled onto the
+> neighbouring face, and the two pieces are blended with complementary
+> weights over `feather_cells` on either side of the edge.  Small preset,
+> seeds 0 / 1: detail |refined - plain| on the seam row where the basin
+> continues 0 -> 0.024 / 0.045 m (the same basins 4..9 cells in: 0.030 /
+> 0.048 m), seam / first-step-inside ratio 0.926 -> 0.912 / 0.888 -> 0.867
+> (no crease), only the 4,129 / 7,075 blended cells change, fine
+> discharge and basin ids byte-identical, the blend itself 0.01 s.
 
 `bake/globe/hydro/watersheds.py` partitioned the drainage into basins
 with a cut at every cube-face edge: a land cell whose downstream cell lay
@@ -138,12 +148,15 @@ Reading it:
   link is inside a basin or at a split outlet).  The viewer's basin layer
   (`scripts/viewer_shot.py <world> --layer basin --view flat`) shows the
   basins running across the ±45° face boundaries that used to slice them;
-* the fine raster at the seams did not move, to the digit.  Both seam rows
-  were and are the plain upsample (before: the frozen ring at the face
-  edge; after: the feather weight restricted to the face), so the step
-  across the seam is the plain upsample's own step in both worlds and the
-  detail strip along the edges stays.  This is the least-change design
-  and it is a null result for the fine seam;
+* (history) at this change the fine raster at the seams did not move, to
+  the digit: both seam rows were the plain upsample (before: the frozen
+  ring at the face edge; after: the feather weight restricted to the
+  face), so the detail strip along the edges stayed — "relabelled, not
+  fixed".  The seam blend of section 5 replaces that restriction; on the
+  small preset the seam-row detail where a basin continues across is now
+  0.024 m (seed 0) and 0.045 m (seed 1) instead of 0, close to the
+  detail a few cells in, with the seam / inside step ratio 0.91 and 0.87
+  (section 5.3);
 * the rivers across the seam are as continuous as before (0.90 -> 0.89):
   that continuity was already carried by the coarse-initialised discharge,
   and the on-face cells within `feather_cells` of the seam are blended back
@@ -176,8 +189,8 @@ land pairs across the seams, mean |step| 12.85 m against 13.43 m for the
 first step inside the face (ratio 0.96), detail |refined - plain| 0, 0.02,
 0.12, 0.23, 0.30, 0.42, 0.57, 0.66, 0.76, 0.85 m by depth against 2.50 m
 in the interior, fine discharge ratio across the 3,319 face links median
-0.81 (7.8 % below 0.3).  After this change those numbers stay where they
-are, for the reason of section 3.
+0.81 (7.8 % below 0.3).  After this change (before the seam blend of
+section 5) those numbers stay where they are, for the reason of section 3.
 
 The stages have no code-version stamp and `stage_done` compares only the
 parameter hash, so existing worlds keep the old partition until `bake
@@ -188,7 +201,9 @@ changes (the refine stream is keyed by (basin, face) now, and edge windows
 shift into the face), so comparisons to earlier worlds go through the
 `basin_id` rasters, never through ids.
 
-## 5. What is left: the strip
+## 5. The strip, and the seam blend that removes it
+
+### 5.1 The problem (as written with the partition change)
 
 The detail-deficit strip along the cube edges is the same artefact every
 basin divide has (frozen ring + `feather_cells` ramp), only straight and
@@ -204,6 +219,147 @@ row at weight 1.  It is a separate change with its own measurement (the
 seam / inside ratio must stay near 1 while the detail at depth 0..9 rises
 to the interior's), and whether it is worth its cost should be decided on
 that measurement, not here.
+
+### 5.2 The seam blend (`refine/rasterize.py`, `basin_job.job`, `run.py`)
+
+* `blend_result` computes the divide feather on `own` over the whole
+  window, off-face strip included.  Where the basin continues across the
+  edge the seam is no longer a divide; where it ends there (a real divide,
+  the coast, a basin with no piece on that face) the cells across are not
+  `own`, the distance is 1 on the seam row and the result is today's to
+  the bit (a basin on one face writes exactly what it wrote before).  The
+  *discharge* keeps the face-restricted feather: a river position cannot be
+  averaged between two erosion runs, and letting each face's refined
+  discharge meet at the seam dropped the fine discharge ratio across the
+  face links from 0.84 / 0.86 to 0.78 / 0.77 (seeds 0 / 1) in a first
+  bake; with the restriction it is unchanged to the digit.
+* a piece of a multi-face basin returns `seam_records` with its stats
+  (pickled back from the worker): its own detail `surface - plain` and
+  `sediment - plain sediment` on its face's cells within `feather_cells` of
+  every edge towards a face the basin has a piece on (with the divide
+  feather `w` and the surface / water surface it wrote), and, per such
+  edge, its refined off-face strip resampled onto the neighbouring face's
+  fine lattice: each neighbour cell centre of the basin (coarse
+  `basin_id`) within `feather_cells` of the edge goes `to_sphere_v` ->
+  `project_to_face_v(window face)` -> fractional window index -> bilinear;
+* weights: `a(dist) = smoothstep((dist + F) / 2F)` for the piece whose face
+  the cell is on, `1 - a` for the piece across (`dist` = the cell centre's
+  distance from the edge in cells, so the two are 0.59 / 0.41 on the seam
+  row at F = 4 and 1/2 on the edge line itself); the crossing weight is
+  also ramped to 0 over F cells at that piece's window border, so a window
+  ending along the edge fades out; near a cube corner the owning weight is
+  the smaller of the two edges'.  Per cell the weights are normalised, so
+  they sum to 1;
+* after every job has written, the driver sorts all records by (face,
+  basin, kind, source face), sums them in that order and rewrites each cell
+  that has the owning piece's record, a crossing record and `w > 0`:
+  `surface = plain + w * sum(beta dsurf) / sum(beta)`, `sediment =
+  max(plain sediment + w * sum(beta dsed) / sum(beta), 0)`, `height =
+  surface - sediment`.  The detail is blended, not the absolute surface, so
+  the two gnomonic samplings of the bicubic plain surface never meet;
+  `w` is the owning piece's, so divides stay pinned;
+* categorical fields are the owning piece's: `basin_id`, `hardness`,
+  `discharge` untouched; the water surface keeps the owning piece's level
+  on its lake cells (`max(level, surface)`, which never lifts it above
+  refine's lake-balance cap) and is the blended surface on dry cells;
+* order independence: pass 1 still writes disjoint cells, pass 2 runs once
+  on the sorted records (`test_seam_blend_job_order_independent` blends
+  the tiny world's records in three orders, byte-identical, and checks the
+  raster holds exactly those cells);
+* memory: the records live in the driver until the blend.  They are
+  bounded by the 24 face sides x F rows x N_fine cells with one owning and
+  at most two crossing records each: at Earth (F = 8, N_fine = 2048) at
+  most 393k target cells x ~80 B = ~32 MB whatever the basin count; small
+  measured 0.3 / 0.5 MB.
+
+No parameter changes (`feather_cells` sets the blend width); the refine
+outputs change only in the blended cells.
+
+### 5.3 Measured: small preset, seeds 0 and 1
+
+`scripts/bake.py --world scratch/seam/a8cf/small-s{0,1}-{before,after}
+--preset small --seed {0,1} --set refine.workers=2` (before = commit
+af58d28), then `python scripts/face_seams.py <world>`.  `face_seams.py`
+now also reports the `*_same_basin` numbers: the seam positions where the
+seam-row cells on both faces carry the same basin id (the cells the blend
+acts on; 1,196 of 1,248 land pairs on seed 0, 2,112 of 2,368 on seed 1).
+
+| | s0 before | s0 after | s1 before | s1 after |
+|---|---|---|---|---|
+| basins / on more than one face / pieces | 146 / 28 / 174 | same | 166 / 48 / 216 | same |
+| fine cells written (pass 1) | 118,012 | 118,012 | 117,964 | 117,964 |
+| seam cells blended (pass 2) | — | 4,129 | — | 7,075 |
+| cells that differ from before (height / sediment / water surface) | | 4,121 / 4,129 / 4,124 | | 7,059 / 7,075 / 7,063 |
+| ... of those further than F = 4 from an edge | | 0 | | 0 |
+| discharge, basin_id, hardness cells that differ | | 0 | | 0 |
+| detail at 0, 1, 2 ... 9 cells from the seam, same basin (m) | 0, .008, .016, .022, .031, .028, .034, .029, .027, .029 | .024, .024, .024, .024, .031, .028, .034, .029, .027, .029 | 0, .011, .027, .042, .046, .044, .051, .050, .047, .048 | .045, .044, .044, .047, .046, .044, .051, .050, .047, .048 |
+| detail by depth, all land (m) | 0, .008, .016, .023, .030, .033 ... | .023, .023, .022, .024, .030, .033 ... | 0, .010, .024, .037, .041, .041 ... | .039, .038, .036, .041, .041, .041 ... |
+| detail in the interior (m) | 0.109 | 0.109 | 0.069 | 0.069 |
+| mean \|step\| across the seam, same basin (m) | 1.811 | 1.796 | 1.911 | 1.882 |
+| mean \|step\| first cell inside, same basin (m) | 1.956 | 1.969 | 2.153 | 2.171 |
+| seam / inside ratio, same basin | 0.926 | 0.912 | 0.888 | 0.867 |
+| seam / inside ratio, all land pairs | 0.891 | 0.879 | 0.887 | 0.868 |
+| p99 \|step\| across the seam (m) | 14.95 | 14.96 | 7.86 | 7.77 |
+| fine discharge ratio across face links, median (< 0.3) | 0.84 (4.1 %) | 0.84 (4.1 %) | 0.86 (5.7 %) | 0.86 (5.7 %) |
+| water surface < surface - 1 mm / sediment < 0 | | 0 / 0 | | 0 / 0 |
+| refine basin jobs wall / cpu (s) | 3.6 / 5.2 | 2.3 / 2.9 | 3.1 / 4.2 | 2.6 / 3.3 |
+| seam blend (s) / records (MB) | — | 0.01 / 0.3 | — | 0.01 / 0.5 |
+
+Reading it:
+
+* the strip is gone where it should be.  The seam row of a basin that
+  continues across an edge carries 0.024 m / 0.045 m of detail instead of
+  0, flat across rows 0..3 and close to rows 4..9 (0.027-0.034 m /
+  0.044-0.051 m).  It stays somewhat below the far interior's mean (0.109
+  / 0.069 m), which is the land far from any edge and was never the
+  near-edge value (rows 4..9 were at the same 0.03 / 0.05 m before);
+  seed 0's rows 0..3 are ~20 % below its rows 4..9 — the average of two
+  independently eroded detail fields at weights near 1/2 has less
+  variance than either (1/sqrt(2) for uncorrelated fields), and part of
+  the refined detail is shared (both runs start from the same plain
+  surface and coarse discharge), so the loss is smaller than that bound;
+* no crease: the step across the seam is slightly *smaller* than before
+  relative to the first step inside (0.926 -> 0.912, 0.888 -> 0.867),
+  because the two seam-row cells are both blends of the same two pieces
+  and differ by less than two independent refinements would; the before
+  worlds, whose seam rows were the plain upsample on both faces, sat at
+  0.89-0.93 already, and p99 is unchanged;
+* only the blended cells differ from the before world, and only in height,
+  sediment and water surface.  The water surface change flips fine cells
+  in the strip between "lake" (water > 5 cm above the surface) and dry: 8
+  lake -> dry on seed 0 (of 19 strip lake cells), 47 lake -> dry and 3 dry
+  -> lake on seed 1 (of 81), in shallow margins (e.g. seed 1 basin 65 on
+  face 4, 0.05-1.35 m deep before).  Before, those seam rows were pinned
+  to the plain upsample, whose lake depth is the bilinearly smeared coarse
+  one the refine job already refuses to use as a level; the owning
+  piece's refined flood has depth 0 there (checked on every one of the 47
+  cells), as it does a few cells in;
+* refine time is within run-to-run noise at this scale: the after runs
+  were faster than the before runs, which the blend (it only adds work)
+  cannot cause.  The pass itself is 0.01 s; the record extraction is a
+  distance transform and a bilinear strip per multi-face piece, inside
+  the job times.  At Earth the pass reads nothing back from disk and
+  writes at most ~393k cells.
+
+### 5.4 Review
+
+An adversarial review verified the load-bearing claims and found no
+blocker. It resampled the plain window surface of every multi-face piece
+onto the neighbouring face with the blend's own geometry and compared it
+with that face's own plain upsample: 4,943 cells, mean residual 0.018 m
+against 0.94 m for a half-cell shift and 2.10 m for the step between
+adjacent cells. It also found that no test guarded that geometry (a
+two-cell shift passed all 20 refine tests), so the coordinates now live in
+`rasterize.strip_window_coords` and
+`test_seam_strip_is_sampled_where_the_neighbour_face_is` checks them the
+same way (a two-cell shift fails it). The 8 / 47 lake flips come from the
+pass-1 feather, not the blend: those cells had 0.05-0.5 m of smeared
+coarse water depth under `lake_min_depth`, and the refined flood is dry
+there before and after. Two things stay open and want an Earth hillshade
+at a seam: the averaged detail is 7-20 % lower on rows 0..3 than a few
+cells in, which may show as a faint band, and the discharge keeps the
+face-restricted feather, so within `feather_cells` of a crossed edge a
+river drawn from discharge can sit slightly off the refined valley.
 
 ## 6. Notes
 

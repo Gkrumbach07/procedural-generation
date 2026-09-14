@@ -13,8 +13,10 @@ ceiling; the flooded water surface is >= the surface; a window crossing a
 face edge upsamples without NaNs or seams; every land cell is written
 exactly once; a basin on two faces is refined as one job per face piece
 whose mask follows the basin across the edge; rivers continue across
-split outlets and across face edges; the fine surface has no crease at
-the cube edges; the whole stage is deterministic.
+split outlets and across face edges; the seam blend's weights sum to 1,
+its seam row carries refined detail and it does not depend on the job
+order; the fine surface has no crease at the cube edges; the whole stage
+is deterministic.
 """
 from __future__ import annotations
 
@@ -425,14 +427,15 @@ def _multi_face_basin(basins):
     pytest.skip("no basin on more than one face in this world")
 
 
-def test_piece_mask_crosses_the_face_edge(world):
+def test_piece_mask_crosses_the_face_edge(world, tmp_path):
     """For a basin on two faces, the piece job on either face has active
     (mask 1) cells beyond the face edge — the frozen ring sits on the true
     divide, not on the seam — so a river crossing the edge keeps flowing;
     every cardinal face exit's flow continues into mask > 0 across the
-    edge; the rasteriser writes only the piece's own on-face cells and the
-    feather weight is 0 on the seam row (the two pieces meet on the plain
-    upsample, as at a divide)."""
+    edge; the rasteriser writes only the piece's own on-face cells; the
+    feather weight is > 0 on seam cells the basin continues across and 0
+    where the basin ends at the edge; the piece returns seam records for its
+    own face and for the face across the edge."""
     store, params, basins = world["store"], world["params"], world["basins"]
     R, N = params.world.R, params.N_c
     b = _multi_face_basin(basins)
@@ -440,6 +443,8 @@ def test_piece_mask_crosses_the_face_edge(world):
     from globe.hydro.d8 import D8_DI, D8_DJ
 
     n_crossing_exits = 0
+    scratch_root = tmp_path / "raster"
+    rz.create_fine(scratch_root, params)
     for p in b["pieces"]:
         res = bj.run_basin(store.root, b, params, face=p["face"])
         m = res.arrays["mask"]
@@ -459,14 +464,22 @@ def test_piece_mask_crosses_the_face_edge(world):
                 a1, b1 = a0 + di * R, b0 + dj * R
                 assert (m[a1 : a1 + R, b1 : b1 + R] > 0).any()
                 n_crossing_exits += 1
-        # write only the on-face own cells; the seam row is the plain upsample
-        out, own = rz.blend_result(res.arrays, b["id"], int(params.refine.feather_cells), on)
+        # write only the on-face own cells; the seam is not a divide where
+        # the basin continues across it (feather weight > 0 on seam cells
+        # whose neighbour across the edge is the basin)
+        F = int(params.refine.feather_cells)
+        out, own = rz.blend_result(res.arrays, b["id"], F)
         own_on = own & on
         assert own_on.sum() == p["area_cells"] * R * R
         seam = own_on & ~ndimage.binary_erosion(on, structure=np.ones((3, 3), bool), border_value=0)
-        if seam.any():
-            assert np.array_equal(out["height"][seam], res.arrays["height0"][seam])
-        assert rz.write_result(store.root, params, res) == int(own_on.sum())  # rewrites the same cells with the same values
+        across = ndimage.binary_dilation(own & ~on, structure=np.ones((3, 3), bool))
+        w = rz.feather_weight(own, F)
+        assert seam.any() and (w[seam & across] > 0).any()
+        assert (w[seam & ~across & ndimage.binary_dilation(~own, structure=np.ones((3, 3), bool))] == 0).all()
+        assert rz.write_result(scratch_root, params, res) == int(own_on.sum())  # a scratch raster: the world's seam cells are blended
+        recs = rz.seam_records(res, params, [q["face"] for q in b["pieces"]], store.load_field("basin_id", params.coarse_grid()).interior)
+        kinds = {(r["kind"], r["face"]) for r in recs}
+        assert (rz.SEAM_NATIVE, win.face) in kinds and any(k == rz.SEAM_CROSS and g != win.face for k, g in kinds)
     assert n_crossing_exits > 0
     # the piece of the other face got its own rng stream
     a0 = bj.run_basin_arrays(store.root, b, params)
@@ -594,11 +607,151 @@ def test_rivers_continue_across_face_edges(world):
     assert np.median(ratios) > 0.3
 
 
+def _two_piece_records(F, n=16, detail_a=1.0, detail_b=3.0, native_w=1.0):
+    """Synthetic seam records on target face 0 (an ``n x n`` fine face,
+    side 1 = the edge at i = 0): the owning piece (source face 0) with
+    detail ``detail_a`` on rows 0 .. F-1, the piece across the edge (source
+    face 2) with ``detail_b`` on the same cells, weights from
+    ``seam_side_weight`` as ``seam_records`` sets them; plain surface 100 m,
+    plain sediment 1 m, no lakes."""
+    i, j, k = rz.side_cells(1, n, F)
+    idx = i * n + j
+    a = rz.seam_side_weight(k + 0.5, F)
+    m = idx.size
+    f32 = lambda v: np.full(m, v, np.float32)  # noqa: E731
+    native = {"kind": rz.SEAM_NATIVE, "face": 0, "src": 0, "bid": 7, "idx": idx, "dsurf": f32(detail_a), "dsed": f32(0.0),
+              "beta": a.astype(np.float32), "w": f32(native_w), "surf0": f32(100.0), "sed0": f32(1.0), "surf": f32(100.0 + detail_a), "ws": f32(100.0 + detail_a)}
+    cross = {"kind": rz.SEAM_CROSS, "face": 0, "src": 2, "bid": 7, "idx": idx, "dsurf": f32(detail_b), "dsed": f32(0.0), "beta": (1.0 - a).astype(np.float32)}
+    return native, cross, k
+
+
+def test_seam_blend_weights_sum_to_one_and_seam_row_carries_detail():
+    """Two pieces meeting at a cube edge: the owning and the crossing weight
+    sum to 1 at every distance and are 1/2 on the edge; the blend of detail
+    1 (owning) and 3 (across) is the weighted mean row by row (1.81 half a
+    cell in, 2 on the edge line), falls monotonically towards 1 over
+    ``feather_cells``; the seam row
+    carries detail (not the plain upsample); the result is continuous
+    through the edge (the mirrored cell on the other face gets the mirrored
+    value); a zero divide feather pins the plain upsample; a piece alone
+    (no cross record) is not rewritten; sediment is clipped at 0 and the
+    water surface of a dry cell is the blended surface."""
+    F = 4
+    d = np.linspace(-6.0, 6.0, 49)
+    wa = rz.seam_side_weight(d, F)
+    assert np.allclose(wa + rz.seam_side_weight(-d, F), 1.0)
+    assert rz.seam_side_weight(0.0, F) == 0.5 and rz.seam_side_weight(F, F) == 1.0 and rz.seam_side_weight(-F, F) == 0.0
+    assert np.all(np.diff(wa) >= 0)
+    native, cross, k = _two_piece_records(F)
+    out = rz.blend_seams([native, cross], 16)[0]
+    order = np.argsort(native["idx"])
+    kk = k[order]
+    detail = out["height"] + out["sediment"] - 100.0
+    assert np.array_equal(out["idx"], native["idx"][order])
+    for r in range(F):
+        a = rz.seam_side_weight(r + 0.5, F)
+        assert np.allclose(detail[kk == r], a * 1.0 + (1.0 - a) * 3.0, atol=1e-4)
+    seam = detail[kk == 0]
+    assert (seam > 1.5).all() and (seam < 2.5).all()  # both pieces near 1/2 (0.59 / 0.41 half a cell in): refined detail, not plain
+    rows = [float(detail[kk == r].mean()) for r in range(F)]
+    assert all(x > y for x, y in zip(rows, rows[1:])) and rows[-1] > 1.0
+    # continuity through the edge: the mirrored cell (-dist) on the other face blends 3 (its own) and 1 (across)
+    mirror = rz.seam_side_weight(0.5, F) * 3.0 + (1.0 - rz.seam_side_weight(0.5, F)) * 1.0
+    assert abs((seam.mean() + mirror) / 2.0 - 2.0) < 1e-6 and abs(seam.mean() - mirror) < 0.8
+    assert np.allclose(out["water_surface"], out["height"] + out["sediment"])
+    # divide feather 0: the plain upsample, not rewritten
+    native0, cross0, _ = _two_piece_records(F, native_w=0.0)
+    assert 0 not in rz.blend_seams([native0, cross0], 16)
+    # the owning piece alone: nothing to blend
+    assert rz.blend_seams([native], 16) == {}
+    # sediment never negative
+    nat, crs, _ = _two_piece_records(F)
+    nat["dsed"][:] = -5.0
+    crs["dsed"][:] = -5.0
+    assert (rz.blend_seams([nat, crs], 16)[0]["sediment"] >= 0).all()
+
+
+def test_seam_blend_job_order_independent(world):
+    """The seam blend does not depend on which piece finished first: the
+    records of every multi-face basin's pieces, blended in the driver's
+    order, reversed and shuffled, give byte-identical cells; the owning
+    and crossing weights of each blended cell sum to 1 away from window
+    borders; and the stage's raster carries the blend (the seam rows
+    differ from the plain upsample where a basin continues across)."""
+    store, params, basins = world["store"], world["params"], world["basins"]
+    grid = params.coarse_grid()
+    bid_c = store.load_field("basin_id", grid).interior
+    pieces = [(b, p) for b, p in refine_run.basin_pieces(basins) if len(b.get("pieces") or ()) > 1]
+    if not pieces:
+        pytest.skip("no basin on more than one face in this world")
+    records = []
+    for b, p in pieces:
+        res = bj.run_basin(store.root, b, params, face=p["face"])
+        records += rz.seam_records(res, params, [q["face"] for q in b["pieces"]], bid_c)
+    assert any(r["kind"] == rz.SEAM_CROSS for r in records)
+    ref = rz.blend_seams(records, params.N_fine)
+    assert ref
+    rng = np.random.default_rng(3)
+    for recs in (records[::-1], [records[i] for i in rng.permutation(len(records))]):
+        got = rz.blend_seams(recs, params.N_fine)
+        assert got.keys() == ref.keys()
+        for g in ref:
+            for key in ref[g]:
+                assert np.array_equal(ref[g][key], got[g][key]), (g, key)
+    # the raster holds exactly these cells
+    n_blended = 0
+    for g, v in ref.items():
+        i, j = np.divmod(v["idx"], params.N_fine)
+        for key in ("height", "sediment", "water_surface"):
+            assert np.array_equal(_fine(world, key, g)[i, j], v[key]), (g, key)
+        n_blended += v["idx"].size
+    assert world["info"]["seam_cells_blended"] == n_blended > 0
+    # the seam row (touching the edge) of the blended cells carries refined detail
+    seam_detail = []
+    for r in records:
+        if r["kind"] != rz.SEAM_NATIVE or r["face"] not in ref:
+            continue
+        v = ref[r["face"]]
+        pos = np.searchsorted(v["idx"], r["idx"])
+        hit = (pos < v["idx"].size) & (v["idx"][np.minimum(pos, v["idx"].size - 1)] == r["idx"])
+        i, j = np.divmod(r["idx"][hit], params.N_fine)
+        row0 = np.minimum.reduce([i, params.N_fine - 1 - i, j, params.N_fine - 1 - j]) == 0
+        surf = v["height"][pos[hit]] + v["sediment"][pos[hit]]
+        seam_detail.append(np.abs(surf - r["surf0"][hit])[row0])
+    seam_detail = np.concatenate(seam_detail)
+    assert seam_detail.size and (seam_detail > 1e-3).mean() > 0.5
+    # weights: per target cell the owning + crossing betas sum to at most 1,
+    # and to 1 wherever the crossing window reaches 2 feathers past the edge
+    # (the tiny preset's halo is one feather; with halo_cells 4 it is two,
+    # as on small and Earth) and the cell is off the cube-corner strips
+    p4 = params.with_overrides(refine={"halo_cells": 2 * params.refine.feather_cells // params.world.R})
+    recs4 = []
+    for b, p in pieces:
+        res = bj.run_basin(store.root, b, p4, face=p["face"])
+        recs4 += rz.seam_records(res, p4, [q["face"] for q in b["pieces"]], bid_c)
+    F, n = params.refine.feather_cells, params.N_fine
+    for g in sorted({r["face"] for r in recs4}):
+        rg = [r for r in recs4 if r["face"] == g]
+        idx = np.concatenate([r["idx"] for r in rg])
+        beta = np.concatenate([r["beta"] for r in rg]).astype(np.float64)
+        cells, inv = np.unique(idx, return_inverse=True)
+        tot = np.bincount(inv, weights=beta)
+        has_x = np.bincount(inv, weights=np.concatenate([np.full(r["idx"].size, r["kind"] == rz.SEAM_CROSS) for r in rg])) > 0
+        has_n = np.bincount(inv, weights=np.concatenate([np.full(r["idx"].size, r["kind"] == rz.SEAM_NATIVE) for r in rg])) > 0
+        i, j = np.divmod(cells, n)
+        corner = (np.minimum(i, n - 1 - i) < F) & (np.minimum(j, n - 1 - j) < F)
+        both = has_x & has_n
+        assert both.any() and (tot[both] <= 1.0 + 1e-5).all()
+        assert np.median(tot[both & ~corner]) > 0.999, np.percentile(tot[both & ~corner], [5, 50])
+
+
 def test_fine_seam_step_matches_inside_step(world):
     """The fine surface has no crease along the cube edges: the mean |step|
     between the two land cells straddling an edge is within 1.5x the mean
-    |step| between the first two cells inside the face (the seam row is the
-    plain upsample on both faces, as every divide is)."""
+    |step| between the first two cells inside the face (where a basin ends
+    at the edge the seam row is the plain upsample on both faces, as every
+    divide is; where it continues both seam rows are the seam blend of the
+    same two pieces)."""
     from globe.refine.lod import edge_links, neighbour_ring, side_row
 
     params = world["params"]
@@ -664,3 +817,50 @@ def test_detail_noise_fades_out_at_sea_level():
     far = np.abs(surface[:, 0]) > 40.0
     assert shore.any() and np.abs(n1[shore]).max() < 0.05 * np.abs(n0).max()
     assert np.array_equal(n1[far], n0[far])
+
+
+def test_seam_strip_is_sampled_where_the_neighbour_face_is(world):
+    """The seam blend resamples a piece's refined off-face strip onto the
+    neighbouring face (`rasterize.strip_window_coords` + bilinear).  Checked
+    on the plain upsample, which both faces compute independently: the
+    window's plain surface resampled onto the neighbour's cells within
+    `feather_cells` of the edge matches that face's own plain upsample to a
+    small fraction of the step between adjacent cells, and a half-cell
+    offset in the geometry is many times worse (a review found a two-cell
+    shift passed every other test)."""
+    from globe.refine.lod import edge_links
+    from globe.refine.upsample import upsample_face
+
+    store, params, basins = world["store"], world["params"], world["basins"]
+    b = _multi_face_basin(basins)
+    N_fine, R, F = params.N_fine, params.world.R, int(params.refine.feather_cells)
+    grid, fields, derived = bj.coarse_inputs(store.root, params)
+    links = edge_links(N_fine)
+    faces = {int(q["face"]) for q in b["pieces"]}
+    res_all, offs_all, steps = [], [], []
+    for p in b["pieces"]:
+        res = bj.run_basin(store.root, b, params, face=p["face"])
+        win = res.win
+        plain = res.arrays["height0"].astype(np.float64) + res.arrays["sediment0"]
+        for s in range(4):
+            ln = links[win.face * 4 + s]
+            g = int(ln.nb_face)
+            if g not in faces:
+                continue
+            i, j, _ = rz.side_cells(ln.nb_side, N_fine, F)
+            up = upsample_face(fields, derived, g, R, 0, grid.N)
+            own = up["height"].astype(np.float64) + up["sediment"]
+            x, y = rz.strip_window_coords(win, g, i, j, N_fine)
+            n = win.n
+            ok = (x >= 0) & (x <= n - 1) & (y >= 0) & (y <= n - 1)
+            if ok.sum() < 8:
+                continue
+            ref = own[i[ok], j[ok]]
+            res_all.append(np.abs(rz._bilinear(plain, x[ok], y[ok]) - ref))
+            offs_all.append(np.abs(rz._bilinear(plain, np.clip(x[ok] + 0.5, 0, n - 1), y[ok]) - ref))
+            steps.append(np.abs(np.diff(own, axis=0)).ravel())
+    if not res_all:
+        pytest.skip("no crossed edge with a strip inside the window")
+    r, o, st = np.concatenate(res_all).mean(), np.concatenate(offs_all).mean(), np.concatenate(steps).mean()
+    assert r < 0.05 * st, (r, st)
+    assert o > 5.0 * r, (r, o)
