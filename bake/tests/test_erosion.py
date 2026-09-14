@@ -25,6 +25,7 @@ from scipy import ndimage
 from globe.config import WorldParams, cell_units
 from globe.field import FaceField
 from globe.erosion import glacial
+from globe.erosion import maps as emaps
 from globe.erosion import particle as pk
 from globe.erosion import run as erosion_run
 from globe.erosion.maps import ErosionState, apply_isostasy, apply_uplift, hold_datum, run_iteration, step, uplift_cap
@@ -473,10 +474,12 @@ def test_driver_checkpoint_resume(scratch):
 
 def test_checkpoints_are_pruned_and_a_shorter_run_resumes(scratch):
     """Only the two newest checkpoints of a parameter family survive, and
-    ``iterations`` is not part of the checkpoint identity: a shorter rerun
-    resumes from the newest checkpoint at or below its end."""
+    ``iterations`` is not part of the checkpoint identity in
+    ``uplift_mode = 'stack'``: a shorter rerun resumes from the newest
+    checkpoint at or below its end.  (In 'replay' it is, see
+    test_uplift_replay_resume_equals_continuous_run.)"""
     p = WorldParams.tiny_world(11)
-    p.erosion = dataclasses.replace(p.erosion, iterations=9, checkpoint_every=3, quicklook_every=0)
+    p.erosion = dataclasses.replace(p.erosion, iterations=9, checkpoint_every=3, quicklook_every=0, uplift_mode="stack")
     store = _stub_world(scratch, "erosion_prune", p)
     erosion_run.run(store, p, _log)
     kept = sorted(q.name for q in store.checkpoint_dir.glob("erosion_iter*.npz"))
@@ -556,7 +559,7 @@ def test_uplift_cap_bounds_the_rise_and_stays_mean_free(scratch):
     mass-free, cells under the cap get exactly their own uplift, cap off
     reproduces the old rule bit for bit, and a window state (its own
     synthetic field, refine's zeros) is never capped by ``step``."""
-    p = WorldParams.small_world(0)  # 50 m cells: 2 m/it = 0.04 cell units
+    p = WorldParams.small_world(0).with_overrides(erosion={"uplift_max_m": 2.0})  # 50 m cells: 2 m/it = 0.04 cell units (off by default since 'replay')
     grid = p.coarse_grid()
     store = _stub_world(scratch, "uplift_cap", p)
     f = {n: store.load_field(n, grid) for n in ("bedrock", "hardness", "precip", "evap", "uplift")}
@@ -722,6 +725,157 @@ def test_datum_is_held_through_the_run(scratch):
     hinfo = hydro_run.run(store, p, _log)
     assert abs(hinfo["height_shift_m"]) < 5.0, hinfo["height_shift_m"]
     assert abs(hinfo["land_fraction"] - p.world.land_fraction) < 0.02
+
+
+def _uplift_world(scratch, name: str, p: WorldParams) -> WorldStore:
+    """A stub world whose uplift is the size of the real stage's: the stub
+    field x1000 (~1 m/it, net positive) and a 6 x 6 belt core at 5 m/it, so
+    a 2 m/it cap binds on it and a double count shows."""
+    store = _stub_world(scratch, name, p)
+    grid = p.coarse_grid()
+    upl = store.load_field("uplift", grid)
+    upl.data *= 1000.0
+    upl.interior[2, 10:16, 10:16] = 5.0
+    upl.exchange_halos()
+    store.save_field(upl)
+    return store
+
+
+def _no_surface_processes(monkeypatch):
+    """No particles, no mass wasting: what is left of ``maps.step`` is the
+    base/route/lake refreshes, uplift, isostasy (on nothing) and the datum."""
+    monkeypatch.setattr(emaps, "run_iteration", lambda state, params, key, **kw: {"particles": 0, "steps_mean": 0.0, "deaths": {}})
+    monkeypatch.setattr(emaps, "thermal_erosion", lambda state, params: None)
+
+
+def test_uplift_replay_without_erosion_ends_at_bedrock(scratch, monkeypatch):
+    """``erosion.uplift_mode = 'replay'`` (docs/uplift-replay.md): the stage
+    starts from ``bedrock`` less the total the run will apply and replays it,
+    so with every surface process off the surface ends at ``bedrock`` --
+    cell for cell, up to one global constant (the datum hold) -- with the
+    cap off and with it binding.  'stack' ends at ``bedrock`` plus the
+    applied uplift: the last ``uplift_window`` tectonic steps counted twice."""
+    n = 12
+    p = WorldParams.tiny_world(3).with_overrides(erosion={
+        "iterations": n, "glacial_every": 0, "checkpoint_every": 0, "quicklook_every": 0, "resume": False})
+    assert p.erosion.uplift_mode == "replay" and p.erosion.isostasy > 0.0  # the defaults; isostasy stays on
+    store = _uplift_world(scratch, "replay_no_erosion", p)
+    _no_surface_processes(monkeypatch)
+    grid = p.coarse_grid()
+    for cap_m in (0.0, 2.0):
+        q = p.with_overrides(erosion={"uplift_max_m": cap_m})
+        st = erosion_run.build_state(store, q)
+        bed = store.load_field("bedrock", grid).interior.astype(np.float64) / st.height_unit_m
+        inter = st.interior
+        u, mean = emaps._applied_uplift(st, uplift_cap(st, q.erosion))
+        applied = n * (u[inter] - mean)
+        if cap_m:
+            assert (st.uplift[inter] > uplift_cap(st, q.erosion)).sum() == 36  # the cap binds on the core
+        # the start is the reference-step crust, held at the land fraction
+        d0 = st.height[inter] - (bed - applied)
+        assert np.ptp(d0) < 1e-9
+        assert abs(np.mean(st.surface()[inter] >= 0) - p.world.land_fraction) < 2.0 / d0.size
+        assert applied.max() > 0.2  # a real replay: the core starts > 10 m below its bedrock (48 m uncapped, 12 m capped)
+        m0 = st.total_mass()
+        for it in range(n):
+            step(st, q, it)
+        d = st.height[inter] - bed
+        assert np.ptp(d) < 1e-9, np.ptp(d)  # bedrock + one constant
+        assert not st.sediment.any() and not st.pending.any()
+        # the replayed total is mass-free: the only mass change is the datum's
+        assert abs((st.total_mass() - m0) - d.size * (float(d.mean()) - float(d0.mean()))) < 1e-6
+
+        s = q.with_overrides(erosion={"uplift_mode": "stack"})
+        ss = erosion_run.build_state(store, s)
+        assert np.array_equal(ss.height[inter], bed)  # stack starts at bedrock itself
+        for it in range(n):
+            step(ss, s, it)
+        ds = ss.height[inter] - bed
+        assert np.ptp(ds - applied) < 1e-9  # ... and ends at bedrock + the applied uplift
+        assert np.ptp(ds) > 0.2
+
+
+def test_uplift_stack_mode_is_the_old_rule_bit_for_bit(scratch, monkeypatch):
+    """``uplift_mode = 'stack'`` is the behaviour before the replay existed
+    (af58d28): the start state is ``ErosionState.from_grid`` on ``bedrock``
+    untouched, ``start_replay`` is a no-op, and steps driven with the old
+    ``apply_uplift`` body (inlined below) produce the same bytes in every
+    evolving array, with the 2 m/it cap binding.  Its checkpoint identity
+    still leaves ``iterations`` out."""
+    p = WorldParams.tiny_world(5).with_overrides(erosion={"uplift_mode": "stack", "uplift_max_m": 2.0})
+    store = _uplift_world(scratch, "stack_bit_identical", p)
+    grid = p.coarse_grid()
+    a = erosion_run.build_state(store, p)
+    f = {k: store.load_field(k, grid) for k in ("bedrock", "hardness", "precip", "evap", "uplift")}
+    b = ErosionState.from_grid(grid, f["bedrock"], f["hardness"], f["precip"], f["evap"], f["uplift"], p.erosion)
+    assert a.height.tobytes() == b.height.tobytes()
+    assert emaps.start_replay(a, p) is None and emaps.uplift_replay(a, p.erosion) is None
+    assert a.height.tobytes() == b.height.tobytes()
+
+    def old_apply_uplift(state, cap=None):  # erosion/maps.py at af58d28, verbatim
+        act = state.mask == pk.MASK_ACTIVE
+        u = state.uplift if cap is None else np.minimum(state.uplift, float(cap))
+        mean = 0.0
+        if state.spherical:
+            iact = state.mask[state.interior] == pk.MASK_ACTIVE
+            mean = float(u[state.interior][iact].mean()) if iact.any() else 0.0
+        state.height[act] += u[act] - mean
+
+    for it in range(4):
+        step(a, p, it)
+    monkeypatch.setattr(emaps, "apply_uplift", old_apply_uplift)
+    for it in range(4):
+        step(b, p, it)
+    for k in ("height", "sediment", "discharge", "momentum", "pending", "base", "route"):
+        assert getattr(a, k).tobytes() == getattr(b, k).tobytes(), k
+    p6 = p.with_overrides(erosion={"iterations": 6})
+    assert erosion_run._ckpt_hash(p6, store) == erosion_run._ckpt_hash(p, store)
+
+
+def test_uplift_replay_resume_equals_continuous_run(scratch):
+    """The replayed start is built once: a run resumed from its iteration-5
+    checkpoint writes the same bytes as the continuous run (a second
+    subtraction would put the whole run ``iterations x uplift`` low).  And a
+    replay checkpoint belongs to its ``iterations``: a 6-iteration run of the
+    same world must not resume from it, and stack and replay never share
+    checkpoints."""
+    p = WorldParams.tiny_world(7)
+    p.erosion = dataclasses.replace(p.erosion, iterations=10, checkpoint_every=5, quicklook_every=0, uplift_mode="replay")
+    store = _uplift_world(scratch, "replay_resume", p)
+    info = erosion_run.run(store, p, _log)
+    assert info["uplift_mode"] == "replay"
+    assert info["replay_lowered_max_m"] > 30.0  # the 5 m/it core, less the ~1 m/it mean, over 10 iterations
+    assert abs(info["land_fraction"] - p.world.land_fraction) < 0.02
+    ref = {k: store.load_field(k, p.coarse_grid()).data.copy() for k in erosion_run.OUTPUTS}
+    for suf in (".npz", ".json"):
+        (store.checkpoint_dir / f"erosion_iter0010{suf}").unlink()
+    store.clear_outputs(erosion_run.OUTPUTS)
+    msgs = []
+    erosion_run.run(store, p, msgs.append)
+    assert any("resumed" in m and "iteration 5" in m for m in msgs), msgs
+    for k in erosion_run.OUTPUTS:
+        assert store.load_field(k, p.coarse_grid()).data.tobytes() == ref[k].tobytes(), k
+    p6 = p.with_overrides(erosion={"iterations": 6})
+    assert erosion_run._ckpt_hash(p6, store) != erosion_run._ckpt_hash(p, store)
+    assert erosion_run.find_checkpoint(store, p6, max_iteration=6) is None
+    ps = p.with_overrides(erosion={"uplift_mode": "stack"})
+    assert erosion_run._ckpt_hash(ps, store) != erosion_run._ckpt_hash(p, store)
+    assert erosion_run.find_checkpoint(store, ps) is None
+    with pytest.raises(ValueError, match="uplift_mode"):
+        p.with_overrides(erosion={"uplift_mode": "twice"})
+
+
+def test_uplift_replay_is_a_no_op_on_a_window():
+    """A refinement window (``spherical=False``) owns no planetary datum and
+    starts from the coarse result: replay never touches it, whatever its
+    uplift field."""
+    p = WorldParams.small_world(0)
+    assert p.erosion.uplift_mode == "replay"
+    w = make_window(48, "dome", p, iters=10, uplift_total=8.0)
+    h0 = w.height.copy()
+    assert emaps.uplift_replay(w, p.erosion) is None
+    assert emaps.start_replay(w, p) is None
+    assert w.height.tobytes() == h0.tobytes()
 
 
 # --------------------------------------------------------------------------

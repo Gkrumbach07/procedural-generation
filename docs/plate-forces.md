@@ -382,7 +382,11 @@ profiles, except for the 1.0 % of od006's *bedrock* that already stands
 above 5 km (max 8612 m) before erosion starts. The top cell of 0.004 is
 5798 m of bedrock + 3162 m of applied uplift + 866 m of datum hold; od006's
 is 8544 + 6855 - 619 m of net erosion. `erosion.uplift_max_m` (2 m per
-iteration) is the ceiling, and halves the excess (docs/uplift-ceiling.md).
+iteration) was the ceiling, and halved the excess (docs/uplift-ceiling.md).
+The window turned out to be counted twice, once in `bedrock` and once over
+the run. `erosion.uplift_mode = 'replay'` starts erosion from the
+reference-step crust instead, and the cap is off by default
+(docs/uplift-replay.md).
 0.004 stays the default: the 2-4 km bands are what a viewer sees as
 mountains, and the median is the 1-2 km band's problem to fix by
 erosion, not by taking the belts down faster.

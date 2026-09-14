@@ -221,7 +221,7 @@ def main() -> int:
     store = WorldStore(args.world)
     state = erun.build_state(store, params)
     if args.fresh:
-        ck = Path("fresh")            # iteration 0: bedrock as tectonics left it
+        ck = Path("fresh")            # iteration 0: build_state (bedrock, or the reference-step crust in uplift_mode replay)
     else:
         ck = Path(args.checkpoint) if args.checkpoint else pick_checkpoint(store, args.at)
         if not ck.exists():

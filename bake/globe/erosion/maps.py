@@ -745,14 +745,27 @@ def apply_uplift(state: ErosionState, cap: float | None = None) -> None:
     global pass; :func:`step` passes it only for a ``spherical`` state (the
     window tests hand in their own synthetic field, refine passes 0).  With
     ``cap=None`` this is byte-identical to the uncapped rule.
+
+    What the stage starts from is :func:`start_replay`'s business
+    (``erosion.uplift_mode``): this function adds the same field in both
+    modes.
     """
     act = state.mask == pk.MASK_ACTIVE
+    u, mean = _applied_uplift(state, cap)
+    state.height[act] += u[act] - mean
+
+
+def _applied_uplift(state: ErosionState, cap: float | None) -> tuple[np.ndarray, float]:
+    """The (capped) field and the datum :func:`apply_uplift` removes from it:
+    one iteration adds ``u - mean`` to every active cell.  Shared with
+    :func:`uplift_replay`, so the start state is lowered by exactly what the
+    run will add back."""
     u = state.uplift if cap is None else np.minimum(state.uplift, float(cap))
     mean = 0.0
     if state.spherical:
         iact = state.mask[state.interior] == pk.MASK_ACTIVE
         mean = float(u[state.interior][iact].mean()) if iact.any() else 0.0
-    state.height[act] += u[act] - mean
+    return u, mean
 
 
 def uplift_cap(state: ErosionState, ep) -> float | None:
@@ -762,6 +775,63 @@ def uplift_cap(state: ErosionState, ep) -> float | None:
     if not state.spherical or float(getattr(ep, "uplift_max_m", 0.0)) <= 0.0:
         return None
     return cell_units(ep, "uplift_max_m", state.height_unit_m)
+
+
+def uplift_replay(state: ErosionState, ep) -> np.ndarray | None:
+    """The total uplift the stage will apply to each cell (cell units, an
+    extended array, zero off the active cells), or ``None`` when
+    ``erosion.uplift_mode`` is ``'stack'`` or the state is a window.
+
+    ``erosion.iterations`` times the per-iteration change :func:`apply_uplift`
+    makes -- the capped field less its active-interior mean -- so it is
+    mass-free like the rule it inverts, and a run that adds the field
+    ``iterations`` times over a start lowered by this lands on the start's
+    own height plus this, cell for cell."""
+    if not state.spherical or str(getattr(ep, "uplift_mode", "stack")) != "replay":
+        return None
+    u, mean = _applied_uplift(state, uplift_cap(state, ep))
+    act = state.mask == pk.MASK_ACTIVE
+    total = np.zeros_like(state.height)
+    total[act] = float(int(ep.iterations)) * (u[act] - mean)
+    return total
+
+
+def start_replay(state: ErosionState, params) -> dict | None:
+    """``erosion.uplift_mode = 'replay'``: turn a state built from
+    ``bedrock`` into the crust as it stood at the uplift reference step.
+
+    Tectonics writes ``bedrock`` at its last step and ``uplift`` as what a
+    segment gained over the last ``uplift_window`` steps, spread over
+    ``erosion.iterations``.  Starting from ``bedrock`` and applying
+    ``uplift`` counts that window twice (docs/uplift-ceiling.md: earth-v5's
+    top cell is 5798 m of bedrock + 3162 m of applied uplift).  This lowers
+    the start by :func:`uplift_replay` -- exactly what :func:`apply_uplift`
+    will add back over the run -- refreshes the halos, and holds the datum
+    on the result (:func:`hold_datum`, a rigid shift), so the coastline
+    iteration 0's sea mask and routing flood see is the reference step's at
+    ``world.land_fraction``, which is what the loop holds from iteration 1
+    on.  With no surface process the stage then ends at ``bedrock`` less a
+    single global constant (the accumulated datum hold).
+
+    Call it once, on a freshly built state: a checkpoint already carries the
+    replayed height, and :func:`globe.erosion.run.load_checkpoint`
+    overwrites it.  Returns ``None`` (and changes nothing) in ``'stack'``
+    mode or on a window; otherwise ``replay_max`` / ``replay_min`` (cell
+    units, the most a cell was lowered / raised), ``land_fraction`` (of the
+    lowered surface, before the hold) and ``datum_shift`` (cell units, what
+    :func:`hold_datum` subtracted; 0 when ``params`` has no world group)."""
+    ep = _eparams(params)
+    total = uplift_replay(state, ep)
+    if total is None:
+        return None
+    state.height -= total
+    state.exchange_halos()
+    inter = state.interior
+    info = {"replay_max": float(total[inter].max()), "replay_min": float(total[inter].min()),
+            "land_fraction": float(np.mean((state.height + state.sediment)[inter] >= 0)), "datum_shift": 0.0}
+    if isinstance(params, WorldParams):
+        info["datum_shift"] = hold_datum(state, params.world.land_fraction)
+    return info
 
 
 _KAPPA_CACHE: dict = {}
@@ -968,4 +1038,4 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
     return st
 
 
-__all__ = ["ErosionState", "run_iteration", "thermal_erosion", "apply_uplift", "apply_isostasy", "hold_datum", "step", "spawn_particles", "height_unit", "max_steps_of"]
+__all__ = ["ErosionState", "run_iteration", "thermal_erosion", "apply_uplift", "uplift_replay", "start_replay", "apply_isostasy", "hold_datum", "step", "spawn_particles", "height_unit", "max_steps_of"]

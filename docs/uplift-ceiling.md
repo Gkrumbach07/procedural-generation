@@ -1,5 +1,21 @@
 # The ceiling on uplift: why 2 % of the land stood above 5 km
 
+> **Superseded (docs/uplift-replay.md).** This note found the cause and
+> then clipped it. "Applied undamped for all iterations" is only half of
+> it: the `uplift` window is already in `bedrock`, so the stage was
+> counting the last 100 tectonic steps twice. That is why surface minus
+> applied uplift landed on Earth's 0.3 %. `erosion.uplift_mode = 'replay'`
+> (now the default) starts erosion from the reference-step crust and ends
+> at `bedrock` when nothing erodes. On the small preset it keeps every
+> cell under the bedrock's 99.9th percentile without a cap, so
+> **`uplift_max_m` now defaults to 0**. The 2 m/it default and the "halves
+> the excess" framing below hold only for `uplift_mode = 'stack'`, which
+> reproduces earth-v7 with `uplift_max_m = 2`. The mechanism analysis, the
+> tables and the datum-hold section still stand. Under replay the Earth
+> ocean shallows by ~450 m, because the window's sea-floor subsidence was
+> double-counted too (docs/uplift-replay.md, "What to expect at Earth
+> scale").
+
 After erosion, earth-v5 has 2.2 % of its land above 5 km (Earth: 0.3 %)
 and a highest point of 9862 m; sweep-od006 (same, `orogen_decay` 0.006)
 has 1.8 % and 14,780 m; sweep-od008 has 0.2 % and 6674 m. Before erosion

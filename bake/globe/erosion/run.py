@@ -33,7 +33,16 @@ left alone.  ``bake.py --force`` clears the outputs but not
 (that is what it is for); a kernel change bumps ``KERNEL_VERSION`` and
 invalidates it.  ``erosion.iterations`` is not part of the checkpoint hash,
 so lowering it resumes from the newest checkpoint at or below the new end
-instead of recomputing from bedrock.
+instead of recomputing from bedrock -- in ``erosion.uplift_mode = 'stack'``.
+In ``'replay'`` the start state is ``bedrock`` less ``iterations`` times the
+applied uplift (:func:`globe.erosion.maps.start_replay`), so a checkpoint
+belongs to one ``iterations`` and the count stays in its hash.
+
+``erosion.uplift_mode`` (docs/uplift-replay.md): ``'stack'`` starts from
+``bedrock`` and applies ``uplift`` on top; ``'replay'`` starts from the crust
+at the uplift reference step and replays the window, ending at ``bedrock``
+when nothing erodes.  The start is built once, before the loop; a resumed
+run's checkpoint already carries the replayed height and overwrites it.
 """
 from __future__ import annotations
 
@@ -47,7 +56,7 @@ import numpy as np
 from ..config import WorldParams
 from ..field import FaceField
 from ..io.world_store import WorldStore
-from .maps import ErosionState, step, uplift_cap
+from .maps import ErosionState, start_replay, step, uplift_cap
 from .particle import KERNEL_VERSION, MASK_ACTIVE
 
 OUTPUTS = ["height", "sediment", "discharge", "momentum"]
@@ -70,13 +79,20 @@ def _ckpt_hash(params: WorldParams, store: WorldStore | None = None) -> str:
     checkpoints and :func:`find_checkpoint`'s ``max_iteration`` guard — not
     the hash — is what rejects a checkpoint past the requested end.  This
     normalisation is a one-time invalidation of checkpoints written by the
-    old scheme."""
+    old scheme.
+
+    Except in ``uplift_mode = 'replay'``: there the start state is lowered by
+    ``iterations`` times the applied uplift (``maps.start_replay``), so a
+    state at iteration k of an 800-iteration run is not a state of a
+    600-iteration one (resuming it would end ``200 x uplift`` below
+    ``bedrock``), and ``iterations`` stays in the hash."""
     up = f":k{KERNEL_VERSION}"
     if store is not None:
         for s in ("tectonics", "climate"):
             info = store.stage_info(s) or {}
             up += ":" + str(info.get("hash", ""))
-    norm = params.with_overrides(erosion={"iterations": 0, "resume": True})
+    replay = str(params.erosion.uplift_mode) == "replay"
+    norm = params.with_overrides(erosion={"iterations": int(params.erosion.iterations) if replay else 0, "resume": True})
     return norm.group_hash("world", "erosion") + ":" + params.group_hash("tectonics", "climate") + up
 
 
@@ -182,14 +198,21 @@ def load_checkpoint(state: ErosionState, path: Path, meta: dict) -> None:
     state.iteration = int(meta["iteration"])
 
 
-def build_state(store: WorldStore, params: WorldParams) -> ErosionState:
+def build_state(store: WorldStore, params: WorldParams, replay: bool = True) -> ErosionState:
+    """The iteration-0 state: ``bedrock`` as tectonics left it, lowered to
+    the uplift reference step when ``erosion.uplift_mode`` is ``'replay'``
+    (:func:`globe.erosion.maps.start_replay`) unless ``replay`` is False --
+    :func:`run` takes that step itself, to measure the bedrock first."""
     grid = params.coarse_grid()
     bed = store.load_field("bedrock", grid)
     hard = store.load_field("hardness", grid)
     upl = store.load_field("uplift", grid)
     pr = store.load_field("precip", grid)
     ev = store.load_field("evap", grid)
-    return ErosionState.from_grid(grid, bed, hard, pr, ev, upl, params.erosion)
+    state = ErosionState.from_grid(grid, bed, hard, pr, ev, upl, params.erosion)
+    if replay:
+        start_replay(state, params)
+    return state
 
 
 def write_outputs(store: WorldStore, state: ErosionState) -> None:
@@ -200,9 +223,12 @@ def write_outputs(store: WorldStore, state: ErosionState) -> None:
 def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     ep = params.erosion
     grid = params.coarse_grid()
-    state = build_state(store, params)
+    state = build_state(store, params, replay=False)
     n_iter = int(ep.iterations)
     land0 = float(np.mean((state.height + state.sediment)[state.interior] >= 0))
+    # uplift_mode 'replay': lower the start to the reference-step crust (None
+    # in 'stack').  A resume overwrites the height with the checkpoint's.
+    rep = start_replay(state, params)
     ck = find_checkpoint(store, params, max_iteration=n_iter) if ep.resume else None
     if ck is not None:
         load_checkpoint(state, *ck)
@@ -215,6 +241,10 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     n_capped = int(np.sum(state.uplift[state.interior][iact] > cap)) if cap is not None else 0
     log(f"[erosion] uplift cap {0.0 if cap is None else ep.uplift_max_m:g} m/iteration"
         f" ({n_capped} of {int(iact.sum())} active cells above it; field max {state.uplift[state.interior][iact].max() * state.height_unit_m:.2f} m/iteration)")
+    if rep is not None:
+        log(f"[erosion] uplift replay: start lowered by up to {rep['replay_max'] * state.height_unit_m:.1f} m"
+            f" and raised by up to {-rep['replay_min'] * state.height_unit_m:.1f} m to the reference-step crust"
+            f" (land fraction {rep['land_fraction']:.3f} before the datum hold moved the surface {-rep['datum_shift'] * state.height_unit_m:+.1f} m)")
     # viewer timeline frames (hash-exempt, read-only).  Frames past the
     # resume point belong to whichever run wrote them, not to this one.
     from ..viz import frames as vf
@@ -286,7 +316,18 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         # tectonics field the stage refused (docs/uplift-ceiling.md)
         "uplift_cap_m_per_iter": 0.0 if cap is None else float(ep.uplift_max_m),
         "uplift_capped_cells": n_capped,
+        # 'stack' or 'replay' (docs/uplift-replay.md)
+        "uplift_mode": str(ep.uplift_mode),
     }
+    if rep is not None:
+        # the start was the reference-step crust: the most a cell was lowered
+        # (raised) to build it, its land fraction before the datum was held
+        # on it, and that hold (metres, datum_drift_m's sign: positive = the
+        # surface was shifted down; not part of datum_drift_m, the loop's)
+        info["replay_lowered_max_m"] = rep["replay_max"] * state.height_unit_m
+        info["replay_raised_max_m"] = -rep["replay_min"] * state.height_unit_m
+        info["land_fraction_reference"] = rep["land_fraction"]
+        info["replay_datum_start_m"] = rep["datum_shift"] * state.height_unit_m
     if sea is not None:
         # what the kernel called sea at the last refresh (maps.refresh_base):
         # the classification the whole stage ran on, worth having on record

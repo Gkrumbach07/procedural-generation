@@ -19,7 +19,7 @@ All `Grid`s share `R_planet` (derived from the coarse grid).
 | stage | field | dtype | units / meaning |
 |---|---|---|---|
 | tectonics | `bedrock` | f32 | metres; shifted so `land_fraction` of cells are ≥ 0, and scaled so the 99.9th percentile of land sits at `tectonics.relief_spacings` mean segment spacings (`relief_m` metres when set) — the vertical scale follows the horizontal one, so the land does not stand at the talus angle at every preset |
-| | `uplift` | f32 | metres per **erosion iteration** (already divided by `erosion.iterations`, scaled by `uplift_scale`).  The global erosion pass applies it *mean-free* (`apply_uplift`): its area mean is a rise of the whole planet against the kernel's fixed base level, not relief, and would leave hydro's re-quantile to drown the lowlands.  Each cell receives at most `erosion.uplift_max_m` metres of it per iteration (global pass only, clipped before the mean): the field is the last `uplift_window` tectonic steps' rate with no bound of its own, and a belt still rising at the last step would otherwise climb through the whole erosion stage (docs/uplift-ceiling.md) |
+| | `uplift` | f32 | metres per **erosion iteration** (already divided by `erosion.iterations`, scaled by `uplift_scale`).  The global erosion pass applies it *mean-free* (`apply_uplift`): its area mean is a rise of the whole planet against the kernel's fixed base level, not relief, and would leave hydro's re-quantile to drown the lowlands.  The window is already in `bedrock`, so by default (`erosion.uplift_mode` 'replay') the stage starts from `bedrock` less the total it will apply and replays the window; with no erosion it ends at `bedrock` (docs/uplift-replay.md).  'stack' starts from `bedrock` and counts the window twice.  `erosion.uplift_max_m` (0 = off, the default) caps each cell's share per iteration (global pass only, clipped before the mean; docs/uplift-ceiling.md) |
 | | `hardness` | f32 | [0,1], 1 = hardest |
 | | `plate_id` | i16 | plate index; every cell has one |
 | | `plate_vel` | f32 (2) | contravariant coarse cells per tectonic step (vector field) |
@@ -167,7 +167,12 @@ before adding it, but only on the **global** 6-face state, whose `z = 0`
 is the planetary datum; a window applies its uplift as given (a window
 mean would subside a basin against a base level it does not own), so a
 windowed run with a real uplift field must be handed one that is already
-mean-free over the whole sphere.  Refine passes `uplift = 0`.
+mean-free over the whole sphere.  Refine passes `uplift = 0`.  In
+`uplift_mode` 'replay' (`maps.start_replay`, global state only) the
+iteration-0 state is lowered by `iterations` times that same mean-free
+field and the datum is held on it once; a checkpoint carries the replayed
+height, so a resume never lowers it again, and `iterations` is part of the
+checkpoint hash in that mode.
 
 Datum: every global iteration ends with `maps.hold_datum`, a rigid shift of
 `height` onto the `land_fraction` order statistic of `height + sediment`

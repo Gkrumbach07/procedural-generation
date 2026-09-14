@@ -61,9 +61,11 @@ Units
   erosion stage applying it every iteration reproduces the window's
   tectonic uplift over its run.  The difference is Lagrangian (per
   segment, follows the moving crust) so plate translation does not
-  register as uplift/subsidence.  Nothing here bounds it: the ceiling on
-  what a cell may receive per iteration is ``erosion.uplift_max_m``
-  (erosion/maps.py ``apply_uplift``, docs/uplift-ceiling.md).
+  register as uplift/subsidence.  That window is already in ``bedrock``,
+  so erosion by default starts from ``bedrock`` less the total it will
+  apply and replays it (``erosion.uplift_mode`` 'replay', erosion/maps.py
+  ``start_replay``, docs/uplift-replay.md); nothing here bounds the rate
+  (``erosion.uplift_max_m``, docs/uplift-ceiling.md).
 * ``plate_vel`` is ``omega × pos`` per step expressed as contravariant
   coarse cell components (coarse cells per tectonic step).
 """
