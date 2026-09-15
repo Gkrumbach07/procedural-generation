@@ -8,7 +8,8 @@ it, loaded only where the view is:
 
 * levels ``L = 1, 2, ...`` at ``base_res x 2^L`` cells a face, up to the
   source's own resolution (block means of it below that);
-* each level cut into ``TILE``-cell tiles per face, every tile one lossless
+* each level cut into ``TILE``-cell tiles per face (a row of tiles read at
+  a time, so a 32768^2 face is never in memory), every tile one lossless
   RGBA WebP of ``TILE + 2`` pixels a side (a cell of its neighbours around
   it, clamped at the face edge, so bilinear sampling needs no neighbour
   tile): ``R, G`` = 16-bit height over the detail range (sea level on a code,
@@ -47,9 +48,9 @@ class RefinedSource:
         self.surf, self.ws, self.water = surf, ws, water
         self.res = int(surf.shape[1])
 
-    def face(self, f: int) -> dict:
-        ws = self.ws[f] if self.ws is not None else self.surf[f]
-        return {"surf": np.asarray(self.surf[f], np.float32), "ws": np.asarray(ws, np.float32), "water": np.asarray(self.water[f])}
+    def rows(self, f: int, r0: int, r1: int) -> dict:
+        ws = self.ws[f, r0:r1] if self.ws is not None else self.surf[f, r0:r1]
+        return {"surf": np.asarray(self.surf[f, r0:r1], np.float32), "ws": np.asarray(ws, np.float32), "water": np.asarray(self.water[f, r0:r1])}
 
 
 class PlanetSource:
@@ -61,34 +62,42 @@ class PlanetSource:
         self.sea_near_c, self.depth, self.min_cells = sea_near_c, float(lake_min_depth), int(lake_min_cells)
         self.res = self.N * self.R
 
-    def face(self, f: int) -> dict:
+    def rows(self, f: int, r0: int, r1: int) -> dict:
+        """Rows ``[r0, r1)`` of face ``f``.  A lake piece smaller than
+        ``lake_min_cells`` is dropped as :func:`viewer._planet_final` drops
+        it, judged over the rows plus a margin as wide as such a piece."""
         from ..derive import lakes as lakes_mod
 
-        load = lambda name: np.load(self.pdir / f"L{self.R}.f{f}.{name}.npy", mmap_mode="r")
+        m = int(np.ceil(np.sqrt(self.min_cells))) + 2
+        e0, e1 = max(r0 - m, 0), min(r1 + m, self.res)
+        load = lambda name: np.load(self.pdir / f"L{self.R}.f{f}.{name}.npy", mmap_mode="r")[e0:e1]
         surf = np.asarray(load("height"), np.float32) + np.asarray(load("sediment"), np.float32)
         ws = np.maximum(np.asarray(load("water_surface"), np.float32), surf)
         water = np.zeros(surf.shape, np.uint8)
-        ocean = (surf < 0.0) & np.repeat(np.repeat(self.sea_near_c[f], self.R, axis=0), self.R, axis=1)
+        c0 = e0 // self.R
+        near = np.repeat(np.repeat(self.sea_near_c[f, c0:(e1 + self.R - 1) // self.R], self.R, axis=0), self.R, axis=1)[e0 - c0 * self.R:e1 - c0 * self.R]
+        ocean = (surf < 0.0) & near
         water[ocean] = WATER_OCEAN
         lake = lakes_mod.kept_lake_mask(lakes_mod.lake_mask(surf, ws, self.depth, ocean=ocean), self.min_cells)
         water[lake] = WATER_LAKE
-        return {"surf": surf, "ws": ws, "water": water}
+        c = slice(r0 - e0, r1 - e0)
+        return {"surf": surf[c], "ws": ws[c], "water": water[c]}
 
 
 # --------------------------------------------------------------------------
 # a face at a level
 # --------------------------------------------------------------------------
 def reduce_face(d: dict, k: int) -> dict:
-    """Block ``k x k`` means (surface, water surface); a block is ocean or lake
-    where most of it is."""
+    """Block ``k x k`` means (surface, water surface) of rows of a face; a
+    block is ocean or lake where most of it is."""
     if k == 1:
         return d
-    n = d["surf"].shape[0] // k
-    blk = lambda a: a[:n * k, :n * k].reshape(n, k, n, k)
+    a_, b_ = d["surf"].shape[0] // k, d["surf"].shape[1] // k
+    blk = lambda a: a[:a_ * k, :b_ * k].reshape(a_, k, b_, k)
     surf = blk(d["surf"]).mean(axis=(1, 3), dtype=np.float64).astype(np.float32)
     ws = blk(d["ws"]).mean(axis=(1, 3), dtype=np.float64).astype(np.float32)
     frac = lambda code: blk(d["water"] == code).mean(axis=(1, 3))
-    water = np.zeros((n, n), np.uint8)
+    water = np.zeros((a_, b_), np.uint8)
     water[frac(WATER_LAKE) > 0.5] = WATER_LAKE
     water[frac(WATER_OCEAN) > 0.5] = WATER_OCEAN
     return {"surf": surf, "ws": np.maximum(ws, surf), "water": water}
@@ -140,11 +149,12 @@ def encode_height_on(h: np.ndarray, h0: float, h1: float) -> np.ndarray:
     return np.clip(q, 0, 65535).astype(np.uint16)
 
 
-def tile_image(surf, ld, ocean_m, ti: int, tj: int, h0: float, h1: float, lake_range: float) -> np.ndarray | None:
-    """The ``(TILE + 2)^2`` RGBA image of tile ``(ti, tj)`` of a face level, or
-    None when it has no land and no lake."""
-    n = surf.shape[0]
-    ii = np.clip(np.arange(ti * TILE - 1, ti * TILE + TILE + 1), 0, n - 1)
+def tile_image(surf, ld, ocean_m, ti: int, tj: int, h0: float, h1: float, lake_range: float, res: int | None = None, row0: int = 0) -> np.ndarray | None:
+    """The ``(TILE + 2)^2`` RGBA image of tile ``(ti, tj)`` of a face level
+    ``res`` cells a side, from arrays holding its rows ``[row0, row0 +
+    len)``, or None when it has no land and no lake."""
+    n = int(res) if res is not None else surf.shape[0]
+    ii = np.clip(np.arange(ti * TILE - 1, ti * TILE + TILE + 1), 0, n - 1) - row0
     jj = np.clip(np.arange(tj * TILE - 1, tj * TILE + TILE + 1), 0, n - 1)
     oc = ocean_m[np.ix_(ii, jj)]
     lk = ld[np.ix_(ii, jj)]
@@ -185,9 +195,11 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
     if not levels:
         return None
     lo, hi = np.inf, -np.inf
+    step = 4 * TILE
     for f in range(6):
-        s = src.face(f)["surf"]
-        lo, hi = min(lo, float(s.min())), max(hi, float(s.max()))
+        for r0 in range(0, src.res, step):
+            s = src.rows(f, r0, min(src.res, r0 + step))["surf"]
+            lo, hi = min(lo, float(s.min())), max(hi, float(s.max()))
     h0, h1 = height_grid(lo, hi)
     meta = {"tile": TILE, "pad": 1, "h0": h0, "h1": h1, "lake_range": float(lake_range), "levels": []}
     for L, res in levels:
@@ -195,25 +207,28 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
         (tdir / f"L{L}").mkdir(parents=True, exist_ok=True)
         meta["levels"].append({"L": L, "res": res, "nT": nT})
     written = 0
+    # a row of tiles at a time, with the rows the lake-shore and ocean-mask
+    # filters reach beyond it (3 cells): a face is never read whole
+    MARGIN = 4
     for f in range(6):
-        full = src.face(f)
         for li, (L, res) in enumerate(levels):
-            d = reduce_face(full, src.res // res)
-            ld = face_lake_depth(d["surf"], d["ws"], d["water"], lake_range)
-            om = face_smooth_mask(d["water"] == WATER_OCEAN)
+            k = src.res // res
             nT = meta["levels"][li]["nT"]
             bits = meta["levels"][li].setdefault("_bits", np.zeros(6 * nT * nT, np.bool_))
             for ti in range(nT):
+                lr0, lr1 = max(ti * TILE - MARGIN, 0), min((ti + 1) * TILE + MARGIN, res)
+                d = reduce_face(src.rows(f, lr0 * k, lr1 * k), k)
+                ld = face_lake_depth(d["surf"], d["ws"], d["water"], lake_range)
+                om = face_smooth_mask(d["water"] == WATER_OCEAN)
                 for tj in range(nT):
-                    img = tile_image(d["surf"], ld, om, ti, tj, h0, h1, lake_range)
+                    img = tile_image(d["surf"], ld, om, ti, tj, h0, h1, lake_range, res=res, row0=lr0)
                     if img is None:
                         continue
                     key = f"{L}_{f}_{ti}_{tj}"
                     (tdir / f"L{L}" / f"{f}_{ti}_{tj}.js").write_text('GLOBE_VIEWER.tile("%s","%s");\n' % (key, webp_rgba_b64(img)))
                     bits[(f * nT + ti) * nT + tj] = True
                     written += 1
-            del d, ld, om
-        del full
+                del d, ld, om
         log(f"[viewer] detail tiles: face {f} done ({written:,} so far)")
     for lv in meta["levels"]:
         bits = lv.pop("_bits")
