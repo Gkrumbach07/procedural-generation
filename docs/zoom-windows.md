@@ -292,3 +292,39 @@ leave through the ring rather than the outlet cell, and a channel that
 does is counted as disconnected. And the surface is crumpled into parallel
 ridges with channels that look broken (`scratch/window/sweep/D_vs_base.png`),
 where the shipped erosion's is a smooth fan of converging valleys.
+
+**At 76 m the same configuration trades dams for runaway incision** (trib,
+60 iterations, `iter_deposit` 0.39 m = 50 m x 76.4 / 9773, window lakes
+refreshed every iteration, dam breach; the other two rows as above):
+
+| | relief 3 km | lakes / km^2 (median size) | pit deaths | exits | ≥100 km^2 channels on the outlet's network (pieces) | steps | CPU µs / cell / it |
+|---|---|---|---|---|---|---|---|
+| detail noise 3 | 52 / 121 m | 663 / 707 (0.017 km^2) | 62 % | 38 % | 26 % (483) | 268 | 5.8 |
+| drainage relief | 69 / 101 m | 10,670 / 1,006 (0.017) | 37 % | 62 % | 52 % (763) | 509 | 12.6 |
+| **+ lakes, scaled deposit cap, breach** | **299 / 393 m** | 6,384 / 1,441 (0.052) | 34 % | 24 % | **1 %** (1,862) | **2,810** | **87.9** |
+
+With deposition throttled to a cell-sized cap and erosion's caps left at
+12.5 / 25 m, the channels incise without limit -- the relief ends above what
+the relief step put there, and the valleys become chains of pools
+(`scratch/window/runs/D76_vs_dr76.png`: a densely dissected, water-threaded
+surface, the texture of McDonald's maps, on a network in 1,862 pieces).
+Particles that no longer die in lakes walk the window instead: 2,810 steps
+and 15x the cost per cell, 36 minutes for one 11,500 km^2 catchment.
+
+## Where this leaves the particle kernel at fine cells
+
+Every lever measured moves one failure into another: creep on wears the
+relief away; creep off keeps it and the particle pass dams the channels;
+lakes let particles past the dams but not through them; a cell-sized
+deposit cap stops the dams and lets incision run away, at 15x the cost.
+The kernel was calibrated on 9.8 km cells, where its metre caps bind hard
+and a bar or a trench is small against a cell, and no single rescaling
+found here carries that balance down to 76 m. The two ways forward are a
+consistent re-calibration of *all* of its length scales per level (erosion
+and deposition caps, cover depth, `route_eps`, the talus and creep terms)
+judged on these metrics, or a different model for the fine levels: an
+implicit stream-power solver on the flood tree (Braun & Willett 2013's
+FastScape scheme -- O(n) per step, unconditionally stable, drainage-
+consistent by construction, so no pits and no walk cost), with the
+particles' discharge replaced by flow accumulation on the same tree for
+the rendered stream map.
