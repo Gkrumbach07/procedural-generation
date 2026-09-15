@@ -244,7 +244,8 @@ def local_flood(surface: np.ndarray, drain: np.ndarray, flood_active: np.ndarray
     return np.maximum(ws, surface).astype(np.float32)
 
 
-def lake_outflow(labels: np.ndarray, n_lakes: int, land: np.ndarray, plain: np.ndarray, level: np.ndarray, discharge: np.ndarray) -> np.ndarray:
+def lake_outflow(labels: np.ndarray, n_lakes: int, land: np.ndarray, plain: np.ndarray, level: np.ndarray, discharge: np.ndarray,
+                 drain: np.ndarray | None = None) -> np.ndarray:
     """Spawn weight of the water leaving the window's lakes.  A particle
     reaching a lake dies in it (module docstring), so without this the river
     below a lake carried only the rain that falls below it -- invisible while
@@ -252,17 +253,26 @@ def lake_outflow(labels: np.ndarray, n_lakes: int, land: np.ndarray, plain: np.n
     lake to the sea once it did not.  Each lake whose level reaches its spill
     cell (the lowest land cell next to it) sends the largest upsampled coarse
     discharge on it -- the flow through the lake -- from that cell; a lake held
-    below its rim (closed) sends nothing.  ``labels`` 1..n_lakes, 0 off lakes."""
+    below its rim (closed) sends nothing.  ``labels`` 1..n_lakes, 0 off lakes.
+
+    With ``drain`` (the sea, the window's exits) a lake whose lowest rim cell
+    is a drain empties there and sends nothing either: its water is already
+    out.  Searching the land alone put a coastal lake's spill at the lowest
+    *land* cell of its shore, and the outflow ran along the coast to the sea
+    from there -- a short river strip beside the shore."""
     out = np.zeros(labels.shape, np.float32)
     if n_lakes <= 0:
         return out
     idx = np.arange(1, n_lakes + 1)
-    ring_lab = np.where(land, ndimage.maximum_filter(labels, size=3), 0)
+    rim = land if drain is None else (land | drain)
+    ring_lab = np.where(rim, ndimage.maximum_filter(labels, size=3), 0)
     spills = ndimage.minimum_position(np.where(ring_lab > 0, plain, np.inf), ring_lab, idx)
     through = ndimage.maximum(discharge, labels, idx)
     top = ndimage.maximum(level, labels, idx)
     for k, pos, q, lv in zip(idx, spills, np.atleast_1d(through), np.atleast_1d(top)):
         if pos is None or not np.isfinite(plain[pos]) or ring_lab[pos] != k:
+            continue
+        if drain is not None and drain[pos]:
             continue
         if lv + 0.5 >= plain[pos] and q > 0.0:
             out[pos] += np.float32(q)
@@ -412,7 +422,7 @@ def _run_basin(root, basin, params, log, t0, bid, rp, grid, fields, derived, win
     lake_lab = (lake_labels.reshape(-1)[lake_idx] - 1).astype(np.int64)
     lake_floor_m = plain.reshape(-1)[lake_idx].astype(np.float64)
     lake_cap_m = wsp.reshape(-1)[lake_idx] - np.maximum(lake_min, 0.5 * (wsp - plain).reshape(-1)[lake_idx])
-    outflow = lake_outflow(lake_labels, n_lakes, active & ~lake, plain, wsp, up["discharge"])
+    outflow = lake_outflow(lake_labels, n_lakes, active & ~lake, plain, wsp, up["discharge"], drain=drain & ~lake)
     del lake_labels, wsp, plain
     lake_discarded = 0.0
     ep = basin_erosion_params(params, gen)

@@ -581,7 +581,8 @@ def test_coast_pass(world):
 def test_lake_outflow_spawns_at_the_spill_of_an_overflowing_lake():
     """``basin_job.lake_outflow``: a lake whose level reaches its lowest shore
     cell sends the flow through it (the largest upsampled coarse discharge on
-    the lake) from that cell; a lake held below its rim sends nothing."""
+    the lake) from that cell; a lake held below its rim sends nothing, and
+    neither does one whose lowest rim is the sea."""
     n = 20
     plain = np.full((n, n), 10.0)
     labels = np.zeros((n, n), np.int64)
@@ -600,6 +601,17 @@ def test_lake_outflow_spawns_at_the_spill_of_an_overflowing_lake():
     out = bj.lake_outflow(labels, 2, land, plain, level, q)
     assert out[8, 6] == pytest.approx(9.0)
     assert out.sum() == pytest.approx(9.0)
+    # the same first lake on the coast: the sea touches it below its land
+    # spill, so the water leaves there and nothing spawns on the shore
+    sea = np.zeros((n, n), bool)
+    sea[4:8, 3] = True
+    plain2 = np.where(sea, -20.0, plain)
+    out = bj.lake_outflow(labels, 2, land & ~sea, plain2, level, q, drain=sea)
+    assert out.sum() == 0.0
+    # and a lake the sea does not touch is unchanged by passing it
+    sea2 = np.zeros((n, n), bool)
+    sea2[0, :] = True
+    assert bj.lake_outflow(labels, 2, land & ~sea2, np.where(sea2, -20.0, plain), level, q, drain=sea2)[8, 6] == pytest.approx(9.0)
 
 
 def test_feather_and_divides_in_raster(world):

@@ -55,8 +55,12 @@ Fixed in the refine stage (`scratch/shots/cmp_mouths*.png`, before / after):
   the coarse blur was gone; an overflowing lake now spawns the flow through
   it at its spill cell.
 
-Left: a lake right on the coast spills along the shore, which draws a short
-river strip beside the sea.
+A lake right on the coast used to spill along the shore, drawing a short
+river strip beside the sea: its spill was searched among land cells only,
+so the outflow started at the lowest land cell of its shore and ran along
+the coast. A lake whose lowest rim cell is the sea (or a window exit) now
+sends nothing -- its water is already out (`lake_outflow(..., drain=)`;
+earth-v9's refined grid predates the fix).
 
 The refined frame costs a 40 MB final frame against 14 MB and 58 s
 against 33 s to export.
