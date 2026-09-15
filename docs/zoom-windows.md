@@ -328,3 +328,61 @@ FastScape scheme -- O(n) per step, unconditionally stable, drainage-
 consistent by construction, so no pits and no walk cost), with the
 particles' discharge replaced by flow accumulation on the same tree for
 the rendered stream map.
+
+## McDonald's own parameters
+
+The post in `docs/ref` gives only its lake flood's numbers (`volumeFactor`
+100, stream-map rate 0.01, drainage 0.001, approach 0.5, spill 5) and two
+modifiers (friction x (1 - 0.5 stream), evaporation x (1 - 0.2 stream)).
+The particle parameters are in his code, SimpleHydrology (current
+`master`, read 2026-09-15; `source/water.h`, `world.h`, `cellpool.h`):
+
+| his | value | ours (earth preset) |
+|---|---|---|
+| `depositionRate` | 0.1 per step | `deposition_rate` 0.1 |
+| `evapRate` | 0.001 per step | `evap_rate` 0.001 x `dt` 1.2 |
+| `momentumTransfer` | 1 | `k_mom` 1 |
+| `lrate` (discharge / momentum EMA) | 0.1 | `ema` 0.1 |
+| entrainment | `c_eq = (1 + 10 erf(0.4 q)) x (h - h2)` | `0.2 x drop x (1 + (q / 32)^0.5)` |
+| `maxAge` | **500 steps** | `max_steps` 2 x window cells |
+| `minVol` | 0.01 of the spawn volume | `min_volume_frac` 5e-5 |
+| inertia | full: `speed += gravity n / volume`, no friction | `friction` 0.25 |
+| erosion / deposition caps | **none** | 12.5 m / step, 25 / 50 m per iteration |
+| cascade | `maxdiff` 0.01 x 80 = 0.8 cell slope, `settling` 0.8 | talus 0.6 / 1.2, rate 0.5, plus creep 0.1 |
+| terrain | 8-octave simplex (gain 0.6) in [0, 1] x `mapscale` 80 on a 512-cell tile | the parent's upsample + detail |
+
+His heights are fractions of `mapscale`, so his constants are cell units,
+as the kernel's are: erodibility 1.0 and `k_disc` 10 with `erf` entrainment
+(`disc_exponent` 0). What does not carry: his discharge is particle volume
+per cycle, ours is closer to upstream area, so the `erf` scale is a guess
+(`disc_saturation` 32, ours); and his terrain stands up to 80 cells high,
+where the 76 m plateau window stands ~4.
+
+"Nick mode" on the kernel: `creep_rate 0, erodibility 1, k_disc 10,
+disc_exponent 0, disc_saturation 32, max_steps 500, min_volume_frac 0.01,
+friction 0, evap_rate 0.00083, max_erode / iter_erode / iter_deposit /
+thermal_max 1e9 (off), thermal_rate 0.8, talus 0.8 / 0.8`. 60 iterations,
+drift correction off:
+
+| window | start | relief 3 km | lakes / % of area | pit / age deaths | ≥100 km^2 network on the outlet | CPU µs / cell / it |
+|---|---|---|---|---|---|---|
+| trib 305 m | detail noise 3 | 86 / 237 m | 930 / 8 % | 22 / 0 % | 81 % | |
+| trib 305 m | drainage relief | 126 / 257 m | 1,028 / 8 % | 17 / 1 % | 80 % | |
+| trib 305 m | drainage relief + window lakes | 128 / 235 m | 1,502 / 8 % | 13 / 1 % | 83 % | |
+| trib 76 m | drainage relief | 143 / 227 m | 12,472 / 6 % | 39 / 39 % | **62 %** | 9.1 |
+| trib 76 m | detail noise 3 | 68 / 156 m | 7,203 / 8 % | 50 / 22 % | 18 % | 6.5 |
+| range 305 m (5: 216, 928; 174-7,803 m) | drainage relief | 133 / 429 m (upsample 51 / 175) | 1,453 / 5 % | 23 / 7 % | 26 % | 5.4 |
+| range 305 m, shipped refine (150 it, detail 0.3, drift on) | | 51 / 168 m | 45 / 0.1 % | 12 / 0 % | 79 % | 4.3 |
+
+Against every earlier configuration, McDonald's settings give the best
+river network at both cell sizes on the plateau (80-83 % at 305 m against
+31-72 %; 62 % at 76 m against 1-52 %) and keep the cost bounded by
+`maxAge` (9.1 µs at 76 m against 12.6-87.9). They are also the first to
+cut branching, incised valleys (`scratch/window/nick/nick_cmp.png`) and, on
+the mountain catchment, real detail: ridges and gullies off the range and
+texture over the lowland, where the shipped refine leaves the upsample
+smooth (`mtn_crop_cmp.png`). What they do not fix: 5-8 % of the area is
+still small lakes in pits, the plateau still streaks along the regional
+slope, the coarse-scale drift grows without the correction (38-62 m
+median), and the range catchment is a poor connectivity test -- most of
+its steep part is a one-coarse-cell-wide strip.
