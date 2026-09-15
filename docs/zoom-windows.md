@@ -509,3 +509,194 @@ fewer than half, and it costs a quarter of the time for 40 iterations
 instead of 150 (`scratch/window/mtn2/def76_view_d.png` against
 `chain76_view_d.png`, both drawn by `scripts/window_view.py`). The water
 it leaves is mostly pools strung along the valley floors.
+
+## Why there were no rivers to draw: the discharge scales
+
+Looking at a 76 m window at its own resolution (512^2 crops, 39 km) rather
+than squeezed onto a screen settles whether the missing rivers were a
+rendering problem: the discharge map itself had none. In the mountain crops
+the largest stream carried 0.13 rain units, the drainage of ~1 km^2; at
+305 m the biggest stream in the whole catchment carried 6 % of the
+catchment's rain (`scratch/window/probe.py`, discharge against the rain
+accumulated down the flood tree of the same surface: 11 % of the expected
+discharge at 10^4 cells upstream). Water ran off as sheets
+(`scratch/window/probe/p32_q.png`).
+
+The discharge `q` is in rain volume: a fine cell's precipitation is the
+planet cell's over R^2, so `q` is the upstream area in planet cells times
+the rain, at every refinement. Two scales set against it were
+fixed numbers, and McDonald's are in cells:
+
+* **entrainment** `c_eq = dh (1 + k_disc erf(q / disc_saturation))`. His
+  discharge is the volume of the 512 particles a cycle sends over a 512^2
+  map, so `erf(0.4 q)` saturates at ~1,280 cells of upstream area. Ours was
+  32 -- 3,300 km^2 of rain on the earth preset. At 305 m a 100 km^2 stream
+  got a factor 1.35 instead of 11, at 76 m nothing did, so no channel ever
+  outran its hillslopes (the positive feedback that makes a network);
+* **the momentum push** `k_mom cos m / (vol + q)` reaches half strength
+  where `q` equals a particle's volume: ~512 cells for him, 4 cells for us
+  (a spawn volume is 4 cells of rain at 0.25 particles per cell). Every rill
+  carried full stream momentum, which lined particles up into parallel
+  sheets.
+
+Both are now counts of cells (`erosion.disc_saturation_cells`,
+`erosion.momentum_saturation_cells`, kernel 11: the push is
+`k_mom cos c m / (vol + c q)` with `c` from the spawn volume and the rain
+per cell), and gravity against inertia is his too (`slope_gain` 0.589: he
+renormalises the speed to sqrt 2 a step with gravity 1, the kernel to one
+cell with dt 1.2).
+
+Mountain catchment at 305 m, 150 iterations from the planet
+(`scratch/window/qscale/`, `cmp1-3.png`):
+
+| | lakes (km^2) | 3 km relief p50 / p90 | pit deaths |
+|---|---|---|---|
+| zoom profile before | 2,795 (1,349) | 177 / 652 m | 15 % |
+| + `disc_saturation_cells` 1280 | 2,540 (1,401) | 266 / 1,071 m | 14 % |
+| + `momentum_saturation_cells` 512 | 1,889 (1,248) | 240 / 1,091 m | 18 % |
+| + `slope_gain` 0.589 (McDonald's gravity) | 1,915 (1,230) | 194 / 783 m | 17 % |
+
+The first row is sheet flow with pools; the second a branching, incised
+network with sharp ridges; with the gravity of his model the trunk rivers
+wind.
+
+## soillib's pit-free limits
+
+soillib (`model/path/erosion.cu`, `mass_transfer`): "The erosion system is
+not permitted to generate a pit, because pits become self-reinforcing and
+numerically unstable." Per step a cell may lose at most `0.25 L slope` and
+gain at most `0.25 L 0.3`, `L` the cell diagonal and `slope` the Godunov
+*downhill* gradient (per axis the steeper one-sided drop, zero where both
+neighbours are higher, `__glocal`). The bottom of a pit has slope 0 and can
+never be deepened; any cell loses at most a third of its drop to its lowest
+neighbour per step, an exponential approach to its downstream level.
+
+In the kernel it is a per-cell budget per iteration next to `iter_erode`
+(`particle.slope_erode_cap`, `erosion.slope_limit_erode` /
+`slope_limit_deposit`, off by default). Same catchment, the table's last
+row plus the limits:
+
+| | lakes (km^2) | 3 km relief p50 / p90 | pit deaths |
+|---|---|---|---|
+| no limits, 150 it | 1,915 (1,230) | 194 / 783 m | 17 % |
+| erosion and deposition limits 0.25, 150 it | **512** (677) | 160 / 579 m | 12 % |
+| erosion limit only | 574 (751) | 158 / 576 m | 13 % |
+| deposition limit only | 1,574 (1,052) | 202 / 787 m | 19 % |
+| erosion limit 1.0 | 1,352 (1,135) | 192 / 746 m | 18 % |
+| **both limits, 400 it** | **630** (724) | **198 / 751 m** | 12 % |
+
+The erosion limit is what removes the pools -- a quarter of them are left --
+and it slows incision, which more iterations buy back: at 400 the relief
+is the unlimited run's with a third of its lakes, one-thread rivers in a
+clean dendritic network. It is cheap at 305 m (154 s). The census
+(item 3) called 92-98 % of the depressions dams, yet the *erosion* limit is
+the one that removes them; why is not measured (a guess: a channel reach
+incising faster than the cell below it can follow leaves that cell standing
+as the dam).
+
+All of it is now `ZOOM_EROSION`.
+
+## Straight tracks at 76 m: momentum from the wrong level
+
+The 76 m level chained from that 305 m result (40 iterations) had one-thread
+winding rivers and fewer pools strung along the valleys, and every slope
+scored with straight parallel tracks a few cells apart, all in one
+direction, identical with `slope_saturation` 0.02 or 0.005 (gentle slopes
+steering as hard as steep ones), so not a gravity problem, and only 6 % of
+the worst crop was a filled flat, so not the routing surface. The chained
+window took the parent's discharge and the *planet's* momentum: the push
+divides one by the other, and the planet's momentum over a 76 m cell's
+discharge pushed every particle along the planet's flow direction for the
+whole run. `window_bake.py --parent` now starts with no momentum; the zoom
+stage carries each level's momentum to the next.
+
+## The zoom stage
+
+`globe/zoom/bake.py` builds what the sections above measured, for a square
+around any spot instead of one catchment:
+
+    python scripts/zoom_bake.py --world worlds/earth-v9 --cell 5 239 913
+    python scripts/zoom_bake.py --world worlds/earth-v9 --lat -12.5 --lon 131.2
+
+* **levels**, coarse to fine, each chained from the one above: 1.2 km over
+  469 km (200 iterations, from the planet), 305 m over 156 km (400), 76 m
+  over 78 km (150) by default (`DEFAULT_LEVELS`, `--levels
+  R:cells:iterations[:tile[:margin]]`), ~13 min on 20 threads;
+* **inflow**: a square is not a catchment, so the water from outside
+  enters where the parent's drainage crosses the edge -- the planet's
+  `flow_dir` / `flow_acc` for the first level, the parent level's flood tree
+  and flux after that -- as extra spawn weight at the lowest cell by the
+  crossing (`ErosionState.inflow_volume` keeps it out of the rain per cell
+  the discharge scales use; a tile spawns at most 3x its rain's particles);
+* **tiles**: each level's product is cut into square cores of at most
+  `tile` cells, eroded one after another in windows of core + `margin`, the
+  flux of the level's current flood tree that crosses a tile's edge spawning
+  there. A tile writes its new cells in the core and the inner half of its
+  margin (the outer half, where its own edge shows, is left to the next);
+  cells an earlier tile wrote it erodes again, starting from that result,
+  and cross-fades back from the earlier result at its window edge to its own
+  a margin in. (Freezing them instead cut every river that flows into an
+  earlier tile at the strip: the kernel tracks no discharge on frozen cells,
+  `scratch/window/zoom_mtn_levels.png`);
+* **held to the parent while it erodes** (below), then a last smooth drift
+  correction, a local flood capped by the parent's lakes, and the flux for
+  the level below; `L{R}.npz` / `.json` / `.html` per level, `view.html` (the finest)
+  and `zoom.json` in `<world>/zoom/<name>/`;
+* the globe viewer lists them from `viewer/zooms.js`
+  (`globe/zoom/index.py`, rewritten by every zoom bake and viewer export):
+  each level's square outlined on the globe, the finest filled; a click
+  inside opens the 3-D page (which links back to the globe at the spot);
+  a click anywhere else shows the command that bakes a zoom there, or --
+  under `scripts/serve_world.py`, which serves the world and queues bakes
+  behind `/api/zoom` -- a button that runs it and lists the zoom when it is
+  done.
+
+## Pools from the drift correction
+
+The first mountain zoom (`peaks`, face 5 cell 212 902, 3.5-6.5 km) had the
+dense ridge-and-valley texture at 305 m and 76 m, and 8-11 % of each square
+under small deep pools (76 m: depth p50 19 m, p90 82 m, some 370 m). On a
+4-cell (39 km) square of its 76 m level, 150 iterations, from the same
+305 m parent (`scratch/window/zoom_l3_test.py`, `pools_*.log`):
+
+| | lakes (share) | lakes before the last correction | p90 offset from the parent at 4 parent cells, before / after it |
+|---|---|---|---|
+| as baked (correction at the parent's cell, after the tiles) | 1,204 (7.4 %) | **1.2 %** | 426 / 1.9 m |
+| starting pits filled with sediment | 1,174 (7.2 %) | | |
+| half the detail noise | 1,113 (7.3 %) | | |
+| breaching the pools after the level (up to 30 / 100 m / any depth) | 5.7 / 2.7 / 0 % | | slots up to 150 m deep |
+| held every 10 iterations, directly | 428 (3.9 %) | 4.1 % | 33 / 1.6 m |
+| held as an uplift rate, at the parent's cell (every 5 / 10) | 841 / 686 (5.3 / 4.8 %) | 7.1 / 6.0 % | 4 / 1 m |
+| **held as an uplift rate at 4 parent cells, every 10** | **206 (1.6 %)** | 2.0 % | 23 / 22 m |
+| correction at 4 parent cells, after the tiles only | 178 (1.6 %) | 1.2 % | 426 / 36 m |
+
+Neither the noise nor its pits make the pools: before the correction the
+level had 1.2 %. With no uplift, a mountain level erodes the ground down
+(426 m at the 1.2 km scale in 150 iterations at 76 m; 1.4 km at 305 m in
+400), and the correction lifted it back in bumps a parent cell wide -- the
+width of the valleys the level had just cut, so it raised their floors into
+dams. Held at four parent cells the lift is broader than the valleys; held
+*while it erodes* the level also never strays far from the ground it
+belongs on (22 m), so its particles cut the valleys at the right height.
+The hold is a rate the kernel's uplift applies each iteration
+(`ZoomLevel.hold_every` 10, `hold_scale` 4): at each hold the offset now
+and how fast it grew set the rate that would bring it to zero by the next
+hold.
+
+The two zooms baked with the defaults on earth-v9 (`worlds/earth-v9/zoom/`,
+`scratch/window/zoom_peaks_levels3.png` against `zoom_peaks_levels.png`):
+
+| `peaks` (5, 212, 902; 2.3-7.3 km) | lakes, frozen tiles & correction after | **lakes, held while eroding** | offset from the parent (p90, 4 parent cells) | time |
+|---|---|---|---|---|
+| 1.2 km over 469 km, 200 it | 3.1 % | 2.8 % | 46 m | 38 s |
+| 305 m over 156 km, 400 it | 7.9 % | **0.7 %** | 51 m | 168 s |
+| 76 m over 78 km, 150 it | 11.0 % | **0.85 %** | 17 m | 337 s |
+
+At 305 m and 76 m it is the ridge-and-gully landscape of McDonald's maps:
+dendritic valleys a few cells apart, sharp divides, winding trunk rivers,
+lakes only where the parent has one (`worlds/earth-v9/zoom/peaks/view.png`).
+
+Left: tiles run one after another (a four-colour order would run
+non-touching tiles in parallel), a zoom is shifted to stay on one cube face,
+inflow enters as clear water (it erodes the crossing a little in the outer
+margin), and the particles still die in pits 6-9 % of the time at 76 m.

@@ -634,13 +634,17 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
     meta_js = "GLOBE_VIEWER.setMeta(%s);\n" % json.dumps(meta, separators=(",", ":"))
     (out / "data" / "meta.js").write_text(meta_js)
     html = TEMPLATE.read_text()
-    (out / "index.html").write_text(html.replace(PLACEHOLDER, '<script src="data/meta.js"></script>'))
+    (out / "index.html").write_text(html.replace(PLACEHOLDER, '<script src="data/meta.js"></script>\n<script src="zooms.js"></script>'))
+    from ..zoom import index as zoom_index
+    zooms = zoom_index.scan(root)
+    (out / "zooms.js").write_text(zoom_index.script(zooms))
     if single:
         inline_meta = json.loads(json.dumps(meta))
         for m in inline_meta["frames"]:
             m["file"] = None
         blocks = ["<script>GLOBE_VIEWER.setMeta(%s);</script>" % json.dumps(inline_meta, separators=(",", ":"))]
         blocks += ["<script>%s</script>" % s for s in scripts]
+        blocks.append("<script>%s</script>" % zoom_index.script(zooms))
         (out / "standalone.html").write_text(html.replace(PLACEHOLDER, "\n".join(blocks)))
     log(f"[viewer] {len(frames)} frames, {sizes / 1e6:.1f} MB -> {out / 'index.html'} in {time.time() - t0:.1f}s")
 

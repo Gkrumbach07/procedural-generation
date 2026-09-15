@@ -46,10 +46,20 @@
   #help b { color:var(--text); font-weight:500; }
   #helpbtn { position:fixed; top:10px; right:10px; }
   .hidden { display:none !important; }
+  #ovl { position:fixed; inset:0; width:100%; height:100%; pointer-events:none; }
+  #zoompop { min-width:230px; max-width:340px; font-size:12px; }
+  #zoompop .t { font-weight:600; margin-bottom:4px; }
+  #zoompop .d { color:var(--dim); margin-bottom:6px; }
+  #zoompop code { display:block; background:#0e131b; border:1px solid var(--line); border-radius:4px; padding:4px 6px; margin:4px 0;
+    font-size:11px; white-space:pre-wrap; word-break:break-all; user-select:all; }
+  #zoompop a { color:var(--accent); }
+  #zoompop .x { position:absolute; top:4px; right:8px; cursor:pointer; color:var(--dim); }
 </style>
 </head>
 <body>
 <canvas id="gl"></canvas>
+<canvas id="ovl"></canvas>
+<div id="zoompop" class="panel hidden"></div>
 
 <div id="top" class="panel">
   <h1 id="title">Globe</h1>
@@ -75,7 +85,8 @@
 <div id="help" class="panel">
   <b>Drag</b> pan / rotate · <b>Wheel</b> zoom at cursor · <b>Double-click</b> zoom in<br>
   <b>Space</b> play/pause · <b>← →</b> step frame · <b>Shift+← →</b> jump stage<br>
-  <b>G</b> globe/flat · <b>Home</b> reset · <b>1–9</b> layers · <b>R</b> rivers · <b>L</b> grid<br><br>
+  <b>G</b> globe/flat · <b>Home</b> reset · <b>1–9</b> layers · <b>R</b> rivers · <b>L</b> grid<br>
+  <b>Click</b> a spot: open its zoom (outlined squares), or bake one there<br><br>
   The URL keeps the view, so a link reopens exactly this frame and camera.
 </div>
 
@@ -106,6 +117,7 @@ const GV = window.GLOBE_VIEWER = window.GLOBE_VIEWER || {};
 GV.pending = GV.pending || {};
 GV.setMeta = m => { GV.meta = m; };
 GV.frame = (i, texs) => { GV.pending[i] = texs; if (GV.onFrame) GV.onFrame(i); };
+GV.setZooms = z => { GV.zooms = z; if (GV.onZooms) GV.onZooms(z); };   // zooms.js (globe/zoom/index.py)
 </script>
 <!--GLOBE_VIEWER_DATA-->
 <script>
@@ -625,7 +637,130 @@ function draw() {
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   updateLabels(a);
   updateLegend(FA);
+  drawZooms();
 }
+
+// ---------------------------------------------------------------------------
+// Zooms: squares of the world baked far finer around a spot (globe/zoom).
+// zooms.js lists them; click inside one to open its 3-D view, click
+// anywhere else for the command that bakes one there -- or, when the page
+// is served by scripts/serve_world.py, a button that does it.
+// ---------------------------------------------------------------------------
+const ovl = $("ovl"), ovx = ovl.getContext("2d"), pop = $("zoompop");
+let zooms = GV.zooms || [], zoomHits = [];
+GV.onZooms = z => { zooms = z || []; requestDraw(); };
+function dirToScreen(p) {   // unit direction -> canvas px, null on the far side
+  const s = scalePx();
+  if (state.view === "globe") {
+    const { C, E, N } = camBasis();
+    if (dot3(p, C) < 0.02) return null;
+    return [canvas.width / 2 + dot3(p, E) * s, canvas.height / 2 - dot3(p, N) * s];
+  }
+  const [lat, lon] = latLonOf(p);
+  return [canvas.width / 2 + wrapLon(lon - state.lon0) * s, canvas.height / 2 - (lat - state.lat0) * s];
+}
+function drawZooms() {
+  if (ovl.width !== canvas.width || ovl.height !== canvas.height) { ovl.width = canvas.width; ovl.height = canvas.height; }
+  ovx.clearRect(0, 0, ovl.width, ovl.height);
+  zoomHits = [];
+  const dpr = window.devicePixelRatio || 1;
+  for (const z of zooms) {
+    const lv = z.levels || [];
+    lv.forEach((L, k) => {
+      const pts = L.corners.map(([la, lo]) => dirToScreen(dirOf(la * PI / 180, lo * PI / 180)));
+      if (pts.some(q => !q)) return;
+      const fine = k === lv.length - 1;
+      ovx.beginPath(); pts.forEach(([x, y], n) => n ? ovx.lineTo(x, y) : ovx.moveTo(x, y)); ovx.closePath();
+      ovx.strokeStyle = fine ? "rgba(255,214,102,.95)" : `rgba(255,214,102,${0.25 + 0.2 * k})`;
+      ovx.lineWidth = (fine ? 2 : 1) * dpr; ovx.setLineDash(fine ? [] : [4 * dpr, 3 * dpr]); ovx.stroke();
+      if (fine) {
+        ovx.fillStyle = "rgba(255,214,102,.12)"; ovx.fill();
+        const cx = pts.reduce((a, q) => a + q[0], 0) / 4, cy = pts.reduce((a, q) => a + q[1], 0) / 4;
+        ovx.setLineDash([]); ovx.beginPath(); ovx.arc(cx, cy, 4 * dpr, 0, 2 * PI); ovx.fillStyle = "#ffd666"; ovx.fill();
+        ovx.font = `${11 * dpr}px system-ui`; ovx.fillStyle = "#ffe8a8";
+        ovx.fillText(`${z.name} · ${Math.round(L.cell_m)} m`, cx + 7 * dpr, cy - 6 * dpr);
+        zoomHits.push({ z, pts, cx, cy });
+      }
+    });
+    ovx.setLineDash([]);
+  }
+}
+function inPoly(x, y, pts) {
+  let c = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, yi] = pts[i], [xj, yj] = pts[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c;
+  }
+  return c;
+}
+const API = location.protocol.startsWith("http") ? "../api/zoom" : null;
+let apiOK = false, jobs = [];
+function reloadZooms() { const s = document.createElement("script"); s.src = `zooms.js?t=${Date.now()}`; document.body.appendChild(s); }
+async function pollJobs() {
+  if (!API) return;
+  try {
+    const r = await fetch(API); if (!r.ok) return;
+    const d = await r.json(); apiOK = true;
+    const was = jobs.filter(j => j.state === "running" || j.state === "queued").length;
+    jobs = d.jobs || [];
+    const now = jobs.filter(j => j.state === "running" || j.state === "queued").length;
+    if (now < was || (d.zooms || []).length !== zooms.length) reloadZooms();
+    if (now) setTimeout(pollJobs, 3000);
+    if (pop.dataset.kind === "spot") showSpot(+pop.dataset.px, +pop.dataset.py);
+  } catch (e) { apiOK = false; }
+}
+function placePop(px, py) {
+  const dpr = window.devicePixelRatio || 1;
+  pop.style.left = `${Math.min(px / dpr + 12, innerWidth - 350)}px`; pop.style.top = `${Math.min(py / dpr + 12, innerHeight - 220)}px`;
+  pop.classList.remove("hidden");
+}
+function showZoom(h, px, py) {
+  const z = h.z;
+  pop.dataset.kind = "zoom";
+  pop.innerHTML = `<span class="x" onclick="this.parentNode.classList.add('hidden')">×</span><div class="t">${z.name}</div>` +
+    `<div class="d">${z.lat.toFixed(2)}°, ${z.lon.toFixed(2)}° · baked in ${Math.round((z.seconds || 0) / 60)} min</div>` +
+    `<div><a href="${z.href}"><b>Open 3-D view</b></a> (${Math.round(z.levels[z.levels.length - 1].cell_m)} m)</div>` +
+    `<div class="d" style="margin-top:4px">levels: ` + z.levels.map(L => `<a href="${L.href}">${L.cell_m >= 1000 ? (L.cell_m / 1000).toFixed(1) + " km" : Math.round(L.cell_m) + " m"}</a>`).join(" · ") + `</div>`;
+  placePop(px, py);
+}
+function showSpot(px, py) {
+  const p = screenToDir(px, py);
+  if (!p) { pop.classList.add("hidden"); return; }
+  const [f, u, v] = fromSphere(p), Nc = META.N_c || 1024;
+  const i = Math.min(Nc - 1, Math.floor(u * Nc)), j = Math.min(Nc - 1, Math.floor(v * Nc));
+  const [lat, lon] = latLonOf(p);
+  const cmd = `python scripts/zoom_bake.py --world worlds/${META.world} --cell ${f} ${i} ${j}`;
+  const mine = jobs.filter(jb => jb.spot && jb.spot[0] === f && Math.abs(jb.spot[1] - i) <= 3 && Math.abs(jb.spot[2] - j) <= 3);
+  const job = mine[mine.length - 1];
+  pop.dataset.kind = "spot"; pop.dataset.px = px; pop.dataset.py = py;
+  let html = `<span class="x" onclick="this.parentNode.classList.add('hidden')">×</span><div class="t">${(lat * 180 / PI).toFixed(2)}°, ${(lon * 180 / PI).toFixed(2)}°</div>` +
+    `<div class="d">cell ${f} ${i} ${j} · no zoom here yet</div>`;
+  if (job) html += `<div>zoom ${job.name}: <b>${job.state}</b>${job.message ? " — " + job.message : ""}</div>`;
+  if (apiOK && (!job || job.state === "failed")) html += `<div class="row"><button class="plain" id="bakezoom">Bake a zoom here</button><span class="d">~10–20 min</span></div>`;
+  else if (!apiOK) html += `<div class="d">Bake one (then reload this page):</div><code>${cmd}</code>`;
+  pop.innerHTML = html;
+  const btn = $("bakezoom");
+  if (btn) btn.onclick = async () => {
+    btn.disabled = true;
+    try { const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ face: f, i, j }) });
+      if (!r.ok) throw new Error(await r.text()); } catch (e) { btn.textContent = "failed: " + e.message; return; }
+    pollJobs();
+  };
+  placePop(px, py);
+}
+let clickTimer = null, down = null;
+canvas.addEventListener("pointerdown", ev => { down = { x: ev.clientX, y: ev.clientY }; });
+canvas.addEventListener("click", ev => {
+  if (!down || Math.hypot(ev.clientX - down.x, ev.clientY - down.y) > 4) return;
+  const dpr = window.devicePixelRatio || 1, px = ev.offsetX * dpr, py = ev.offsetY * dpr;
+  clearTimeout(clickTimer);
+  clickTimer = setTimeout(() => {
+    const h = zoomHits.find(hh => inPoly(px, py, hh.pts) || Math.hypot(px - hh.cx, py - hh.cy) < 10 * dpr);
+    h ? showZoom(h, px, py) : showSpot(px, py);
+  }, 260);
+});
+canvas.addEventListener("dblclick", () => clearTimeout(clickTimer));
+pollJobs();
 
 // ---------------------------------------------------------------------------
 // UI: labels, legend, readout
