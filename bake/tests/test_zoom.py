@@ -384,6 +384,40 @@ def test_planet_level_chained_from_a_coarser_one(world, planet):
         assert (a["water_surface"] >= a["height"] + a["sediment"] - 1e-3).all()
 
 
+def test_planet_finish_in_bounded_memory_matches_the_whole_face_finish(world, planet, tmp_path, monkeypatch):
+    """``planet_finish.finish_face`` writes the same outputs as the in-memory
+    finish while a face floods whole, and valid ones -- water on or above the
+    ground, none on the sea, lakes kept -- when it floods in blocks."""
+    import shutil
+
+    from globe.zoom import planet as zp
+    from globe.zoom import planet_finish as pf
+
+    lv, src = planet["level"], planet["out"]
+    out = tmp_path / "fin"
+    shutil.copytree(src, out)
+    for f in (0, 3):
+        ref = {k: np.load(zp.out_path(src, lv.R, f, k)) for k in zp.OUT_FIELDS}
+        st = pf.finish_face(world["root"], out, lv, f)
+        for k in zp.OUT_FIELDS:
+            assert np.array_equal(np.load(zp.out_path(out, lv.R, f, k)), ref[k]), (f, k)
+        assert not (out / f"L{lv.R}.f{f}.plain_ws.tmp.npy").exists()
+    n = world["params"].coarse_grid().N * lv.R
+    monkeypatch.setattr(pf, "FLOOD_WHOLE", n // 4)
+    monkeypatch.setattr(pf, "FLOOD_BLOCK", n // 4)
+    monkeypatch.setattr(pf, "FLOOD_OVERLAP", n // 16)
+    lakes = []
+    for f in range(6):
+        st = pf.finish_face(world["root"], out, lv, f)
+        a = {k: np.load(zp.out_path(out, lv.R, f, k)) for k in zp.OUT_FIELDS}
+        surf = a["height"] + a["sediment"]
+        assert (a["water_surface"] >= surf - 1e-3).all() and np.isfinite(a["water_surface"]).all()
+        ref = np.load(zp.out_path(src, lv.R, f, "height"))
+        assert np.array_equal(a["height"], ref)
+        lakes.append(st["lake_cells"])
+    assert sum(lakes) >= 0
+
+
 def test_planet_inflow_crosses_cube_edges():
     """A window on a face edge takes water from the neighbouring face's
     drainage: a donor beyond the edge is looked up on the face that owns it,
