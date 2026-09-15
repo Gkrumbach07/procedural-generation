@@ -864,3 +864,42 @@ def test_seam_strip_is_sampled_where_the_neighbour_face_is(world):
     r, o, st = np.concatenate(res_all).mean(), np.concatenate(offs_all).mean(), np.concatenate(steps).mean()
     assert r < 0.05 * st, (r, st)
     assert o > 5.0 * r, (r, o)
+
+
+def test_zoom_erosion_profile_is_a_valid_override():
+    """``refine.zoom.ZOOM_EROSION`` names real erosion parameters with values
+    of their own types, so a window can apply it with ``with_overrides``."""
+    from globe.refine.zoom import ZOOM_EROSION
+    p = WorldParams.tiny_world().with_overrides(erosion=dict(ZOOM_EROSION))
+    for k, v in ZOOM_EROSION.items():
+        assert getattr(p.erosion, k) == v, k
+    assert isinstance(p.erosion.max_steps, int)
+
+
+def test_smooth_drift_removes_the_coarse_scale_without_the_grid():
+    """``refine.zoom.smooth_drift`` takes a smooth coarse-scale drift out as
+    well as ``basin_job.block_drift`` does, and its correction has no kink
+    on the block lines: the bilinear one's second difference jumps there
+    (the printed grid of docs/zoom-windows.md), the Gaussian one's does not."""
+    from globe.refine.basin_job import block_drift
+    from globe.refine.zoom import smooth_drift
+    R, nb = 16, 12
+    n = R * nb
+    y, x = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    rng = np.random.default_rng(3)
+    drift = 30.0 * np.sin(x / 45.0) * np.cos(y / 60.0) + 10.0 * (x / n)
+    detail = rng.normal(0.0, 5.0, (n, n))
+    cells = np.ones((n, n), bool)
+    for fn in (block_drift, smooth_drift):
+        F = fn(drift + detail, cells, R)
+        res = (drift + detail - F).reshape(nb, R, nb, R).mean(axis=(1, 3))
+        assert np.abs(res).max() < 1.0, (fn.__name__, np.abs(res).max())
+    Fb = block_drift(drift + detail, cells, R)
+    Fs = smooth_drift(drift + detail, cells, R)
+    def kink(F):
+        d2 = np.abs(F[:, 2:] - 2 * F[:, 1:-1] + F[:, :-2])      # second difference along x, at columns 1..n-2
+        cols = np.arange(1, n - 1)
+        on = (cols % R == R // 2)                                # bilinear nodes sit at block centres: kinks there
+        return d2[:, on].mean() / max(d2[:, ~on].mean(), 1e-12)
+    assert kink(Fb) > 3.0, kink(Fb)
+    assert kink(Fs) < 1.5, kink(Fs)

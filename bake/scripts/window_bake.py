@@ -4,19 +4,19 @@
 the refine stage's own basin job, measuring cost, convergence, river
 connectivity, relief and lakes (docs/zoom-windows.md).
 
-    python scripts/window_bake.py --world worlds/earth-v9 --outlet 5 58 868 \
-        --R 2 8 32 --iters 150 --out scratch/window/runs
-    python scripts/window_bake.py --world worlds/earth-v9 --outlet 5 67 873 \
-        --R 32 --iters 8 --census 8 --relief drainage --no-block-drift --erosion creep_rate=0 --out ...
+    # the zoom-window setup measured best (McDonald's erosion settings, a
+    # smooth drift correction, lakes in erosion, detail noise 3)
+    python scripts/window_bake.py --world worlds/earth-v9 --outlet 5 239 913 --R 32 --iters 150 \
+        --profile zoom --detail-amp 3 --drift smooth --erosion window_lakes=1 flood_every=5 --out ...
 
 The window is the D8 catchment upstream of ``--outlet`` (face, i, j on the
 coarse grid), confined to one face, handed to ``refine.basin_job._run_basin``
-as a synthetic basin whose only exit is the outlet cell.  Prototypes, all
-monkeypatched in and none part of the refine stage: ``--relief drainage``
-(scripts/drainage_relief.py) replaces the detail noise, ``--no-block-drift``
-skips the per-coarse-cell drift correction, ``--census N`` classifies the
-depressions each of the first N iterations makes (scripts/pit_census.py) and
-``--breach`` takes back the deposits that dam them (scripts/dam_breach.py).
+as a synthetic basin whose only exit is the outlet cell.  ``--profile zoom``
+applies ``refine.zoom.ZOOM_EROSION`` and ``--drift smooth``
+``refine.zoom.smooth_drift`` in place of the job's per-coarse-cell
+correction.  Prototypes, monkeypatched in: ``--relief drainage``
+(scripts/drainage_relief.py), ``--census N`` (scripts/pit_census.py),
+``--breach`` (scripts/dam_breach.py).
 """
 import argparse
 import json
@@ -158,7 +158,9 @@ def main():
     ap.add_argument("--detail-amp", type=float, default=None)
     ap.add_argument("--erosion", nargs="*", default=[], help="erosion overrides k=v (floats)")
     ap.add_argument("--relief", choices=["noise", "drainage"], default="noise")
-    ap.add_argument("--no-block-drift", action="store_true", help="skip the job's per-coarse-cell drift correction")
+    ap.add_argument("--no-block-drift", action="store_true", help="skip the job's per-coarse-cell drift correction (same as --drift none)")
+    ap.add_argument("--drift", choices=["block", "smooth", "none"], default=None, help="drift correction: the job's per-coarse-cell one, refine.zoom.smooth_drift, or none")
+    ap.add_argument("--profile", choices=["zoom", "shipped"], default="shipped", help="erosion settings: refine.zoom.ZOOM_EROSION or the world's own (--erosion overrides either)")
     ap.add_argument("--breach", action="store_true", help="breach the dams each particle pass builds (scratch/window/dam_breach.py)")
     ap.add_argument("--census", type=int, default=0, help="pit census for the first N iterations (scratch/window/pit_census.py)")
     ap.add_argument("--relief-elev", type=float, default=0.1, help="drainage relief: valley depth per metre of elevation")
@@ -191,7 +193,13 @@ def main():
         ro = {"halo_cells": int(a.halo), "refine_iterations": int(a.iters)}
         if a.detail_amp is not None:
             ro["detail_amp"] = float(a.detail_amp)
-        eo = {k: float(v) for k, v in (x.split("=") for x in a.erosion)}
+        eo = {}
+        if a.profile == "zoom":
+            from globe.refine.zoom import ZOOM_EROSION
+            eo.update(ZOOM_EROSION)
+        eo.update({k: float(v) for k, v in (x.split("=") for x in a.erosion)})
+        if "max_steps" in eo:
+            eo["max_steps"] = int(eo["max_steps"])
         p = base.with_overrides(world={"R": int(R)}, refine=ro, erosion=eo)
         win = basin_window(basin, R, a.halo, face=f, N=grid.N)
         conv = []
@@ -262,8 +270,12 @@ def main():
 
         bj.step = step
         real_build_mask, real_detail, real_drift = bj.build_mask, bj.detail_noise, bj.block_drift
-        if a.no_block_drift:
+        drift_mode = a.drift or ("none" if a.no_block_drift else "block")
+        if drift_mode == "none":
             bj.block_drift = lambda delta, cells, R_, **kw: np.zeros_like(delta)
+        elif drift_mode == "smooth":
+            from globe.refine.zoom import smooth_drift
+            bj.block_drift = lambda delta, cells, R_, **kw: smooth_drift(delta, cells, R_)
         dstats = {}
         if a.relief == "drainage":
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -334,7 +346,7 @@ def main():
             "coarse_drift_p50_p90_max_m": block_drift_stats(surf - plain, act, R),
             "relief_3km_p50_p90_m": relief_stats(surf, act, cell_m, 3000.0),
             "relief_3km_plain_p50_p90_m": relief_stats(plain, act, cell_m, 3000.0),
-            "census": census_rows, "breach": breach_stats,
+            "census": census_rows, "breach": breach_stats, "profile": a.profile, "drift_mode": drift_mode,
             "relief_mode": a.relief, "relief_elev": a.relief_elev, "relief_rel": a.relief_rel, "drainage_stats": dstats,
             "channels": channel_metrics(q, act, cell_m / 1000.0, float(q[outlet].max()) / (m.sum() * coarse_km ** 2), outlet),
             "convergence": conv[:: max(1, len(conv) // 30)] + conv[-1:],

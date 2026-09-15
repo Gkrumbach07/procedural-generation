@@ -386,3 +386,58 @@ still small lakes in pits, the plateau still streaks along the regional
 slope, the coarse-scale drift grows without the correction (38-62 m
 median), and the range catchment is a poor connectivity test -- most of
 its steep part is a one-coarse-cell-wide strip.
+
+## The zoom-window setup
+
+`bake/globe/refine/zoom.py` now holds the two things a window below the
+planet grid needs, outside the refine stage until zoom windows are one:
+`ZOOM_EROSION` (the McDonald settings above) and `smooth_drift`, a drift
+correction made of normalised Gaussian low-passes (sigma one coarse cell)
+instead of `basin_job.block_drift`'s per-coarse-cell bilinear field, whose
+gradient jumps on every block line (`test_smooth_drift_removes_the_coarse_scale_without_the_grid`:
+3x the second difference on the node lines for the bilinear field, none for
+the Gaussian). `window_bake.py --profile zoom --drift smooth`.
+
+**The drift correction.** On the pit-free relief surface before any erosion
+(trib, 305 m): no correction leaves 7 lakes and 34 / 67 m of coarse-scale
+drift; the block correction 107 lakes and 0 m; the smooth one 71 lakes and
+6 / 17 m. Uncorrected, erosion's own drift grows with the run (30 / 70 m at
+60 iterations, 104 / 178 m at 150), so a correction is needed; the smooth one
+holds it to 7-9 / 15-25 m and neither changes the river network, which it
+follows.
+
+**Longer runs with lakes** (trib, 305 m, zoom profile, drainage relief,
+smooth drift, window lakes every 5 iterations):
+
+| iterations | relief 3 km | lakes / km^2 | ≥100 km^2 / ≥10 km^2 network on the outlet (pieces) |
+|---|---|---|---|
+| 60 | 127 / 235 m | 1,545 / 1,052 | 80 % / 94 % (140) |
+| 150 | 85 / 182 m | 1,160 / 632 | 85 % / 85 % (81) |
+| 300 | 72 / 168 m | 1,055 / 463 | 75 % / 99 % (99) |
+
+Lake area falls with the run (9 %, 5.5 %, 4 % of the catchment): the pools
+fill with the load dropped at their shores. The surface after 150-300
+iterations is a branching network converging on the outlet with a scatter
+of small lakes (`scratch/window/drift/drift_cmp.png`).
+
+**A compact mountain catchment** (face 5, outlet (239, 913): 220 coarse
+cells in a 30 x 27 box, 224 m to 6,979 m, median 3,747 m), 305 m, 150
+iterations:
+
+| | relief 3 km (upsample 89 / 199 m) | lakes / km^2 | ≥100 / ≥10 km^2 network on the outlet |
+|---|---|---|---|
+| shipped refine (detail 0.3, block drift) | 89 / 198 m | 39 / 8 | 57 % / 97 % |
+| zoom, drainage relief | 221 / 594 m | 2,835 / 915 | 20 % / 13 % |
+| **zoom, detail noise 3** | 177 / 652 m | 2,795 / 1,349 | 54 % / 95 % |
+
+The drainage relief step fails on a steep regional slope: its flood tree's
+flow lines run parallel down the range and the carve cuts them into
+corduroy -- parallel ridges and grooves with the network in pieces. The
+same zoom settings from plain detail noise give mountains: branching
+ridges, rounded massifs, valleys with lakes in them, the network mostly
+connected (`scratch/window/mtn2/mtn2_crops.png`, shipped / drainage relief
+/ noise). On the plateau the two starts tied under these settings (81 and
+80 %), so the relief step is not earning its place; the setup is **zoom
+profile, detail noise 3, smooth drift, window lakes**. What is left is the
+lake count (6 % of the mountain catchment, most of it small pools) and the
+coarse drift at the p90 (58 m on the mountain).
