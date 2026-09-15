@@ -4,16 +4,24 @@
 the refine stage's own basin job, measuring cost, convergence, river
 connectivity, relief and lakes (docs/zoom-windows.md).
 
-    python scripts/window_bake.py --world worlds/earth-v9 --outlet 5 239 913 --R 32 --iters 150 --out ...
+    # a level from the planet, then the next level chained from it
+    python scripts/window_bake.py --world worlds/earth-v9 --outlet 5 239 913 --R 32 --iters 150 --save --out W --tag a_
+    python scripts/window_bake.py --world worlds/earth-v9 --outlet 5 239 913 --R 128 --iters 40 \
+        --parent W/a_R32.npz --parent-R 32 --save --out W --tag b_
+    python scripts/window_view.py W/b_R128.npz --shot b.png
 
 Defaults are the zoom-window setup measured best (``refine.zoom``: McDonald's
 erosion settings with lakes in erosion, detail noise 3, the smooth drift
 correction); ``--profile shipped`` runs the refine stage's own settings.
-The window is the D8 catchment upstream of ``--outlet`` (face, i, j on the
-coarse grid), confined to one face, handed to ``refine.basin_job._run_basin``
-as a synthetic basin whose only exit is the outlet cell.  Prototypes,
-monkeypatched in: ``--relief drainage`` (scripts/drainage_relief.py),
-``--census N`` (scripts/pit_census.py), ``--breach`` (scripts/dam_breach.py).
+``--parent`` starts from a coarser saved window of the same catchment and
+halo instead of the planet (upsampled surface and discharge, detail only
+below the parent's cell, drift held to the parent at the parent's cell) --
+soillib's multiscale procedure.  The window is the D8 catchment upstream of
+``--outlet`` (face, i, j on the coarse grid), confined to one face, handed
+to ``refine.basin_job._run_basin`` as a synthetic basin whose only exit is
+the outlet cell.  Prototypes, monkeypatched in: ``--relief drainage``
+(scripts/drainage_relief.py), ``--census N`` (scripts/pit_census.py),
+``--breach`` (scripts/dam_breach.py).
 """
 import argparse
 import json
@@ -159,6 +167,9 @@ def main():
     ap.add_argument("--drift", choices=["block", "smooth", "none"], default=None, help="drift correction: the job's per-coarse-cell one, refine.zoom.smooth_drift (default with --profile zoom), or none")
     ap.add_argument("--profile", choices=["zoom", "shipped"], default="zoom", help="zoom (default): refine.zoom.ZOOM_EROSION and ZOOM_REFINE; shipped: the world's own refine settings (--erosion / --detail-amp override either)")
     ap.add_argument("--breach", action="store_true", help="breach the dams each particle pass builds (scratch/window/dam_breach.py)")
+    ap.add_argument("--parent", default=None, help="start from this window's saved arrays (a coarser --save run of the same catchment and halo) instead of the planet: multiscale chaining")
+    ap.add_argument("--parent-R", type=int, default=None, help="the parent window's R")
+    ap.add_argument("--chain-detail", type=float, default=0.5, help="with --parent: detail amplitude x min(parent slope x parent cell, parent 3x3 relief), octaves below the parent cell only")
     ap.add_argument("--census", type=int, default=0, help="pit census for the first N iterations (scratch/window/pit_census.py)")
     ap.add_argument("--relief-elev", type=float, default=0.1, help="drainage relief: valley depth per metre of elevation")
     ap.add_argument("--relief-rel", type=float, default=0.5, help="drainage relief: valley depth per metre of coarse 3x3 relief")
@@ -270,12 +281,50 @@ def main():
 
         bj.step = step
         real_build_mask, real_detail, real_drift = bj.build_mask, bj.detail_noise, bj.block_drift
+        real_upsample = bj.upsample_window
+        if a.parent:
+            from scipy.ndimage import map_coordinates, maximum_filter, minimum_filter
+            from globe.refine.upsample import ridged_fbm
+            par = np.load(a.parent)
+            fR = R // int(a.parent_R)
+            par_cell = grid.cell_size_m / int(a.parent_R)
+            psurf = (par["height"] + par["sediment"]).astype(np.float64)
+            pgy, pgx = np.gradient(psurf, par_cell)
+            pslope = np.hypot(pgx, pgy)
+            prel = maximum_filter(psurf, size=3) - minimum_filter(psurf, size=3)
+
+            def to_child(arr, H_, NE_, order=3):
+                e = (np.arange(NE_) - H_ + 0.5) / fR - 0.5
+                I, J = np.meshgrid(e, e, indexing="ij")
+                return map_coordinates(np.asarray(arr, np.float64), [I, J], order=order, mode="nearest")
+
+            def upsample(fields_, derived_, win_, grid_):
+                up_ = real_upsample(fields_, derived_, win_, grid_)
+                H_, NE_ = win_.H, win_.NE
+                up_["height0"] = to_child(par["height"], H_, NE_).astype(up_["height0"].dtype)
+                up_["sediment0"] = np.maximum(to_child(par["sediment"], H_, NE_, order=1), 0.0).astype(up_["sediment0"].dtype)
+                up_["discharge"] = np.maximum(to_child(par["discharge"], H_, NE_, order=1), 0.0).astype(up_["discharge"].dtype)
+                up_["slope"] = to_child(pslope, H_, NE_, order=1).astype(np.float32)
+                up_["relief"] = to_child(prel, H_, NE_, order=1).astype(np.float32)
+                return up_
+
+            def chain_detail(win_, slope, relief, hardness, detail_amp, cell_size_m, gen, surface=None, coast_taper_m=0.0):
+                amp = a.chain_detail * np.minimum(np.maximum(slope, 0) * par_cell, np.maximum(relief, 0)) * (0.5 + 0.5 * np.clip(hardness, 0, 1))
+                if surface is not None and coast_taper_m > 0:
+                    t = np.clip(np.abs(surface) / coast_taper_m, 0, 1)
+                    amp = amp * t * t * (3 - 2 * t)
+                return (amp * ridged_fbm((win_.NE, win_.NE), 2.0 * fR, gen)).astype(np.float32)
+
+            bj.upsample_window, bj.detail_noise = upsample, chain_detail
         drift_mode = a.drift or ("none" if a.no_block_drift else ("smooth" if a.profile == "zoom" else "block"))
         if drift_mode == "none":
             bj.block_drift = lambda delta, cells, R_, **kw: np.zeros_like(delta)
         elif drift_mode == "smooth":
             from globe.refine.zoom import smooth_drift
-            bj.block_drift = lambda delta, cells, R_, **kw: smooth_drift(delta, cells, R_)
+            if a.parent:   # hold the parent at the parent's cell, not the planet's
+                bj.block_drift = lambda delta, cells, R_, **kw: smooth_drift(delta, cells, R // int(a.parent_R))
+            else:
+                bj.block_drift = lambda delta, cells, R_, **kw: smooth_drift(delta, cells, R_)
         dstats = {}
         if a.relief == "drainage":
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -311,6 +360,7 @@ def main():
             bj.step = real_step
             emaps.run_iteration = real_run_it
             bj.build_mask, bj.detail_noise, bj.block_drift = real_build_mask, real_detail, real_drift
+            bj.upsample_window = real_upsample
         wall = time.time() - t0
         ru1 = resource.getrusage(resource.RUSAGE_SELF)
         cpu = (ru1.ru_utime - ru0.ru_utime) + (ru1.ru_stime - ru0.ru_stime)

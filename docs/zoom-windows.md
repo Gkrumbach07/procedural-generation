@@ -481,3 +481,31 @@ little with the particle caps already off. Neither is a new default. The
 pit-free limits and the multiscale chain are the two worth building: the
 first is the soillib answer to the dams this doc spent three sections on,
 the second is the zoom pyramid itself.
+
+## The finest level: chained, not direct
+
+The mountain catchment at 76 m with the zoom defaults, straight from the
+planet as every earlier window was, against the same level chained from
+the 305 m window (`window_bake.py --parent a_R32.npz --parent-R 32`: the
+parent's surface and discharge upsampled, detail noise only below the
+parent's cell at 0.5 x min(parent slope x 305 m, parent 3x3 relief), the
+drift held to the parent at the parent's cell, 40 iterations -- soillib's
+multiscale procedure):
+
+| | 305 m, 150 it | 76 m direct, 150 it | **76 m chained, 40 it** |
+|---|---|---|---|
+| relief over 3 km | 177 / 652 m | 156 / 485 m | 173 / 656 m |
+| lakes / km^2 (share) | 2,795 / 1,349 (6.4 %) | 29,108 / 1,631 (7.8 %) | 11,419 / 1,437 (6.8 %) |
+| pit / age deaths | 15 / 6 % | 26 / 32 % | 35 / 24 % |
+| ≥100 / ≥10 / ≥1 km^2 network on the outlet (pieces at 100) | 54 / 95 / 96 % (149) | 24 / 18 / 15 % (231) | **100 / 75 / 97 %** (3) |
+| erosion wall time (CPU µs / cell / it) | 37 s | 1,295 s (8.6) | **322 s** (7.5) |
+
+Direct, the 76 m window has to organise noise from 20 km down to 150 m in
+one go and does not: 29,108 lakes, a fifth of the network on the outlet,
+the relief lower than the 305 m level's. Chained, it inherits the 305 m
+level's valleys and only adds what is below them: the large network is in
+3 pieces (100 % on the outlet), the relief is the parent's, the lakes are
+fewer than half, and it costs a quarter of the time for 40 iterations
+instead of 150 (`scratch/window/mtn2/def76_view_d.png` against
+`chain76_view_d.png`, both drawn by `scripts/window_view.py`). The water
+it leaves is mostly pools strung along the valley floors.
