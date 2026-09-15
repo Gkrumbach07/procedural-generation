@@ -1172,6 +1172,32 @@ def test_closed_basin_erodes_as_land_and_keeps_its_sediment(scratch):
     assert out["on"][1] > out["off"][1], out   # the basin keeps what it is given
 
 
+def test_window_lakes_flag_the_depressions_the_route_fills():
+    """``erosion.window_lakes``: a window's depressions deeper than
+    ``hydro.lake_min_depth`` on the routing surface become flagged lakes
+    (``S_RFLAG == 2`` in the packed samples), refreshed on the route's
+    stride, so particles cross them instead of dying against the dams a
+    window's particle pass builds (docs/zoom-windows.md).  Off, a window
+    has no lake flags at all -- the refine stage's behaviour."""
+    p = WorldParams.small_world(0)
+    on = p.with_overrides(erosion={"window_lakes": True, "flood_every": 1})
+    runs = {}
+    for name, params in (("off", p), ("on", on)):
+        st = make_window(32, "tilt", params, seed=5)
+        H = st.H
+        c = H + 16
+        pit = (slice(None), slice(c - 2, c + 2), slice(c - 2, c + 2))
+        st.height[pit] -= 2.0                      # a 4 x 4 pit, 2 cells deep, on the slope
+        step(st, params, 0)
+        runs[name] = st
+    off, on_st = runs["off"], runs["on"]
+    assert off.lake_flag is None or not off.lake_flag.any()
+    flag = on_st.lake_flag
+    assert flag is not None and flag[0, c - 1:c + 1, c - 1:c + 1].all(), flag[0, c - 3:c + 3, c - 3:c + 3]
+    assert flag.sum() < 200                         # the pit and what the flood joins to it, not the slope
+    assert np.all(on_st.samp[0][flag[0] > 0, pk.S_RFLAG] == 2.0)
+
+
 def test_hold_datum_carries_the_base_level_with_it(scratch):
     """``hold_datum`` is a rigid shift of the datum, not a physical change,
     so everything registered to the terrain moves with it.  Sea level is 0

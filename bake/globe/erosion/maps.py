@@ -394,6 +394,32 @@ class ErosionState:
                 "depressions": int(bal.get("depressions", 0)), "overflowing": int(bal.get("overflowing", 0)),
                 "closed": int(bal.get("closed", 0)), "dry": int(bal.get("dry", 0))}
 
+    def refresh_lakes_window(self, min_depth: float) -> dict:
+        """:meth:`refresh_lakes` for a window (``erosion.window_lakes``):
+        every depression the routing flood fills more than ``min_depth``
+        (cell units) deep is an overflowing lake -- flagged, so particles
+        cross it on the routing surface without touching the bed, drop their
+        load at its shore and are not killed for climbing inside it, and its
+        bed is never eroded below the water.  The level is the routing
+        surface's (spill point plus ``route_eps`` per cell), so lakes and
+        routes agree by construction; there is no evaporation balance, a
+        window having no climate of its own to draw a basin down with.
+
+        Without it a window's particle pass dams its own channels (92-98 % of
+        new depressions at 305 m cells, docs/zoom-windows.md) and a particle
+        reaching the dam climbs, dies and drops its load behind it, so the dam
+        is never incised.  Must run after :meth:`refresh_route`."""
+        flag = np.zeros(self.height.shape, dtype=np.uint8)
+        if self.route is None:
+            self.lake_flag = flag
+            return {"lake_cells": 0}
+        lake = ((self.route - self.surface()) > float(min_depth)) & (self.mask == pk.MASK_ACTIVE)
+        H = self.H
+        inter = (slice(None), slice(H, -H), slice(H, -H))
+        flag[inter] = lake[inter]
+        self.lake_flag = flag
+        return {"lake_cells": int(lake[inter].sum())}
+
     def fields(self, names=("height", "sediment", "discharge", "momentum")) -> dict[str, FaceField]:
         """Output FaceFields in metres (spherical mode)."""
         if self.grid is None:
@@ -1032,6 +1058,10 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
         st_lake = state.refresh_lakes(float(params.hydro.lake_evap),
                                       float(params.hydro.lake_min_depth) / float(state.height_unit_m),
                                       _ocean_min_fraction(params))
+    elif not state.spherical and bool(getattr(ep, "window_lakes", False)) and ep.flood_every > 0 and \
+            (state.lake_flag is None or state.iteration % ep.flood_every == 0):
+        min_depth = float(params.hydro.lake_min_depth) if isinstance(params, WorldParams) else 0.5
+        st_lake = state.refresh_lakes_window(min_depth / float(state.height_unit_m))
     tr = time.time() - t0
     iso = state.spherical and float(getattr(ep, "isostasy", 0.0)) > 0.0
     if iso:

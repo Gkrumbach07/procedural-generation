@@ -249,3 +249,46 @@ into a lake with a level, particles cross it without touching the bed and
 drop their load at its shore, and an overflowing lake spills downstream.
 That is the next step: lakes-in-erosion for windows, so a dam behaves like
 a lake that fills with sediment and spills, not like a trap.
+
+## Lakes-in-erosion for windows
+
+`erosion.window_lakes` (`ErosionState.refresh_lakes_window`, off by default
+so the refine stage is unchanged): every depression the routing flood fills
+deeper than `hydro.lake_min_depth` is a flagged, overflowing lake, refreshed
+on the route's `flood_every` stride -- particles cross it without touching
+the bed and without being killed for climbing, drop 90 % of their load at
+its shore, and its bed is never eroded below the water. The level is the
+routing surface's own, so lakes and routes agree; there is no evaporation
+balance. `test_window_lakes_flag_the_depressions_the_route_fills`.
+
+**On its own it does not stop the dams.** The census with the lakes
+refreshed every 10 iterations is identical to without (the first refresh
+finds the pit-free relief and the next comes after iteration 8); refreshed
+every iteration the depressions grow, 1,839 against 1,304 by iteration 8,
+and they are dams just the same (89-98 % by the particle pass, spill raised
+30 m in the first iteration -- before any lake exists).
+
+So the size of a deposit is the lever, relative to the cell: a 30 m bar
+dams a few cells of a planet channel dropping ~10 m per 9.8 km cell and
+~30 cells (9 km) of a 305 m channel dropping ~1 m per cell, while
+`iter_deposit` is 50 m at every cell size. 60 iterations, trib, 305 m,
+drainage relief, creep 0, drift correction off:
+
+| | relief 3 km | lakes / km^2 | pit deaths | ≥100 km^2 channels on the outlet's network |
+|---|---|---|---|---|
+| window lakes, refreshed every iteration | 203 / 315 m | 2,027 / 1,079 | 11 % | 67 % |
+| `iter_deposit` 1.5 m (= 50 m x 305 / 9773) | 179 / 282 m | 517 / 610 | 21 % | 45 % |
+| both | 172 / 273 m | 704 / 370 | 25 % | 31 % |
+| both + dam breach | 172 / 271 m | **226 / 114** | 24 % | 37 % |
+
+The last is the first configuration with a lake area in a sensible range
+(1 % of the catchment, against 3-9 % for the other rows and 4-17 % for
+the earlier creep-0 runs), but the river
+network is worse: a quarter of the particles still die in pits and only a
+third of the large channels reach the outlet. Two caveats on that number:
+the window's routing treats the catchment's divide ring as an outlet (a
+cell next to the outside of the mask is a seed), so 66-88 % of particles
+leave through the ring rather than the outlet cell, and a channel that
+does is counted as disconnected. And the surface is crumpled into parallel
+ridges with channels that look broken (`scratch/window/sweep/D_vs_base.png`),
+where the shipped erosion's is a smooth fan of converging valleys.
