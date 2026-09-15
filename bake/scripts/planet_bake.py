@@ -28,7 +28,7 @@ def main(argv=None) -> int:
     ap.add_argument("--tile", type=int, default=1024)
     ap.add_argument("--margin", type=int, default=64)
     ap.add_argument("--faces", type=int, nargs="*", default=None)
-    ap.add_argument("--workers", type=int, default=0, help="tile processes per pass (default one per 4 cores)")
+    ap.add_argument("--workers", type=int, default=0, help="tile processes per pass (default one per tile, up to one per core)")
     ap.add_argument("--no-finish", action="store_true", help="tiles only: no seam blend, water surface or outputs")
     a = ap.parse_args(argv)
 

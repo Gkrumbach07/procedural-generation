@@ -162,6 +162,32 @@ def test_zoom_is_deterministic_and_the_same_in_parallel(world, zoom, tmp_path):
         assert np.array_equal(a[k], b[k]), k
 
 
+def test_pool_threads_follow_the_running_tiles_particles(monkeypatch):
+    """A worker takes the share of the cores its tile's particles are of the
+    running tiles' (one thread at least), and a tile's demand counts only
+    while it runs."""
+    import os
+
+    import numba
+
+    cpus = os.cpu_count() or 1
+    before = numba.get_num_threads()
+    demand = zb.pool_demand()
+    monkeypatch.setattr(zb, "_DEMAND", demand)
+    try:
+        with zb._Demand(3.0), zb._Demand(1.0):
+            assert demand[0] == pytest.approx(4.0)
+            zb._share_threads(3.0)
+            assert numba.get_num_threads() == max(1, min(round(cpus * 0.75), numba.config.NUMBA_NUM_THREADS))
+            zb._share_threads(1e-6)
+            assert numba.get_num_threads() == 1
+        assert demand[0] == 0.0
+        zb._share_threads(1.0)
+        assert numba.get_num_threads() == min(cpus, numba.config.NUMBA_NUM_THREADS)
+    finally:
+        numba.set_num_threads(before)
+
+
 def test_zoom_pages_and_viewer_list(world, zoom):
     out = zoom["out"]
     for lv in LEVELS:
@@ -225,6 +251,35 @@ def test_planet_level_outputs_are_complete_and_physical(world, planet):
         assert (a["water_surface"] >= a["height"] + a["sediment"] - 1e-3).all()
         assert (a["sediment"] >= -1e-4).all() and (a["discharge"] >= 0).all()
     assert sum(fc["seam_cells"] for fc in info["faces"]) > 0
+
+
+def test_planet_workers_map_the_inputs_the_world_has(world, planet):
+    """The inputs the bake wrote once are what a worker would load itself,
+    mapped rather than copied; a changed world file makes a worker load
+    instead of trusting them."""
+    import os
+
+    from globe.refine import basin_job as bj
+    from globe.refine.zoom import zoom_params
+    from globe.zoom import planet as zp
+
+    lp = zoom_params(world["params"], planet["level"].R)
+    grid, fields, derived, fd, fa = zp.planet_inputs(world["root"], lp, planet["out"])
+    assert isinstance(fields["height"].data, np.memmap) and isinstance(fd, np.memmap)
+    g2, f2, d2 = bj.coarse_inputs(world["root"], lp)
+    fd2, fa2 = zp.planet_flow(world["root"])
+    for a, b in ((fields, f2), (derived, d2)):
+        assert a.keys() == b.keys()
+        for k in a:
+            assert a[k].data.dtype == b[k].data.dtype and np.array_equal(a[k].data, b[k].data) and a[k].is_vector == b[k].is_vector, k
+    assert np.array_equal(fd, fd2) and np.array_equal(fa, fa2)
+    src = world["root"] / "coarse" / "precip.f3.npy"
+    st = src.stat()
+    try:
+        os.utime(src, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+        assert not isinstance(zp.planet_inputs(world["root"], lp, planet["out"])[1]["height"].data, np.memmap)
+    finally:
+        os.utime(src, ns=(st.st_atime_ns, st.st_mtime_ns))
 
 
 def test_planet_level_does_not_depend_on_the_workers(world, planet, tmp_path):

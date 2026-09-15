@@ -48,7 +48,7 @@ from ..cubesphere import from_sphere_v, project_to_face_v, to_sphere_v
 from ..hydro.priority_flood import priority_flood_flat
 from ..io.world_store import WorldStore
 from ..refine import basin_job as bj
-from ..refine.upsample import Window, upsample_window
+from ..refine.upsample import COARSE_INPUTS, Window, upsample_window
 from ..refine.zoom import ZOOM_REFINE, zoom_params
 from . import bake as zb
 
@@ -61,7 +61,7 @@ WORK_FIELDS = {"height": ((), np.float32), "sediment": ((), np.float32), "discha
 @dataclass(frozen=True)
 class PlanetLevel:
     R: int = 8
-    iterations: int = 80  # 200 as a zoom level runs is ~12 h for earth-v9 on 20 cores (a 1152² tile ~15 min at 4 threads: the kernel passes every cell of the window, sea too)
+    iterations: int = 80  # 200 as a zoom level runs was ~12 h for earth-v9 on 20 cores (a 1152² land tile ~15 min at 4 threads: its particles, docs/zoom-windows.md "Where a tile's time goes")
     tile: int = 1024  # core side, fine cells (a multiple of R)
     margin: int = 64  # fine cells, a multiple of R
     hold_every: int = 10
@@ -182,6 +182,78 @@ def planet_flow(root: str | Path) -> tuple[np.ndarray, np.ndarray]:
     return _FLOW[key]
 
 
+# --------------------------------------------------------------------------
+# the planet's inputs, shared by the workers
+# --------------------------------------------------------------------------
+_SHARED: dict[str, tuple] = {}
+
+
+def _input_stamp(root: Path) -> str:
+    """Sizes and modification times of the coarse files the inputs come from."""
+    parts = []
+    for name in COARSE_INPUTS + ("flow_dir", "flow_acc"):
+        for f in range(6):
+            st = (Path(root) / "coarse" / f"{name}.f{f}.npy").stat()
+            parts.append(f"{name}.{f}:{st.st_size}:{st.st_mtime_ns}")
+    return ";".join(parts)
+
+
+def write_shared_inputs(root: str | Path, params: WorldParams, out: str | Path) -> Path:
+    """``<out>/inputs/``: the coarse inputs and their derived fields
+    (:func:`refine.basin_job.coarse_inputs`) and the planet's flow
+    (:func:`planet_flow`) as ``.npy`` files, rewritten when the world's
+    files change.  Workers map them (:func:`planet_inputs`), so the ~1 GB
+    they are at N = 1024 is in memory once, not once per worker."""
+    root, d = Path(root), Path(out) / "inputs"
+    stamp = _input_stamp(root)
+    info_path = d / "inputs.json"
+    if info_path.exists() and json.loads(info_path.read_text()).get("stamp") == stamp:
+        return d
+    d.mkdir(parents=True, exist_ok=True)
+    info_path.unlink(missing_ok=True)
+    grid, fields, derived = bj.coarse_inputs(root, params)
+    vec = {}
+    for group, fs in (("field", fields), ("derived", derived)):
+        for name, ff in fs.items():
+            np.save(d / f"{group}.{name}.npy", ff.data)
+            vec[f"{group}.{name}"] = bool(ff.is_vector)
+    fd, fa = planet_flow(root)
+    np.save(d / "flow_dir.npy", fd)
+    np.save(d / "flow_acc.npy", fa)
+    bj._CACHE.clear()
+    _FLOW.clear()
+    info_path.write_text(json.dumps({"stamp": stamp, "vector": vec}))
+    return d
+
+
+def planet_inputs(root: str | Path, params: WorldParams, out: str | Path) -> tuple:
+    """``(grid, fields, derived, flow_dir, flow_acc)``: mapped from
+    ``<out>/inputs`` when :func:`write_shared_inputs` wrote them for the
+    world as it is, loaded into this process otherwise."""
+    root, d = Path(root), Path(out) / "inputs"
+    info_path = d / "inputs.json"
+    key = str(d.resolve())
+    hit = _SHARED.get(key)
+    if hit is not None and hit[0] == _input_stamp(root):
+        return hit[1]
+    info = json.loads(info_path.read_text()) if info_path.exists() else {}
+    if info.get("stamp") != _input_stamp(root):
+        grid, fields, derived = bj.coarse_inputs(root, params)
+        fd, fa = planet_flow(root)
+        return grid, fields, derived, fd, fa
+    from ..field import FaceField
+
+    grid = params.coarse_grid()
+    groups = {"field": {}, "derived": {}}
+    for k, is_vec in info["vector"].items():
+        group, name = k.split(".", 1)
+        groups[group][name] = FaceField(grid, np.load(d / f"{k}.npy", mmap_mode="r"), is_vector=is_vec, name=name)
+    res = (grid, groups["field"], groups["derived"], np.load(d / "flow_dir.npy", mmap_mode="r"), np.load(d / "flow_acc.npy", mmap_mode="r"))
+    _SHARED.clear()
+    _SHARED[key] = (info["stamp"], res)
+    return res
+
+
 def planet_inflow(fd: np.ndarray, fa: np.ndarray, face: int, a0: int, a1: int, b0: int, b1: int, R: int, surface: np.ndarray) -> np.ndarray:
     """Spawn weight (``surface.shape``: the fine window ``[a0, a1) x [b0,
     b1)`` coarse plus a one-cell ring) of the water the planet's drainage
@@ -244,7 +316,7 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
     nc = cc + 2 * mc
     ta1, tb1 = ta0 + nc, tb0 + nc
     lp = zoom_params(params, R)
-    grid, fields, derived = bj.coarse_inputs(root, lp)
+    grid, fields, derived, fd, fa = planet_inputs(root, lp, out)
     N = grid.N
     win = Window(face, ta0, ta1, tb0, tb1, R)
     up = upsample_window(fields, derived, win, grid)
@@ -278,7 +350,6 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
     stats = {"face": face, "window": [ta0, tb0, nc], "active_cells": int(active.sum())}
     if not active.any():
         return stats
-    fd, fa = planet_flow(root)
     src = planet_inflow(fd, fa, face, ta0, ta1, tb0, tb1, R, plain)
     job = {"a": ta0 + mc, "b": tb0 + mc, "c": cc, "sl": sl, "land": land, "active": active, "inwin": inwin, "ocean": ocean, "src": src, "f": R,
            "arrays": {"height": cur["height"], "sediment": cur["sediment"], "discharge": cur["discharge"], "momentum": cur["momentum"],
@@ -346,6 +417,7 @@ def run_planet(root: str | Path, level: PlanetLevel = PlanetLevel(), out: str | 
     bid = np.stack([np.load(root / "coarse" / f"basin_id.f{f}.npy") for f in range(6)])
     land_c = bid >= 0
     faces = list(range(6)) if faces is None else [int(f) for f in faces]
+    write_shared_inputs(root, zoom_params(params, R), out)
     t0 = time.time()
     for face in faces:
         passes = face_tiles(level, N, land_c, face)
@@ -355,7 +427,7 @@ def run_planet(root: str | Path, level: PlanetLevel = PlanetLevel(), out: str | 
                 open_work(out, face, k, NF, mode="w+").flush()
         widest = max((len(ps) for ps in passes), default=1)
         n_workers, threads = zb.pool_size(widest, workers)
-        with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp.get_context("spawn"), initializer=zb._pool_init, initargs=(threads,)) as ex:
+        with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp.get_context("spawn"), initializer=zb._pool_init, initargs=(threads, zb.pool_demand())) as ex:
             for p_i, ps in enumerate(passes):
                 key = f"{face}:{p_i}"
                 if prog["passes"].get(key):
@@ -476,7 +548,7 @@ def finish_face(root: Path, out: Path, level: PlanetLevel, face: int, strip: int
     t0 = time.time()
     params = WorldParams.from_dict(WorldStore(root).manifest["params"])
     lp = zoom_params(params, level.R)
-    grid, fields, derived = bj.coarse_inputs(root, lp)
+    grid, fields, derived = planet_inputs(root, lp, out)[:3]
     N, R = grid.N, level.R
     n = N * R
     g = level.guard * R
@@ -582,4 +654,4 @@ def quicklook(out: Path, R: int, size: int = 1024) -> Path:
     return path
 
 
-__all__ = ["PlanetLevel", "hashed_ridged", "planet_flow", "planet_inflow", "open_work", "planet_tile", "face_tiles", "run_planet", "blend_face_seams", "finish_face", "quicklook", "out_path"]
+__all__ = ["PlanetLevel", "hashed_ridged", "planet_flow", "planet_inputs", "write_shared_inputs", "planet_inflow", "open_work", "planet_tile", "face_tiles", "run_planet", "blend_face_seams", "finish_face", "quicklook", "out_path"]

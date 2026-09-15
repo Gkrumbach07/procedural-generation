@@ -454,20 +454,23 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
     hold = int(level.hold_every)
     sigma = max(1, int(round(job["f"] * level.hold_scale)))
     off_prev = np.zeros(active.shape)
-    for it in range(int(level.iterations)):
-        st = step(state, ep, it, particles_per_cell=ppc, rng_stage="refine")
-        particles += int(st.get("particles", 0))
-        for k, v in (st.get("deaths") or {}).items():
-            deaths[k] += int(v)
-        if hold > 0 and (it + 1) % hold == 0:
-            # hold the tile to its parent while it erodes, as an uplift rate:
-            # the offset now, and how fast it grew over the last `hold`
-            # iterations under the uplift already applied, set the rate that
-            # brings it to zero by the next hold if the erosion keeps its pace
-            # (docs/zoom-windows.md, "Pools from the drift correction")
-            off = np.where(active, smooth_drift((state.height[0] + state.sediment[0]) * unit - plain_t, active, sigma), 0.0)
-            state.uplift[0] -= np.where(active, (2.0 * off - off_prev) / (hold * unit), 0.0)
-            off_prev = off
+    demand = float(ppc) * float(active.sum())
+    with _Demand(demand):
+        for it in range(int(level.iterations)):
+            _share_threads(demand)
+            st = step(state, ep, it, particles_per_cell=ppc, rng_stage="refine")
+            particles += int(st.get("particles", 0))
+            for k, v in (st.get("deaths") or {}).items():
+                deaths[k] += int(v)
+            if hold > 0 and (it + 1) % hold == 0:
+                # hold the tile to its parent while it erodes, as an uplift rate:
+                # the offset now, and how fast it grew over the last `hold`
+                # iterations under the uplift already applied, set the rate that
+                # brings it to zero by the next hold if the erosion keeps its pace
+                # (docs/zoom-windows.md, "Pools from the drift correction")
+                off = np.where(active, smooth_drift((state.height[0] + state.sediment[0]) * unit - plain_t, active, sigma), 0.0)
+                state.uplift[0] -= np.where(active, (2.0 * off - off_prev) / (hold * unit), 0.0)
+                off_prev = off
     tot = max(sum(deaths.values()), 1)
     stats = {"core": [job["a"], job["b"], job["c"]], "active_cells": int(active.sum()), "inflow": inflow, "rain": rain_total,
              "particles_per_cell": ppc, "particles": particles, "seconds": round(time.time() - t0, 1),
@@ -504,10 +507,60 @@ def write_tile(level: ZoomLevel, cur: dict, done: np.ndarray, job: dict, out: di
     return int(blend.sum())
 
 
-def _pool_init(threads: int) -> None:
+#: the pool's shared demand (``pool_demand``), set in each worker by ``_pool_init``
+_DEMAND = None
+
+
+def pool_demand():
+    """Shared ``[particles per iteration of the tiles running now]`` for
+    :func:`_pool_init`: the tiles of a pass differ by 50x in work, and with
+    cores split evenly the biggest ran on 4 of 20 while the rest sat idle
+    once the small ones were done."""
+    import multiprocessing as mp
+
+    return mp.get_context("spawn").Array("d", 1)
+
+
+def _pool_init(threads: int, demand=None) -> None:
     import numba
 
+    global _DEMAND
+    _DEMAND = demand
     numba.set_num_threads(max(1, min(int(threads), numba.config.NUMBA_NUM_THREADS)))
+
+
+def _share_threads(mine: float) -> None:
+    """In a pool worker: take the share of the cores this tile's particles
+    are of the running tiles' (at least one thread).  The kernel's results do
+    not depend on the thread count, only its speed."""
+    if _DEMAND is None:
+        return
+    import os
+
+    import numba
+
+    total = max(float(_DEMAND[0]), mine, 1.0)
+    n = int(round((os.cpu_count() or 1) * mine / total))
+    numba.set_num_threads(max(1, min(n, numba.config.NUMBA_NUM_THREADS)))
+
+
+class _Demand:
+    """Add a tile's demand to the pool's while it runs."""
+
+    def __init__(self, amount: float):
+        self.amount = float(amount)
+
+    def __enter__(self):
+        if _DEMAND is not None:
+            with _DEMAND.get_lock():
+                _DEMAND[0] += self.amount
+        return self
+
+    def __exit__(self, *exc):
+        if _DEMAND is not None:
+            with _DEMAND.get_lock():
+                _DEMAND[0] = max(_DEMAND[0] - self.amount, 0.0)
+        return False
 
 
 def _erode_job(args):
@@ -518,13 +571,17 @@ def _erode_job(args):
 # a level
 # --------------------------------------------------------------------------
 def pool_size(jobs: int, workers: int = 0) -> tuple[int, int]:
-    """``(worker processes, numba threads each)`` for a pass of ``jobs``
-    tiles: ``workers`` (0 = one per 4 cores, the most one kernel process
-    uses well), never more than the jobs; the cores are split evenly."""
+    """``(worker processes, numba threads each to start with)`` for a pass
+    of ``jobs`` tiles: ``workers`` (0 = one per core), never more than the
+    jobs.  Once running, a worker's threads follow its tile's share of the
+    particles (:func:`_share_threads`).  A process per tile beats threads:
+    the change lists are applied serially (a 1152² land tile at R = 8: 17
+    CPU-s of tracing an iteration, 3.4 s of applying), so a core does ~1.5x
+    the work on its own tile as one of four on a shared one."""
     import os
 
     cpus = os.cpu_count() or 1
-    n = int(workers) if int(workers) > 0 else max(1, cpus // 4)
+    n = int(workers) if int(workers) > 0 else cpus
     n = max(1, min(n, int(jobs)))
     return n, max(1, cpus // n)
 
@@ -554,7 +611,7 @@ def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level
         import multiprocessing as mp
         from concurrent.futures import ProcessPoolExecutor
 
-        pool = ProcessPoolExecutor(max_workers=n_workers, mp_context=mp.get_context("spawn"), initializer=_pool_init, initargs=(threads,))
+        pool = ProcessPoolExecutor(max_workers=n_workers, mp_context=mp.get_context("spawn"), initializer=_pool_init, initargs=(threads, pool_demand()))
     try:
         for ps in passes:
             # the flood tree of the surface as it stands: the passes before

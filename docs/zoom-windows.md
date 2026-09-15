@@ -706,7 +706,8 @@ margin), and the particles still die in pits 6-9 % of the time at 76 m.
 A level's tiles run in passes whose windows do not overlap -- the four
 parities of the tile indices, since same-parity neighbours are a whole core
 apart (`bake.tile_passes`) -- and a pass runs across worker processes (one
-per four cores by default, `--workers`). Each tile seeds its own particles
+per four cores at first; one per tile now, see "Where a tile's time goes",
+`--workers`). Each tile seeds its own particles
 from its index, and the flood tree that sets its inflow is the one the
 earlier passes left, so a level is byte-identical however many workers ran
 it (`tests/test_zoom.py`, and the 76 m square below).
@@ -722,3 +723,39 @@ and 1), 150 iterations:
 Only 1.5x: half the tiles here are in passes of one or two, and a kernel
 process with 5 threads runs a tile in ~1.4x the time one with 20 does.
 Passes of many tiles (the planet level below) gain more.
+
+### Where a tile's time goes
+
+Profiled on two planet tiles at R = 8 (1152² windows, 10 iterations,
+`scratch/window/prof_tile.py`), seconds per iteration:
+
+| | land tile (1.33 M active cells) | coastal tile (26 k active) |
+|---|---|---|
+| tracing (`trace_particles`, parallel) | 17.0 CPU | 0.05 CPU |
+| applying (`apply_changes`, serial) | 3.4 | 0.007 |
+| drift hold (`smooth_drift`, every 10th) | 0.23 | 0.24 |
+| every other pass over the window (route, thermal, pack, EMA, caps) | 0.13 | 0.03 |
+
+The sea is not the cost: the passes over every cell of the window together
+take 0.1 s an iteration. A land tile is its particles -- a million an
+iteration, 194 change-list entries each -- and the change lists are applied
+serially in particle order, because every particle reaching a river writes
+the river's cells, so no two chunks of a pass commute. At 14.7 ns an entry
+the apply is compute, not memory: packing a cell's height, sediment,
+change, cap and tracks into one 64-byte record (`scratch/window/apply_packed.py`,
+bit-identical) gains only 1.15-1.19x.
+
+What was slow was the scheduling. The cores were split evenly, 5 workers x
+4 threads, and a pass of one land tile and four coastal ones took the land
+tile's 690 s on 4 threads while 16 cores idled after the first 40 s. Now:
+
+* a worker's numba threads follow its tile's share of the particles of the
+  tiles running at that moment (`bake._share_threads`, re-set every
+  iteration; the kernel's results do not depend on the thread count);
+* one worker per tile, up to one per core: with the apply serial, a core
+  does ~1.5x the work on its own tile as one of four threads on a shared
+  one (17 / n + 3.75 s an iteration on n threads);
+* the planet's coarse inputs (~1 GB at N = 1024, loaded by every worker)
+  are written once to `<out>/inputs/` and mapped by the workers
+  (`planet.write_shared_inputs`), so a worker is ~0.4 GB of its own and
+  16 of them fit.

@@ -36,7 +36,7 @@ def main(argv=None) -> int:
     ap.add_argument("--levels", nargs="*", default=None, help="R:cells:iterations[:tile[:margin]] per level, coarse to fine")
     ap.add_argument("--erosion", nargs="*", default=[], help="erosion overrides k=v on top of the zoom profile")
     ap.add_argument("--threads", type=int, default=0, help="numba threads of this process (default all)")
-    ap.add_argument("--workers", type=int, default=0, help="tile worker processes per pass (default one per 4 cores)")
+    ap.add_argument("--workers", type=int, default=0, help="tile worker processes per pass (default one per tile, up to one per core)")
     ap.add_argument("--no-resume", action="store_true", help="re-bake levels whose files exist")
     ap.add_argument("--shot", action="store_true", help="also screenshot view.html (Playwright)")
     a = ap.parse_args(argv)
