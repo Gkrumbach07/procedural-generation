@@ -75,6 +75,7 @@
     <span class="chk"><input type="checkbox" id="grid">grid</span>
     <span class="chk"><input type="checkbox" id="fade" checked>blend</span>
     <span class="chk"><input type="checkbox" id="coast">coast</span>
+    <span class="chk" id="scoutchk"><input type="checkbox" id="scout" checked>scout</span>
   </div>
   <div class="row"><label>Speed</label><input type="range" id="fps" min="1" max="30" step="1" value="10"><span id="fpsv" style="width:28px;text-align:right">10</span></div>
   <div class="row"><button class="plain" id="shot">Save PNG</button><button class="plain" id="copylink">Copy view link</button></div>
@@ -118,6 +119,7 @@ GV.pending = GV.pending || {};
 GV.setMeta = m => { GV.meta = m; };
 GV.frame = (i, texs) => { GV.pending[i] = texs; if (GV.onFrame) GV.onFrame(i); };
 GV.setZooms = z => { GV.zooms = z; if (GV.onZooms) GV.onZooms(z); };   // zooms.js (globe/zoom/index.py)
+GV.setScout = c => { GV.scout = c; if (GV.onScout) GV.onScout(c); };    // scout.js (globe/zoom/scout.py)
 GV.rivers = r => { GV.riverData = r; if (GV.onRivers) GV.onRivers(r); };  // data/rivers.js (viewer.river_lines)
 GV.tile = (key, b64) => { if (GV.onTile) GV.onTile(key, b64); };               // tiles/L*/f_ti_tj.js (globe/viz/detail.py)
 </script>
@@ -669,7 +671,7 @@ loadNext(); loadNext();   // two in flight
 const state = {
   frame: META.final_index ?? NF - 1, fpos: META.final_index ?? NF - 1,
   view: "globe", lat0: 0.35, lon0: 0.0, zoom: 1.0,
-  layer: "elevation", exag: META.default_exag ?? 12, rivers: true, grid: false, coast: false, fade: true,
+  layer: "elevation", exag: META.default_exag ?? 12, rivers: true, grid: false, coast: false, fade: true, scout: true,
   playing: false, fps: 10,
 };
 // zoom 1 shows the whole planet in either view
@@ -686,7 +688,7 @@ function readHash() {
   num("lat", v => state.lat0 = v * PI / 180); num("lon", v => state.lon0 = v * PI / 180);
   num("z", v => state.zoom = v); num("x", v => state.exag = v);
   if (h.has("layer")) state.layer = h.get("layer");
-  for (const k of ["rivers", "grid", "coast", "fade"]) if (h.has(k)) state[k] = h.get(k) === "1";
+  for (const k of ["rivers", "grid", "coast", "fade", "scout"]) if (h.has(k)) state[k] = h.get(k) === "1";
   if (h.get("ui") === "0") document.body.classList.add("noui");
 }
 let hashTimer = 0;
@@ -952,6 +954,11 @@ function draw() {
 const ovl = $("ovl"), ovx = ovl.getContext("2d"), pop = $("zoompop");
 let zooms = GV.zooms || [], zoomHits = [];
 GV.onZooms = z => { zooms = z || []; requestDraw(); };
+// Scout candidates (globe/zoom/scout.py): numbered markers, a square of the
+// scored window once it is a few pixels, a popup with the measures, the
+// thumbnail and the zoom-bake button
+let scoutCands = GV.scout || [], scoutHits = [];
+GV.onScout = c => { scoutCands = c || []; requestDraw(); };
 function dirToScreen(p) {   // unit direction -> canvas px, null on the far side
   const s = scalePx();
   if (state.view === "globe") {
@@ -987,6 +994,50 @@ function drawZooms() {
     });
     ovx.setLineDash([]);
   }
+  scoutHits = [];
+  if (state.scout) {
+    for (const c of scoutCands) {
+      const p = dirOf(c.lat * PI / 180, c.lon * PI / 180), q = dirToScreen(p);
+      if (!q) continue;
+      const half = 0.5 * c.window_km * 1000 / META.R_planet_m * scalePx();
+      if (half > 6 * dpr) {
+        ovx.strokeStyle = "rgba(120,230,210,.9)"; ovx.lineWidth = 1.5 * dpr;
+        ovx.strokeRect(q[0] - half, q[1] - half, 2 * half, 2 * half);
+      }
+      const r = 8 * dpr;
+      ovx.beginPath(); ovx.arc(q[0], q[1], r, 0, 2 * PI);
+      ovx.fillStyle = "rgba(20,110,100,.9)"; ovx.fill(); ovx.strokeStyle = "#9ff0e0"; ovx.lineWidth = 1.2 * dpr; ovx.stroke();
+      ovx.font = `bold ${9 * dpr}px system-ui`; ovx.fillStyle = "#e8fffa"; ovx.textAlign = "center"; ovx.textBaseline = "middle";
+      ovx.fillText(String(c.rank), q[0], q[1] + 0.5 * dpr);
+      ovx.textAlign = "start"; ovx.textBaseline = "alphabetic";
+      scoutHits.push({ c, x: q[0], y: q[1] });
+    }
+  }
+}
+function showScout(h, px, py) {
+  const c = h.c, m = c.measures, pct = x => (100 * x).toFixed(1) + " %";
+  const [f, i, j] = c.spot;
+  pop.dataset.kind = "scout";
+  const mine = jobs.filter(jb => jb.spot && jb.spot[0] === f && Math.abs(jb.spot[1] - i) <= 3 && Math.abs(jb.spot[2] - j) <= 3);
+  const job = mine[mine.length - 1];
+  let html = `<span class="x" onclick="this.parentNode.classList.add('hidden')">×</span>` +
+    `<div class="t">Scout #${c.rank} · score ${c.score.toFixed(2)}</div>` +
+    `<div class="d">${c.lat.toFixed(2)}°, ${c.lon.toFixed(2)}° · cell ${f} ${i} ${j} · ${c.window_km} km window</div>` +
+    `<img src="${c.thumbnail}" style="width:100%;border-radius:4px;margin:4px 0" alt="">` +
+    `<div class="d">relief ${Math.round(m.relief_m)} m · walkable ${pct(m.walkable)} · creeks ${pct(m.creek_share)} · lakes ${pct(m.lake_share)}<br>` +
+    `riffle ${pct(m.riffle_share)} · pocket water ${pct(m.pocket_share)} · ${m.temperature_c.toFixed(1)} °C · rain ×${m.wetness.toFixed(2)} · forest ${pct(m.forest_share)}</div>`;
+  if (job) html += `<div>zoom ${job.name}: <b>${job.state}</b>${job.message ? " — " + job.message : ""}</div>`;
+  if (apiOK && (!job || job.state === "failed")) html += `<div class="row"><button class="plain" id="bakezoom">Bake a zoom here</button><span class="d">~10–20 min</span></div>`;
+  else if (!apiOK) html += `<code>python scripts/zoom_bake.py --world worlds/${META.world} --cell ${f} ${i} ${j}</code>`;
+  pop.innerHTML = html;
+  const btn = $("bakezoom");
+  if (btn) btn.onclick = async () => {
+    btn.disabled = true;
+    try { const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ face: f, i, j }) });
+      if (!r.ok) throw new Error(await r.text()); } catch (e) { btn.textContent = "failed: " + e.message; return; }
+    pollJobs();
+  };
+  placePop(px, py);
 }
 function inPoly(x, y, pts) {
   let c = false;
@@ -1058,6 +1109,8 @@ canvas.addEventListener("click", ev => {
   const dpr = window.devicePixelRatio || 1, px = ev.offsetX * dpr, py = ev.offsetY * dpr;
   clearTimeout(clickTimer);
   clickTimer = setTimeout(() => {
+    const sc = scoutHits.find(hh => Math.hypot(px - hh.x, py - hh.y) < 11 * dpr);
+    if (sc) return showScout(sc, px, py);
     const h = zoomHits.find(hh => inPoly(px, py, hh.pts) || Math.hypot(px - hh.cx, py - hh.cy) < 10 * dpr);
     h ? showZoom(h, px, py) : showSpot(px, py);
   }, 260);
@@ -1084,7 +1137,7 @@ function updateLabels(a) {
   sel.value = state.layer;
   for (const o of sel.options) o.disabled = o.value !== "elevation" && !(f.layers && f.layers[o.value]);
   $("exag").value = state.exag; $("exagv").textContent = state.exag + "×";
-  $("rivers").checked = state.rivers; $("grid").checked = state.grid; $("coast").checked = state.coast; $("fade").checked = state.fade;
+  $("rivers").checked = state.rivers; $("grid").checked = state.grid; $("coast").checked = state.coast; $("fade").checked = state.fade; $("scout").checked = state.scout;
   $("fps").value = state.fps; $("fpsv").textContent = state.fps;
 }
 const lgc = $("legendc").getContext("2d");
@@ -1294,7 +1347,7 @@ $("reset").onclick = resetView;
 sel.onchange = () => { state.layer = sel.value; legendKey = ""; writeHash(); requestDraw(); };
 $("exag").oninput = e => { state.exag = +e.target.value; writeHash(); requestDraw(); };
 $("fps").oninput = e => { state.fps = +e.target.value; $("fpsv").textContent = state.fps; };
-for (const k of ["rivers", "grid", "coast", "fade"]) $(k).onchange = e => { state[k] = e.target.checked; writeHash(); requestDraw(); };
+for (const k of ["rivers", "grid", "coast", "fade", "scout"]) $(k).onchange = e => { state[k] = e.target.checked; writeHash(); requestDraw(); };
 $("play").onclick = togglePlay;
 $("prev").onclick = () => { state.playing = false; setFrame(state.frame - 1); };
 $("next").onclick = () => { state.playing = false; setFrame(state.frame + 1); };

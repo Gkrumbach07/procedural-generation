@@ -829,7 +829,9 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
     (out / "data" / "meta.js").write_text(meta_js)
     html = TEMPLATE.read_text()
     extra = '\n<script src="data/rivers.js"></script>' if rivers_js else ""
-    (out / "index.html").write_text(html.replace(PLACEHOLDER, '<script src="data/meta.js"></script>' + extra + '\n<script src="zooms.js"></script>'))
+    (out / "index.html").write_text(html.replace(PLACEHOLDER, '<script src="data/meta.js"></script>' + extra + '\n<script src="zooms.js"></script>\n<script src="scout.js"></script>'))
+    if not (out / "scout.js").exists():
+        (out / "scout.js").write_text("GLOBE_VIEWER.setScout([]);\n")
     from ..zoom import index as zoom_index
     zooms = zoom_index.scan(root)
     (out / "zooms.js").write_text(zoom_index.script(zooms))
