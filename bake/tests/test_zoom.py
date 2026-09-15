@@ -396,8 +396,11 @@ def test_planet_finish_in_bounded_memory_matches_the_whole_face_finish(world, pl
     lv, src = planet["level"], planet["out"]
     out = tmp_path / "fin"
     shutil.copytree(src, out)
+    ref_dir = tmp_path / "ref"
+    shutil.copytree(src, ref_dir)
     for f in (0, 3):
-        ref = {k: np.load(zp.out_path(src, lv.R, f, k)) for k in zp.OUT_FIELDS}
+        zp.finish_face(world["root"], ref_dir, lv, f)                    # the in-memory finish
+        ref = {k: np.load(zp.out_path(ref_dir, lv.R, f, k)) for k in zp.OUT_FIELDS}
         st = pf.finish_face(world["root"], out, lv, f)
         for k in zp.OUT_FIELDS:
             assert np.array_equal(np.load(zp.out_path(out, lv.R, f, k)), ref[k]), (f, k)

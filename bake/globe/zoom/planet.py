@@ -501,8 +501,11 @@ def run_planet(root: str | Path, level: PlanetLevel = PlanetLevel(), out: str | 
                     log(f"face {face} pass {p_i + 1}/{len(passes)}: {len(ps)} tiles ({len(ps) - len(todo)} already written), {cells / 1e6:.1f} M cells, {time.time() - tp:.0f}s "
                         f"({n_workers} workers x {threads} threads; {time.time() - t0:.0f}s so far)")
     if finish and len(faces) == 6:
-        # three faces at a time: a face's flood holds ~2 GB at R = 8
-        n_workers, threads = zb.pool_size(6, 3)
+        # three faces at a time while a face floods whole (~2 GB at R = 8), one
+        # past it (planet_finish: blocks of 8192^2 and strips of the face)
+        from . import planet_finish as pf
+
+        n_workers, threads = zb.pool_size(6, 3 if N * R <= pf.FLOOD_WHOLE else 1)
         with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp.get_context("spawn"), initializer=zb._pool_init, initargs=(threads,)) as ex:
             fin = list(ex.map(_finish_job, [(root, out, level, f) for f in range(6)]))
         ql = quicklook(out, R)
@@ -516,7 +519,9 @@ def run_planet(root: str | Path, level: PlanetLevel = PlanetLevel(), out: str | 
 
 
 def _finish_job(args):
-    return finish_face(*args)
+    from . import planet_finish as pf
+
+    return pf.finish_face(*args)
 
 
 # --------------------------------------------------------------------------
@@ -535,7 +540,8 @@ def _bilinear(a: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
     y = np.clip(y, 0.0, n1 - 1.001)
     i, j = np.floor(x).astype(np.int64), np.floor(y).astype(np.int64)
     fx, fy = x - i, y - j
-    return (a[i, j] * (1 - fx) * (1 - fy) + a[i + 1, j] * fx * (1 - fy) + a[i, j + 1] * (1 - fx) * fy + a[i + 1, j + 1] * fx * fy)
+    at = lambda ii, jj: np.asarray(a[ii, jj])            # a memmap: only these cells are read
+    return (at(i, j) * (1 - fx) * (1 - fy) + at(i + 1, j) * fx * (1 - fy) + at(i, j + 1) * (1 - fx) * fy + at(i + 1, j + 1) * fx * fy)
 
 
 def _neighbour_across(face: int, side: int, N: int) -> int:
@@ -582,13 +588,13 @@ def blend_face_seams(out: Path, level: PlanetLevel, N: int, face: int, arrays: d
         y = v * n - 0.5 + g
         inside = (x >= 0) & (x <= NF - 2) & (y >= 0) & (y <= NF - 2)
         wn = {k: open_work(out, nb, k, NF, mode="r") for k in ("height", "sediment", "discharge", "done")}
-        done_n = np.asarray(wn["done"])[np.clip(np.rint(x).astype(np.int64), 0, NF - 1), np.clip(np.rint(y).astype(np.int64), 0, NF - 1)] & inside
+        done_n = np.asarray(wn["done"][np.clip(np.rint(x).astype(np.int64), 0, NF - 1), np.clip(np.rint(y).astype(np.int64), 0, NF - 1)]) & inside
         t = np.clip((dist + F) / (2.0 * F), 0.0, 1.0)
         w = np.where(done_n, t * t * (3.0 - 2.0 * t), 1.0)
         for k in ("height", "sediment"):
-            other = _bilinear(np.asarray(wn[k]), x, y)
+            other = _bilinear(wn[k], x, y)
             arrays[k][I, J] = np.where(done_n, w * arrays[k][I, J] + (1.0 - w) * other, arrays[k][I, J]).astype(np.float32)
-        q_other = _bilinear(np.asarray(wn["discharge"]), x, y)
+        q_other = _bilinear(wn["discharge"], x, y)
         arrays["discharge"][I, J] = np.where(done_n & (w < 0.5), q_other, arrays["discharge"][I, J]).astype(np.float32)
         blended += int(done_n.sum())
         del wn
@@ -677,6 +683,8 @@ def quicklook(out: Path, R: int, size: int = 1024) -> Path:
     ``size`` cells per face."""
     from PIL import Image
 
+    from .planet_finish import quicklook_rows
+
     tiles = {}
     for f in range(6):
         h = np.load(out_path(out, R, f, "height"), mmap_mode="r")
@@ -685,8 +693,7 @@ def quicklook(out: Path, R: int, size: int = 1024) -> Path:
         m = (n // k) * k
 
         def red(name, how="mean"):
-            a = np.asarray(np.load(out_path(out, R, f, name), mmap_mode="r")[:m, :m], np.float32).reshape(m // k, k, m // k, k)
-            return a.max(axis=(1, 3)) if how == "max" else a.mean(axis=(1, 3))
+            return quicklook_rows(out, R, f, name, k, m, how)
 
         surf = red("height") + red("sediment")
         q = red("discharge", "max")
