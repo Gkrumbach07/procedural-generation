@@ -1258,3 +1258,74 @@ def test_offshore_writeoff_is_range_checked():
         with pytest.raises(ValueError):
             WorldParams.tiny_world().with_overrides(erosion={"offshore_writeoff": bad}).validate()
     WorldParams.tiny_world().with_overrides(erosion={"offshore_writeoff": 1.0}).validate()
+
+
+def test_slope_erode_cap_is_soillibs_downhill_limit():
+    """``particle.slope_erode_cap``: soillib's pit-free limit, ``coef x
+    sqrt(2) x`` the Godunov downhill slope.  The bottom of a pit gets 0 (it
+    can never be deepened), a cell loses at most that share of its drop to
+    its lowest axis neighbour, uphill neighbours do not count, and off the
+    array the exit slope stands in."""
+    h = np.full((1, 7, 7), 5.0)
+    s = np.zeros_like(h)
+    h[0, 2, 2] = 1.0                    # a one-cell pit
+    h[0, 4, 5] = 3.0                    # (4, 4) drains to it, 2 below
+    h[0, 4, 3] = 9.0                    # uphill of (4, 4): ignored
+    mask = np.ones((1, 7, 7), np.uint8)
+    out = np.empty_like(h)
+    pk.slope_erode_cap(h, s, mask, 0.25, 0.02, out)
+    k = 0.25 * np.sqrt(2.0)
+    assert out[0, 2, 2] == 0.0
+    assert out[0, 4, 4] == pytest.approx(k * 2.0)
+    assert out[0, 0, 3] == pytest.approx(k * 0.02)     # the array edge: the exit slope
+    mask[0, 3, 3] = 0
+    pk.slope_erode_cap(h, s, mask, 0.25, 0.02, out)
+    assert out[0, 3, 3] == 0.0
+
+
+def test_slope_limit_erode_bounds_an_iterations_erosion():
+    """With ``erosion.slope_limit_erode`` no cell loses more in one iteration
+    than the cap computed on the surface it started from; without it the
+    same particles take more somewhere (the limit binds)."""
+    base = WorldParams.small_world(0).with_overrides(erosion={"erodibility": 1.0, "k_disc": 10.0, "disc_exponent": 0.0,
+                                                              "max_erode": 1e9, "iter_erode": 1e9})
+    losses = {}
+    for name, coef in (("off", 0.0), ("on", 0.02)):
+        p = base.with_overrides(erosion={"slope_limit_erode": coef})
+        st = make_window(48, "tilt", p, seed=11, relief=12.0)
+        s0 = (st.height + st.sediment).copy()
+        cap = np.empty_like(st.height)
+        pk.slope_erode_cap(st.height, st.sediment, st.mask, 0.02, float(p.erosion.slope_limit_exit), cap)
+        run_iteration(st, p, 0)
+        loss = s0 - (st.height + st.sediment)
+        act = st.mask == pk.MASK_ACTIVE
+        losses[name] = (loss[act], cap[act])
+    loss_on, cap = losses["on"]
+    assert np.all(loss_on <= cap + 1e-9), float((loss_on - cap).max())
+    loss_off, _ = losses["off"]
+    assert (loss_off > cap + 1e-6).sum() > 10
+
+
+def test_discharge_scales_in_cells_of_upstream_rain():
+    """``disc_saturation_cells`` / ``momentum_saturation_cells`` put the
+    entrainment saturation and the momentum push's half strength at a number
+    of cells of upstream rain, whatever the rain volume per cell (a zoom
+    window's precip is the planet's over R^2); inflow spawn weight
+    (``ErosionState.inflow_volume``) is not rain and does not count."""
+    for scale in (1.0, 1e-4):
+        p = WorldParams.small_world(0).with_overrides(erosion={"disc_saturation_cells": 1280.0, "momentum_saturation_cells": 512.0})
+        st = make_window(32, "tilt", p, seed=2)
+        st.precip *= np.float32(scale)
+        idx, w = emaps.spawn_weights(st)            # the cells rain falls on (land, active, precip > 0)
+        stats = run_iteration(st, p, 0)
+        n_cells = idx.size
+        rain = float(w.sum()) / n_cells
+        assert stats["disc_saturation"] == pytest.approx(1280.0 * rain, rel=1e-3)
+        assert stats["mom_scale"] == pytest.approx(stats["volume"] / (512.0 * rain), rel=1e-3)
+    st = make_window(32, "tilt", p, seed=2)
+    idx, w = emaps.spawn_weights(st)
+    extra = float(w.sum())
+    st.precip.reshape(-1)[idx] *= np.float32(2.0)            # as much again enters as inflow
+    st.inflow_volume = extra
+    stats2 = run_iteration(st, p, 0)
+    assert stats2["disc_saturation"] == pytest.approx(1280.0 * extra / n_cells, rel=1e-3)

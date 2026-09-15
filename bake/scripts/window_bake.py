@@ -304,6 +304,10 @@ def main():
                 up_["height0"] = to_child(par["height"], H_, NE_).astype(up_["height0"].dtype)
                 up_["sediment0"] = np.maximum(to_child(par["sediment"], H_, NE_, order=1), 0.0).astype(up_["sediment0"].dtype)
                 up_["discharge"] = np.maximum(to_child(par["discharge"], H_, NE_, order=1), 0.0).astype(up_["discharge"].dtype)
+                # the saved window has no momentum: start without, rather than the
+                # planet's over the parent's discharge (the push divides one by the
+                # other, and that mismatch drew straight parallel tracks)
+                up_["momentum"] = np.zeros_like(up_["momentum"])
                 up_["slope"] = to_child(pslope, H_, NE_, order=1).astype(np.float32)
                 up_["relief"] = to_child(prel, H_, NE_, order=1).astype(np.float32)
                 return up_

@@ -92,6 +92,7 @@ class ErosionState:
     iteration: int = 0
     land_target: float | None = None  # the land fraction `hold_datum` holds (`datum_land_fraction`, set by erosion.run.build_state); None = world.land_fraction
     deposit_on_exit: bool = False  # window mode: deposit the load at the last active cell when leaving
+    inflow_volume: float = 0.0  # window mode: the part of the spawn weight (`precip`) that is not rain on the window but water flowing in across its edge (zoom tiles, globe/zoom/bake.py); excluded from the rain per cell the cell-count discharge scales use
 
     def __post_init__(self):
         F, NE = self.height.shape[0], self.height.shape[1]
@@ -585,6 +586,32 @@ def run_iteration(
         state.pending.reshape(-1)[pend_cells] = 0.0
     state.pack()
     state.acc[...] = 0.0
+    # discharge scales in cells of upstream area (McDonald's are in cells:
+    # his discharge is the volume of the 512 particles a cycle sends over a
+    # 512^2 map, so erf(0.4 q) saturates at ~1280 cells and the momentum push
+    # is at half strength at ~512).  Ours is in rain volume, one cell's worth
+    # of rain per iteration = the rain spawn weight over the cells it falls on
+    disc_sat = float(ep.disc_saturation)
+    mom_scale = 1.0
+    if float(ep.disc_saturation_cells) > 0.0 or float(ep.momentum_saturation_cells) > 0.0:
+        total = float(volume0) * float(n_particles)
+        n_rain = max(int(spawn_weights(state)[0].size), 1)
+        rain_per_cell = max(total - float(state.inflow_volume), 0.0) / n_rain
+        rain_per_cell = rain_per_cell if rain_per_cell > 0.0 else total / n_rain
+        if float(ep.disc_saturation_cells) > 0.0:
+            disc_sat = float(ep.disc_saturation_cells) * rain_per_cell
+        if float(ep.momentum_saturation_cells) > 0.0:
+            mom_scale = float(volume0) / (float(ep.momentum_saturation_cells) * rain_per_cell)
+    use_ecap = float(ep.slope_limit_erode) > 0.0
+    if use_ecap:
+        ecap = np.empty_like(state.height)
+        pk.slope_erode_cap(state.height, state.sediment, state.mask, float(ep.slope_limit_erode), float(ep.slope_limit_exit), ecap)
+    else:
+        ecap = np.zeros(1, dtype=np.float64)
+    iter_deposit = cell_units(ep, "iter_deposit", state.height_unit_m)
+    if float(ep.slope_limit_deposit) > 0.0:
+        # soillib: deposition <= 0.25 L critSlopeSediment per step
+        iter_deposit = min(iter_deposit, float(ep.slope_limit_deposit) * math.sqrt(2.0) * 0.3)
     max_steps = max_steps_of(ep, state.N)
     cap = max_steps + 2 * pk.SPREAD
     P = sp_face.shape[0]
@@ -630,8 +657,9 @@ def run_iteration(
                 float(ep.deposition_rate),
                 float(ep.evap_rate),
                 float(ep.k_mom),
+                mom_scale,
                 float(ep.k_disc),
-                float(ep.disc_saturation),
+                disc_sat,
                 float(ep.disc_exponent),
                 float(ep.slope_gain),
                 float(ep.slope_saturation),
@@ -664,10 +692,11 @@ def run_iteration(
             cl_cell, cl_delta, cl_vol, cl_mom, cl_count[:m], cap,
             state.height, state.sediment, state.acc, state.pending, state.samp, state.disch_track, state.mom_track, state.mask,
             cell_units(ep, "iter_erode", state.height_unit_m),
-            cell_units(ep, "iter_deposit", state.height_unit_m),
+            iter_deposit,
             float(ep.fan_slope), state.route is not None,
             cell_units(ep, "dep_floor_m", state.height_unit_m),
             float(ep.offshore_writeoff),
+            ecap, use_ecap,
         )
         n_clamp += int(nc)
         to_pending += tp
@@ -690,6 +719,8 @@ def run_iteration(
     stats["seconds_trace"] = t_trace
     stats["seconds_apply"] = t_apply
     stats["chunk"] = int(chunk)
+    stats["disc_saturation"] = disc_sat
+    stats["mom_scale"] = mom_scale
     if log is not None:
         log(f"  particles {P} volume {volume0:.3f} mean steps {stats['steps_mean']:.1f} deaths {stats['deaths']} clamped {n_clamp} pending {stats['pending_total']:.1f} ({stats['seconds']:.2f}s)")
     return stats

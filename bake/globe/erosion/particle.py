@@ -57,7 +57,7 @@ MASK_FROZEN = 2
 
 #: bumped whenever a kernel change alters results: part of the checkpoint
 #: hash, so stale checkpoints are never resumed after a code change
-KERNEL_VERSION = 10  # 10: the evaporation floor is a fraction of the spawn volume (erosion.min_volume_frac). 9: the datum hold keeps the bedrock's land fraction in shelf mode (maps.datum_land_fraction)
+KERNEL_VERSION = 11  # 11: discharge scales in cells (erosion.disc_saturation_cells / momentum_saturation_cells) and soillib's slope limits (erosion.slope_limit_erode / slope_limit_deposit); all off by default, where the pass is unchanged. 10: the evaporation floor is a fraction of the spawn volume (erosion.min_volume_frac). 9: the datum hold keeps the bedrock's land fraction in shelf mode (maps.datum_land_fraction)
 
 #: a dying particle deposits its remaining load at the cell it died in; the
 #: excess over that cell's caps moves back up its last SPREAD active cells
@@ -274,6 +274,7 @@ def trace_particles(
     deposition_rate,
     evap_rate,
     k_mom,
+    mom_scale,
     k_disc,
     disc_saturation,
     disc_exponent,
@@ -343,7 +344,12 @@ def trace_particles(
     downhill direction times ``slope_gain * s / sqrt(s² + slope_sat²)``
     (terminal-velocity flow: on gentle slopes the direction still counts
     fully, so gravity is not swamped by the momentum push, whose magnitude
-    is O(1) in a stream).  The drop into an ocean cell counts only down to
+    is O(1) in a stream).  The stream momentum push is ``k_mom * cos *
+    c m / (vol + c q)``: ``c = mom_scale`` sets the discharge at which a
+    stream's momentum reaches half strength (``c q = vol``); 1 = at one
+    spawn volume, i.e. on every rill (McDonald's volume-per-cycle units put
+    it at ~512 cells of upstream area, maps.run_iteration
+    ``momentum_saturation_cells``).  The drop into an ocean cell counts only down to
     sea level (``dh = h0 - max(h1, 0)``): flow decelerates at the coast, so
     coastal cells are not planed down by the depth of the shelf.
     """
@@ -459,7 +465,7 @@ def trace_particles(
                 # stream momentum: m / (vol + q) is the volume-weighted mean
                 # (unit) velocity of the stream, so the push is bounded by k_mom
                 cosang = _sdot(samp, f, ei, ej, ma, mb, sa, sb) / (mlen * slen)
-                k = k_mom * cosang / (vol + q)
+                k = k_mom * cosang * mom_scale / (vol + mom_scale * q)
                 sa += k * ma
                 sb += k * mb
             acc = dt / (vol_rel * density)
@@ -711,6 +717,7 @@ def apply_changes(
     cl_cell, cl_delta, cl_vol, cl_mom, cl_count, cap,
     height, sediment, acc, pending, samp, disch_track, mom_track, mask,
     iter_erode, iter_deposit, fan_slope, use_route, dep_floor, offshore_writeoff,
+    erode_cap, use_erode_cap,
 ):
     """Apply a change list serially in particle order against the live
     terrain.  This is the single place where physical limits are enforced
@@ -724,7 +731,9 @@ def apply_changes(
     * erosion request ``e``: applied amount ``e' = min(e, budget, s_c -
       floor)`` with the budget ``iter_erode + acc[c]`` (net per iteration),
       ``floor = max(0 if the cell is land, live surface of the cell the
-      particle stepped to next)`` — a land cell is never eroded below sea
+      particle stepped to next)`` (with ``use_erode_cap`` the budget is also
+      at most ``erode_cap[c] + acc[c]``: soillib's slope limit,
+      :func:`slope_erode_cap`) — a land cell is never eroded below sea
       level nor below the cell downstream (so no pit can be dug, and the
       chain of floors ends at the ocean, which is never eroded).  The
       shortfall ``e - e'`` is carried as a *deficit* that cancels the
@@ -777,6 +786,7 @@ def apply_changes(
     dflat = disch_track.reshape(total)
     mflat = mom_track.reshape(total, 2)
     kflat = mask.reshape(total)
+    ecflat = erode_cap.reshape(erode_cap.size)
     n_clamp = 0
     to_pending = 0.0
     lost = 0.0
@@ -801,6 +811,10 @@ def apply_changes(
                 e = -d
                 e_act = e
                 room = iter_erode + aflat[c]
+                if use_erode_cap:
+                    r2 = ecflat[c] + aflat[c]
+                    if r2 < room:
+                        room = r2
                 if e_act > room:
                     e_act = room
                 floor = b_c if s_c >= b_c else s_c  # submerged cells are never eroded
@@ -894,6 +908,40 @@ def apply_changes(
             # else: the particle left the window with that load
         lost += deficit
     return n_clamp, to_pending, lost, lost_offshore
+
+
+@njit(cache=True, parallel=True)
+def slope_erode_cap(height, sediment, mask, coef, exit_slope, out):
+    """soillib's pit-free erosion limit (erosiv/soillib, model/path/erosion.cu
+    ``transfer = max(transfer, -0.25 L slope)``): the most a cell may lose in
+    one iteration, ``coef * sqrt(2) * slope`` in cell units, where ``slope``
+    is the Godunov downhill gradient (per axis the steeper of the two
+    one-sided *downhill* differences, 0 where both neighbours are higher --
+    soillib's ``__glocal``; ``sqrt(2)`` is its cell diagonal L).  A cell at
+    the bottom of a pit has slope 0 and cannot be deepened; any cell loses at
+    most ``coef * sqrt(2)`` of its drop to its lowest axis neighbour.  A
+    neighbour off the array counts as ``exit_slope`` downhill.  Writes
+    ``out`` (F, NE, NE); cells outside the active mask get 0."""
+    F, NE, _ = height.shape
+    k = coef * math.sqrt(2.0)
+    for f in range(F):
+        for i in prange(NE):
+            for j in range(NE):
+                if mask[f, i, j] != MASK_ACTIVE:
+                    out[f, i, j] = 0.0
+                    continue
+                h = height[f, i, j] + sediment[f, i, j]
+                gxn = exit_slope if i == 0 else h - (height[f, i - 1, j] + sediment[f, i - 1, j])
+                gxp = exit_slope if i == NE - 1 else h - (height[f, i + 1, j] + sediment[f, i + 1, j])
+                gyn = exit_slope if j == 0 else h - (height[f, i, j - 1] + sediment[f, i, j - 1])
+                gyp = exit_slope if j == NE - 1 else h - (height[f, i, j + 1] + sediment[f, i, j + 1])
+                gx = gxn if gxn > gxp else gxp
+                gy = gyn if gyn > gyp else gyp
+                if gx < 0.0:
+                    gx = 0.0
+                if gy < 0.0:
+                    gy = 0.0
+                out[f, i, j] = k * math.sqrt(gx * gx + gy * gy)
 
 
 @njit(cache=True, parallel=True)
@@ -1087,6 +1135,7 @@ __all__ = [
     "DEATH_NAMES",
     "trace_particles",
     "apply_changes",
+    "slope_erode_cap",
     "fold_changes",
     "KERNEL_VERSION",
     "pack_samples",

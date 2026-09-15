@@ -51,6 +51,24 @@ ZOOM_EROSION = {
     # 2023 model as ill-posed; measured here they help
     "window_lakes": True,
     "flood_every": 5,
+    # discharge scales in cells, as McDonald's are (his discharge is the
+    # volume of 512 particles per cycle over a 512^2 map): erf(0.4 q) is
+    # ~1280 cells of upstream rain, the momentum push half strength at ~512.
+    # A fixed disc_saturation 32 is 3,300 km^2 of rain on the earth preset:
+    # no stream in a zoom window reached the boost, water ran off as sheets.
+    # 305 m mountain catchment, 150 iterations: 3 km relief p90 652 -> 1071 m,
+    # a branching incised network; with the momentum scale lakes 2540 -> 1889
+    "disc_saturation_cells": 1280.0,
+    "momentum_saturation_cells": 512.0,
+    # gravity against inertia as his: speed renormalised to sqrt(2) a step,
+    # gravity 1 (ours: unit step, dt 1.2): slope_gain 1 / (1.2 sqrt 2)
+    "slope_gain": 0.589,
+    # soillib's pit-free limits (erosion <= 0.25 L downhill slope, deposition
+    # <= 0.25 L 0.3 per iteration): lakes 1915 -> 512 at 150 iterations and
+    # 630 at 400 with the relief back (p90 751 m); the erosion limit is what
+    # does it (deposition limit alone 1574)
+    "slope_limit_erode": 0.25,
+    "slope_limit_deposit": 0.25,
 }
 
 #: refine overrides for a zoom window: detail noise at 3x the stage's
