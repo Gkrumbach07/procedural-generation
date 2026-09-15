@@ -716,10 +716,38 @@ def river_lines_script(lines: dict, specs: dict) -> tuple[str, dict]:
 # --------------------------------------------------------------------------
 # export
 # --------------------------------------------------------------------------
+def detail_source(root: Path, manifest: dict, refined: bool, planet: str | None):
+    """The final frame's full-resolution source for detail tiles
+    (:mod:`globe.viz.detail`), or None."""
+    from . import detail as dt
+
+    h = _load_faces(root, "height")
+    if h is None:
+        return None
+    sed = _load_faces(root, "sediment")
+    surf_c = h + (sed if sed is not None else 0.0)
+    flow_dir_c = _load_faces(root, "flow_dir")
+    if planet:
+        pdir = Path(root) / planet if not Path(planet).is_absolute() else Path(planet)
+        if not (pdir / "planet.json").exists():
+            return None
+        R = int(json.loads((pdir / "planet.json").read_text())["level"]["R"])
+        params = manifest.get("params", {}) or {}
+        depth = float((params.get("hydro", {}) or {}).get("lake_min_depth", 0.5))
+        min_cells = max(1, int(round(float((params.get("derive", {}) or {}).get("lake_min_cells", 1.0)) * R * R)))
+        ocean_c = (np.asarray(flow_dir_c) == 255) if flow_dir_c is not None else (surf_c < 0.0)
+        sea_near = _dilate_max(ocean_c.astype(np.float32), 0.0) > 0.0
+        return dt.PlanetSource(pdir, R, surf_c.shape[1], sea_near, depth, min_cells)
+    if refined:
+        fine = _fine_final(root, manifest, surf_c, flow_dir_c)
+        return None if fine is None else dt.RefinedSource(fine["surf"], fine["ws"], fine["water"])
+    return None
+
+
 def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | None = None,
                   frame_res: int | None = None, max_frames: int | None = None,
                   single: bool = False, refined: bool | None = None, planet: str | None = None,
-                  river_source: str = "auto", log=print) -> Path:
+                  river_source: str = "auto", detail: bool = False, log=print) -> Path:
     """``frame_res`` / ``max_frames`` downsample and thin the captured
     timeline -- a light export for a slow link or a phone.  ``river_source``
     (:func:`river_lines`): ``"auto"`` draws derive's graph rivers, except on a
@@ -771,6 +799,17 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
         sizes += len(rivers_js)
         log(f"[viewer] river lines ({river_source}): {rivers_info['lines']:,} lines, {rivers_info['vertices']:,} vertices, {len(rivers_js) / 1e6:.1f} MB")
 
+    detail_info = None
+    if detail:
+        from . import detail as dt
+
+        src = detail_source(root, manifest, refined, planet)
+        if src is not None:
+            td = time.time()
+            detail_info = dt.export_tiles(out, src, final.res, LAKE_DEPTH_RANGE_M, log)
+            if detail_info:
+                log(f"[viewer] detail tiles: {', '.join(f'L{lv['L']} {lv['res']}² {lv['tiles']:,}' for lv in detail_info['levels'])} in {time.time() - td:.0f}s")
+
     meta = {
         "world": root.resolve().name,
         "N_c": manifest.get("N_c"), "cell_size_m": manifest.get("cell_size_m"), "seed": manifest.get("seed"),
@@ -784,6 +823,7 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
         "final_index": len(frames) - 1,
         "frames": metas,
         "river_lines": rivers_info,
+        "detail": detail_info,
     }
     meta_js = "GLOBE_VIEWER.setMeta(%s);\n" % json.dumps(meta, separators=(",", ":"))
     (out / "data" / "meta.js").write_text(meta_js)

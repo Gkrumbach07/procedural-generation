@@ -308,3 +308,53 @@ def test_river_lines_payload_round_trips():
     assert np.array_equal(back["xyz"].reshape(-1, 3), lines["xyz"]) and np.array_equal(back["width"], lines["width"])
     assert np.array_equal(back["byte"], lines["byte"]) and np.array_equal(back["lengths"], lines["lengths"])
     assert info["lines"] == 2 and info["vertices"] == 3 and info["min_byte"] == int(vw.log_byte(np.array([10.0]), 1.0, 1000.0)[0])
+
+
+# --------------------------------------------------------------------------
+# detail tiles (globe/viz/detail.py)
+# --------------------------------------------------------------------------
+def test_detail_tiles_round_trip_heights_shores_and_the_sea(tmp_path):
+    """A tile decodes back to its cells: 16-bit height on a grid with sea level
+    on a code (a cell's sign survives), the signed lake depth byte, and the
+    ocean mask in alpha with land opaque; tiles of nothing but sea are not
+    written, and the bitset says which are."""
+    import base64
+    import io
+
+    from PIL import Image
+
+    from globe.viz import detail as dt
+
+    res = 2 * dt.TILE
+    rng = np.random.default_rng(3)
+    surf = rng.normal(200.0, 400.0, (6, res, res)).astype(np.float32)
+    surf[:, :, :8] = 0.04                                  # a plain a few cm above the sea
+    surf[:, :, 8:12] = -0.04                               # and a few cm below it
+    water = np.zeros((6, res, res), np.uint8)
+    water[:, dt.TILE - 2:, :] = dt.WATER_OCEAN             # every face's second tile row is sea, its pad row too
+    surf[water == dt.WATER_OCEAN] = -3000.0
+    water[:, 40:50, 100:120] = dt.WATER_LAKE
+    ws = np.where(water == dt.WATER_LAKE, surf + 15.0, surf).astype(np.float32)
+    src = dt.RefinedSource(surf, ws, water)
+    assert dt.levels_for(dt.TILE, res) == [(1, res)] and dt.levels_for(res, res) == []
+    info = dt.export_tiles(tmp_path, src, dt.TILE, 200.0, log=lambda m: None)
+    lv = info["levels"][0]
+    bits = np.unpackbits(np.frombuffer(base64.b64decode(lv["exists"]), np.uint8), bitorder="little")[: 6 * 4].reshape(6, 2, 2)
+    assert bits[:, 0, :].all() and not bits[:, 1, :].any() and lv["tiles"] == 12
+    js = (tmp_path / "tiles" / "L1" / "2_0_0.js").read_text()
+    img = np.array(Image.open(io.BytesIO(base64.b64decode(js.split('"')[3]))).convert("RGBA"))
+    assert img.shape == (dt.TILE + 2, dt.TILE + 2, 4)
+    cell = img.transpose(1, 0, 2)[1:-1, 1:-1]               # (i, j) of the face's tile cells
+    q = cell[..., 0].astype(np.int64) * 256 + cell[..., 1]
+    h = info["h0"] + q / 65535.0 * (info["h1"] - info["h0"])
+    s = surf[2, :dt.TILE, :dt.TILE]
+    assert np.abs(h - s).max() <= (info["h1"] - info["h0"]) / 65535.0
+    assert np.all((h >= 0.0) == (s >= 0.0))
+    land = water[2, :dt.TILE, :dt.TILE] == dt.WATER_LAND
+    assert (cell[..., 3][land & (np.arange(dt.TILE)[:, None] < dt.TILE - 8)] == 255).all()        # land away from the coast is opaque
+    assert (cell[..., 3][dt.TILE - 1, :] < 128).all()                                                # the sea is not
+    ld = (cell[..., 2] / 127.5 - 1.0) * 200.0
+    assert (ld[40:50, 100:120] > 14.0).all() and (ld[:30, :60] < -100.0).all()
+    # the pad is the neighbouring cells, clamped at the face edge
+    full = img.transpose(1, 0, 2)
+    assert np.array_equal(full[0, 1:-1], full[1, 1:-1]) and np.array_equal(full[-1, 1:-1, :2], np.stack([(dt.encode_height_on(surf[2, dt.TILE, :dt.TILE], info["h0"], info["h1"]) >> 8), dt.encode_height_on(surf[2, dt.TILE, :dt.TILE], info["h0"], info["h1"]) & 255], -1).astype(np.uint8))

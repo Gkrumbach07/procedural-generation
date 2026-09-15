@@ -119,6 +119,7 @@ GV.setMeta = m => { GV.meta = m; };
 GV.frame = (i, texs) => { GV.pending[i] = texs; if (GV.onFrame) GV.onFrame(i); };
 GV.setZooms = z => { GV.zooms = z; if (GV.onZooms) GV.onZooms(z); };   // zooms.js (globe/zoom/index.py)
 GV.rivers = r => { GV.riverData = r; if (GV.onRivers) GV.onRivers(r); };  // data/rivers.js (viewer.river_lines)
+GV.tile = (key, b64) => { if (GV.onTile) GV.onTile(key, b64); };               // tiles/L*/f_ti_tj.js (globe/viz/detail.py)
 </script>
 <!--GLOBE_VIEWER_DATA-->
 <script>
@@ -205,7 +206,12 @@ uniform float uRiverZoom;      // bytes the fade-in moves up per doubling of cel
 uniform int uGrid, uCoast;
 uniform int uLines;            // 1 when the river-line pass drew into uRL this frame
 uniform sampler2D uRL;         // river lines, canvas-sized: R coverage x fade, G width (for the colour)
-uniform float uTexelRad;       // one texel of frame a, radians
+uniform float uTexelRad;       // one texel of the finest terrain drawn, radians
+uniform int uDetail;           // 1: detail tiles of level uDRes are drawn where loaded (globe/viz/detail.py)
+uniform sampler2D uDT;         // tile cache: slots of uDSlot px, R,G height, B signed lake depth, A 255 - ocean mask
+uniform sampler2D uDP;         // page table of the level: texel (f%3 nT + ti, f/3 nT + tj) = slot (R, G), A loaded
+uniform float uDRes, uDTile, uDSlot; uniform int uDnT;
+uniform vec2 uDH;              // detail height decode range, metres
 const float PI = 3.14159265358979;
 const float TWO_OVER_PI = 0.636619772367581;
 
@@ -230,6 +236,30 @@ float decodeH(vec4 c, vec2 hr){
   float q = floor(c.r * 255.0 + 0.5) * 256.0 + floor(c.g * 255.0 + 0.5);
   return hr.x + q * (1.0 / 65535.0) * (hr.y - hr.x);
 }
+// the cache pixel coordinate of direction p on the detail level, if its tile
+// is loaded (texel centres at integer + 0.5 - 0.5, as atlasXY)
+bool detailXY(vec3 p, out vec2 xy){
+  int f = faceOf(p); float d = dot(p, BN[f]);
+  float X = (atan(dot(p, BR[f]) / d) * TWO_OVER_PI + 0.5) * uDRes;
+  float Y = (atan(dot(p, BU[f]) / d) * TWO_OVER_PI + 0.5) * uDRes;
+  int ti = clamp(int(floor(X / uDTile)), 0, uDnT - 1), tj = clamp(int(floor(Y / uDTile)), 0, uDnT - 1);
+  vec4 e = texelFetch(uDP, ivec2((f % 3) * uDnT + ti, (f / 3) * uDnT + tj), 0);
+  if (e.a < 0.5) return false;
+  vec2 slot = floor(e.rg * 255.0 + 0.5);
+  xy = slot * uDSlot + vec2(X - float(ti) * uDTile, Y - float(tj) * uDTile) + 0.5;
+  return true;
+}
+vec4 detailLinear(vec2 xy){
+  vec2 i0 = floor(xy); vec2 fr = xy - i0; ivec2 a = ivec2(i0);
+  return mix(mix(texelFetch(uDT, a, 0), texelFetch(uDT, a + ivec2(1,0), 0), fr.x),
+             mix(texelFetch(uDT, a + ivec2(0,1), 0), texelFetch(uDT, a + ivec2(1,1), 0), fr.x), fr.y);
+}
+float detailHeight(vec2 xy){
+  vec2 i0 = floor(xy); vec2 fr = xy - i0; ivec2 a = ivec2(i0);
+  float h00 = decodeH(texelFetch(uDT, a, 0), uDH), h10 = decodeH(texelFetch(uDT, a + ivec2(1,0), 0), uDH);
+  float h01 = decodeH(texelFetch(uDT, a + ivec2(0,1), 0), uDH), h11 = decodeH(texelFetch(uDT, a + ivec2(1,1), 0), uDH);
+  return mix(mix(h00, h10, fr.x), mix(h01, h11, fr.x), fr.y);
+}
 float heightIn(sampler2D t, vec3 geo, vec2 hr, vec3 p){
   vec2 xy = atlasXY(p, geo); vec2 i0 = floor(xy); vec2 fr = xy - i0; ivec2 a = ivec2(i0);
   float h00 = decodeH(texelFetch(t, a, 0), hr), h10 = decodeH(texelFetch(t, a + ivec2(1,0), 0), hr);
@@ -237,6 +267,8 @@ float heightIn(sampler2D t, vec3 geo, vec2 hr, vec3 p){
   return mix(mix(h00, h10, fr.x), mix(h01, h11, fr.x), fr.y);
 }
 float heightAt(vec3 p){
+  vec2 dxy;
+  if (uDetail == 1 && detailXY(p, dxy)) return detailHeight(dxy);
   float h = heightIn(uT0a, uGeoA, uHA, p);
   if (uMix > 0.0) h = mix(h, heightIn(uT0b, uGeoB, uHB, p), uMix);
   return h;
@@ -350,7 +382,12 @@ void main(){
   // metres below it, and that contour hugs the land cells' centres -- and a
   // lake is wherever the interpolated signed lake depth is above 0
   float wcode;
-  if (uHasShore == 1) {
+  vec2 dxy;
+  if (uDetail == 1 && detailXY(p, dxy)) {
+    vec4 t = detailLinear(dxy) * 255.0;
+    float ld = (t.b / 127.5 - 1.0) * uLakeRange;
+    wcode = 255.0 - t.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
+  } else if (uHasShore == 1) {
     float oc = byteLinear(uST, uSGeo, 2, p);
     float ld = (byteLinear(uST, uSGeo, 1, p) / 127.5 - 1.0) * uLakeRange;
     wcode = oc > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
@@ -705,6 +742,112 @@ function screenToDir(px, py) {
 
 let drawQueued = false;
 function requestDraw() { if (!drawQueued) { drawQueued = true; requestAnimationFrame(draw); } }
+
+// ---------------------------------------------------------------------------
+// Detail tiles (globe/viz/detail.py): the final frame's terrain beyond its
+// atlas, a level at a time.  The level whose cells are about a pixel is
+// chosen per draw; the tiles the view covers are loaded (<script> tags, as
+// everything else), kept in a cache texture of fixed slots with the least
+// recently seen evicted, and found by the shader through the level's page
+// table.  A tile not loaded yet is drawn from the atlas.
+// ---------------------------------------------------------------------------
+const DET = META.detail || null;
+const detail = { slotPx: 0, per: 0, tex: null, levels: [], slotKey: [], keySlot: new Map(), seen: [], inflight: 0, queue: [], queued: new Set(), missing: new Set(), tick: 0 };
+if (DET && DET.levels && DET.levels.length) {
+  detail.slotPx = DET.tile + 2 * DET.pad;
+  const size = Math.min(4096, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+  detail.per = Math.floor(size / detail.slotPx);
+  detail.tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, detail.tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.NEAREST);
+  for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
+  detail.levels = DET.levels.map(lv => {
+    const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 3 * lv.nT, 2 * lv.nT, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.NEAREST);
+    const bin = atob(lv.exists), bits = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bits[i] = bin.charCodeAt(i);
+    return Object.assign({}, lv, { page: t, bits });
+  });
+  const n = detail.per * detail.per;
+  detail.slotKey = new Array(n).fill(null); detail.seen = new Array(n).fill(-1);
+}
+function tileExists(lv, f, ti, tj) { const k = (f * lv.nT + ti) * lv.nT + tj; return (lv.bits[k >> 3] >> (k & 7)) & 1; }
+function setPage(lv, f, ti, tj, slot) {
+  const px = new Uint8Array(slot < 0 ? [0, 0, 0, 0] : [slot % detail.per, Math.floor(slot / detail.per), 0, 255]);
+  gl.bindTexture(gl.TEXTURE_2D, lv.page);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, (f % 3) * lv.nT + ti, Math.floor(f / 3) * lv.nT + tj, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+}
+// the level for this view: the coarsest whose cells are at most ~1.3 px, none while the atlas' are
+function detailLevel(FA) {
+  if (!detail.tex || FA.stage !== "final") return null;
+  const cellsPerPx = 1 / (scalePx() * HALF_PI / FA.res);
+  const want = Math.ceil(Math.log2(1 / cellsPerPx) - 0.4);
+  if (want < 1) return null;
+  return detail.levels[Math.min(want, detail.levels.length) - 1];
+}
+function visibleTiles(lv) {
+  const keys = new Set(), step = 48;
+  for (let y = 0; y <= canvas.height + step - 1; y += step) {
+    for (let x = 0; x <= canvas.width + step - 1; x += step) {
+      const p = screenToDir(Math.min(x, canvas.width - 1), Math.min(y, canvas.height - 1)); if (!p) continue;
+      const [f, u, v] = fromSphere(p);
+      const ti = Math.min(Math.floor(u * lv.res / DET.tile), lv.nT - 1), tj = Math.min(Math.floor(v * lv.res / DET.tile), lv.nT - 1);
+      if (tileExists(lv, f, ti, tj)) keys.add(`${lv.L}_${f}_${ti}_${tj}`);
+    }
+  }
+  return keys;
+}
+function pumpTiles() {
+  while (detail.inflight < 6 && detail.queue.length) {
+    const key = detail.queue.shift();
+    const [L, f, ti, tj] = key.split("_").map(Number);
+    const sc = document.createElement("script");
+    sc.src = `tiles/L${L}/${f}_${ti}_${tj}.js`;
+    detail.inflight++;
+    sc.onload = () => { detail.inflight--; sc.remove(); pumpTiles(); };
+    sc.onerror = () => { detail.inflight--; detail.missing.add(key); detail.queued.delete(key); sc.remove(); pumpTiles(); };
+    document.head.appendChild(sc);
+  }
+}
+let detailVisible = new Set();
+GV.onTile = async (key, b64) => {
+  detail.queued.delete(key);
+  if (detail.keySlot.has(key)) return;
+  const bm = await createImageBitmap(b64ToBlob(b64, "image/webp"), { premultiplyAlpha: "none", colorSpaceConversion: "none" });
+  let slot = detail.slotKey.indexOf(null);
+  if (slot < 0) {                                   // evict the least recently seen tile the view does not need
+    let best = -1;
+    for (let k = 0; k < detail.slotKey.length; k++)
+      if (!detailVisible.has(detail.slotKey[k]) && (best < 0 || detail.seen[k] < detail.seen[best])) best = k;
+    if (best < 0) return;
+    const [L0, f0, i0, j0] = detail.slotKey[best].split("_").map(Number);
+    setPage(detail.levels[L0 - 1], f0, i0, j0, -1);
+    detail.keySlot.delete(detail.slotKey[best]);
+    slot = best;
+  }
+  gl.bindTexture(gl.TEXTURE_2D, detail.tex);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, (slot % detail.per) * detail.slotPx, Math.floor(slot / detail.per) * detail.slotPx, gl.RGBA, gl.UNSIGNED_BYTE, bm);
+  bm.close && bm.close();
+  const [L, f, ti, tj] = key.split("_").map(Number);
+  setPage(detail.levels[L - 1], f, ti, tj, slot);
+  detail.slotKey[slot] = key; detail.keySlot.set(key, slot); detail.seen[slot] = detail.tick;
+  requestDraw();
+};
+// the detail level to draw, after asking for the tiles this view lacks
+function updateDetail(FA) {
+  const lv = detailLevel(FA);
+  if (!lv) { detailVisible = new Set(); return null; }
+  detail.tick++;
+  detailVisible = visibleTiles(lv);
+  for (const key of detailVisible) {
+    const slot = detail.keySlot.get(key);
+    if (slot !== undefined) detail.seen[slot] = detail.tick;
+    else if (!detail.queued.has(key) && !detail.missing.has(key)) { detail.queued.add(key); detail.queue.push(key); }
+  }
+  pumpTiles();
+  return lv;
+}
 // rivers.js loads before this script, so its data may be waiting already
 GV.onRivers = r => ingestRivers(r);
 if (GV.riverData) ingestRivers(GV.riverData);
@@ -745,7 +888,15 @@ function draw() {
   gl.uniform1f(U.uSea, META.sea_level_m || 0);
   gl.uniform1f(U.uLandTop, META.land_top_m); gl.uniform1f(U.uOceanBottom, META.ocean_bottom_m);
   gl.uniform1f(U.uExag, state.exag); gl.uniform1f(U.uShadeAmt, state.exag > 0 ? 0.85 : 0.0);
-  gl.uniform1f(U.uTexelRad, HALF_PI / FA.res);
+  const dlv = mix === 0 ? updateDetail(FA) : null;
+  gl.uniform1f(U.uTexelRad, HALF_PI / (dlv ? dlv.res : FA.res));
+  gl.uniform1i(U.uDetail, dlv ? 1 : 0);
+  bindTex(7, dlv ? detail.tex : tex[a][0], "uDT");
+  bindTex(8, dlv ? dlv.page : tex[a][0], "uDP");
+  if (dlv) {
+    gl.uniform1f(U.uDRes, dlv.res); gl.uniform1f(U.uDTile, DET.tile); gl.uniform1f(U.uDSlot, detail.slotPx);
+    gl.uniform1i(U.uDnT, dlv.nT); gl.uniform2f(U.uDH, DET.h0, DET.h1);
+  }
   gl.uniform3fv(U.uBiome, biome); gl.uniform3fv(U.uSat, sat);
   const tch = CHANNELS.temperature || {}, pch = CHANNELS.precip || {};
   gl.uniform2f(U.uTempRange, tch.lo ?? -45, tch.hi ?? 35); gl.uniform2f(U.uPrecipRange, pch.lo ?? 0.02, pch.hi ?? 5);

@@ -106,3 +106,23 @@ plain's sheet flow into parallel hatching (188 k lines); at the 97th they
 follow the texture's channels with some hatching left on flats (22 k
 lines, 62 k vertices, 0.9 MB). The discharge texture still draws the
 timeline's frames.
+
+## Detail tiles
+
+A browser texture holds one atlas of 2048^2 a face at most -- the refined
+grid, or the 1.2 km planet level reduced by four. `export_viewer.py
+--detail` also writes the final frame's terrain beyond its atlas as tiles
+(`globe/viz/detail.py`, `viewer/tiles/L{L}/`), levels of 2x, 4x ... the
+atlas up to the source's own resolution, 256 cells a tile, one lossless
+RGBA WebP each (height 16-bit, signed lake depth, 255 - ocean mask; a cell
+of pad so a tile samples bilinearly by itself; all-sea tiles not written).
+
+The viewer picks the level whose cells are about a pixel, loads the tiles
+the view covers into a 225-slot cache texture (least recently seen out),
+and the shader looks each pixel up in the level's page table; a tile not
+loaded yet draws from the atlas. Heights, shading, coasts and lake shores
+come from the tiles, rivers are the lines. Earth-v9 exported at a 1024^2
+atlas with tiles from its 2048^2 refined grid (230 tiles, 17 MB, 8 s)
+matches the 2048^2 atlas at zoom 12 to 120
+(`scratch/shots/e1/keep_detail_cmp.png`: atlas 1024^2, with tiles, atlas
+2048^2).
