@@ -4,6 +4,7 @@ R = 8 is 1.2 km on the earth preset, over every tile with land.
 
     python scripts/planet_bake.py --world worlds/earth-v9
     python scripts/planet_bake.py --world worlds/earth-v9 --faces 5 --no-finish      # one face, to time it
+    python scripts/planet_bake.py --world worlds/earth-v9 --R 32 --parent 8          # 305 m, chained from the finished 1.2 km level
 
 Output: ``<world>/zoom/planet_R{R}/``: ``L{R}.f{k}.{height,sediment,discharge,
 water_surface}.npy`` per face, ``L{R}.png``, ``planet.json``, and the work
@@ -27,6 +28,8 @@ def main(argv=None) -> int:
     ap.add_argument("--iterations", type=int, default=80)
     ap.add_argument("--tile", type=int, default=1024)
     ap.add_argument("--margin", type=int, default=64)
+    ap.add_argument("--parent", type=int, default=0, help="R of the finished planet level to chain from (zoom/planet_R<parent>); 0 = the planet's upsample")
+    ap.add_argument("--seam-cells", type=int, default=None, help="fine cells blended either side of a cube edge (default 2 R: the same ground at every R)")
     ap.add_argument("--faces", type=int, nargs="*", default=None)
     ap.add_argument("--workers", type=int, default=0, help="tile processes per pass (default one per tile, up to one per core)")
     ap.add_argument("--no-finish", action="store_true", help="tiles only: no seam blend, water surface or outputs")
@@ -39,7 +42,8 @@ def main(argv=None) -> int:
     def log(msg):
         print(f"[{time.time() - t0:8.1f}s] {msg}", flush=True)
 
-    level = PlanetLevel(R=a.R, iterations=a.iterations, tile=a.tile, margin=a.margin)
+    level = PlanetLevel(R=a.R, iterations=a.iterations, tile=a.tile, margin=a.margin, parent=a.parent,
+                        seam_cells=a.seam_cells if a.seam_cells is not None else 2 * a.R)
     out = run_planet(Path(a.world), level, faces=a.faces, workers=a.workers, log=log, finish=not a.no_finish)
     log(f"done: {out}")
     return 0
