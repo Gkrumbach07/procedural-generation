@@ -445,13 +445,13 @@ class RenderParams:
     #: cells per face of the final frame: 0 = the full resolution of its
     #: source (N_c, or N_c x R with viewer_refined)
     viewer_final_res: int = 0
-    #: draw the final frame from the refined grid (fine/) instead of the
-    #: coarse one.  Off: at earth-v9 the fine frame shows refine's own
-    #: defects the coarse frame hides -- land specks offshore where the
-    #: refined surface pokes above 0 in a sea cell, and discharge that does
-    #: not line up across basin windows, so a river can stop short of the
-    #: coast while a separate channel reaches it (docs/viewer-rivers.md)
-    viewer_refined: bool = False
+    #: draw the final frame from the refined grid (fine/) when refine has
+    #: run, instead of the coarse one.  It was off while the fine frame showed
+    #: refine's own defects -- land specks offshore (the upsample overshooting
+    #: a shallow shelf) and rivers blurred into the coarse discharge by the
+    #: basin feather, ending short of the sea -- fixed by the coast pass, the
+    #: unfeathered discharge and lake outflow (docs/viewer-rivers.md)
+    viewer_refined: bool = True
 
 
 @dataclass

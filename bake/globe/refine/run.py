@@ -7,6 +7,7 @@ Pipeline::
     base pass: plain upsample of every face (6 jobs)         -- fills every cell
     basin jobs, largest first (basin_job.job -> rasterize.write_result)
     seam blend across the cube edges (rasterize.write_seams)  -- multi-face basins
+    the coast (rasterize.write_coast)                         -- sea below 0, coastal land above
     quicklooks: the 3 largest basins (refine_basin<id>.png), then the planet
 
 Workers (``refine.workers``, 0 = all cores) are a *spawned*
@@ -40,6 +41,7 @@ import numpy as np
 
 from ..config import WorldParams
 from ..io.world_store import WorldStore
+from ..hydro.d8 import OCEAN
 from . import basin_job as bj
 from . import rasterize as rz
 
@@ -155,6 +157,8 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     t2 = time.time()
     records = [r for s in stats for r in s.pop("seam_records", ())]
     seam_cells = rz.write_seams(root, params, records)
+    # the coast last: nothing written after it may move a cell across sea level
+    coast = rz.write_coast(root, params, store.load_field("flow_dir", params.coarse_grid()).interior == OCEAN)
     seam_record_mb = sum(sum(v.nbytes for v in r.values() if isinstance(v, np.ndarray)) for r in records) / 1e6
     del records
     t_seams = time.time() - t2
@@ -185,6 +189,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         "seconds_base": round(t_base, 2),
         "seconds_base_cpu": round(float(sum(s["seconds"] for s in face_stats)), 2),
         "seam_cells_blended": int(seam_cells),
+        **coast,
         "seam_records_mb": round(seam_record_mb, 2),
         "seconds_seams": round(t_seams, 2),
         "seconds_basins_wall": round(t_basins, 2),

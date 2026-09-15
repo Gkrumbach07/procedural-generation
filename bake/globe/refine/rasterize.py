@@ -190,15 +190,19 @@ def blend_result(arrays: dict[str, np.ndarray], bid: int, feather_cells: int, on
     edge).  The feather weight of the surface and water surface is computed
     on ``own`` over the whole window, so a cube edge the basin continues
     across is not a divide (the pieces on the two faces are reconciled
-    there by :func:`blend_seams`) and an edge it ends at is.  With
-    ``on_face`` (bool, the window cells on the job's face) the *discharge*
-    feather is computed on ``own & on_face``: a river position cannot be
-    averaged between two pieces, so at the seam both faces fall back to the
-    coarse-initialised discharge, which is what carries a river across the
-    edge.  Pure (no I/O) so tests can check the blend."""
+    there by :func:`blend_seams`) and an edge it ends at is.  The
+    *discharge* is not feathered at divides or the coast: a river is a
+    position, and blending a refined channel into the upsampled coarse
+    discharge drew a sharp channel beside a blurred copy of itself and ended
+    rivers short of the sea while the coarse blob reached it
+    (docs/viewer-rivers.md).  With ``on_face`` (bool, the window cells on the
+    job's face) it is feathered towards the cube edge only: a river position
+    cannot be averaged between two pieces either, so at the seam both faces
+    fall back to the coarse-initialised discharge, which is what carries a
+    river across the edge.  Pure (no I/O) so tests can check the blend."""
     own = arrays["basin_id"] == int(bid)
     w = feather_weight(own, feather_cells)
-    wq = w if on_face is None else feather_weight(own & on_face, feather_cells)
+    wq = own.astype(np.float32) if on_face is None else feather_weight(on_face, feather_cells) * own
     out = {}
     for name, ref in FEATHERED:
         a = arrays[name].astype(np.float32)
@@ -233,6 +237,112 @@ def write_result(root: str | Path, params: WorldParams, res) -> int:
         mm.flush()
         del mm
     return n
+
+
+# --------------------------------------------------------------------------
+# the coast
+# --------------------------------------------------------------------------
+#: the coast pass keeps a fine sea cell at least this far below sea level and
+#: coastal land this far above it (m)
+COAST_MARGIN_M = 1.0
+
+
+def coast_fraction(grid, ocean_c: np.ndarray, passes: int = 2) -> FaceField:
+    """The coarse ocean mask after ``passes`` 3x3 binomial passes across
+    face edges, every cell centre held on its own side of 0.5 (by 0.1): its
+    0.5 contour, interpolated, is a coastline that rounds the coarse cells'
+    corners instead of tracing them (the viewer's ``smooth_mask``)."""
+    m = np.asarray(ocean_c, bool)
+    ff = FaceField.from_interior(grid, m.astype(np.float32), name="ocean", exchange=True)
+    H, N = grid.H, grid.N
+    w = (1.0, 2.0, 1.0)
+    for _ in range(passes):
+        d = ff.data
+        out = np.zeros((6, N, N), np.float32)
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                out += (w[di + 1] * w[dj + 1] / 16.0) * d[:, H + di:H + di + N, H + dj:H + dj + N]
+        ff.data[:, H:H + N, H:H + N] = out
+        ff.exchange_halos()
+    inter = ff.data[:, H:H + N, H:H + N]
+    inter[:] = np.where(m, np.maximum(inter, 0.6), np.minimum(inter, 0.4))
+    ff.exchange_halos()
+    return ff
+
+
+def coast_zone(grid, ocean_c: np.ndarray) -> np.ndarray:
+    """Coarse ``(6, N, N)`` cells the coast pass may change: ocean, or
+    8-adjacent to it (across face edges)."""
+    m = np.asarray(ocean_c, bool)
+    ff = FaceField.from_interior(grid, m.astype(np.uint8), name="near", exchange=True)
+    H, N = grid.H, grid.N
+    out = np.empty_like(m)
+    for f in range(6):
+        out[f] = ndimage.binary_dilation(ff.data[f].astype(bool), structure=np.ones((3, 3), bool))[H:H + N, H:H + N]
+    return out
+
+
+def write_coast(root: str | Path, params: WorldParams, ocean_c: np.ndarray, strip: int = 64) -> dict:
+    """Make the fine surface agree with a smooth coastline, after every other
+    writer.  The upsample overshoots above sea level where a shallow shelf
+    (erosion fills it to a few metres below the water) meets high ground --
+    45k fine sea cells up to 245 m on earth-v9, drawn as specks of land
+    offshore -- and the basin rasters' coastline is the coarse cells'
+    outline.  In the coarse cells that are ocean or touch it: a cell inside
+    the 0.5 contour of :func:`coast_fraction` (bilinear) is sea and stands at
+    least ``COAST_MARGIN_M`` below 0 (sediment removed first), with no water
+    surface above 0; any other cell there stands at least that far above 0,
+    and a former sea cell among them takes the largest discharge of the
+    refined land within two cells (not the sea's upsampled coarse value).
+    Returns counts."""
+    grid = params.coarse_grid()
+    N, R = grid.N, int(params.world.R)
+    ocean_c = np.asarray(ocean_c, bool)
+    frac = coast_fraction(grid, ocean_c)
+    near_c = coast_zone(grid, ocean_c)
+    M = np.float32(COAST_MARGIN_M)
+    lowered = raised = 0
+    for f in range(6):
+        mm = {name: open_fine(root, name, f, "r+") for name in ("height", "sediment", "water_surface", "discharge", "basin_id")}
+        for i0 in range(0, N, strip):
+            i1 = min(N, i0 + strip)
+            near = np.repeat(np.repeat(near_c[f, i0:i1], R, axis=0), R, axis=1)
+            if not near.any():
+                continue
+            sl = slice(i0 * R, i1 * R)
+            sea = (frac.sample_window(f, i0, i1, 0, N, R, order=1) > 0.5) & near
+            h = np.array(mm["height"][sl], dtype=np.float32)
+            sd = np.array(mm["sediment"][sl], dtype=np.float32)
+            ws = np.array(mm["water_surface"][sl], dtype=np.float32)
+            surf = h + sd
+            drop = np.where(sea & (surf > -M), surf + M, np.float32(0.0)).astype(np.float32)
+            take = np.minimum(np.maximum(sd, 0.0), drop)
+            sd -= take
+            h -= drop - take
+            ws[sea] = np.minimum(ws[sea], 0.0)
+            low = near & ~sea & (surf < M)
+            sd[low] += M - surf[low]
+            land = near & ~sea                     # a sea cell the contour gives to land keeps no sea surface under it
+            ws[land] = np.maximum(ws[land], h[land] + sd[land])
+            # sea cells the contour gives to land have the upsampled coarse
+            # discharge of the sea (a blue strip along the coast): they take
+            # the refined land's next to them instead, so a river reaches the
+            # new shore and nothing else shows
+            q = np.array(mm["discharge"][sl], dtype=np.float32)
+            was_sea = land & (np.asarray(mm["basin_id"][sl]) < 0)
+            if was_sea.any():
+                src = np.where(np.asarray(mm["basin_id"][sl]) >= 0, q, np.float32(0.0))
+                q[was_sea] = ndimage.maximum_filter(src, size=5)[was_sea]
+            lowered += int((drop > 0).sum())
+            raised += int(low.sum())
+            mm["height"][sl] = h
+            mm["sediment"][sl] = sd
+            mm["water_surface"][sl] = ws
+            mm["discharge"][sl] = q
+        for m in mm.values():
+            m.flush()
+        del mm
+    return {"coast_lowered_cells": lowered, "coast_raised_cells": raised}
 
 
 # --------------------------------------------------------------------------

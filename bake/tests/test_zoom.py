@@ -23,7 +23,7 @@ from globe.zoom import index as zindex
 from test_refine import _params, _world_to_watersheds
 
 
-LEVELS = (zb.ZoomLevel(4, 12, 4, tile=24, margin=4, hold_every=2), zb.ZoomLevel(8, 6, 3, tile=24, margin=4, hold_every=0, hold_scale=1.0))
+LEVELS = (zb.ZoomLevel(4, 12, 4, tile=24, margin=4, hold_every=2, hold_scale=1.0), zb.ZoomLevel(8, 6, 3, tile=24, margin=4, hold_every=0, hold_scale=1.0))
 
 
 @pytest.fixture(scope="module")
@@ -85,6 +85,20 @@ def test_flux_is_the_rain_upstream():
     assert np.all(flux >= w - 1e-12)
 
 
+def test_tile_passes_never_overlap_and_cover_every_tile():
+    for n, tile, m in ((4096, 1024, 64), (768, 256, 64), (48, 24, 4), (100, 30, 20)):
+        starts, c = zb.tile_starts(0, n, tile)
+        windows = zb.tile_windows(starts, c, m)
+        passes = zb.tile_passes(windows, c, m)
+        assert sorted(w for ps in passes for w in ps) == sorted(windows)
+        for ps in passes:
+            for k, w1 in enumerate(ps):
+                for w2 in ps[k + 1:]:
+                    apart = (w1[2] + c + m <= w2[2] - m or w2[2] + c + m <= w1[2] - m or
+                             w1[3] + c + m <= w2[3] - m or w2[3] + c + m <= w1[3] - m)
+                    assert apart, (n, tile, m, w1, w2)
+
+
 def test_inflow_spawns_off_the_border():
     s = np.random.default_rng(0).random((16, 16))
     w = zb.spawn_at(np.array([0.0, 15.0, 7.2]), np.array([3.0, 15.0, 7.7]), np.array([1.0, 2.0, 3.0]), s, 2)
@@ -137,9 +151,11 @@ def test_zoom_takes_inflow_from_the_planet_and_the_level_above(zoom):
         assert any(t.get("inflow", 0.0) > 0.0 for t in res.stats["tiles"]), res.stats["tiles"]
 
 
-def test_zoom_is_deterministic(world, zoom, tmp_path):
+def test_zoom_is_deterministic_and_the_same_in_parallel(world, zoom, tmp_path):
+    """A rerun matches byte for byte, and so does one with the tiles of a
+    pass in worker processes (each tile seeds its own particles)."""
     out2 = tmp_path / "again"
-    zb.run_zoom(world["root"], zoom["spot"], LEVELS[:1], out=out2, name="again", resume=False)
+    zb.run_zoom(world["root"], zoom["spot"], LEVELS[:1], out=out2, name="again", resume=False, workers=2)
     a = zb.load_level(out2, LEVELS[0].R).arrays
     b = zoom["levels"][0].arrays
     for k in ("height", "sediment", "discharge"):
@@ -162,3 +178,119 @@ def test_zoom_pages_and_viewer_list(world, zoom):
     assert js.startswith("GLOBE_VIEWER.setZooms(") and json.loads(js[len("GLOBE_VIEWER.setZooms("):-3])[0]["name"] == "t"
     info = json.loads((out / "zoom.json").read_text())
     assert info["spot"] == list(zoom["spot"]) and -90 <= info["lat"] <= 90
+
+
+# --------------------------------------------------------------------------
+# the planet at a zoom level's resolution (globe/zoom/planet.py)
+# --------------------------------------------------------------------------
+def test_hashed_noise_agrees_where_windows_overlap():
+    from globe.zoom import planet as zp
+
+    a = zp.hashed_ridged(7, 2, -5, 10, 40, 30, 16.0)
+    b = zp.hashed_ridged(7, 2, 15, 22, 40, 30, 16.0)
+    assert np.allclose(a[20:, 12:], b[:20, :18])
+    assert np.abs(a).max() <= 1.0 + 1e-6 and a.std() > 0.05
+    c = zp.hashed_ridged(8, 2, -5, 10, 40, 30, 16.0)
+    assert not np.allclose(a, c)
+
+
+PLANET = None
+
+
+def _planet_level():
+    from globe.zoom import planet as zp
+
+    return zp.PlanetLevel(R=4, iterations=3, tile=32, margin=8, hold_every=2, seam_cells=4)
+
+
+@pytest.fixture(scope="module")
+def planet(world):
+    from globe.zoom import planet as zp
+
+    out = zp.run_planet(world["root"], _planet_level(), workers=2)
+    return {"out": out, "level": _planet_level()}
+
+
+def test_planet_level_outputs_are_complete_and_physical(world, planet):
+    from globe.zoom import planet as zp
+
+    out, lv = planet["out"], planet["level"]
+    info = json.loads((out / "planet.json").read_text())
+    N = world["params"].coarse_grid().N
+    assert info["active_cells"] > 0 and (out / info["quicklook"]).exists()
+    for f in range(6):
+        a = {k: np.load(zp.out_path(out, lv.R, f, k)) for k in zp.OUT_FIELDS}
+        for k, v in a.items():
+            assert v.shape == (N * lv.R, N * lv.R) and np.isfinite(v).all(), (f, k)
+        assert (a["water_surface"] >= a["height"] + a["sediment"] - 1e-3).all()
+        assert (a["sediment"] >= -1e-4).all() and (a["discharge"] >= 0).all()
+    assert sum(fc["seam_cells"] for fc in info["faces"]) > 0
+
+
+def test_planet_level_does_not_depend_on_the_workers(world, planet, tmp_path):
+    from globe.zoom import planet as zp
+
+    lv = planet["level"]
+    out2 = zp.run_planet(world["root"], lv, out=tmp_path / "serial", faces=[0], workers=1, finish=False)
+    g = lv.guard * lv.R
+    for k in ("height", "sediment", "discharge"):
+        a = np.load(zp.work_path(planet["out"], 0, k))
+        b = np.load(zp.work_path(out2, 0, k))
+        assert np.array_equal(a, b), k
+
+
+def test_planet_inflow_crosses_cube_edges():
+    """A window on a face edge takes water from the neighbouring face's
+    drainage: a donor beyond the edge is looked up on the face that owns it,
+    and when its D8 receiver (in that face's own directions) lies across the
+    edge in the window, its whole accumulation enters there -- on the
+    window's edge row, and nowhere else."""
+    from globe.cubesphere import from_sphere_v, project_to_face_v, to_sphere_v
+    from globe.zoom import planet as zp
+
+    N, R, face = 32, 4, 0
+    j = 12.0
+    p = to_sphere_v(np.array([face]), np.array([-0.5 / N]), np.array([(j + 0.5) / N]))   # ring cell i = -1
+    f2, u2, v2 = from_sphere_v(p)
+    f2, i2, j2 = int(f2[0]), min(int(u2[0] * N), N - 1), min(int(v2[0] * N), N - 1)
+    assert f2 != face
+    found = False
+    for code in range(8):
+        ri, rj = i2 + zp.zb.D8[code, 0], j2 + zp.zb.D8[code, 1]
+        pr = to_sphere_v(np.array([f2]), np.array([(ri + 0.5) / N]), np.array([(rj + 0.5) / N]))
+        u, v = project_to_face_v(np.array([face]), pr)
+        if int(np.floor(u[0] * N)) == 0 and 8 <= int(np.floor(v[0] * N)) < 16:
+            found = True
+            break
+    assert found
+    fd = np.full((6, N, N), 255, np.int64)
+    fa = np.zeros((6, N, N))
+    fd[f2, i2, j2] = code
+    fa[f2, i2, j2] = 5.0
+    w = zp.planet_inflow(fd, fa, face, 0, 8, 8, 16, R, np.zeros((8 * R + 2, 8 * R + 2)))
+    assert w.sum() == pytest.approx(5.0)
+    assert w[1:1 + R // 2 + 1].sum() == pytest.approx(5.0)
+
+
+def test_viewer_final_frame_from_the_planet_level(world, planet):
+    """``viewer._planet_final`` reduces the planet level to the frame
+    resolution: block-mean surface, block-max discharge, sea and lakes by
+    derive's rules."""
+    from globe.viz import viewer
+    from globe.zoom import planet as zp
+
+    root, params = world["root"], world["params"]
+    grid = params.coarse_grid()
+    store = world["store"]
+    surf_c = store.load_field("height", grid).interior + store.load_field("sediment", grid).interior
+    fd = store.load_field("flow_dir", grid).interior
+    lv = planet["level"]
+    N = grid.N
+    fin = viewer._planet_final(root, json.loads((root / "manifest.json").read_text()), surf_c, fd, planet["out"].relative_to(root), res=N * 2, log=lambda m: None)
+    assert fin["surf"].shape == (6, 2 * N, 2 * N)
+    k = lv.R // 2
+    q0 = np.load(zp.out_path(planet["out"], lv.R, 0, "discharge"))
+    assert np.allclose(fin["discharge"][0], q0.reshape(2 * N, k, 2 * N, k).max(axis=(1, 3)))
+    h0 = np.load(zp.out_path(planet["out"], lv.R, 0, "height")) + np.load(zp.out_path(planet["out"], lv.R, 0, "sediment"))
+    assert np.allclose(fin["surf"][0], h0.reshape(2 * N, k, 2 * N, k).mean(axis=(1, 3)), atol=1e-2)
+    assert (fin["water"] == viewer.WATER_OCEAN).any() and (fin["ws"] >= fin["surf"] - 1e-3).all()

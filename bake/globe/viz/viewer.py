@@ -350,6 +350,58 @@ def _fine_final(root: Path, manifest: dict, surf_c: np.ndarray, flow_dir_c: np.n
             "basin": _load_faces(root, "basin_id", "fine")}
 
 
+def _planet_final(root: Path, manifest: dict, surf_c: np.ndarray, flow_dir_c: np.ndarray | None, planet: str | Path, res: int = 2048, log=print) -> dict | None:
+    """The final state from a planet zoom level (``globe.zoom.planet``: e.g.
+    ``zoom/planet_R8``, 1.2 km on the earth preset), block-reduced face by
+    face to ``res`` cells per face -- a face of it is 8192^2, and the atlas
+    of six at full resolution is past what a browser texture holds.  Heights
+    and water surfaces are block means, discharge the block maximum (a river
+    narrower than a block still shows).  Sea and lakes follow derive's rules
+    as :func:`_fine_final`'s do.  None when the level is not there."""
+    from ..derive import lakes as lakes_mod
+
+    pdir = Path(root) / planet if not Path(planet).is_absolute() else Path(planet)
+    info_path = pdir / "planet.json"
+    if not info_path.exists():
+        return None
+    R_lvl = int(json.loads(info_path.read_text())["level"]["R"])
+    N = surf_c.shape[1]
+    n = N * R_lvl
+    res = int(min(res, n))
+    k = n // res
+    R = res // N
+    params = manifest.get("params", {}) or {}
+    depth = float((params.get("hydro", {}) or {}).get("lake_min_depth", 0.5))
+    min_cells = max(1, int(round(float((params.get("derive", {}) or {}).get("lake_min_cells", 1.0)) * R * R)))
+    ocean_c = (np.asarray(flow_dir_c) == 255) if flow_dir_c is not None else (surf_c < 0.0)
+    sea_near = _dilate_max(ocean_c.astype(np.float32), 0.0) > 0.0
+
+    def red(face, name, how):
+        a = np.load(pdir / f"L{R_lvl}.f{face}.{name}.npy", mmap_mode="r")
+        out = np.empty((res, res), np.float32)
+        for i in range(res):                                  # a block row at a time: never a whole face resident
+            blk = np.asarray(a[i * k:(i + 1) * k, :res * k], np.float32).reshape(k, res, k)
+            out[i] = blk.max(axis=(0, 2)) if how == "max" else blk.mean(axis=(0, 2))
+        return out
+
+    surf = np.empty((6, res, res), np.float32)
+    sed = np.empty_like(surf)
+    ws = np.empty_like(surf)
+    q = np.empty_like(surf)
+    water = np.zeros(surf.shape, np.uint8)
+    for f in range(6):
+        sed[f] = red(f, "sediment", "mean")
+        surf[f] = red(f, "height", "mean") + sed[f]
+        ws[f] = np.maximum(red(f, "water_surface", "mean"), surf[f])
+        q[f] = red(f, "discharge", "max")
+        ocean = (surf[f] < 0.0) & np.repeat(np.repeat(sea_near[f], R, axis=0), R, axis=1)
+        water[f][ocean] = WATER_OCEAN
+        lake = lakes_mod.kept_lake_mask(lakes_mod.lake_mask(surf[f], ws[f], depth, ocean=ocean), min_cells)
+        water[f][lake] = WATER_LAKE
+    log(f"[viewer] final frame from {pdir.name} (R={R_lvl}, {k}x{k} blocks -> {res}² per face)")
+    return {"surf": surf, "sed": sed, "ws": ws, "water": water, "discharge": q, "biome": None, "basin": None}
+
+
 class _Frame:
     """One timeline entry before encoding: metres + optional channels."""
 
@@ -371,7 +423,7 @@ def _thin(items: list, n: int) -> list:
 
 
 def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int | None = None,
-                   max_frames: int | None = None, refined: bool = False) -> tuple[list[_Frame], dict]:
+                   max_frames: int | None = None, refined: bool = False, planet: str | None = None) -> tuple[list[_Frame], dict]:
     manifest = json.loads((root / "manifest.json").read_text())
     stages = manifest.get("stages", {})
     frames: list[_Frame] = []
@@ -411,7 +463,11 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
     if surf is None:
         raise FileNotFoundError(f"{root}: no height or bedrock on the coarse grid -- has tectonics run?")
     N = surf.shape[1]
-    fine = _fine_final(root, manifest, surf, _load_faces(root, "flow_dir"), log) if (refined and h is not None) else None
+    fine = None
+    if planet and h is not None:
+        fine = _planet_final(root, manifest, surf, _load_faces(root, "flow_dir"), planet, int(final_res or 2048), log)
+    elif refined and h is not None:
+        fine = _fine_final(root, manifest, surf, _load_faces(root, "flow_dir"), log)
     Nsrc = fine["surf"].shape[1] if fine is not None else N
     R = Nsrc // N
     r = min(Nsrc, int(final_res or Nsrc))
@@ -450,7 +506,7 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
         sediment=ds(sed),
         crust=ds(up(crust), "nearest") if crust is not None else None,
     ))
-    src = f"refined grid, R={R}" if fine is not None else "coarse grid"
+    src = (f"planet level {planet}" if planet else f"refined grid, R={R}") if fine is not None else "coarse grid"
     log(f"[viewer] {len(tect) if scale else 0} tectonics + {sum(f.stage == 'erosion' for f in frames)} erosion frames + final ({r}² per face, {src})")
     return frames, manifest
 
@@ -583,7 +639,7 @@ def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
 # --------------------------------------------------------------------------
 def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | None = None,
                   frame_res: int | None = None, max_frames: int | None = None,
-                  single: bool = False, refined: bool | None = None, log=print) -> Path:
+                  single: bool = False, refined: bool | None = None, planet: str | None = None, log=print) -> Path:
     """``frame_res`` / ``max_frames`` downsample and thin the captured
     timeline -- a light export for a slow link or a phone."""
     t0 = time.time()
@@ -594,7 +650,7 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
     # the refined frame is asked for to see the refined grid: full resolution unless told otherwise
     fres = final_res if final_res else (0 if refined else _render_param(m0, "viewer_final_res", 0))
     frames, manifest = collect_frames(root, fres, log,
-                                      frame_res=frame_res, max_frames=max_frames, refined=refined)
+                                      frame_res=frame_res, max_frames=max_frames, refined=refined, planet=planet)
     final = frames[-1]
     hydro_info = (manifest.get("stages", {}).get("hydro", {}) or {}).get("info", {}) or {}
     specs = channel_specs(final, hydro_info.get("river_threshold_volume"))

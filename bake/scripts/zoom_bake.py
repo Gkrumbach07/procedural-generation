@@ -35,7 +35,8 @@ def main(argv=None) -> int:
     ap.add_argument("--name", default=None, help="directory under <world>/zoom (default f<face>_<i>_<j>)")
     ap.add_argument("--levels", nargs="*", default=None, help="R:cells:iterations[:tile[:margin]] per level, coarse to fine")
     ap.add_argument("--erosion", nargs="*", default=[], help="erosion overrides k=v on top of the zoom profile")
-    ap.add_argument("--threads", type=int, default=0, help="numba threads (default all)")
+    ap.add_argument("--threads", type=int, default=0, help="numba threads of this process (default all)")
+    ap.add_argument("--workers", type=int, default=0, help="tile worker processes per pass (default one per 4 cores)")
     ap.add_argument("--no-resume", action="store_true", help="re-bake levels whose files exist")
     ap.add_argument("--shot", action="store_true", help="also screenshot view.html (Playwright)")
     a = ap.parse_args(argv)
@@ -74,7 +75,7 @@ def main(argv=None) -> int:
         print(f"[{time.time() - t0:7.1f}s] {msg}", flush=True)
 
     log(f"zoom of {root} at cell {spot}")
-    out = run_zoom(root, spot, levels, name=a.name, log=log, erosion=erosion or None, resume=not a.no_resume)
+    out = run_zoom(root, spot, levels, name=a.name, log=log, erosion=erosion or None, resume=not a.no_resume, workers=a.workers)
     zooms = index.write(root)
     info = json.loads((out / "zoom.json").read_text())
     log(f"done: {out / 'view.html'} ({info['seconds']:.0f}s; {len(zooms)} zoom(s) listed for the globe viewer)")

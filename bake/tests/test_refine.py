@@ -102,9 +102,19 @@ def test_job_invariants(world):
         assert m.shape == (res.win.n, res.win.n)
         frozen = m == pk.MASK_FROZEN
         assert frozen.any()
-        # divide cells: exactly the plain upsample (height, sediment, discharge)
-        for name, ref in (("height", "height0"), ("sediment", "sediment0"), ("discharge", "discharge0")):
+        # divide cells: exactly the plain upsample (height, sediment)
+        for name, ref in (("height", "height0"), ("sediment", "sediment0")):
             assert np.array_equal(a[name][frozen], a[ref][frozen]), name
+        # ... and their discharge the largest of their active neighbours' (a
+        # river runs on to the sea), the plain upsample away from any
+        # (compared off the window's border row, which the job saw beyond)
+        act = m == pk.MASK_ACTIVE
+        touch = frozen & ndimage.binary_dilation(act, structure=np.ones((3, 3), bool))
+        core = np.zeros(m.shape, bool)
+        core[1:-1, 1:-1] = True
+        near_q = ndimage.maximum_filter(np.where(act, a["discharge"], 0.0), size=3)
+        assert np.allclose(a["discharge"][touch & core], near_q[touch & core])
+        assert np.array_equal(a["discharge"][frozen & ~touch & core], a["discharge0"][frozen & ~touch & core])
         # no on-face inside cell is 8-adjacent to an outside cell / the
         # border (the off-face strip of a basin that continues across the
         # edge may reach the window border; the kernel's extended array is
@@ -505,6 +515,7 @@ def test_fine_raster_complete_and_consistent(world):
     grid_, fields, derived = bj.coarse_inputs(store.root, params)
     from globe.refine.upsample import upsample_face
 
+    zone = _coast_zone(world)
     for f in range(6):
         bid = _fine(world, "basin_id", f)
         assert np.array_equal(bid, np.repeat(np.repeat(bid_c[f], R, 0), R, 1))
@@ -512,12 +523,83 @@ def test_fine_raster_complete_and_consistent(world):
         for a in (h, s, w, q, hd):
             assert np.isfinite(a).all()
         up = upsample_face(fields, derived, f, R, 0, N)
-        ocean = bid < 0
+        ocean = (bid < 0) & ~zone[f]         # the coast pass owns the sea next to land (test_coast_pass)
         assert np.array_equal(h[ocean], up["height"][ocean]) and np.array_equal(s[ocean], up["sediment"][ocean])
         assert (w[ocean] == 0).all()
         assert np.array_equal(hd, up["hardness"])
         assert (w[~ocean] >= (h + s)[~ocean] - 1e-4).all()
         assert (s >= 0).all() and (q >= 0).all()
+
+
+def _coast_zone(world):
+    """Fine ``(6, Nf, Nf)`` cells :func:`rasterize.write_coast` may change."""
+    from globe.hydro.d8 import OCEAN
+
+    params, store = world["params"], world["store"]
+    grid = params.coarse_grid()
+    R = params.world.R
+    near = rz.coast_zone(grid, store.load_field("flow_dir", grid).interior == OCEAN)
+    return np.repeat(np.repeat(near, R, axis=1), R, axis=2)
+
+
+def test_coast_pass(world):
+    """``rasterize.write_coast``: in the coast zone every fine cell inside
+    the smoothed ocean contour is sea at least ``COAST_MARGIN_M`` deep and
+    every other cell land at least that high, so no speck of land stands
+    offshore and no puddle of sea sits on the coastal plain; water surfaces
+    stay >= the surface, sea surfaces at 0."""
+    from globe.hydro.d8 import OCEAN
+
+    store, params, info = world["store"], world["params"], world["info"]
+    grid = params.coarse_grid()
+    R, N = params.world.R, params.N_c
+    ocean_c = store.load_field("flow_dir", grid).interior == OCEAN
+    frac = rz.coast_fraction(grid, ocean_c)
+    zone = _coast_zone(world)
+    M = rz.COAST_MARGIN_M
+    seen_sea = seen_land = 0
+    for f in range(6):
+        surf = _fine(world, "height", f) + _fine(world, "sediment", f)
+        ws = _fine(world, "water_surface", f)
+        sea = (frac.sample_window(f, 0, N, 0, N, R, order=1) > 0.5) & zone[f]
+        land = zone[f] & ~sea
+        assert (surf[sea] <= -M + 1e-3).all() and (ws[sea] <= 1e-6).all()
+        assert (surf[land] >= M - 1e-3).all() and (ws[land] >= surf[land] - 1e-3).all()
+        assert (_fine(world, "sediment", f) >= -1e-4).all()
+        bid = _fine(world, "basin_id", f)
+        q = _fine(world, "discharge", f)
+        was_sea = land & (bid < 0)
+        if was_sea.any():
+            near_land = ndimage.maximum_filter(np.where(bid >= 0, q, 0.0), size=5)
+            assert np.allclose(q[was_sea], near_land[was_sea])
+        seen_sea += int(sea.sum())
+        seen_land += int(land.sum())
+    assert seen_sea > 0 and seen_land > 0
+    assert info["coast_lowered_cells"] + info["coast_raised_cells"] > 0
+
+
+def test_lake_outflow_spawns_at_the_spill_of_an_overflowing_lake():
+    """``basin_job.lake_outflow``: a lake whose level reaches its lowest shore
+    cell sends the flow through it (the largest upsampled coarse discharge on
+    the lake) from that cell; a lake held below its rim sends nothing."""
+    n = 20
+    plain = np.full((n, n), 10.0)
+    labels = np.zeros((n, n), np.int64)
+    labels[4:8, 4:8] = 1                          # lake 1, level 5, spill at (8, 6) height 5
+    labels[12:16, 12:16] = 2                      # lake 2, level 3, lowest shore 9: closed
+    plain[labels == 1] = 2.0
+    plain[labels == 2] = 1.0
+    plain[8, 6] = 5.0
+    plain[11, 13] = 9.0
+    level = np.where(labels == 1, 5.0, np.where(labels == 2, 3.0, plain))
+    q = np.zeros((n, n))
+    q[labels == 1] = 7.0
+    q[5, 5] = 9.0
+    q[labels == 2] = 4.0
+    land = labels == 0
+    out = bj.lake_outflow(labels, 2, land, plain, level, q)
+    assert out[8, 6] == pytest.approx(9.0)
+    assert out.sum() == pytest.approx(9.0)
 
 
 def test_feather_and_divides_in_raster(world):
@@ -539,7 +621,7 @@ def test_feather_and_divides_in_raster(world):
         cross[:-1, :] |= bid[1:, :] != bid[:-1, :]
         cross[:, 1:] |= bid[:, 1:] != bid[:, :-1]
         cross[:, :-1] |= bid[:, 1:] != bid[:, :-1]
-        cross &= bid >= 0
+        cross &= (bid >= 0) & ~_coast_zone(world)[f]
         if cross.any():
             assert np.abs(surf[cross] - plain[cross]).max() < 1e-3
     own = np.zeros((12, 12), bool)

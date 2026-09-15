@@ -20,17 +20,17 @@ Per level:
    flood tree and flux) the rain volume of everything upstream enters as
    extra spawn weight;
 4. tiles: the product is split into square cores of at most ``tile`` fine
-   cells, each eroded in a window of its core plus ``margin`` on every side,
-   in raster order.  Cells an earlier tile wrote are frozen (sampled, never
-   eroded); water reaching the tile across its window edge or out of frozen
-   cells -- the flux of the work array's flood tree at the crossing --
-   spawns where it crosses (``ErosionState.inflow_volume``).  A tile writes
-   back its core and the inner half of its margin; the outer half, where
-   its own edge shows, is left to the tiles after it;
-5. the drift correction (:func:`refine.zoom.smooth_drift`) holds the level
-   to its parent at the parent's cell, the water surface is a local flood
-   capped by the parent's lakes, and the flux is accumulated on the final
-   surface for the level below.
+   cells, each eroded in a window of its core plus ``margin`` on every side.
+   Tiles run in passes whose windows do not overlap (the four index
+   parities), each pass across worker processes; water crossing into a
+   tile -- the flux of the work array's flood tree as the earlier passes
+   left it -- spawns where it crosses (``ErosionState.inflow_volume``).  A
+   tile writes its new cells in the core and the inner half of its margin,
+   and cross-fades cells an earlier pass wrote back from that result;
+5. each tile is held to its parent while it erodes (an uplift rate at
+   ``hold_scale`` parent cells); after the tiles a last smooth drift
+   correction, a local flood capped by the parent's lakes, and the flux on
+   the final surface for the level below.
 """
 from __future__ import annotations
 
@@ -359,22 +359,48 @@ def tile_starts(p0: int, n: int, tile: int) -> tuple[list[int], int]:
     return [min(p0 + k * c, p0 + n - c) for k in range(nt)], c
 
 
-def run_tile(params: WorldParams, level: ZoomLevel, geo: Geometry, inp: dict, cur: dict, done: np.ndarray, flux_w: np.ndarray, recv: np.ndarray,
-             a: int, b: int, c: int, gen: np.random.Generator, log=None) -> dict:
-    """Erode one tile of ``cur`` (work arrays, updated in place) with core
-    ``[a, a + c) x [b, b + c)`` in a window of ``margin`` more on every
-    side; marks what it writes in ``done``.  The window's land is active
-    except along the coast; cells an earlier tile wrote start from its
-    result and are cross-faded back, from the earlier result at the window
-    edge (where this tile's own edge shows) to this tile's a margin in.
-    Freezing them instead cut every river that flows into an earlier tile at
-    the strip (the kernel tracks no discharge on frozen cells)."""
+def tile_windows(starts: list[int], c: int, m: int) -> list[tuple[int, int, int, int]]:
+    """``(ti, tj, a, b)`` for every tile core ``[a, a + c) x [b, b + c)``."""
+    return [(ti, tj, a, b) for ti, a in enumerate(starts) for tj, b in enumerate(starts)]
+
+
+def tile_passes(windows: list[tuple[int, int, int, int]], c: int, m: int) -> list[list[tuple[int, int, int, int]]]:
+    """Tiles grouped into passes whose windows (core + ``m`` on every side)
+    do not overlap, so a pass can run in parallel with the same result as in
+    order: the four parities of the tile indices (neighbours of one parity
+    are a core apart), a tile that would overlap one of its parity in a pass
+    of its own."""
+    def apart(w1, w2):
+        return (w1[2] + c + m <= w2[2] - m or w2[2] + c + m <= w1[2] - m or
+                w1[3] + c + m <= w2[3] - m or w2[3] + c + m <= w1[3] - m)
+
+    passes = [[w for w in windows if (w[0] % 2, w[1] % 2) == par] for par in ((0, 0), (0, 1), (1, 0), (1, 1))]
+    out = []
+    for ps in passes:
+        # the last core is shifted back to end at the product edge: where that
+        # brings two of a parity together, they run in turn
+        group: list = []
+        for w in ps:
+            if all(apart(w, x) for x in group):
+                group.append(w)
+            else:
+                out.append([w])
+        if group:
+            out.append(group)
+    return out
+
+
+def prepare_tile(level: ZoomLevel, geo: Geometry, inp: dict, cur: dict, flux_w: np.ndarray, recv: np.ndarray, a: int, b: int, c: int) -> dict | None:
+    """The arrays one tile's erosion needs (copies, so a worker can take
+    them), or None when the window has no land to erode.  The kernel array
+    is the window plus a one-cell ring outside it (mask 0); the window's land
+    is active except along the coast; water crossing into the active cells
+    -- the flux of the work array's flood tree -- spawns where it crosses."""
     m = int(level.margin)
     NE = geo.NE
     wa0, wa1 = a - m, a + c + m
     wb0, wb1 = b - m, b + c + m
     assert wa0 >= 1 and wb0 >= 1 and wa1 <= NE - 1 and wb1 <= NE - 1, (a, b, c, m, NE)
-    # kernel array: the window plus a one-cell ring outside it (mask 0)
     sl = (slice(wa0 - 1, wa1 + 1), slice(wb0 - 1, wb1 + 1))
     ocean = inp["ocean"][sl]
     inwin = np.zeros(ocean.shape, bool)
@@ -382,13 +408,8 @@ def run_tile(params: WorldParams, level: ZoomLevel, geo: Geometry, inp: dict, cu
     land = inwin & ~ocean
     frozen = land & ndimage.binary_dilation(ocean & inwin, structure=np.ones((3, 3), bool))
     active = land & ~frozen
-    mask = np.zeros(ocean.shape, np.uint8)
-    mask[land] = pk.MASK_FROZEN
-    mask[active] = pk.MASK_ACTIVE
-    stats = {"core": [a, b, c], "active_cells": int(active.sum())}
     if not active.any():
-        return stats
-    # inflow: flux of the work array's flood tree across into the tile's active cells
+        return None
     act_w = np.zeros((NE, NE), bool)
     act_w[sl] = active
     act_flat = act_w.ravel()
@@ -398,25 +419,41 @@ def run_tile(params: WorldParams, level: ZoomLevel, geo: Geometry, inp: dict, cu
     src = np.zeros(NE * NE)
     np.add.at(src, recv[cross], flux_w.ravel()[cross])
     src = src.reshape(NE, NE)[sl]
-    rain = np.where(active, inp["precip"][sl], 0.0)
+    arr = {k: np.array(cur[k][sl]) for k in ("height", "sediment", "discharge", "momentum")}
+    arr.update({k: np.array(inp[k][sl]) for k in ("hardness", "precip", "evap", "metric", "metric_inv", "plain")})
+    return {"a": a, "b": b, "c": c, "sl": sl, "land": land, "active": active, "inwin": inwin, "ocean": ocean, "src": src, "arrays": arr, "f": int(inp["f"])}
+
+
+def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tuple) -> dict:
+    """Erode one prepared tile (runs in a worker): returns its height,
+    sediment (metres), discharge and momentum over the kernel array, and
+    stats.  ``key`` seeds the tile's own particle stream, so the result does
+    not depend on which tiles run beside it."""
+    arr = job["arrays"]
+    active, land = job["active"], job["land"]
+    mask = np.zeros(active.shape, np.uint8)
+    mask[land] = pk.MASK_FROZEN
+    mask[active] = pk.MASK_ACTIVE
+    src = job["src"]
+    rain = np.where(active, arr["precip"], 0.0)
     inflow = float(src[active].sum())
     weight = (rain + np.where(active, src, 0.0)).astype(np.float32)
     rain_total = float(rain.sum())
     ppc = float(params.refine.particles_per_cell) * (min(1.0 + inflow / rain_total, MAX_INFLOW_PARTICLES) if rain_total > 0 else 1.0)
     unit = params.fine_grid().cell_size_m
-    zeros = np.zeros(ocean.shape)
     state = ErosionState.window(
-        cur["height"][sl], cur["sediment"][sl], cur["discharge"][sl], cur["momentum"][sl], inp["hardness"][sl], weight,
-        inp["evap"][sl], zeros, mask, inp["metric"][sl], inp["metric_inv"][sl], 1, unit,
+        arr["height"], arr["sediment"], arr["discharge"], arr["momentum"], arr["hardness"], weight,
+        arr["evap"], np.zeros(active.shape), mask, arr["metric"], arr["metric_inv"], 1, unit,
     )
     state.inflow_volume = inflow
-    ep = bj.basin_erosion_params(params, gen)
+    ep = bj.basin_erosion_params(params, params.rng("refine", *key))
     t0 = time.time()
     deaths = {k: 0 for k in pk.DEATH_NAMES}
     particles = 0
-    plain_t = inp["plain"][sl]
+    plain_t = arr["plain"]
     hold = int(level.hold_every)
-    off_prev = np.zeros(ocean.shape)
+    sigma = max(1, int(round(job["f"] * level.hold_scale)))
+    off_prev = np.zeros(active.shape)
     for it in range(int(level.iterations)):
         st = step(state, ep, it, particles_per_cell=ppc, rng_stage="refine")
         particles += int(st.get("particles", 0))
@@ -428,19 +465,28 @@ def run_tile(params: WorldParams, level: ZoomLevel, geo: Geometry, inp: dict, cu
             # iterations under the uplift already applied, set the rate that
             # brings it to zero by the next hold if the erosion keeps its pace
             # (docs/zoom-windows.md, "Pools from the drift correction")
-            off = np.where(active, smooth_drift((state.height[0] + state.sediment[0]) * unit - plain_t, active, max(1, int(round(inp["f"] * level.hold_scale)))), 0.0)
+            off = np.where(active, smooth_drift((state.height[0] + state.sediment[0]) * unit - plain_t, active, sigma), 0.0)
             state.uplift[0] -= np.where(active, (2.0 * off - off_prev) / (hold * unit), 0.0)
             off_prev = off
-        if log is not None and (it + 1) % 50 == 0:
-            log(f"    R={geo.R} tile {a},{b}: iteration {it + 1}/{level.iterations} ({time.time() - t0:.0f}s)")
-    h = state.height_m()[0]
-    s = state.sediment_m()[0]
-    q = state.discharge[0]
-    mom = state.momentum[0]
-    # write back: new cells of the core and the inner half of the margin as
-    # they are; cells an earlier tile wrote cross-faded over the margin
-    side = ocean.shape[0] - 2
-    e = np.arange(ocean.shape[0]) - 1
+    tot = max(sum(deaths.values()), 1)
+    stats = {"core": [job["a"], job["b"], job["c"]], "active_cells": int(active.sum()), "inflow": inflow, "rain": rain_total,
+             "particles_per_cell": ppc, "particles": particles, "seconds": round(time.time() - t0, 1),
+             "deaths_pct": {k: round(100.0 * v / tot, 1) for k, v in deaths.items() if v}}
+    return {"height": state.height_m()[0], "sediment": state.sediment_m()[0], "discharge": state.discharge[0].copy(),
+            "momentum": state.momentum[0].copy(), "stats": stats}
+
+
+def write_tile(level: ZoomLevel, cur: dict, done: np.ndarray, job: dict, out: dict) -> int:
+    """Write an eroded tile back into ``cur``: new cells of the core and the
+    inner half of the margin as they are; cells an earlier tile wrote
+    cross-faded, from the earlier result at the window edge (where this
+    tile's own edge shows) to this tile's a margin in.  Freezing them instead
+    cut every river that flows into an earlier tile at the strip (the kernel
+    tracks no discharge on frozen cells).  Returns the blended cell count."""
+    m = int(level.margin)
+    sl, land, inwin, ocean = job["sl"], job["land"], job["inwin"], job["ocean"]
+    side = land.shape[0] - 2
+    e = np.arange(land.shape[0]) - 1
     de = np.minimum(e, side - 1 - e)                       # cells in from the window edge
     d = np.minimum(de[:, None], de[None, :])
     t = np.clip((d + 0.5) / max(m, 1), 0.0, 1.0)
@@ -448,23 +494,43 @@ def run_tile(params: WorldParams, level: ZoomLevel, geo: Geometry, inp: dict, cu
     old = done[sl]
     new = land & ~old & (d >= m - m // 2)
     blend = land & old
-    for name, arr in (("height", h), ("sediment", s), ("discharge", q), ("momentum", mom)):
+    for name in ("height", "sediment", "discharge", "momentum"):
+        arr = out[name]
         view = cur[name][sl]
         view[new] = arr[new]
         wb = wgt[blend] if arr.ndim == 2 else wgt[blend][:, None]
         view[blend] = wb * arr[blend] + (1.0 - wb) * view[blend]
     done[sl] |= new | (inwin & ocean)
-    tot = max(sum(deaths.values()), 1)
-    stats.update({"blended_cells": int(blend.sum()), "inflow": inflow, "rain": rain_total, "particles_per_cell": ppc, "particles": particles, "seconds": time.time() - t0,
-                  "deaths_pct": {k: round(100.0 * v / tot, 1) for k, v in deaths.items() if v}})
-    return stats
+    return int(blend.sum())
+
+
+def _pool_init(threads: int) -> None:
+    import numba
+
+    numba.set_num_threads(max(1, min(int(threads), numba.config.NUMBA_NUM_THREADS)))
+
+
+def _erode_job(args):
+    return erode_tile(*args)
 
 
 # --------------------------------------------------------------------------
 # a level
 # --------------------------------------------------------------------------
+def pool_size(jobs: int, workers: int = 0) -> tuple[int, int]:
+    """``(worker processes, numba threads each)`` for a pass of ``jobs``
+    tiles: ``workers`` (0 = one per 4 cores, the most one kernel process
+    uses well), never more than the jobs; the cores are split evenly."""
+    import os
+
+    cpus = os.cpu_count() or 1
+    n = int(workers) if int(workers) > 0 else max(1, cpus // 4)
+    n = max(1, min(n, int(jobs)))
+    return n, max(1, cpus // n)
+
+
 def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level: ZoomLevel, parent: LevelResult | None, log=None,
-              erosion: dict | None = None) -> LevelResult:
+              erosion: dict | None = None, workers: int = 0) -> LevelResult:
     root = Path(root)
     t0 = time.time()
     face, ci, cj = spot
@@ -477,18 +543,37 @@ def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level
     cur = {"height": inp["height"].copy(), "sediment": inp["sediment"].copy(), "discharge": inp["discharge"].copy(), "momentum": inp["momentum"].copy()}
     done = np.zeros((geo.NE, geo.NE), bool)
     starts, c = tile_starts(geo.p0, geo.n, level.tile)
+    windows = tile_windows(starts, c, level.margin)
+    passes = tile_passes(windows, c, level.margin)
     tiles = []
     weight = inp["precip"] + inp["inflow"]
-    for a in starts:
-        for b in starts:
-            # the flood tree of the surface as it stands: the tiles before
+    widest = max(len(ps) for ps in passes)
+    n_workers, threads = pool_size(widest, workers)
+    pool = None
+    if n_workers > 1:
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor
+
+        pool = ProcessPoolExecutor(max_workers=n_workers, mp_context=mp.get_context("spawn"), initializer=_pool_init, initargs=(threads,))
+    try:
+        for ps in passes:
+            # the flood tree of the surface as it stands: the passes before
             # this one have moved the rivers it takes inflow from
             recv, flux_w = drainage(cur["height"] + cur["sediment"], inp["ocean"], weight)
-            st = run_tile(lp, level, geo, inp, cur, done, flux_w, recv, a, b, c, gen, log=log)
-            tiles.append(st)
-            if log is not None:
-                log(f"  R={geo.R} tile {len(tiles)}/{len(starts) ** 2}: {st.get('active_cells', 0):,} cells, inflow {st.get('inflow', 0.0):.1f} "
-                    f"of rain {st.get('rain', 0.0):.1f}, {st.get('seconds', 0.0):.0f}s, deaths {st.get('deaths_pct', {})}")
+            jobs = [(w, prepare_tile(level, geo, inp, cur, flux_w, recv, w[2], w[3], c)) for w in ps]
+            jobs = [(w, jb) for w, jb in jobs if jb is not None]
+            args = [(lp, level, geo.R, jb, (ZOOM_KEY, face, ci, cj, level.R, w[0], w[1])) for w, jb in jobs]
+            outs = list(pool.map(_erode_job, args)) if pool is not None and len(args) > 1 else [_erode_job(x) for x in args]
+            for (w, jb), out in zip(jobs, outs):
+                st = out["stats"]
+                st["blended_cells"] = write_tile(level, cur, done, jb, out)
+                tiles.append(st)
+                if log is not None:
+                    log(f"  R={geo.R} tile {len(tiles)}/{len(windows)}: {st['active_cells']:,} cells, inflow {st['inflow']:.1f} "
+                        f"of rain {st['rain']:.1f}, {st['seconds']:.0f}s, deaths {st['deaths_pct']}")
+    finally:
+        if pool is not None:
+            pool.shutdown()
     t_tiles = time.time() - t0 - t_in
     # hold the level to its parent at the parent's cell
     plain = inp["plain"]
@@ -523,6 +608,7 @@ def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level
     stats = {
         "R": geo.R, "cell_m": params.coarse_grid().cell_size_m / geo.R, "geometry": asdict(geo), "level": asdict(level), "tiles": tiles,
         "seconds": round(time.time() - t0, 1), "seconds_inputs": round(t_in, 1), "seconds_tiles": round(t_tiles, 1),
+        "passes": len(passes), "workers": n_workers,
         "noise_max_m": round(inp["noise_max_m"], 1), "drift_max_m": round(float(np.abs(fd).max()), 1),
         "held_p90_m": [round(held_before, 2), round(held_after, 2)], "lake_share_before_hold": round(lake_before, 4),
         "lake_share": round(float(lake[prod].mean()), 4), "change_std_m": round(float((surface - plain)[geo.product()][cells[geo.product()]].std()), 2) if cells.any() else 0.0,
@@ -592,7 +678,7 @@ def load_level(out: Path, R: int) -> LevelResult:
 
 
 def run_zoom(root: str | Path, spot: tuple[int, int, int], levels=DEFAULT_LEVELS, out: str | Path | None = None, name: str | None = None,
-             log=None, erosion: dict | None = None, resume: bool = True) -> Path:
+             log=None, erosion: dict | None = None, resume: bool = True, workers: int = 0) -> Path:
     """Bake a zoom of the world at ``root`` around coarse cell ``spot`` =
     ``(face, i, j)`` into ``out`` (default ``<root>/zoom/<name>``): one
     ``L{R}.npz`` / ``L{R}.json`` per level, ``zoom.json``.  With ``resume``
@@ -618,7 +704,7 @@ def run_zoom(root: str | Path, spot: tuple[int, int, int], levels=DEFAULT_LEVELS
         else:
             if log is not None:
                 log(f"R={level.R}: {level.cells} coarse cells, {level.iterations} iterations")
-            res = run_level(root, params, (face, ci, cj), level, parent, log=log, erosion=erosion)
+            res = run_level(root, params, (face, ci, cj), level, parent, log=log, erosion=erosion, workers=workers)
             res.stats["key"] = key
             save_level(res, out)
             if log is not None:
@@ -634,4 +720,4 @@ def run_zoom(root: str | Path, spot: tuple[int, int, int], levels=DEFAULT_LEVELS
 
 
 __all__ = ["ZoomLevel", "DEFAULT_LEVELS", "Geometry", "LevelResult", "place", "drainage", "planet_inflow", "level_inflow",
-           "level_inputs", "tile_starts", "run_tile", "run_level", "run_zoom", "spot_of_lonlat", "lonlat_of_spot", "save_level", "load_level"]
+           "level_inputs", "tile_starts", "tile_passes", "prepare_tile", "erode_tile", "write_tile", "pool_size", "run_level", "run_zoom", "spot_of_lonlat", "lonlat_of_spot", "save_level", "load_level"]

@@ -29,7 +29,9 @@ Erosion setup (``globe.erosion`` window mode, ``spherical=False``,
   *inside the mask* and the kernel deposits its whole load at the death
   cell ("deposit and stop", PLAN 8.2) — the only way to stop particles
   with the published kernel API without a mask-0 hole (which would
-  discard the load).  A lake is a sink with a *ceiling*.  Lake cells are
+  discard the load).  A lake is a sink with a *ceiling*.  What flows out of
+  an overflowing lake enters again at its spill cell as extra spawn weight
+  (:func:`lake_outflow`), so the river below the lake carries it.  Lake cells are
   the cells the local priority flood of the *plain* upsample (same
   drains as the final flood) covers deeper than ``lake_min_depth``
   within a coarse cell of a coarse lake (upsampled lake depth > 0); the
@@ -242,6 +244,31 @@ def local_flood(surface: np.ndarray, drain: np.ndarray, flood_active: np.ndarray
     return np.maximum(ws, surface).astype(np.float32)
 
 
+def lake_outflow(labels: np.ndarray, n_lakes: int, land: np.ndarray, plain: np.ndarray, level: np.ndarray, discharge: np.ndarray) -> np.ndarray:
+    """Spawn weight of the water leaving the window's lakes.  A particle
+    reaching a lake dies in it (module docstring), so without this the river
+    below a lake carried only the rain that falls below it -- invisible while
+    the raster feathered the coarse discharge back in, a dry valley from the
+    lake to the sea once it did not.  Each lake whose level reaches its spill
+    cell (the lowest land cell next to it) sends the largest upsampled coarse
+    discharge on it -- the flow through the lake -- from that cell; a lake held
+    below its rim (closed) sends nothing.  ``labels`` 1..n_lakes, 0 off lakes."""
+    out = np.zeros(labels.shape, np.float32)
+    if n_lakes <= 0:
+        return out
+    idx = np.arange(1, n_lakes + 1)
+    ring_lab = np.where(land, ndimage.maximum_filter(labels, size=3), 0)
+    spills = ndimage.minimum_position(np.where(ring_lab > 0, plain, np.inf), ring_lab, idx)
+    through = ndimage.maximum(discharge, labels, idx)
+    top = ndimage.maximum(level, labels, idx)
+    for k, pos, q, lv in zip(idx, spills, np.atleast_1d(through), np.atleast_1d(top)):
+        if pos is None or not np.isfinite(plain[pos]) or ring_lab[pos] != k:
+            continue
+        if lv + 0.5 >= plain[pos] and q > 0.0:
+            out[pos] += np.float32(q)
+    return out
+
+
 def peak_rss_mb() -> float:
     """Peak resident size of this process so far (MB)."""
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
@@ -385,10 +412,14 @@ def _run_basin(root, basin, params, log, t0, bid, rp, grid, fields, derived, win
     lake_lab = (lake_labels.reshape(-1)[lake_idx] - 1).astype(np.int64)
     lake_floor_m = plain.reshape(-1)[lake_idx].astype(np.float64)
     lake_cap_m = wsp.reshape(-1)[lake_idx] - np.maximum(lake_min, 0.5 * (wsp - plain).reshape(-1)[lake_idx])
+    outflow = lake_outflow(lake_labels, n_lakes, active & ~lake, plain, wsp, up["discharge"])
     del lake_labels, wsp, plain
     lake_discarded = 0.0
     ep = basin_erosion_params(params, gen)
     precip = np.where(active & ~lake, up["precip"], np.float32(0.0)).astype(np.float32)
+    rain_total = float(precip.sum())
+    outflow_total = float(outflow.sum())
+    precip = (precip + outflow).astype(np.float32)
     del up["precip"]
     evap = up.pop("evap")
     if ep.dt * ep.evap_rate > 0.0:
@@ -415,9 +446,13 @@ def _run_basin(root, basin, params, log, t0, bid, rp, grid, fields, derived, win
             np.zeros((NE, NE), dtype=np.float64), mask, up.pop("metric"), up.pop("metric_inv"), H, unit, deposit_on_exit=False,
         )
         del height, sediment, precip, evap  # the state owns / copied them
+        state.inflow_volume = outflow_total
+        # the lakes' outflow joins the spawn weight: more particles, so the
+        # rain on the rest of the basin keeps its share (capped)
+        ppc = float(rp.particles_per_cell) * (min(1.0 + outflow_total / rain_total, 3.0) if rain_total > 0.0 else 1.0)
         lake_cap_u = lake_cap_m / unit
         for it in range(n_iter):
-            st = step(state, ep, it, particles_per_cell=rp.particles_per_cell, rng_stage="refine")
+            st = step(state, ep, it, particles_per_cell=ppc, rng_stage="refine")
             particles += int(st.get("particles", 0))
             entries += int(st.get("entries", 0))
             clamped += int(st.get("clamped", 0))
@@ -477,6 +512,14 @@ def _run_basin(root, basin, params, log, t0, bid, rp, grid, fields, derived, win
     del drain, flood_active, ocean
     t_flood = time.time() - t2
 
+    # the frozen ring (divides, the coast, exits) tracks no discharge: next to
+    # active cells it takes the largest of theirs, so a river runs on to the
+    # sea instead of ending a cell short on the upsampled coarse value
+    if n_iter > 0:
+        touch = (mask == pk.MASK_FROZEN) & ndimage.binary_dilation(active, structure=np.ones((3, 3), bool))
+        if touch.any():
+            near_q = ndimage.maximum_filter(np.where(active, discharge, np.float32(0.0)), size=3)
+            discharge = np.where(touch, near_q, discharge).astype(np.float32)
     sl = (slice(H, H + n), slice(H, H + n))
     out_bid = np.where(mask > 0, np.int32(bid), up["basin_id"]).astype(np.int32)
     arrays = {

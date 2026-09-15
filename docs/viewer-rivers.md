@@ -25,18 +25,38 @@ water, so the interpolated 0 m line passes almost through the land cells'
 centres and traces the cell pattern. The coast is therefore drawn from the
 smoothed ocean mask, not from the height.
 
-**The refined grid is not ready to be the final frame.** Drawing the final
-frame from `fine/` (4.9 km, `render.viewer_refined` / `export_viewer.py
---refined`) gives visibly crisper channels, but it also shows two refine
-defects the coarse frame hides:
+**The refined grid is the final frame now** (`render.viewer_refined`, on
+by default since the fixes below). Drawing it from `fine/` first showed two
+refine defects the coarse frame hid:
 
-* land specks offshore, where the refined surface stands above 0 inside a
-  sea cell;
-* discharge that doesn't line up across basin windows: a river can stop
-  short of the coast while a separate channel reaches it, and a sharp
-  channel can run beside a blurred copy of itself where a window's feather
-  blends in the upsampled coarse discharge.
+* land specks offshore: the bicubic upsample of a shallow shelf (erosion
+  fills it to a few metres below the water) overshoots above sea level next
+  to high ground -- 45k fine sea cells up to 245 m on earth-v9, 4,680
+  specks of at most four cells in the coast zone;
+* discharge that doesn't line up: every basin window feathered its
+  discharge back into the upsampled coarse discharge along *all* its edges,
+  the coastline included, so the last cells of a river became a blurred
+  coarse channel beside the sharp one, and rivers ended short of the sea.
 
-So the refined frame is opt-in until refine's discharge and coast are
-fixed. It costs a 40 MB final frame against 14 MB and 58 s against 33 s to
-export.
+Fixed in the refine stage (`scratch/shots/cmp_mouths*.png`, before / after):
+
+* a coast pass after every other writer (`rasterize.write_coast`): in the
+  coarse cells that are ocean or touch it, a fine cell inside the 0.5
+  contour of the smoothed ocean mask is sea at least 1 m deep and any other
+  is land at least 1 m high -- specks 4,680 -> 507 (the rest are the coarse
+  grid's own one-cell islands), and a coastline that rounds the coarse
+  cells; a former sea cell it gives to land takes the refined land's
+  discharge beside it;
+* discharge is feathered only towards cube edges (the seam blend's
+  business), and the frozen ring takes its active neighbours' discharge, so
+  a channel runs into the sea;
+* lakes pass their water on (`basin_job.lake_outflow`): a particle that
+  reaches a lake dies in it, which left the river below every lake dry once
+  the coarse blur was gone; an overflowing lake now spawns the flow through
+  it at its spill cell.
+
+Left: a lake right on the coast spills along the shore, which draws a short
+river strip beside the sea.
+
+The refined frame costs a 40 MB final frame against 14 MB and 58 s
+against 33 s to export.
