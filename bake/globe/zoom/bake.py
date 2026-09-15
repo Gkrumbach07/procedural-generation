@@ -720,6 +720,58 @@ def write_views(out: Path, levels, lat: float, lon: float, name: str, max_res: i
         (Path(out) / "view.html").write_text(html)
 
 
+def planet_dir(root: str | Path, R: int) -> Path | None:
+    """The finished planet level at ``R`` (``globe.zoom.planet``), if there is one."""
+    d = Path(root) / "zoom" / f"planet_R{int(R)}"
+    if not (d / "planet.json").exists():
+        return None
+    return d if int(json.loads((d / "planet.json").read_text())["level"]["R"]) == int(R) else None
+
+
+def level_from_planet(root: Path, params: WorldParams, spot: tuple[int, int, int], level: ZoomLevel, pdir: Path) -> LevelResult:
+    """A zoom's first level cut from the planet level at its ``R`` instead of
+    eroded again: the planet's height, sediment, discharge and water surface
+    over the level's work array (a zoom stays on one face, and its work array
+    inside it), the momentum of the planet's work raster, and the plain
+    upsample, ocean and flux the next level chains from.  The planet level
+    ran fewer iterations than a zoom's own first level (80 against 200 at
+    R = 8), so the relief it hands down is younger."""
+    from . import planet as zp
+
+    t0 = time.time()
+    face, ci, cj = spot
+    N = params.coarse_grid().N
+    geo = place(face, ci, cj, level, N)
+    lp = zoom_params(params, level.R)
+    inp = level_inputs(root, lp, geo, level, None, params.rng("refine", ZOOM_KEY, face, ci, cj, level.R))
+    info = json.loads((pdir / "planet.json").read_text())
+    R, NE = geo.R, geo.NE
+    a0, b0 = geo.origin[0] * R, geo.origin[1] * R
+    if a0 < 0 or b0 < 0 or a0 + NE > N * R or b0 + NE > N * R:
+        raise ValueError(f"zoom level R={R} at {spot} leaves face {face}")
+    sl = (slice(a0, a0 + NE), slice(b0, b0 + NE))
+    arr = {k: np.array(np.load(zp.out_path(pdir, R, face, k), mmap_mode="r")[sl], np.float64) for k in zp.OUT_FIELDS}
+    g = (int(info["level"]["margin"]) // R + 1) * R
+    mom = np.load(zp.work_path(pdir, face, "momentum"), mmap_mode="r")
+    momentum = np.array(mom[a0 + g:a0 + g + NE, b0 + g:b0 + g + NE], np.float64)
+    surface = arr["height"] + arr["sediment"]
+    ocean = inp["ocean"]
+    _, flux = drainage(surface, ocean, inp["precip"] + inp["inflow"])
+    prod = geo.product()
+    ws = np.maximum(arr["water_surface"], surface)
+    lake = (ws - surface > float(params.hydro.lake_min_depth)) & ~ocean
+    arrays = {"height": arr["height"].astype(np.float32), "sediment": arr["sediment"].astype(np.float32), "discharge": arr["discharge"].astype(np.float32),
+              "momentum": momentum.astype(np.float32), "water_surface": ws.astype(np.float32), "flux": flux.astype(np.float32),
+              "plain": inp["plain"].astype(np.float32), "ocean": ocean, "done": np.ones((NE, NE), bool)}
+    stats = {"R": R, "cell_m": params.coarse_grid().cell_size_m / R, "geometry": asdict(geo), "level": asdict(level), "tiles": [],
+             "source": "planet", "planet": pdir.name, "planet_iterations": int(info["level"]["iterations"]),
+             "seconds": round(time.time() - t0, 1), "inflow_total": float(inp["inflow"].sum()),
+             "lake_share": round(float(lake[prod].mean()), 4), "lake_cells_product": int(lake[prod].sum()),
+             "rain_cell": float(inp["precip"][~ocean].mean()) if (~ocean).any() else 0.0,
+             "relief_m": [float(surface[prod].min()), float(surface[prod].max())]}
+    return LevelResult(geo, arrays, stats)
+
+
 def save_level(res: LevelResult, out: Path) -> Path:
     path = Path(out) / f"L{res.geo.R}.npz"
     np.savez_compressed(path, **{k: (v.astype(np.uint8) if v.dtype == bool else v) for k, v in res.arrays.items()})
@@ -735,12 +787,14 @@ def load_level(out: Path, R: int) -> LevelResult:
 
 
 def run_zoom(root: str | Path, spot: tuple[int, int, int], levels=DEFAULT_LEVELS, out: str | Path | None = None, name: str | None = None,
-             log=None, erosion: dict | None = None, resume: bool = True, workers: int = 0) -> Path:
+             log=None, erosion: dict | None = None, resume: bool = True, workers: int = 0, planet: bool | None = None) -> Path:
     """Bake a zoom of the world at ``root`` around coarse cell ``spot`` =
     ``(face, i, j)`` into ``out`` (default ``<root>/zoom/<name>``): one
     ``L{R}.npz`` / ``L{R}.json`` per level, ``zoom.json``.  With ``resume``
     a level whose files exist (same spot and level settings) is loaded, not
-    re-baked."""
+    re-baked.  The first level is cut from the planet level at its ``R``
+    (:func:`level_from_planet`) when ``planet`` is True, or None and a
+    finished one exists; False always erodes it."""
     root = Path(root)
     store = WorldStore(root)
     params = WorldParams.from_dict(store.manifest["params"])
@@ -752,16 +806,26 @@ def run_zoom(root: str | Path, spot: tuple[int, int, int], levels=DEFAULT_LEVELS
     parent = None
     records = []
     for level in levels:
+        pdir = planet_dir(root, level.R) if parent is None and planet is not False else None
+        if planet is True and parent is None and pdir is None:
+            raise FileNotFoundError(f"no finished planet level at R={level.R} under {root / 'zoom'}")
         key = {"spot": [face, ci, cj], "level": asdict(level), "erosion": erosion or {}, "kernel": pk.KERNEL_VERSION}
+        if pdir is not None:
+            key["planet"] = [pdir.name, (pdir / "planet.json").stat().st_mtime_ns]
         meta = out / f"L{level.R}.json"
         if resume and meta.exists() and (out / f"L{level.R}.npz").exists() and json.loads(meta.read_text()).get("key") == key:
             res = load_level(out, level.R)
             if log is not None:
                 log(f"R={level.R}: resumed")
         else:
-            if log is not None:
-                log(f"R={level.R}: {level.cells} coarse cells, {level.iterations} iterations")
-            res = run_level(root, params, (face, ci, cj), level, parent, log=log, erosion=erosion, workers=workers)
+            if pdir is not None:
+                if log is not None:
+                    log(f"R={level.R}: {level.cells} coarse cells, from {pdir.name}")
+                res = level_from_planet(root, params, (face, ci, cj), level, pdir)
+            else:
+                if log is not None:
+                    log(f"R={level.R}: {level.cells} coarse cells, {level.iterations} iterations")
+                res = run_level(root, params, (face, ci, cj), level, parent, log=log, erosion=erosion, workers=workers)
             res.stats["key"] = key
             save_level(res, out)
             if log is not None:
@@ -777,4 +841,4 @@ def run_zoom(root: str | Path, spot: tuple[int, int, int], levels=DEFAULT_LEVELS
 
 
 __all__ = ["ZoomLevel", "DEFAULT_LEVELS", "Geometry", "LevelResult", "place", "drainage", "planet_inflow", "level_inflow",
-           "level_inputs", "tile_starts", "tile_passes", "prepare_tile", "erode_tile", "write_tile", "pool_size", "run_level", "run_zoom", "spot_of_lonlat", "lonlat_of_spot", "save_level", "load_level"]
+           "level_inputs", "tile_starts", "tile_passes", "prepare_tile", "erode_tile", "write_tile", "pool_size", "run_level", "planet_dir", "level_from_planet", "run_zoom", "spot_of_lonlat", "lonlat_of_spot", "save_level", "load_level"]

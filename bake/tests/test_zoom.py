@@ -110,7 +110,7 @@ def test_inflow_spawns_off_the_border():
 def zoom(world, tmp_path_factory):
     spot = _land_spot(world)
     out = world["root"] / "zoom" / "t"
-    zb.run_zoom(world["root"], spot, LEVELS, name="t", resume=False)
+    zb.run_zoom(world["root"], spot, LEVELS, name="t", resume=False, planet=False)
     return {"spot": spot, "out": out, "levels": [zb.load_level(out, lv.R) for lv in LEVELS]}
 
 
@@ -155,7 +155,7 @@ def test_zoom_is_deterministic_and_the_same_in_parallel(world, zoom, tmp_path):
     """A rerun matches byte for byte, and so does one with the tiles of a
     pass in worker processes (each tile seeds its own particles)."""
     out2 = tmp_path / "again"
-    zb.run_zoom(world["root"], zoom["spot"], LEVELS[:1], out=out2, name="again", resume=False, workers=2)
+    zb.run_zoom(world["root"], zoom["spot"], LEVELS[:1], out=out2, name="again", resume=False, workers=2, planet=False)
     a = zb.load_level(out2, LEVELS[0].R).arrays
     b = zoom["levels"][0].arrays
     for k in ("height", "sediment", "discharge"):
@@ -304,6 +304,28 @@ def test_planet_level_does_not_depend_on_the_workers(world, planet, tmp_path):
     assert rec.get("resumed_tiles", 0) > 0, rec
     for k in ("height", "sediment", "discharge"):
         assert np.array_equal(np.load(zp.work_path(planet["out"], 0, k)), np.load(zp.work_path(out2, 0, k))), k
+
+
+def test_zoom_starts_from_the_planet_level(world, zoom, planet, tmp_path):
+    """With a finished planet level at the first level's R, that level is the
+    planet's rasters over its work array -- not eroded again -- and the next
+    level chains from it as from its own."""
+    from globe.zoom import planet as zp
+
+    assert zb.planet_dir(world["root"], LEVELS[0].R) == planet["out"]
+    out = zb.run_zoom(world["root"], zoom["spot"], LEVELS, out=tmp_path / "from_planet", name="p", resume=False)
+    first = zb.load_level(out, LEVELS[0].R)
+    assert first.stats["source"] == "planet"
+    geo, R = first.geo, LEVELS[0].R
+    a0, b0 = geo.origin[0] * R, geo.origin[1] * R
+    h = np.load(zp.out_path(planet["out"], R, geo.face, "height"))[a0:a0 + geo.NE, b0:b0 + geo.NE]
+    assert np.array_equal(first.arrays["height"], h.astype(np.float32))
+    second = zb.load_level(out, LEVELS[1].R)
+    assert second.stats.get("source") != "planet" and second.stats["inflow_total"] > 0.0
+    sl = second.geo.product()
+    assert second.arrays["done"][sl][~second.arrays["ocean"][sl]].all()
+    info = json.loads((out / "zoom.json").read_text())
+    assert [lv["R"] for lv in info["levels"]] == [lv.R for lv in LEVELS]
 
 
 def test_planet_inflow_crosses_cube_edges():

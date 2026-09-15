@@ -765,3 +765,15 @@ split 137, 122 and 157 (passes 2-4; pass 1, 700 s, shared the machine with
 a stray pool), face 1's first pass with 9 workers x 2 threads **58** (9
 tiles, 3.4 M cells, 198 s). Different tiles, so a rough 2.2x -- and face 0's
 passes also shared the cores with the profiling above.
+
+### Zooms from the planet level
+
+Once `zoom/planet_R8` is finished, a zoom's first level (R = 8) is cut from
+it instead of eroded again (`bake.level_from_planet`; `zoom_bake.py
+--no-planet` erodes it as before): the planet's height, sediment, discharge
+and water surface over the level's work array, the momentum of its work
+raster, and the plain upsample, ocean and flux the 305 m level chains from.
+It saves the first level's ~3 minutes of a ~13-minute zoom, and every zoom
+of a world now starts from the same 1.2 km terrain -- two zooms that
+overlap agree at that level. The planet ran 80 iterations to a zoom's 200,
+so the relief handed down is younger.
