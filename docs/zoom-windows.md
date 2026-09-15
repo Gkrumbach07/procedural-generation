@@ -777,3 +777,35 @@ It saves the first level's ~3 minutes of a ~13-minute zoom, and every zoom
 of a world now starts from the same 1.2 km terrain -- two zooms that
 overlap agree at that level. The planet ran 80 iterations to a zoom's 200,
 so the relief handed down is younger.
+
+## The planet at 305 m (design; not run yet)
+
+`planet_bake.py --R 32 --parent 8` erodes every land tile of the planet at
+305 m, chained from the finished 1.2 km level the way a zoom's levels chain
+(`globe/zoom/planet_chain.py`, `PlanetLevel.parent`):
+
+* **inputs**: a tile's surface is the 1.2 km work raster's, bicubic;
+  sediment, discharge and momentum bilinear; the planet's upsample only
+  where the parent wrote nothing (open sea). Detail noise below the parent
+  cell is `chain_detail` 0.5 x min(parent slope x parent cell, parent 3x3
+  relief), hashed on the child's cells so overlapping tiles agree. The hold
+  works at 4 *parent* cells;
+* **inflow**: per face, once, a flood tree of the parent's work raster --
+  the face and its 9-cell guard beyond the cube edges, 8384^2 cells --
+  draining to the sea and the raster's border, carrying the planet's rain
+  and, at the border, the planet's cross-face inflow
+  (`flow.f{k}.{recv,flux}.npy` beside the parent). A tile takes the flux of
+  every parent cell outside its window whose receiver is inside, where it
+  crosses: the parent's own rivers enter where they are, not where hydro's
+  9.8 km D8 says;
+* **finish in bounded memory** (`globe/zoom/planet_finish.py`): a face is
+  32768^2 cells (4.3 GB a float32 field); the outputs are memmaps written a
+  strip at a time, and the water surface is flooded whole up to 8192 cells a
+  side (byte-identical to the in-memory finish of the 1.2 km level) and in
+  8192^2 blocks overlapping by 512 beyond that, capped by the planet's lakes;
+* **viewing**: the viewer's final frame reduces the level to 2048^2 a face
+  and `--detail` tiles carry the rest (`globe/viz/detail.py` reads a row of
+  tiles at a time).
+
+Disk: work rasters of ~23 GB a face (sparse over the sea) and outputs of
+17 GB a face, ~250 GB in all.
