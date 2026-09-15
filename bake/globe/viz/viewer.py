@@ -635,13 +635,97 @@ def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
 
 
 # --------------------------------------------------------------------------
+# river lines (docs/viewer-rivers.md, "River lines")
+# --------------------------------------------------------------------------
+#: traced river lines: rivers carry at least this percentile of land discharge
+#: (the texture fades in from the 85th, but traced that far down a plain's
+#: sheet flow becomes parallel hatching), with this many cells upstream
+TRACED_RIVER_PERCENTILE = 97.0
+TRACED_MIN_LENGTH = 8
+
+
+def river_lines(root: Path, final: _Frame, specs: dict, source: str = "graph", log=print) -> dict | None:
+    """The final frame's rivers as polylines for the viewer to draw at their
+    own width: ``source`` ``"graph"`` reads derive's ``graph/rivers.json``
+    (the drainage graph's reaches traced through the refined channel and
+    Catmull-Rom smoothed, a width in metres from their discharge), ``"traced"``
+    follows the final frame's discharge down its surface's flood tree
+    (:mod:`globe.viz.river_lines`).
+    Returns ``{"xyz": (n, 3) int16 unit vector x 32767, "width": (n,) uint16
+    metres, "byte": (n,) uint8 fade byte of ``channel``, "lengths": (m,)
+    uint32 vertices per line, "channel": spec name}``, or None."""
+    from . import river_lines as rl
+
+    if source == "graph":
+        path = Path(root) / "graph" / "rivers.json"
+        if not path.exists() or "flow" not in specs:
+            return None
+        rivers = json.loads(path.read_text()).get("rivers", [])
+        s = specs["flow"]
+        pts, widths, bytes_, lengths = [], [], [], []
+        for r in rivers:
+            p = np.asarray(r["points"], np.float64)
+            if p.shape[0] < 2:
+                continue
+            pts.append(to_sphere_v(p[:, 0].astype(np.int64), p[:, 1], p[:, 2]))
+            widths.append(p[:, 3])
+            q = r.get("discharge")
+            b = int(log_byte(np.array([q if q is not None else s["river_min"]]), s["lo"], s["hi"])[0])
+            bytes_.append(np.full(p.shape[0], b, np.uint8))
+            lengths.append(p.shape[0])
+        channel = "flow"
+    elif source == "traced":
+        if not {"discharge", "water"} <= final.ch.keys() or "discharge" not in specs:
+            return None
+        s = specs["discharge"]
+        land_q = final.ch["discharge"][(final.height >= 0) & (final.ch["discharge"] > 0)]
+        q_min = _pctl(land_q, TRACED_RIVER_PERCENTILE, s["river_min"])
+        out = rl.trace(final.ch["discharge"], final.ch["water"], final.height, q_min, min_length=TRACED_MIN_LENGTH)
+        q = out["discharge"].astype(np.float64)
+        qmax = max(float(final.ch["discharge"].max()), 1e-9)
+        pts = [out["xyz"]] if out["lengths"].size else []
+        widths = [np.maximum(rl.RIVER_WIDTH_MAX_M * (q / qmax) ** rl.RIVER_WIDTH_EXPONENT, 30.0)]
+        bytes_ = [log_byte(q, s["lo"], s["hi"])]
+        lengths = list(out["lengths"])
+        channel = "discharge"
+        log(f"[viewer] traced river lines: {({k: v for k, v in out.items() if not isinstance(v, np.ndarray)})}")
+    else:
+        return None
+    if not pts:
+        return None
+    xyz = np.concatenate(pts)
+    return {"xyz": np.round(xyz * 32767.0).astype(np.int16), "width": np.clip(np.round(np.concatenate(widths)), 1, 65535).astype(np.uint16),
+            "byte": np.concatenate(bytes_).astype(np.uint8), "lengths": np.asarray(lengths, np.uint32), "channel": channel, "source": source}
+
+
+def river_lines_script(lines: dict, specs: dict) -> tuple[str, dict]:
+    """``GLOBE_VIEWER.rivers({...})`` and the meta entry describing it."""
+    b64 = lambda a: base64.b64encode(np.ascontiguousarray(a).astype(a.dtype.newbyteorder("<")).tobytes()).decode("ascii")
+    s = specs[lines["channel"]]
+    min_byte = int(log_byte(np.array([s["river_min"]]), s["lo"], s["hi"])[0])
+    # graded over the rivers drawn, so a trunk is wider and stays longer as
+    # the view zooms out than a stream just over the line
+    top = float(np.percentile(lines["byte"], 99)) if lines["byte"].size else min_byte + 12
+    span = max(int(round(top)) - min_byte, 12)
+    info = {"source": lines["source"], "lines": int(lines["lengths"].size), "vertices": int(lines["width"].size),
+            "min_byte": min_byte, "span_byte": span}
+    payload = {"xyz": b64(lines["xyz"]), "width": b64(lines["width"]), "byte": b64(lines["byte"]), "lengths": b64(lines["lengths"])}
+    return "GLOBE_VIEWER.rivers(%s);\n" % json.dumps(payload, separators=(",", ":")), info
+
+
+# --------------------------------------------------------------------------
 # export
 # --------------------------------------------------------------------------
 def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | None = None,
                   frame_res: int | None = None, max_frames: int | None = None,
-                  single: bool = False, refined: bool | None = None, planet: str | None = None, log=print) -> Path:
+                  single: bool = False, refined: bool | None = None, planet: str | None = None,
+                  river_source: str = "auto", log=print) -> Path:
     """``frame_res`` / ``max_frames`` downsample and thin the captured
-    timeline -- a light export for a slow link or a phone."""
+    timeline -- a light export for a slow link or a phone.  ``river_source``
+    (:func:`river_lines`): ``"auto"`` draws derive's graph rivers, except on a
+    planet level's frame (they were traced on the refined grid, not on it)
+    or where there are none, where the lines are traced; ``"none"`` leaves
+    the rivers to the discharge texture."""
     t0 = time.time()
     root = Path(world_dir)
     out = Path(out) if out else root / "viewer"
@@ -674,6 +758,19 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
             scripts.append(payload)
         metas.append(meta)
 
+    rivers_js, rivers_info = None, None
+    lines = None
+    if river_source == "auto":
+        lines = (None if planet else river_lines(root, final, specs, "graph", log)) or river_lines(root, final, specs, "traced", log)
+    elif river_source and river_source != "none":
+        lines = river_lines(root, final, specs, river_source, log)
+    if lines is not None:
+        rivers_js, rivers_info = river_lines_script(lines, specs)
+        rivers_info["file"] = "data/rivers.js"
+        (out / "data" / "rivers.js").write_text(rivers_js)
+        sizes += len(rivers_js)
+        log(f"[viewer] river lines ({river_source}): {rivers_info['lines']:,} lines, {rivers_info['vertices']:,} vertices, {len(rivers_js) / 1e6:.1f} MB")
+
     meta = {
         "world": root.resolve().name,
         "N_c": manifest.get("N_c"), "cell_size_m": manifest.get("cell_size_m"), "seed": manifest.get("seed"),
@@ -686,11 +783,13 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
         "exported": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "final_index": len(frames) - 1,
         "frames": metas,
+        "river_lines": rivers_info,
     }
     meta_js = "GLOBE_VIEWER.setMeta(%s);\n" % json.dumps(meta, separators=(",", ":"))
     (out / "data" / "meta.js").write_text(meta_js)
     html = TEMPLATE.read_text()
-    (out / "index.html").write_text(html.replace(PLACEHOLDER, '<script src="data/meta.js"></script>\n<script src="zooms.js"></script>'))
+    extra = '\n<script src="data/rivers.js"></script>' if rivers_js else ""
+    (out / "index.html").write_text(html.replace(PLACEHOLDER, '<script src="data/meta.js"></script>' + extra + '\n<script src="zooms.js"></script>'))
     from ..zoom import index as zoom_index
     zooms = zoom_index.scan(root)
     (out / "zooms.js").write_text(zoom_index.script(zooms))
@@ -698,7 +797,11 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
         inline_meta = json.loads(json.dumps(meta))
         for m in inline_meta["frames"]:
             m["file"] = None
+        if inline_meta.get("river_lines"):
+            inline_meta["river_lines"]["file"] = None
         blocks = ["<script>GLOBE_VIEWER.setMeta(%s);</script>" % json.dumps(inline_meta, separators=(",", ":"))]
+        if rivers_js:
+            blocks.append("<script>%s</script>" % rivers_js)
         blocks += ["<script>%s</script>" % s for s in scripts]
         blocks.append("<script>%s</script>" % zoom_index.script(zooms))
         (out / "standalone.html").write_text(html.replace(PLACEHOLDER, "\n".join(blocks)))

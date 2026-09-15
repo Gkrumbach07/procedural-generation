@@ -29,10 +29,13 @@ def main() -> int:
     ap.add_argument("--refined", action="store_true", default=None,
                     help="draw the final frame from the refined grid (fine/) at full resolution (default: render.viewer_refined)")
     ap.add_argument("--planet", default=None, help="draw the final frame from a planet zoom level (e.g. zoom/planet_R8), reduced to --final-res (default 2048) per face")
+    ap.add_argument("--river-source", default="auto", choices=("auto", "graph", "traced", "none"),
+                    help="river lines on the final frame: derive's graph/rivers.json (auto, except on a --planet frame), traced from its discharge along the surface's flood tree, or none (the discharge texture)")
     ap.add_argument("--formats", default="", help="extra exports: equirect, anim (comma separated)")
     args = ap.parse_args()
     p = export_viewer(args.world, args.out, formats=args.formats, final_res=args.final_res, frame_res=args.frame_res,
-                      max_frames=args.max_frames, single=args.single, refined=args.refined, planet=args.planet)
+                      max_frames=args.max_frames, single=args.single, refined=args.refined, planet=args.planet,
+                      river_source=args.river_source)
     print(p)
     return 0
 

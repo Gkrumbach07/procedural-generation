@@ -2,9 +2,10 @@
 import json
 
 import numpy as np
+import pytest
 
 from globe.config import WorldParams
-from globe.cubesphere import to_sphere_v
+from globe.cubesphere import from_sphere_v, to_sphere_v
 from globe.pipeline import bake
 from globe.viz import frames as vf
 from globe.viz import viewer as vw
@@ -241,7 +242,7 @@ def test_shader_sources_are_not_cut_short_by_a_stray_backtick():
     emitted page is even syntactically valid JavaScript.
     """
     js = vw.TEMPLATE.read_text()
-    for name, tail in (("VS", "gl_Position"), ("FS", "void main")):
+    for name, tail in (("VS", "gl_Position"), ("FS", "void main"), ("LVS", "gl_Position"), ("LFS", "void main")):
         k = js.index(f"const {name} = `")
         start = js.index("`", k)
         lit = _template_literals(js[start:])[0]
@@ -249,3 +250,61 @@ def test_shader_sources_are_not_cut_short_by_a_stray_backtick():
         assert body.startswith("#version 300 es"), name
         assert tail in body, f"{name} shader is cut short: {body[-120:]!r}"
         assert body.rstrip().endswith("}"), f"{name} shader does not end at a closing brace"
+
+
+# --------------------------------------------------------------------------
+# river lines (viewer.river_lines, globe/viz/river_lines.py)
+# --------------------------------------------------------------------------
+def _valley(res: int = 32):
+    """Face 0: sea along i < 2, land rising along i; a valley down j = 16 whose
+    discharge grows towards the sea but dips for a cell mid-way (the
+    time-averaged stream map does that), a band a cell wide either side
+    carrying a little less, and a tributary joining from j = 24."""
+    surf = np.full((6, res, res), 500.0, np.float32)
+    D = np.zeros((6, res, res), np.float32)
+    water = np.zeros((6, res, res), np.uint8)
+    i = np.arange(res, dtype=np.float32)[:, None]
+    j = np.arange(res, dtype=np.float32)[None, :]
+    surf[0] = 1.0 * i + 3.0 * np.abs(j - 16)                 # a V valley falling 1 m a cell towards the sea
+    water[0, :2, :] = 2
+    surf[0, :2, :] = -50.0
+    D[0, 2:, 16] = 1000.0 - 20.0 * np.arange(2, res)
+    D[0, 15, 16] = 500.0                                   # the dip
+    D[0, 2:, 15] = D[0, 2:, 17] = 0.8 * D[0, 2:, 16]
+    D[0, 10, 17:26] = 60.0 + 5.0 * np.arange(9)[::-1]      # tributary, growing towards the valley
+    surf[0, 10, 17:26] -= 5.0                              # its channel, cut into the valley side
+    return D, water, surf
+
+
+def test_river_lines_run_down_a_valley_to_the_sea():
+    from globe.viz import river_lines as rl
+
+    D, water, surf = _valley()
+    out = rl.trace(D, water, surf, q_min=50.0, min_length=3, smooth_passes=3, tolerance=0.25)
+    xyz, n = out["xyz"].astype(np.float64), out["lengths"]
+    assert n.sum() == xyz.shape[0] and np.allclose(np.linalg.norm(xyz, axis=1), 1.0, atol=1e-5)
+    # the dip did not end the river: nothing ends but in the sea or at the face's edge
+    assert out["mouths"] >= 1 and out["ends_elsewhere"] == 0, out
+    # the band beside the channel is spurs, not rivers: every vertex lies
+    # near the valley's axis or on the tributary
+    f, u, v = from_sphere_v(xyz)
+    ci, cj = u * 32 - 0.5, v * 32 - 0.5
+    assert np.all(f == 0)
+    assert np.all((np.abs(cj - 16) <= 1.01) | (np.abs(ci - 10) <= 1.01)), np.c_[ci, cj]
+    # the main stem reaches the shore: its last vertex is the sea cell's centre
+    assert (ci < 2).any()
+    assert out["discharge"].max() == pytest.approx(D.max())
+
+
+def test_river_lines_payload_round_trips():
+    import base64
+
+    lines = {"xyz": np.array([[32767, 0, 0], [0, 32767, 0], [0, 0, -32767]], np.int16), "width": np.array([30, 300, 3000], np.uint16),
+             "byte": np.array([10, 200, 255], np.uint8), "lengths": np.array([2, 1], np.uint32), "channel": "flow", "source": "graph"}
+    specs = {"flow": {"lo": 1.0, "hi": 1000.0, "river_min": 10.0}}
+    js, info = vw.river_lines_script(lines, specs)
+    payload = json.loads(js[js.index("(") + 1: js.rindex(")")])
+    back = {k: np.frombuffer(base64.b64decode(payload[k]), dtype=lines[k].dtype) for k in ("xyz", "width", "byte", "lengths")}
+    assert np.array_equal(back["xyz"].reshape(-1, 3), lines["xyz"]) and np.array_equal(back["width"], lines["width"])
+    assert np.array_equal(back["byte"], lines["byte"]) and np.array_equal(back["lengths"], lines["lengths"])
+    assert info["lines"] == 2 and info["vertices"] == 3 and info["min_byte"] == int(vw.log_byte(np.array([10.0]), 1.0, 1000.0)[0])

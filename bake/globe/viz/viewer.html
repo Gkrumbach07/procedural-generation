@@ -118,6 +118,7 @@ GV.pending = GV.pending || {};
 GV.setMeta = m => { GV.meta = m; };
 GV.frame = (i, texs) => { GV.pending[i] = texs; if (GV.onFrame) GV.onFrame(i); };
 GV.setZooms = z => { GV.zooms = z; if (GV.onZooms) GV.onZooms(z); };   // zooms.js (globe/zoom/index.py)
+GV.rivers = r => { GV.riverData = r; if (GV.onRivers) GV.onRivers(r); };  // data/rivers.js (viewer.river_lines)
 </script>
 <!--GLOBE_VIEWER_DATA-->
 <script>
@@ -202,6 +203,8 @@ uniform float uRiverMin;       // byte at which a river starts to fade in
 uniform float uRiverSpan;      // bytes from there to full strength
 uniform float uRiverZoom;      // bytes the fade-in moves up per doubling of cells per screen pixel
 uniform int uGrid, uCoast;
+uniform int uLines;            // 1 when the river-line pass drew into uRL this frame
+uniform sampler2D uRL;         // river lines, canvas-sized: R coverage x fade, G width (for the colour)
 uniform float uTexelRad;       // one texel of frame a, radians
 const float PI = 3.14159265358979;
 const float TWO_OVER_PI = 0.636619772367581;
@@ -387,8 +390,16 @@ void main(){
     float cpp = max(1.0 / (uScale * uTexelRad), 1.0);
     float t = clamp((b - uRiverMin - uRiverZoom * log2(cpp)) / max(uRiverSpan, 1.0), 0.0, 1.0);
     float w = t * t * (3.0 - 2.0 * t);
+    // with river lines the lines are the rivers: the texture's channels are
+    // two or three cells wide once a cell is several pixels
+    if (uLines == 1) w = 0.0;
     vec3 rc = mix(vec3(0.42, 0.62, 0.80), vec3(0.14, 0.34, 0.70), w);
     col = mix(col, rc, w * 0.9);
+  }
+  if (uLines == 1 && !wet) {
+    vec4 rl = texelFetch(uRL, ivec2(gl_FragCoord.xy), 0);
+    vec3 rc = mix(vec3(0.30, 0.52, 0.78), vec3(0.12, 0.30, 0.66), rl.g);
+    col = mix(col, rc, rl.r * 0.95);
   }
   if (uCoast == 1) {
     float w = fwidth(h);
@@ -428,6 +439,140 @@ for (let i = 0, n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS); i < n; i++
   const name = gl.getActiveUniform(prog, i).name.replace(/\[0\]$/, "");
   U[name] = gl.getUniformLocation(prog, name);
 }
+// ---------------------------------------------------------------------------
+// River lines (viewer.river_lines): every segment a screen-space quad around
+// its two projected ends, shaded as a capsule of the river's width in pixels
+// (at least one pixel, fainter below it), drawn with MAX blending into a
+// canvas-sized texture that the main pass mixes in on land -- so joins do
+// not darken, and a line never paints over a lake or the sea.
+// ---------------------------------------------------------------------------
+const LVS = `#version 300 es
+precision highp float;
+in vec3 aP0, aP1; in vec2 aW, aB;
+uniform vec2 uView; uniform int uMode; uniform float uScale, uLat0, uLon0; uniform vec3 uE, uN, uC;
+uniform float uRplanet, uMinB, uSpan, uZoomK, uLogCpp, uPx;
+out vec2 vPix; flat out vec2 vA, vB; flat out float vW0, vW1, vT0, vT1, vG0, vG1;
+const float PI = 3.14159265358979;
+vec3 proj(vec3 p) {        // screen px from the centre, and 1 when visible
+  if (uMode == 0) return vec3(dot(p, uE) * uScale, dot(p, uN) * uScale, dot(p, uC) > 0.0 ? 1.0 : 0.0);
+  float lat = asin(clamp(p.z, -1.0, 1.0)), lon = atan(p.y, p.x);
+  float dl = mod(lon - uLon0 + PI, 2.0 * PI) - PI;
+  return vec3(dl * uScale, (lat - uLat0) * uScale, 1.0);
+}
+// shown: 0 below the zoom's cut-off (it moves up uZoomK bytes per doubling of
+// cells per pixel), 1 twelve bytes above it; grade: where the discharge lies
+// between the smallest river drawn and the largest (width and colour)
+float shown(float b) { return clamp((b - uMinB - uZoomK * max(uLogCpp, 0.0)) / 12.0, 0.0, 1.0); }
+float grade(float b) { return clamp((b - uMinB) / max(uSpan, 1.0), 0.0, 1.0); }
+void main() {
+  vec3 a = proj(aP0 / 32767.0), b = proj(aP1 / 32767.0);
+  // a river is drawn at its width, but never under 1.3 pixels to 3.2: the
+  // larger the discharge the wider, the way a map draws them, until the
+  // view is close enough for its own width to be more
+  float g0 = grade(aB.x), g1 = grade(aB.y);
+  float w0 = max(aW.x / uRplanet * uScale, uPx * (1.3 + 1.9 * g0 * g0)), w1 = max(aW.y / uRplanet * uScale, uPx * (1.3 + 1.9 * g1 * g1));
+  bool off = a.z < 0.5 || b.z < 0.5 || (uMode == 1 && abs(a.x - b.x) > PI * uScale);
+  vec2 d = b.xy - a.xy; float len = length(d);
+  vec2 dir = len > 1e-6 ? d / len : vec2(1.0, 0.0), nrm = vec2(-dir.y, dir.x);
+  float r = 0.5 * max(max(w0, w1), uPx) + 1.5 * uPx;
+  int k = gl_VertexID;
+  vec2 c = (k < 2 ? a.xy - dir * r : b.xy + dir * r) + nrm * (k % 2 == 0 ? -r : r);
+  vA = a.xy; vB = b.xy; vW0 = w0; vW1 = w1; vT0 = shown(aB.x); vT1 = shown(aB.y); vG0 = g0; vG1 = g1; vPix = c;
+  gl_Position = off ? vec4(2.0, 2.0, 2.0, 1.0) : vec4(2.0 * c / uView, 0.0, 1.0);
+}`;
+const LFS = `#version 300 es
+precision highp float;
+in vec2 vPix; flat in vec2 vA, vB; flat in float vW0, vW1, vT0, vT1, vG0, vG1;
+uniform float uPx;
+out vec4 o;
+void main() {
+  vec2 pa = vPix - vA, ba = vB - vA;
+  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-9), 0.0, 1.0);
+  float dist = length(pa - ba * h);
+  float w = mix(vW0, vW1, h);
+  float half_ = 0.5 * max(w, uPx);
+  float cov = clamp(half_ + 0.5 * uPx - dist, 0.0, uPx) / uPx;
+  float a = cov * mix(vT0, vT1, h);
+  if (a <= 0.0) discard;
+  o = vec4(a, mix(vG0, vG1, h), 0.0, 1.0);
+}`;
+const lprog = gl.createProgram();
+gl.attachShader(lprog, compile(gl.VERTEX_SHADER, LVS));
+gl.attachShader(lprog, compile(gl.FRAGMENT_SHADER, LFS));
+gl.linkProgram(lprog);
+if (!gl.getProgramParameter(lprog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(lprog));
+const LU = {};
+for (let i = 0, n = gl.getProgramParameter(lprog, gl.ACTIVE_UNIFORMS); i < n; i++) {
+  const name = gl.getActiveUniform(lprog, i).name; LU[name] = gl.getUniformLocation(lprog, name);
+}
+const rivers = { vao: null, count: 0, fbo: null, tex: null, w: 0, h: 0 };
+function b64Bytes(b64) { const bin = atob(b64), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u.buffer; }
+function ingestRivers(r) {
+  const xyz = new Int16Array(b64Bytes(r.xyz)), wid = new Uint16Array(b64Bytes(r.width));
+  const byt = new Uint8Array(b64Bytes(r.byte)), lens = new Uint32Array(b64Bytes(r.lengths));
+  let segs = 0; for (const n of lens) segs += Math.max(n - 1, 0);
+  const inst = new Float32Array(segs * 10);
+  let v = 0, o = 0;
+  for (const n of lens) {
+    for (let k = 0; k + 1 < n; k++, o += 10) {
+      const a = v + k, b = v + k + 1;
+      inst[o] = xyz[3*a]; inst[o+1] = xyz[3*a+1]; inst[o+2] = xyz[3*a+2];
+      inst[o+3] = xyz[3*b]; inst[o+4] = xyz[3*b+1]; inst[o+5] = xyz[3*b+2];
+      inst[o+6] = wid[a]; inst[o+7] = wid[b]; inst[o+8] = byt[a]; inst[o+9] = byt[b];
+    }
+    v += n;
+  }
+  const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+  const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, inst, gl.STATIC_DRAW);
+  [["aP0", 3, 0], ["aP1", 3, 12], ["aW", 2, 24], ["aB", 2, 32]].forEach(([nm, size, off]) => {
+    const loc = gl.getAttribLocation(lprog, nm); if (loc < 0) return;
+    gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 40, off); gl.vertexAttribDivisor(loc, 1);
+  });
+  gl.bindVertexArray(null);
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  rivers.vao = vao; rivers.count = segs;
+  requestDraw();
+}
+function riverTarget(w, h) {
+  if (rivers.fbo && rivers.w === w && rivers.h === h) return;
+  if (!rivers.tex) rivers.tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, rivers.tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.NEAREST);
+  if (!rivers.fbo) rivers.fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, rivers.fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, rivers.tex, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  rivers.w = w; rivers.h = h;
+}
+// draws the lines for the current camera; false when there are none to draw
+function drawRiverLines(w, h, FA) {
+  const info = META.river_lines;
+  if (!state.rivers || !rivers.vao || !info || FA.stage !== "final") return false;
+  riverTarget(w, h);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, rivers.fbo);
+  gl.viewport(0, 0, w, h);
+  gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(lprog);
+  const { C, E, N } = camBasis();
+  gl.uniform2f(LU.uView, w, h); gl.uniform1i(LU.uMode, state.view === "globe" ? 0 : 1);
+  gl.uniform1f(LU.uScale, scalePx()); gl.uniform1f(LU.uLat0, state.lat0); gl.uniform1f(LU.uLon0, state.lon0);
+  gl.uniform3fv(LU.uE, E); gl.uniform3fv(LU.uN, N); gl.uniform3fv(LU.uC, C);
+  gl.uniform1f(LU.uRplanet, META.R_planet_m);
+  gl.uniform1f(LU.uMinB, info.min_byte); gl.uniform1f(LU.uSpan, info.span_byte); gl.uniform1f(LU.uZoomK, 10.0);
+  gl.uniform1f(LU.uLogCpp, Math.log2(1 / (scalePx() * HALF_PI / FA.res)));
+  gl.uniform1f(LU.uPx, window.devicePixelRatio || 1);
+  gl.enable(gl.BLEND); gl.blendEquation(gl.MAX); gl.blendFunc(gl.ONE, gl.ONE);
+  gl.bindVertexArray(rivers.vao);
+  gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, rivers.count);
+  gl.bindVertexArray(null);
+  gl.disable(gl.BLEND);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  return true;
+}
+
 gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
 gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
 gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
@@ -560,6 +705,9 @@ function screenToDir(px, py) {
 
 let drawQueued = false;
 function requestDraw() { if (!drawQueued) { drawQueued = true; requestAnimationFrame(draw); } }
+// rivers.js loads before this script, so its data may be waiting already
+GV.onRivers = r => ingestRivers(r);
+if (GV.riverData) ingestRivers(GV.riverData);
 function bindTex(unit, t, name) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t); gl.uniform1i(U[name], unit); }
 function geoOf(fr, k) { const g = (fr.tex && fr.tex[k]) || fr; return [g.res, g.pad, 0]; }
 
@@ -579,7 +727,11 @@ function draw() {
     b = a + 1; mix = state.fpos - a;
   }
   const FA = frames[a], FB = frames[b];
+  const lines = mix === 0 && drawRiverLines(w, h, FA);
+  gl.viewport(0, 0, w, h);
   const { C, E, N } = camBasis();
+  gl.uniform1i(U.uLines, lines ? 1 : 0);
+  bindTex(6, lines ? rivers.tex : tex[a][0], "uRL");
   gl.uniform2f(U.uView, w, h);
   gl.uniform1i(U.uMode, state.view === "globe" ? 0 : 1);
   gl.uniform1f(U.uScale, scalePx());
