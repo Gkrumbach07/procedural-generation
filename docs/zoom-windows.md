@@ -441,3 +441,43 @@ connected (`scratch/window/mtn2/mtn2_crops.png`, shipped / drainage relief
 profile, detail noise 3, smooth drift, window lakes**. What is left is the
 lake count (6 % of the mountain catchment, most of it small pools) and the
 coarse drift at the p90 (58 m on the mountain).
+
+## McDonald's later learnings, checked against the kernel
+
+His last hydrology post (*Procedural Hydrology: Improvements and Meandering
+Rivers in Particle-Based Hydraulic Erosion Simulations*, 2023-12-12) and his
+successor library soillib (`erosiv/soillib`: `source/soillib/model/path/erosion.{hpp,cu}`,
+`example/erosion_gpu_multiscale.py`, read 2026-09-15):
+
+| learning | where | the kernel |
+|---|---|---|
+| thermal avalanching at an angle of repose | 2023 post | has it (`thermal_erosion`, talus by hardness) |
+| surface gradient by finite differences, not mesh normals | 2023 post | has it (`_sbilin_grad`) |
+| dynamic time step: normalise the speed to one cell per step, so mass cannot tunnel | 2023 post | has it (the step is exactly one cell) |
+| discharge = EMA of the volume passing, used as `erf(0.4 q)` | 2023 post | `ZOOM_EROSION` (`disc_exponent` 0); the planet uses a power law |
+| momentum map, pushing particles along the stream: the meander mechanism | 2023 post | has it, the same formula (`k_mom cos / (vol + q)`) |
+| **lakes removed**: the flood fill was costly and "ill-posed" | 2023 post | `window_lakes` measured the other way here (lake area 9 -> 4 %, network 80-85 %); kept |
+| cache-friendly cell struct | 2023 post | n/a |
+| **parameters in physical units with the cell's scale in metres**, so "the simulation occurs correctly at scale" | soillib | lengths only (`LENGTH_PARAMS_M`) |
+| **multiscale: a long run coarse, then ~4 steps at each finer resolution** with every map (discharge, momentum, suspended mass) resized up | soillib example (128 px x 2048, 256 x 4, 1000 x 4 over 20 km) | windows start from the planet's maps (`discharge0`); the chain of levels is not built |
+| **"The erosion system is not permitted to generate a pit, because pits become self-reinforcing and numerically unstable"**: erosion per step at most `0.25 L slope`, deposition at most `0.25 L 0.3` (~0.1 cell) | soillib `mass_transfer` | the kernel caps per particle-step against the next / previous cell; per iteration in metres (off in `ZOOM_EROSION`) |
+| particles as transport samples (water, suspended mass, velocity fluxes with exponential attenuation); erosion and deposition computed per cell from wall shear stress `fD rho v^2 / 8`, slope and the suspended mass | soillib | a different model: the kernel exchanges mass along each particle's path |
+| two layers, bedrock and sediment, critical slopes 0.57 and 0.3; debris flows / landslides above the critical slope | soillib | one layer with a sediment thickness and hardness |
+| a slope boundary condition at the map edge (`exitSlope` 0.02-0.025) | soillib | windows have a frozen ring |
+| pigment / albedo carried with the sediment, printing stream history on the surface | both | not yet: a viewer idea |
+
+Two of these were cheap to test on the mountain catchment (305 m, zoom
+defaults):
+
+| | lakes / km^2 | ≥100 / ≥10 km^2 network on the outlet |
+|---|---|---|
+| 150 iterations (the default) | 2,795 / 1,349 (6 %) | 54 % / 95 % |
+| **40 iterations** (few fine steps, as the multiscale example) | 3,044 / 2,790 (13 %) | **91 %** / 96 % |
+| 150 iterations, `iter_deposit` 32 m (= 0.25 L 0.3 at 305 m) | 2,780 / 1,191 (6 %) | 57 % / 94 % |
+
+Few iterations keep the network the parent routed (91 % on the outlet) but
+leave the pools unfilled (13 % lake); a cell-sized deposit cap changes
+little with the particle caps already off. Neither is a new default. The
+pit-free limits and the multiscale chain are the two worth building: the
+first is the soillib answer to the dams this doc spent three sections on,
+the second is the zoom pyramid itself.

@@ -4,19 +4,16 @@
 the refine stage's own basin job, measuring cost, convergence, river
 connectivity, relief and lakes (docs/zoom-windows.md).
 
-    # the zoom-window setup measured best (McDonald's erosion settings, a
-    # smooth drift correction, lakes in erosion, detail noise 3)
-    python scripts/window_bake.py --world worlds/earth-v9 --outlet 5 239 913 --R 32 --iters 150 \
-        --profile zoom --detail-amp 3 --drift smooth --erosion window_lakes=1 flood_every=5 --out ...
+    python scripts/window_bake.py --world worlds/earth-v9 --outlet 5 239 913 --R 32 --iters 150 --out ...
 
+Defaults are the zoom-window setup measured best (``refine.zoom``: McDonald's
+erosion settings with lakes in erosion, detail noise 3, the smooth drift
+correction); ``--profile shipped`` runs the refine stage's own settings.
 The window is the D8 catchment upstream of ``--outlet`` (face, i, j on the
 coarse grid), confined to one face, handed to ``refine.basin_job._run_basin``
-as a synthetic basin whose only exit is the outlet cell.  ``--profile zoom``
-applies ``refine.zoom.ZOOM_EROSION`` and ``--drift smooth``
-``refine.zoom.smooth_drift`` in place of the job's per-coarse-cell
-correction.  Prototypes, monkeypatched in: ``--relief drainage``
-(scripts/drainage_relief.py), ``--census N`` (scripts/pit_census.py),
-``--breach`` (scripts/dam_breach.py).
+as a synthetic basin whose only exit is the outlet cell.  Prototypes,
+monkeypatched in: ``--relief drainage`` (scripts/drainage_relief.py),
+``--census N`` (scripts/pit_census.py), ``--breach`` (scripts/dam_breach.py).
 """
 import argparse
 import json
@@ -159,8 +156,8 @@ def main():
     ap.add_argument("--erosion", nargs="*", default=[], help="erosion overrides k=v (floats)")
     ap.add_argument("--relief", choices=["noise", "drainage"], default="noise")
     ap.add_argument("--no-block-drift", action="store_true", help="skip the job's per-coarse-cell drift correction (same as --drift none)")
-    ap.add_argument("--drift", choices=["block", "smooth", "none"], default=None, help="drift correction: the job's per-coarse-cell one, refine.zoom.smooth_drift, or none")
-    ap.add_argument("--profile", choices=["zoom", "shipped"], default="shipped", help="erosion settings: refine.zoom.ZOOM_EROSION or the world's own (--erosion overrides either)")
+    ap.add_argument("--drift", choices=["block", "smooth", "none"], default=None, help="drift correction: the job's per-coarse-cell one, refine.zoom.smooth_drift (default with --profile zoom), or none")
+    ap.add_argument("--profile", choices=["zoom", "shipped"], default="zoom", help="zoom (default): refine.zoom.ZOOM_EROSION and ZOOM_REFINE; shipped: the world's own refine settings (--erosion / --detail-amp override either)")
     ap.add_argument("--breach", action="store_true", help="breach the dams each particle pass builds (scratch/window/dam_breach.py)")
     ap.add_argument("--census", type=int, default=0, help="pit census for the first N iterations (scratch/window/pit_census.py)")
     ap.add_argument("--relief-elev", type=float, default=0.1, help="drainage relief: valley depth per metre of elevation")
@@ -191,6 +188,9 @@ def main():
     coarse_km = grid.cell_size_m / 1000.0
     for R in a.R:
         ro = {"halo_cells": int(a.halo), "refine_iterations": int(a.iters)}
+        if a.profile == "zoom":
+            from globe.refine.zoom import ZOOM_REFINE
+            ro.update(ZOOM_REFINE)
         if a.detail_amp is not None:
             ro["detail_amp"] = float(a.detail_amp)
         eo = {}
@@ -270,7 +270,7 @@ def main():
 
         bj.step = step
         real_build_mask, real_detail, real_drift = bj.build_mask, bj.detail_noise, bj.block_drift
-        drift_mode = a.drift or ("none" if a.no_block_drift else "block")
+        drift_mode = a.drift or ("none" if a.no_block_drift else ("smooth" if a.profile == "zoom" else "block"))
         if drift_mode == "none":
             bj.block_drift = lambda delta, cells, R_, **kw: np.zeros_like(delta)
         elif drift_mode == "smooth":

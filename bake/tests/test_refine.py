@@ -867,13 +867,17 @@ def test_seam_strip_is_sampled_where_the_neighbour_face_is(world):
 
 
 def test_zoom_erosion_profile_is_a_valid_override():
-    """``refine.zoom.ZOOM_EROSION`` names real erosion parameters with values
-    of their own types, so a window can apply it with ``with_overrides``."""
-    from globe.refine.zoom import ZOOM_EROSION
+    """``refine.zoom.ZOOM_EROSION`` / ``ZOOM_REFINE`` name real parameters
+    with values of their own types, and ``zoom_params`` applies them at a
+    refinement, with per-call erosion overrides on top."""
+    from globe.refine.zoom import ZOOM_EROSION, ZOOM_REFINE, zoom_params
     p = WorldParams.tiny_world().with_overrides(erosion=dict(ZOOM_EROSION))
     for k, v in ZOOM_EROSION.items():
         assert getattr(p.erosion, k) == v, k
     assert isinstance(p.erosion.max_steps, int)
+    z = zoom_params(WorldParams.tiny_world(), 32, max_steps=300.0)
+    assert z.world.R == 32 and z.erosion.max_steps == 300 and isinstance(z.erosion.max_steps, int)
+    assert z.erosion.window_lakes and z.refine.detail_amp == ZOOM_REFINE["detail_amp"]
 
 
 def test_smooth_drift_removes_the_coarse_scale_without_the_grid():

@@ -10,6 +10,8 @@ until zoom windows are one:
   caps that bind hard there) leave a 76 m window either smooth, or dammed
   with pits, or incising without limit; these give the best river network
   of everything measured and the first branching valleys.
+* :data:`ZOOM_REFINE` -- detail noise strong enough to give erosion relief
+  to organise.
 * :func:`smooth_drift` -- a drift correction without the coarse grid in it.
   ``basin_job.block_drift`` interpolates per-coarse-cell means bilinearly:
   its gradient jumps on every block line, which prints the coarse grid into
@@ -43,7 +45,31 @@ ZOOM_EROSION = {
     "talus_slope_soft": 0.8,     # maxdiff 0.01 x mapscale 80 = 0.8 cell slope
     "talus_slope_hard": 0.8,
     "creep_rate": 0.0,           # none; creep is a diffusion in cell units and erases the relief
+    # lakes in erosion (ErosionState.refresh_lakes_window): pools fill with the
+    # load dropped at their shores -- lake area 9 -> 4 % of a catchment over
+    # 300 iterations on a branching network.  McDonald removed pools from his
+    # 2023 model as ill-posed; measured here they help
+    "window_lakes": True,
+    "flood_every": 5,
 }
+
+#: refine overrides for a zoom window: detail noise at 3x the stage's
+#: amplitude -- the upsample has no relief below a parent cell, and
+#: McDonald's erosion organises noise into branching valleys (on a mountain
+#: catchment the drainage-relief prototype cut parallel corduroy instead)
+ZOOM_REFINE = {
+    "detail_amp": 3.0,
+}
+
+
+def zoom_params(params, R: int, **erosion):
+    """``params`` (a WorldParams) for a zoom window at refinement ``R``: the
+    zoom erosion profile and refine overrides, then any ``erosion`` given."""
+    eo = dict(ZOOM_EROSION)
+    eo.update(erosion)
+    if "max_steps" in eo:
+        eo["max_steps"] = int(eo["max_steps"])
+    return params.with_overrides(world={"R": int(R)}, refine=dict(ZOOM_REFINE), erosion=eo)
 
 
 def smooth_drift(delta: np.ndarray, cells: np.ndarray, R: int, tol: float = 0.05, max_passes: int = 16) -> np.ndarray:
@@ -73,4 +99,4 @@ def smooth_drift(delta: np.ndarray, cells: np.ndarray, R: int, tol: float = 0.05
     return F
 
 
-__all__ = ["ZOOM_EROSION", "smooth_drift"]
+__all__ = ["ZOOM_EROSION", "ZOOM_REFINE", "smooth_drift", "zoom_params"]
