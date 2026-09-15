@@ -2,6 +2,7 @@
 """Serve a baked world's viewer with zoom baking behind it.
 
     python scripts/serve_world.py --world worlds/earth-v9            # http://localhost:8765/viewer/index.html
+    python scripts/serve_world.py --world worlds/earth-v9 --host 100.114.208.82   # this machine's tailnet address only
 
 Static files come from the world directory (the globe viewer, the zoom
 pages).  The viewer finds ``/api/zoom`` and turns a click on a spot into a
@@ -13,7 +14,8 @@ pages).  The viewer finds ``/api/zoom`` and turns a click on a spot into a
 
 One bake runs at a time (a zoom uses every core); the rest wait in order.
 Each job's log is ``<world>/zoom/<name>/bake.log``.  Listens on localhost
-only: this runs code on the machine for whoever can reach the port.
+unless ``--host`` says otherwise (a Tailscale address: the tailnet only):
+this runs code on the machine for whoever can reach the port.
 """
 from __future__ import annotations
 
@@ -145,6 +147,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--world", required=True)
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--host", default="127.0.0.1", help="address to listen on (default localhost; e.g. this machine's Tailscale IP)")
     ap.add_argument("--bake-args", nargs=argparse.REMAINDER, default=[], help="extra arguments for zoom_bake.py (e.g. --levels ...)")
     a = ap.parse_args(argv)
     sys.path.insert(0, str(HERE.parent))
@@ -155,8 +158,8 @@ def main(argv=None) -> int:
 
     index.write(root)
     jobs = Jobs(root, sys.executable, a.bake_args)
-    server = ThreadingHTTPServer(("127.0.0.1", a.port), partial(make_handler(root, jobs), directory=str(root)))
-    print(f"serving {root} at http://localhost:{a.port}/viewer/index.html", flush=True)
+    server = ThreadingHTTPServer((a.host, a.port), partial(make_handler(root, jobs), directory=str(root)))
+    print(f"serving {root} at http://{a.host}:{a.port}/viewer/index.html", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
