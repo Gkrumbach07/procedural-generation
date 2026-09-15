@@ -328,6 +328,62 @@ def test_zoom_starts_from_the_planet_level(world, zoom, planet, tmp_path):
     assert [lv["R"] for lv in info["levels"]] == [lv.R for lv in LEVELS]
 
 
+def test_planet_level_chained_from_a_coarser_one(world, planet):
+    """``PlanetLevel(parent=R)``: every tile starts from the finished coarser
+    level -- where it wrote, the child's plain surface is the parent's
+    interpolated, not the planet's upsample -- takes the parent's drainage
+    across its window edge, and the level finishes like any other.  The
+    parent's flood tree carries all the rain it is given to its drains."""
+    from globe.io.world_store import WorldStore
+    from globe.refine.upsample import Window, upsample_window
+    from globe.refine.zoom import zoom_params
+    from globe.zoom import planet as zp
+    from globe.zoom import planet_chain as pc
+
+    parent = planet["level"]
+    lv = zp.PlanetLevel(R=2 * parent.R, iterations=2, tile=32, margin=8, hold_every=2, seam_cells=4, parent=parent.R)
+    root = world["root"]
+    params = world["params"]
+    N = params.coarse_grid().N
+    # the parent's drainage
+    rp, fp = pc.parent_flow(root, planet["out"], parent, 0)
+    recv, flux = np.load(rp), np.load(fp)
+    NFp = (N + 2 * parent.guard) * parent.R
+    assert recv.shape == (NFp, NFp) and flux.min() >= 0.0 and flux.max() > 0.0
+    # a tile's inputs where the parent wrote
+    lp = zoom_params(params, lv.R)
+    grid, fields, derived, _, _ = zp.planet_inputs(root, lp, planet["out"])
+    mc = lv.margin // lv.R
+    land_c = np.stack([np.load(root / "coarse" / f"basin_id.f{k}.npy") for k in range(6)]) >= 0
+    face, (ta0, tb0, cc) = next((f, t) for f in range(6) for ps in zp.face_tiles(lv, N, land_c, f) for t in ps)
+    nc = cc + 2 * mc
+    win = Window(face, ta0, ta0 + nc, tb0, tb0 + nc, lv.R)
+    up = upsample_window(fields, derived, win, grid)
+    t = slice(lv.R - 1, win.NE - (lv.R - 1))
+    tr = {k: v[t, t] for k, v in up.items()}
+    pc.parent_flow(root, planet["out"], parent, face)
+    ch = pc.chained_inputs(planet["out"], parent, lv, N, face, ta0, tb0, tr, grid.cell_size_m, 1, 0.0)
+    assert ch["f"] == 2 and np.isfinite(ch["plain"]).all() and (ch["sediment0"] >= 0).all()
+    work = np.load(zp.work_path(planet["out"], face, "height")) + np.load(zp.work_path(planet["out"], face, "sediment"))
+    gp = parent.guard * parent.R
+    i, j = ta0 * lv.R - 1 + nc * lv.R // 2, tb0 * lv.R - 1 + nc * lv.R // 2      # a child cell centred on a parent cell pair
+    k = nc * lv.R // 2
+    px = (i + 0.5) / lv.R * parent.R - 0.5 + gp
+    lo = work[int(np.floor(px)), int(np.floor((j + 0.5) / lv.R * parent.R - 0.5 + gp))]
+    hi = work[int(np.ceil(px)), int(np.ceil((j + 0.5) / lv.R * parent.R - 0.5 + gp))]
+    assert min(lo, hi) - 50.0 <= ch["plain"][k, k] <= max(lo, hi) + 50.0
+    # the whole level
+    out = zp.run_planet(root, lv, workers=2)
+    info = json.loads((out / "planet.json").read_text())
+    assert zp.PlanetLevel.from_dict(info["level"]).parent == parent.R and info["active_cells"] > 0
+    tiles = json.loads((out / "progress.json").read_text())["tiles"]
+    assert any(t_.get("inflow", 0.0) > 0.0 for t_ in tiles)
+    for f in range(6):
+        a = {k2: np.load(zp.out_path(out, lv.R, f, k2)) for k2 in zp.OUT_FIELDS}
+        assert all(np.isfinite(v).all() for v in a.values())
+        assert (a["water_surface"] >= a["height"] + a["sediment"] - 1e-3).all()
+
+
 def test_planet_inflow_crosses_cube_edges():
     """A window on a face edge takes water from the neighbouring face's
     drainage: a donor beyond the edge is looked up on the face that owns it,

@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 import numpy as np
@@ -67,12 +67,21 @@ class PlanetLevel:
     hold_every: int = 10
     hold_scale: float = 4.0
     seam_cells: int = 16  # fine cells either side of a cube edge blended between the two faces
+    parent: int = 0  # R of the finished planet level this one chains from (zoom/planet_R{parent}, globe/zoom/planet_chain.py); 0 = from the planet's upsample
+    chain_detail: float = 0.5  # chained: detail noise x min(parent slope x parent cell, parent 3x3 relief)
 
     @property
     def guard(self) -> int:
         """Coarse cells of work raster beyond each face edge: a tile's margin
         and the cell of halo its window samples."""
         return self.margin // self.R + 1
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PlanetLevel":
+        """A level from a ``planet.json`` / ``progress.json`` record, fields it
+        predates at their defaults."""
+        names = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in names})
 
     def zoom_level(self) -> zb.ZoomLevel:
         return zb.ZoomLevel(self.R, 0, self.iterations, tile=self.tile, margin=self.margin, hold_every=self.hold_every, hold_scale=self.hold_scale)
@@ -330,17 +339,33 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
     if coast_taper > 0.0:
         tt = np.clip(np.abs(plain) / coast_taper, 0.0, 1.0)
         amp = amp * tt * tt * (3.0 - 2.0 * tt)
-    noise = np.where(ocean, 0.0, amp * hashed_ridged(int(params.world.seed) + PLANET_KEY, face, ta0 * R - 1, tb0 * R - 1, n, n, 2.0 * R))
+    noise = None
+    base = {k: tr[k] for k in ("height0", "sediment0", "discharge", "momentum")}
+    f_hold = R
+    chained = None
+    if level.parent:
+        from . import planet_chain as pc
+
+        pdir = zb.planet_dir(root, level.parent)
+        if pdir is None:
+            raise FileNotFoundError(f"planet level R={level.parent} is not finished: {level} chains from it")
+        plev = PlanetLevel.from_dict(json.loads((pdir / "planet.json").read_text())["level"])
+        chained = pc.chained_inputs(pdir, plev, level, N, face, ta0, tb0, tr, grid.cell_size_m, int(params.world.seed) + PLANET_KEY, coast_taper)
+        plain, ocean, noise = chained["plain"], chained["ocean"], chained["noise"]
+        base = {k: chained[k] for k in base}
+        f_hold = chained["f"]
+    if noise is None:
+        noise = np.where(ocean, 0.0, amp * hashed_ridged(int(params.world.seed) + PLANET_KEY, face, ta0 * R - 1, tb0 * R - 1, n, n, 2.0 * R))
     NF = (N + 2 * level.guard) * R
     mm = {k: open_work(Path(out), face, k, NF) for k in WORK_FIELDS}
     o = level.guard * R
     sl = (slice(ta0 * R - 1 + o, ta1 * R + 1 + o), slice(tb0 * R - 1 + o, tb1 * R + 1 + o))
     done = np.array(mm["done"][sl])
     cur = {
-        "height": np.where(done, mm["height"][sl], tr["height0"] + noise),
-        "sediment": np.where(done, mm["sediment"][sl], tr["sediment0"]),
-        "discharge": np.where(done, mm["discharge"][sl], tr["discharge"]),
-        "momentum": np.where(done[..., None], mm["momentum"][sl], tr["momentum"]),
+        "height": np.where(done, mm["height"][sl], base["height0"] + noise),
+        "sediment": np.where(done, mm["sediment"][sl], base["sediment0"]),
+        "discharge": np.where(done, mm["discharge"][sl], base["discharge"]),
+        "momentum": np.where(done[..., None], mm["momentum"][sl], base["momentum"]),
     }
     inwin = np.zeros((n, n), bool)
     inwin[1:-1, 1:-1] = True
@@ -350,8 +375,8 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
     stats = {"face": face, "window": [ta0, tb0, nc], "active_cells": int(active.sum())}
     if not active.any():
         return stats
-    src = planet_inflow(fd, fa, face, ta0, ta1, tb0, tb1, R, plain)
-    job = {"a": ta0 + mc, "b": tb0 + mc, "c": cc, "sl": sl, "land": land, "active": active, "inwin": inwin, "ocean": ocean, "src": src, "f": R,
+    src = chained["src"] if chained is not None else planet_inflow(fd, fa, face, ta0, ta1, tb0, tb1, R, plain)
+    job = {"a": ta0 + mc, "b": tb0 + mc, "c": cc, "sl": sl, "land": land, "active": active, "inwin": inwin, "ocean": ocean, "src": src, "f": f_hold,
            "arrays": {"height": cur["height"], "sediment": cur["sediment"], "discharge": cur["discharge"], "momentum": cur["momentum"],
                       "hardness": tr["hardness"], "precip": np.where(ocean, 0.0, np.maximum(tr["precip"], 0.0)), "evap": tr["evap"],
                       "metric": tr["metric"], "metric_inv": tr["metric_inv"], "plain": plain}}
@@ -359,7 +384,7 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
     res = zb.erode_tile(lp, zl, R, job, (PLANET_KEY, face, ta0, tb0))
     stats.update(res["stats"])
     sea = inwin & ocean & ~done                            # write_tile marks the window's sea done: give it the upsample
-    for k, v in (("height", tr["height0"]), ("sediment", tr["sediment0"]), ("discharge", tr["discharge"])):
+    for k, v in (("height", base["height0"]), ("sediment", base["sediment0"]), ("discharge", base["discharge"])):
         view = mm[k][sl]
         view[sea] = v[sea]
     stats["blended_cells"] = zb.write_tile(zl, mm, mm["done"], job, res)
@@ -422,7 +447,7 @@ def run_planet(root: str | Path, level: PlanetLevel = PlanetLevel(), out: str | 
     out.mkdir(parents=True, exist_ok=True)
     prog_path = out / "progress.json"
     prog = json.loads(prog_path.read_text()) if prog_path.exists() else {}
-    if prog.get("level") != asdict(level):
+    if "level" not in prog or asdict(PlanetLevel.from_dict(prog["level"])) != asdict(level):
         prog = {"level": asdict(level), "passes": {}, "tiles": []}
     NF = (N + 2 * level.guard) * R
     bid = np.stack([np.load(root / "coarse" / f"basin_id.f{f}.npy") for f in range(6)])
@@ -430,8 +455,18 @@ def run_planet(root: str | Path, level: PlanetLevel = PlanetLevel(), out: str | 
     faces = list(range(6)) if faces is None else [int(f) for f in faces]
     write_shared_inputs(root, zoom_params(params, R), out)
     t0 = time.time()
+    pdir = plev = None
+    if level.parent:
+        from . import planet_chain as pc
+
+        pdir = zb.planet_dir(root, level.parent)
+        if pdir is None:
+            raise FileNotFoundError(f"planet level R={level.parent} is not finished under {root / 'zoom'}")
+        plev = PlanetLevel.from_dict(json.loads((pdir / "planet.json").read_text())["level"])
     for face in faces:
         passes = face_tiles(level, N, land_c, face)
+        if pdir is not None and not all(prog["passes"].get(f"{face}:{p_i}") for p_i in range(len(passes))):
+            pc.parent_flow(root, pdir, plev, face, log)
         started = any(k.split(":")[0] == str(face) for k in prog["passes"])
         if not (started and all(work_path(out, face, k).exists() for k in WORK_FIELDS)):
             for k in WORK_FIELDS:
