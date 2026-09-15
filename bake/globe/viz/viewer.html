@@ -889,10 +889,13 @@ function draw() {
   gl.uniform1f(U.uMix, mix);
   gl.uniform1f(U.uSea, META.sea_level_m || 0);
   gl.uniform1f(U.uLandTop, META.land_top_m); gl.uniform1f(U.uOceanBottom, META.ocean_bottom_m);
-  gl.uniform1f(U.uExag, state.exag); gl.uniform1f(U.uShadeAmt, state.exag > 0 ? 0.85 : 0.0);
+  gl.uniform1f(U.uShadeAmt, state.exag > 0 ? 0.85 : 0.0);
   const dlv = mix === 0 ? updateDetail(FA) : null;
   gl.uniform1f(U.uTexelRad, HALF_PI / (dlv ? dlv.res : FA.res));
   gl.uniform1i(U.uDetail, dlv ? 1 : 0);
+  // the exaggeration is set for the atlas' cells; a detail level's slopes are
+  // over cells 2^L smaller, and real relief shows at that scale without it
+  gl.uniform1f(U.uExag, state.exag * (dlv ? Math.max(FA.res / dlv.res, 1 / 16) : 1));
   bindTex(7, dlv ? detail.tex : tex[a][0], "uDT");
   bindTex(8, dlv ? dlv.page : tex[a][0], "uDP");
   if (dlv) {
