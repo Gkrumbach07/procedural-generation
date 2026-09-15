@@ -759,3 +759,9 @@ tile's 690 s on 4 threads while 16 cores idled after the first 40 s. Now:
   are written once to `<out>/inputs/` and mapped by the workers
   (`planet.write_shared_inputs`), so a worker is ~0.4 GB of its own and
   16 of them fit.
+
+On earth-v9, seconds per million active cells of a pass: face 0 on the old
+split 137, 122 and 157 (passes 2-4; pass 1, 700 s, shared the machine with
+a stray pool), face 1's first pass with 9 workers x 2 threads **58** (9
+tiles, 3.4 M cells, 198 s). Different tiles, so a rough 2.2x -- and face 0's
+passes also shared the cores with the profiling above.
