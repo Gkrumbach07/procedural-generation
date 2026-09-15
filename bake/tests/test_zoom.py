@@ -292,6 +292,18 @@ def test_planet_level_does_not_depend_on_the_workers(world, planet, tmp_path):
         a = np.load(zp.work_path(planet["out"], 0, k))
         b = np.load(zp.work_path(out2, 0, k))
         assert np.array_equal(a, b), k
+    # a pass cut off after its tiles wrote (progress.json never recorded it):
+    # resuming skips the written tiles instead of eroding them twice
+    prog_path = out2 / "progress.json"
+    prog = json.loads(prog_path.read_text())
+    last = max(prog["passes"], key=lambda k: int(k.split(":")[1]))
+    del prog["passes"][last]
+    prog_path.write_text(json.dumps(prog))
+    zp.run_planet(world["root"], lv, out=out2, faces=[0], workers=1, finish=False)
+    rec = json.loads(prog_path.read_text())["passes"][last]
+    assert rec.get("resumed_tiles", 0) > 0, rec
+    for k in ("height", "sediment", "discharge"):
+        assert np.array_equal(np.load(zp.work_path(planet["out"], 0, k)), np.load(zp.work_path(out2, 0, k))), k
 
 
 def test_planet_inflow_crosses_cube_edges():

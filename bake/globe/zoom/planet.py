@@ -373,6 +373,17 @@ def _tile_job(args):
     return planet_tile(*args)
 
 
+def tile_written(done: np.ndarray, level: PlanetLevel, ta0: int, tb0: int, cc: int) -> bool:
+    """Whether the tile with window origin ``(ta0, tb0)`` has written its
+    result: every cell of its core is ``done``.  Its window's ``done`` is
+    set last, after the arrays are written, and no other tile's window
+    reaches more than a margin into the core, so a core done all through was
+    written by its own tile."""
+    R, mc, o = level.R, level.margin // level.R, level.guard * level.R
+    a0, b0 = (ta0 + mc) * R + o, (tb0 + mc) * R + o
+    return bool(np.asarray(done[a0:a0 + cc * R, b0:b0 + cc * R]).all())
+
+
 def face_tiles(level: PlanetLevel, N: int, land_c: np.ndarray, face: int) -> list[list[tuple[int, int, int]]]:
     """Passes of ``(ta0, tb0, cc)`` window origins (coarse) covering the
     face, tiles with no land in their on-face window left out."""
@@ -433,14 +444,26 @@ def run_planet(root: str | Path, level: PlanetLevel = PlanetLevel(), out: str | 
                 if prog["passes"].get(key):
                     continue
                 tp = time.time()
-                args = [(str(root), params, level, str(out), face, ta0, tb0, cc) for ta0, tb0, cc in ps]
+                # a pass cut off (a crash, a reboot) left the tiles that finished
+                # written: running one again would erode it twice, from its own
+                # result.  A tile sets `done` over its core only after writing
+                # and flushing everything else, so that says which finished
+                done = open_work(out, face, "done", NF, mode="r")
+                todo = [t for t in ps if not tile_written(done, level, *t)]
+                del done
+                args = [(str(root), params, level, str(out), face, ta0, tb0, cc) for ta0, tb0, cc in todo]
                 stats = list(ex.map(_tile_job, args))
+                stats += [{"face": face, "window": [ta0, tb0, cc + 2 * (level.margin // R)], "resumed": True} for ta0, tb0, cc in ps if (ta0, tb0, cc) not in todo]
                 prog["tiles"].extend(stats)
                 prog["passes"][key] = {"tiles": len(ps), "seconds": round(time.time() - tp, 1)}
-                prog_path.write_text(json.dumps(prog))
+                if len(todo) < len(ps):
+                    prog["passes"][key]["resumed_tiles"] = len(ps) - len(todo)
+                tmp = prog_path.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(prog))
+                tmp.replace(prog_path)
                 if log is not None:
                     cells = sum(s.get("active_cells", 0) for s in stats)
-                    log(f"face {face} pass {p_i + 1}/{len(passes)}: {len(ps)} tiles, {cells / 1e6:.1f} M cells, {time.time() - tp:.0f}s "
+                    log(f"face {face} pass {p_i + 1}/{len(passes)}: {len(ps)} tiles ({len(ps) - len(todo)} already written), {cells / 1e6:.1f} M cells, {time.time() - tp:.0f}s "
                         f"({n_workers} workers x {threads} threads; {time.time() - t0:.0f}s so far)")
     if finish and len(faces) == 6:
         # three faces at a time: a face's flood holds ~2 GB at R = 8
