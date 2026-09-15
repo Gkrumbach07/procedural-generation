@@ -24,7 +24,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--world", required=True)
     ap.add_argument("--R", type=int, default=8)
-    ap.add_argument("--iterations", type=int, default=200)
+    ap.add_argument("--iterations", type=int, default=80)
     ap.add_argument("--tile", type=int, default=1024)
     ap.add_argument("--margin", type=int, default=64)
     ap.add_argument("--faces", type=int, nargs="*", default=None)

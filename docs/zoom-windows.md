@@ -700,3 +700,25 @@ Left: tiles run one after another (a four-colour order would run
 non-touching tiles in parallel), a zoom is shifted to stay on one cube face,
 inflow enters as clear water (it erodes the crossing a little in the outer
 margin), and the particles still die in pits 6-9 % of the time at 76 m.
+
+## Parallel tiles
+
+A level's tiles run in passes whose windows do not overlap -- the four
+parities of the tile indices, since same-parity neighbours are a whole core
+apart (`bake.tile_passes`) -- and a pass runs across worker processes (one
+per four cores by default, `--workers`). Each tile seeds its own particles
+from its index, and the flood tree that sets its inflow is the one the
+earlier passes left, so a level is byte-identical however many workers ran
+it (`tests/test_zoom.py`, and the 76 m square below).
+
+`peaks` 76 m over 117 km (12 cells, tile 512: 9 tiles in passes of 4, 2, 2
+and 1), 150 iterations:
+
+| | tile seconds | result |
+|---|---|---|
+| one process, 20 threads | 1,379 | |
+| 4 workers x 5 threads | **930** | byte-identical |
+
+Only 1.5x: half the tiles here are in passes of one or two, and a kernel
+process with 5 threads runs a tile in ~1.4x the time one with 20 does.
+Passes of many tiles (the planet level below) gain more.

@@ -61,7 +61,7 @@ WORK_FIELDS = {"height": ((), np.float32), "sediment": ((), np.float32), "discha
 @dataclass(frozen=True)
 class PlanetLevel:
     R: int = 8
-    iterations: int = 200
+    iterations: int = 80  # 200 as a zoom level runs is ~12 h for earth-v9 on 20 cores (a 1152² tile ~15 min at 4 threads: the kernel passes every cell of the window, sea too)
     tile: int = 1024  # core side, fine cells (a multiple of R)
     margin: int = 64  # fine cells, a multiple of R
     hold_every: int = 10
@@ -494,8 +494,36 @@ def finish_face(root: Path, out: Path, level: PlanetLevel, face: int, strip: int
             arrays[k][rs] = np.where(done, wk[k][on][rs], up[k])
         plain_ws[rs] = up["water_surface"]
     seams = blend_face_seams(out, level, N, face, arrays)
+    # the coast as refine draws it (rasterize.write_coast): a coastal plain
+    # at a metre above the water, noise and the hold's uplift leave a fringe
+    # of fragments either side of 0; inside the smoothed ocean contour the
+    # ground is at least COAST_MARGIN_M below the sea, outside it that high
+    from ..refine import rasterize as rz
+
+    ocean_all = np.stack([np.load(Path(root) / "coarse" / f"flow_dir.f{k}.npy") == 255 for k in range(6)])
+    frac = rz.coast_fraction(grid, ocean_all)
+    zone = rz.coast_zone(grid, ocean_all)
+    M = np.float32(rz.COAST_MARGIN_M)
+    coast_lowered = coast_raised = 0
+    for i0 in range(0, N, strip):
+        i1 = min(N, i0 + strip)
+        near = np.repeat(np.repeat(zone[face, i0:i1], R, axis=0), R, axis=1)
+        if not near.any():
+            continue
+        rs = slice(i0 * R, i1 * R)
+        sea = (frac.sample_window(face, i0, i1, 0, N, R, order=1) > 0.5) & near
+        h, sd = arrays["height"][rs], arrays["sediment"][rs]
+        sf = h + sd
+        drop = np.where(sea & (sf > -M), sf + M, np.float32(0.0)).astype(np.float32)
+        take = np.minimum(np.maximum(sd, 0.0), drop)
+        sd -= take
+        h -= drop - take
+        low = near & ~sea & (sf < M)
+        sd[low] += M - sf[low]
+        coast_lowered += int((drop > 0).sum())
+        coast_raised += int(low.sum())
     surf = arrays["height"] + arrays["sediment"]
-    ocean_c = np.load(Path(root) / "coarse" / f"flow_dir.f{face}.npy") == 255
+    ocean_c = ocean_all[face]
     sea_near = np.repeat(np.repeat(ndimage.binary_dilation(ocean_c, structure=np.ones((3, 3), bool)), R, 0), R, 1)
     ocean = (surf < 0.0) & sea_near
     drain = ocean.copy()
@@ -510,7 +538,8 @@ def finish_face(root: Path, out: Path, level: PlanetLevel, face: int, strip: int
     for k, a in arrays.items():
         np.save(out_path(out, R, face, k), a)
     lake = (ws - surf > float(params.hydro.lake_min_depth)) & ~ocean
-    return {"face": face, "seam_cells": seams, "land_cells": int((~ocean).sum()), "lake_cells": int(lake.sum()), "seconds": round(time.time() - t0, 1)}
+    return {"face": face, "seam_cells": seams, "coast_lowered_cells": coast_lowered, "coast_raised_cells": coast_raised,
+            "land_cells": int((~ocean).sum()), "lake_cells": int(lake.sum()), "seconds": round(time.time() - t0, 1)}
 
 
 def quicklook(out: Path, R: int, size: int = 1024) -> Path:
