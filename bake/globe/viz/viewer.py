@@ -790,7 +790,7 @@ def detail_source(root: Path, manifest: dict, refined: bool, planet: str | None)
 def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | None = None,
                   frame_res: int | None = None, max_frames: int | None = None,
                   single: bool = False, refined: bool | None = None, planet: str | None = None,
-                  river_source: str = "auto", detail: bool = False, log=print) -> Path:
+                  river_source: str = "none", detail: bool = False, log=print) -> Path:
     """``frame_res`` / ``max_frames`` downsample and thin the captured
     timeline -- a light export for a slow link or a phone.  ``river_source``
     (:func:`river_lines`): ``"auto"`` draws derive's graph rivers, except on a

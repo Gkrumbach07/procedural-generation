@@ -335,7 +335,10 @@ def test_detail_tiles_round_trip_heights_shores_and_the_sea(tmp_path):
     surf[water == dt.WATER_OCEAN] = -3000.0
     water[:, 40:50, 100:120] = dt.WATER_LAKE
     ws = np.where(water == dt.WATER_LAKE, surf + 15.0, surf).astype(np.float32)
-    src = dt.RefinedSource(surf, ws, water)
+    q = np.ones_like(surf)                                 # rain everywhere, two rivers
+    q[:, 10:14, :] = 500.0
+    q[:, 60:62, :] = 50.0
+    src = dt.RefinedSource(surf, ws, water, q)
     assert dt.levels_for(dt.TILE, res) == [(1, res)] and dt.levels_for(res, res) == []
     info = dt.export_tiles(tmp_path, src, dt.TILE, 200.0, log=lambda m: None)
     lv = info["levels"][0]
@@ -343,8 +346,10 @@ def test_detail_tiles_round_trip_heights_shores_and_the_sea(tmp_path):
     assert bits[:, 0, :].all() and not bits[:, 1, :].any() and lv["tiles"] == 12
     js = (tmp_path / "tiles" / "L1" / "2_0_0.js").read_text()
     img = np.array(Image.open(io.BytesIO(base64.b64decode(js.split('"')[3]))).convert("RGBA"))
-    assert img.shape == (dt.TILE + 2, dt.TILE + 2, 4)
-    cell = img.transpose(1, 0, 2)[1:-1, 1:-1]               # (i, j) of the face's tile cells
+    assert img.shape == (2 * (dt.TILE + 2), dt.TILE + 2, 4)        # ground on top, water below
+    both = img.transpose(1, 0, 2)                                   # (i, j) of the face's tile cells
+    ground, wat = both[:, :dt.TILE + 2], both[:, dt.TILE + 2:]
+    cell = ground[1:-1, 1:-1]
     q = cell[..., 0].astype(np.int64) * 256 + cell[..., 1]
     h = info["h0"] + q / 65535.0 * (info["h1"] - info["h0"])
     s = surf[2, :dt.TILE, :dt.TILE]
@@ -355,6 +360,12 @@ def test_detail_tiles_round_trip_heights_shores_and_the_sea(tmp_path):
     assert (cell[..., 3][dt.TILE - 1, :] < 128).all()                                                # the sea is not
     ld = (cell[..., 2] / 127.5 - 1.0) * 200.0
     assert (ld[40:50, 100:120] > 14.0).all() and (ld[:30, :60] < -100.0).all()
+    # the water half: the log discharge byte of the same cells
+    qb = wat[1:-1, 1:-1, 0]
+    assert qb[10:14, :].min() > qb[60:62, :].max() and qb[60:62, :].min() > 0
+    assert (qb[20:30, :] == 0).all()                                # only rain: under the line, no river
+    lo, hi = info["q_lo"], info["q_hi"]
+    back = lo * (hi / lo) ** (qb[10:14, :].astype(float) / 255.0)
+    assert np.allclose(back, 500.0, rtol=0.02)
     # the pad is the neighbouring cells, clamped at the face edge
-    full = img.transpose(1, 0, 2)
-    assert np.array_equal(full[0, 1:-1], full[1, 1:-1]) and np.array_equal(full[-1, 1:-1, :2], np.stack([(dt.encode_height_on(surf[2, dt.TILE, :dt.TILE], info["h0"], info["h1"]) >> 8), dt.encode_height_on(surf[2, dt.TILE, :dt.TILE], info["h0"], info["h1"]) & 255], -1).astype(np.uint8))
+    assert np.array_equal(ground[0, 1:-1], ground[1, 1:-1])

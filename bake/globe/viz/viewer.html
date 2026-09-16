@@ -212,8 +212,9 @@ uniform float uTexelRad;       // one texel of the finest terrain drawn, radians
 uniform int uDetail;           // 1: detail tiles of level uDRes are drawn where loaded (globe/viz/detail.py)
 uniform sampler2D uDT;         // tile cache: slots of uDSlot px, R,G height, B signed lake depth, A 255 - ocean mask
 uniform sampler2D uDP;         // page table of the level: texel (f%3 nT + ti, f/3 nT + tj) = slot (R, G), A loaded
-uniform float uDRes, uDTile, uDSlot; uniform int uDnT;
+uniform float uDRes, uDTile, uDSlot, uDSlotH; uniform int uDnT;
 uniform vec2 uDH;              // detail height decode range, metres
+uniform float uDRiverMin, uDRiverSpan;   // the detail tiles' own discharge bytes
 const float PI = 3.14159265358979;
 const float TWO_OVER_PI = 0.636619772367581;
 
@@ -248,7 +249,7 @@ bool detailXY(vec3 p, out vec2 xy){
   vec4 e = texelFetch(uDP, ivec2((f % 3) * uDnT + ti, (f / 3) * uDnT + tj), 0);
   if (e.a < 0.5) return false;
   vec2 slot = floor(e.rg * 255.0 + 0.5);
-  xy = slot * uDSlot + vec2(X - float(ti) * uDTile, Y - float(tj) * uDTile) + 0.5;
+  xy = vec2(slot.x * uDSlot, slot.y * uDSlotH) + vec2(X - float(ti) * uDTile, Y - float(tj) * uDTile) + 0.5;
   return true;
 }
 vec4 detailLinear(vec2 xy){
@@ -424,14 +425,23 @@ void main(){
   // has soft banks and the fainter paths beside it show.  Zoomed out past
   // one cell per pixel the fade-in moves up, so only the larger rivers stay
   // visible at continent scale -- as on a real map
+  // Rivers are the erosion's own discharge: from the detail tile where the
+  // view has one (the level's own stream map, sharp at any zoom), from the
+  // atlas otherwise.
   if (uRivers == 1 && !wet) {
-    float b = byteLinear(uT0a, uGeoA, 2, p);
+    float b, rmin, rspan;
+    if (uDetail == 1 && detailXY(p, dxy)) {
+      b = detailLinear(dxy + vec2(0.0, uDSlot)).r * 255.0;   // the tile's water half
+      rmin = uDRiverMin;
+      rspan = uDRiverSpan;
+    } else {
+      b = byteLinear(uT0a, uGeoA, 2, p);
+      rmin = uRiverMin;
+      rspan = uRiverSpan;
+    }
     float cpp = max(1.0 / (uScale * uTexelRad), 1.0);
-    float t = clamp((b - uRiverMin - uRiverZoom * log2(cpp)) / max(uRiverSpan, 1.0), 0.0, 1.0);
+    float t = clamp((b - rmin - uRiverZoom * log2(cpp)) / max(rspan, 1.0), 0.0, 1.0);
     float w = t * t * (3.0 - 2.0 * t);
-    // with river lines the lines are the rivers: the texture's channels are
-    // two or three cells wide once a cell is several pixels
-    if (uLines == 1) w = 0.0;
     vec3 rc = mix(vec3(0.42, 0.62, 0.80), vec3(0.14, 0.34, 0.70), w);
     col = mix(col, rc, w * 0.9);
   }
@@ -754,11 +764,13 @@ function requestDraw() { if (!drawQueued) { drawQueued = true; requestAnimationF
 // table.  A tile not loaded yet is drawn from the atlas.
 // ---------------------------------------------------------------------------
 const DET = META.detail || null;
-const detail = { slotPx: 0, per: 0, tex: null, levels: [], slotKey: [], keySlot: new Map(), seen: [], inflight: 0, queue: [], queued: new Set(), missing: new Set(), tick: 0 };
+const detail = { slotPx: 0, slotH: 0, per: 0, rows: 0, tex: null, levels: [], slotKey: [], keySlot: new Map(), seen: [], inflight: 0, queue: [], queued: new Set(), missing: new Set(), tick: 0 };
 if (DET && DET.levels && DET.levels.length) {
-  detail.slotPx = DET.tile + 2 * DET.pad;
-  const size = Math.min(4096, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+  detail.slotPx = DET.tile + 2 * DET.pad;                 // a tile is this wide
+  detail.slotH = 2 * detail.slotPx;                        // and twice that tall: ground, then water
+  const size = Math.min(8192, gl.getParameter(gl.MAX_TEXTURE_SIZE));
   detail.per = Math.floor(size / detail.slotPx);
+  detail.rows = Math.floor(size / detail.slotH);
   detail.tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, detail.tex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
   for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.NEAREST);
@@ -771,7 +783,7 @@ if (DET && DET.levels && DET.levels.length) {
     for (let i = 0; i < bin.length; i++) bits[i] = bin.charCodeAt(i);
     return Object.assign({}, lv, { page: t, bits });
   });
-  const n = detail.per * detail.per;
+  const n = detail.per * detail.rows;
   detail.slotKey = new Array(n).fill(null); detail.seen = new Array(n).fill(-1);
 }
 function tileExists(lv, f, ti, tj) { const k = (f * lv.nT + ti) * lv.nT + tj; return (lv.bits[k >> 3] >> (k & 7)) & 1; }
@@ -829,7 +841,7 @@ GV.onTile = async (key, b64) => {
     slot = best;
   }
   gl.bindTexture(gl.TEXTURE_2D, detail.tex);
-  gl.texSubImage2D(gl.TEXTURE_2D, 0, (slot % detail.per) * detail.slotPx, Math.floor(slot / detail.per) * detail.slotPx, gl.RGBA, gl.UNSIGNED_BYTE, bm);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, (slot % detail.per) * detail.slotPx, Math.floor(slot / detail.per) * detail.slotH, gl.RGBA, gl.UNSIGNED_BYTE, bm);
   bm.close && bm.close();
   const [L, f, ti, tj] = key.split("_").map(Number);
   setPage(detail.levels[L - 1], f, ti, tj, slot);
@@ -901,6 +913,8 @@ function draw() {
   if (dlv) {
     gl.uniform1f(U.uDRes, dlv.res); gl.uniform1f(U.uDTile, DET.tile); gl.uniform1f(U.uDSlot, detail.slotPx);
     gl.uniform1i(U.uDnT, dlv.nT); gl.uniform2f(U.uDH, DET.h0, DET.h1);
+    gl.uniform1f(U.uDSlotH, detail.slotH);
+    gl.uniform1f(U.uDRiverMin, DET.river_min_byte ?? 128); gl.uniform1f(U.uDRiverSpan, DET.river_span_byte ?? 40);
   }
   gl.uniform3fv(U.uBiome, biome); gl.uniform3fv(U.uSat, sat);
   const tch = CHANNELS.temperature || {}, pch = CHANNELS.precip || {};

@@ -29,7 +29,7 @@ def main() -> int:
     ap.add_argument("--refined", action="store_true", default=None,
                     help="draw the final frame from the refined grid (fine/) at full resolution (default: render.viewer_refined)")
     ap.add_argument("--planet", default=None, help="draw the final frame from a planet zoom level (e.g. zoom/planet_R8), reduced to --final-res (default 2048) per face")
-    ap.add_argument("--river-source", default="auto", choices=("auto", "graph", "traced", "none"),
+    ap.add_argument("--river-source", default="none", choices=("auto", "graph", "traced", "none"),
                     help="river lines on the final frame: derive's graph/rivers.json (auto, except on a --planet frame), traced from its discharge along the surface's flood tree, or none (the discharge texture)")
     ap.add_argument("--detail", action="store_true",
                     help="also write detail tiles (viewer/tiles/) from the final frame's full-resolution source, loaded as the view zooms in")

@@ -10,12 +10,15 @@ it, loaded only where the view is:
   source's own resolution (block means of it below that);
 * each level cut into ``TILE``-cell tiles per face (a row of tiles read at
   a time, so a 32768^2 face is never in memory), every tile one lossless
-  RGBA WebP of ``TILE + 2`` pixels a side (a cell of its neighbours around
-  it, clamped at the face edge, so bilinear sampling needs no neighbour
-  tile): ``R, G`` = 16-bit height over the detail range (sea level on a code,
-  every cell's sign kept, as :func:`viewer.encode_height`), ``B`` = the
-  signed lake depth byte, ``A`` = 255 - the smoothed ocean mask byte (land
-  opaque, so a browser that premultiplies can only touch the sea);
+  RGBA WebP ``TILE + 2`` pixels wide and twice that tall (a cell of its
+  neighbours around it, clamped at the face edge, so bilinear sampling needs
+  no neighbour tile).  Its top half is the ground -- ``R, G`` = 16-bit height
+  over the detail range (sea level on a code, every cell's sign kept, as
+  :func:`viewer.encode_height`), ``B`` = the signed lake depth byte, ``A`` =
+  255 - the smoothed ocean mask byte (land opaque, so a browser that
+  premultiplies can only touch the sea) -- and its bottom half the water:
+  ``R`` = the log discharge byte the rivers are drawn from, so the stream map
+  stays the erosion's own at every zoom instead of the atlas' blur;
 * written as ``tiles/L{L}/{face}_{ti}_{tj}.js`` (``GLOBE_VIEWER.tile(...)``:
   ``file://`` pages cannot fetch); a tile with no land and no lake in it is
   not written, and ``meta.detail`` carries a bitset of the ones that are.
@@ -101,10 +104,13 @@ def reduce_face(d: dict, k: int) -> dict:
     surf = blk(d["surf"]).mean(axis=(1, 3), dtype=np.float64).astype(np.float32)
     ws = blk(d["ws"]).mean(axis=(1, 3), dtype=np.float64).astype(np.float32)
     frac = lambda code: blk(d["water"] == code).mean(axis=(1, 3))
+    out_q = {}
+    if "discharge" in d:
+        out_q["discharge"] = blk(d["discharge"]).max(axis=(1, 3)).astype(np.float32)   # a river narrower than a block still shows
     water = np.zeros((a_, b_), np.uint8)
     water[frac(WATER_LAKE) > 0.5] = WATER_LAKE
     water[frac(WATER_OCEAN) > 0.5] = WATER_OCEAN
-    return {"surf": surf, "ws": np.maximum(ws, surf), "water": water}
+    return {"surf": surf, "ws": np.maximum(ws, surf), "water": water, **out_q}
 
 
 def face_lake_depth(surf: np.ndarray, ws: np.ndarray, water: np.ndarray, range_m: float) -> np.ndarray:
@@ -153,10 +159,12 @@ def encode_height_on(h: np.ndarray, h0: float, h1: float) -> np.ndarray:
     return np.clip(q, 0, 65535).astype(np.uint16)
 
 
-def tile_image(surf, ld, ocean_m, ti: int, tj: int, h0: float, h1: float, lake_range: float, res: int | None = None, row0: int = 0) -> np.ndarray | None:
-    """The ``(TILE + 2)^2`` RGBA image of tile ``(ti, tj)`` of a face level
-    ``res`` cells a side, from arrays holding its rows ``[row0, row0 +
-    len)``, or None when it has no land and no lake."""
+def tile_image(surf, ld, ocean_m, disch, ti: int, tj: int, h0: float, h1: float, lake_range: float, q_lo: float, q_hi: float,
+               res: int | None = None, row0: int = 0) -> np.ndarray | None:
+    """The ``(TILE + 2)`` x ``2 (TILE + 2)`` RGBA image of tile ``(ti, tj)`` of
+    a face level ``res`` cells a side, from arrays holding its rows ``[row0,
+    row0 + len)``: the ground on top, the water below.  None when the tile has
+    no land and no lake."""
     n = int(res) if res is not None else surf.shape[0]
     ii = np.clip(np.arange(ti * TILE - 1, ti * TILE + TILE + 1), 0, n - 1) - row0
     jj = np.clip(np.arange(tj * TILE - 1, tj * TILE + TILE + 1), 0, n - 1)
@@ -164,11 +172,17 @@ def tile_image(surf, ld, ocean_m, ti: int, tj: int, h0: float, h1: float, lake_r
     lk = ld[np.ix_(ii, jj)]
     if not ((oc < 0.5).any() or (lk > 0.0).any()):
         return None
-    q = encode_height_on(surf[np.ix_(ii, jj)], h0, h1)
+    h = encode_height_on(surf[np.ix_(ii, jj)], h0, h1)
     b = np.clip(np.round(255.0 * (lk + lake_range) / (2.0 * lake_range)), 0, 255).astype(np.uint8)
     a = (255 - np.clip(np.round(255.0 * oc), 0, 255)).astype(np.uint8)
-    img = np.stack([(q >> 8).astype(np.uint8), (q & 255).astype(np.uint8), b, a], axis=-1)
-    return np.ascontiguousarray(img.transpose(1, 0, 2))      # image (y, x) = cell (j, i)
+    ground = np.stack([(h >> 8).astype(np.uint8), (h & 255).astype(np.uint8), b, a], axis=-1)
+    q = np.asarray(disch[np.ix_(ii, jj)], np.float64)
+    t = np.log(np.maximum(q, q_lo) / q_lo) / math.log(max(q_hi / q_lo, 1.0000001))
+    qb = np.where(q > q_lo, np.clip(np.round(255.0 * t), 1, 255), 0).astype(np.uint8)
+    zero = np.zeros_like(qb)
+    water = np.stack([qb, zero, zero, np.full_like(qb, 255)], axis=-1)
+    img = np.concatenate([ground, water], axis=1)            # cell (i, j): ground at j, water at j + TILE + 2
+    return np.ascontiguousarray(img.transpose(1, 0, 2))      # image (y, x)
 
 
 def webp_rgba_b64(img: np.ndarray) -> str:
@@ -200,12 +214,28 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
         return None
     lo, hi = np.inf, -np.inf
     step = 4 * TILE
+    qs = []
     for f in range(6):
         for r0 in range(0, src.res, step):
-            s = src.rows(f, r0, min(src.res, r0 + step))["surf"]
+            d = src.rows(f, r0, min(src.res, r0 + step))
+            s = d["surf"]
             lo, hi = min(lo, float(s.min())), max(hi, float(s.max()))
+            q = d.get("discharge")
+            if q is not None:
+                qq = np.asarray(q)[(np.asarray(s) > 0) & (np.asarray(q) > 0)]
+                if qq.size:
+                    qs.append(qq[::7])
     h0, h1 = height_grid(lo, hi)
-    meta = {"tile": TILE, "pad": 1, "h0": h0, "h1": h1, "lake_range": float(lake_range), "levels": []}
+    # the discharge byte: the land's own range, so the rivers at every level
+    # are the same stream map the erosion left
+    qall = np.concatenate(qs) if qs else np.array([1.0])
+    q_lo = max(float(np.percentile(qall, 50)), 1e-9)
+    q_hi = max(float(qall.max()), q_lo * 10.0)
+    meta = {"tile": TILE, "pad": 1, "h0": h0, "h1": h1, "lake_range": float(lake_range), "q_lo": q_lo, "q_hi": q_hi,
+            "river_min_byte": int(np.clip(round(255.0 * math.log(max(float(np.percentile(qall, 88)), q_lo) / q_lo) / math.log(q_hi / q_lo)), 1, 254)),
+            "river_span_byte": max(int(round(255.0 * math.log(max(float(np.percentile(qall, 99.5)), q_lo) / q_lo) / math.log(q_hi / q_lo))) -
+                                   int(round(255.0 * math.log(max(float(np.percentile(qall, 88)), q_lo) / q_lo) / math.log(q_hi / q_lo))), 8),
+            "levels": []}
     for L, res in levels:
         nT = -(-res // TILE)
         (tdir / f"L{L}").mkdir(parents=True, exist_ok=True)
@@ -224,8 +254,9 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
                 d = reduce_face(src.rows(f, lr0 * k, lr1 * k), k)
                 ld = face_lake_depth(d["surf"], d["ws"], d["water"], lake_range)
                 om = face_smooth_mask(d["water"] == WATER_OCEAN)
+                q = d.get("discharge", np.zeros_like(d["surf"]))
                 for tj in range(nT):
-                    img = tile_image(d["surf"], ld, om, ti, tj, h0, h1, lake_range, res=res, row0=lr0)
+                    img = tile_image(d["surf"], ld, om, q, ti, tj, h0, h1, lake_range, meta["q_lo"], meta["q_hi"], res=res, row0=lr0)
                     if img is None:
                         continue
                     key = f"{L}_{f}_{ti}_{tj}"
