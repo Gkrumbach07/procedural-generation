@@ -1331,6 +1331,11 @@ def test_discharge_scales_in_cells_of_upstream_rain():
     assert stats2["disc_saturation"] == pytest.approx(1280.0 * extra / n_cells, rel=1e-3)
 
 
+def _flat_metric(n: int) -> np.ndarray:
+    """(g_ii, g_ij, g_jj) of a flat square grid -- off-diagonal 0, not 1."""
+    return np.stack([np.ones((n, n)), np.zeros((n, n)), np.ones((n, n))], axis=-1)
+
+
 def _basin_window(n: int = 60, precip: float = 1.0):
     """A slope falling along i with a square basin dug into it."""
     surf = 80.0 - 1.0 * np.repeat(np.arange(n, dtype=np.float64)[:, None], n, 1)
@@ -1339,7 +1344,7 @@ def _basin_window(n: int = 60, precip: float = 1.0):
     mask[0, :] = mask[-1, :] = mask[:, 0] = mask[:, -1] = 0
     st = emaps.ErosionState.window(surf.copy(), np.zeros((n, n)), np.zeros((n, n)), np.zeros((n, n, 2)), np.ones((n, n)),
                                    np.full((n, n), precip), np.ones((n, n)), np.zeros((n, n)), mask,
-                                   np.ones((n, n, 3)), np.ones((n, n, 3)), 1, 1.0)
+                                   _flat_metric(n), _flat_metric(n), 1, 1.0)
     st.refresh_route(0.001)
     return st, surf
 
@@ -1373,3 +1378,80 @@ def test_window_lakes_balance_a_depression_against_its_evaporation():
     st3, _ = _basin_window(precip=0.001)
     st3.refresh_lakes_window(0.5, 0.0)
     assert int(st3.lake_flag[0].sum()) == full
+
+
+def _plain_window(n: int = 64, seed: int = 3):
+    surf = 40.0 - 0.02 * np.repeat(np.arange(n, dtype=np.float64)[:, None], n, 1)
+    surf += 0.12 * ndimage.gaussian_filter(np.random.default_rng(seed).normal(size=(n, n)), 4.0)
+    mask = np.ones((n, n), np.uint8)
+    mask[0, :] = mask[-1, :] = mask[:, 0] = mask[:, -1] = 0
+    return surf, mask
+
+
+def _run_window(surf, mask, rate, its=25, ppc=0.3):
+    from globe.refine.basin_job import basin_erosion_params
+    from globe.refine.zoom import zoom_params
+
+    n = surf.shape[0]
+    ep = basin_erosion_params(zoom_params(WorldParams(), 32), np.random.default_rng(5))
+    ep.lateral_rate = rate
+    ep.max_steps = 60
+    st = emaps.ErosionState.window(surf.copy(), np.full((n, n), 1.0), np.zeros((n, n)), np.zeros((n, n, 2)), np.ones((n, n)),
+                                   np.ones((n, n)), np.ones((n, n)), np.zeros((n, n)), mask,
+                                   _flat_metric(n), _flat_metric(n), 1, 30.0)
+    for it in range(its):
+        emaps.step(st, ep, it, particles_per_cell=ppc, rng_stage="refine")
+    return st
+
+
+def test_change_list_cap_is_one_formula_for_the_kernel_and_its_caller():
+    """``trace_particles`` lays out a particle's slice with
+    :func:`particle.change_list_cap` and ``apply_changes`` is handed the same
+    number: if the two ever disagree the apply reads uninitialised entries
+    and indexes the terrain with whatever they hold."""
+    for max_steps in (40, 500):
+        for lateral in (False, True):
+            cap = int(pk.change_list_cap(max_steps, lateral))
+            assert cap >= (2 * max_steps if lateral else max_steps) + 2 * pk.SPREAD + 1
+    surf, mask = _plain_window(48)
+    st = _run_window(surf, mask, 0.0, its=2)
+    assert np.isfinite(st.height).all()
+
+
+def test_lateral_erosion_cuts_the_bank_on_the_outside_of_a_bend():
+    """``erosion.lateral_rate``: where a particle is cutting *and* turning it
+    also takes material off the cell across the flow on the outside of the
+    bend.  Those entries carry volume -2, so :func:`particle.apply_changes`
+    erodes them under the same caps without tracking discharge or moving the
+    particle's path; with the rate at 0 none are written and the pass is what
+    it was."""
+    surf, mask = _plain_window()
+    seen = {}
+
+    def count(rate):
+        n = surf.shape[0]
+        from globe.refine.basin_job import basin_erosion_params
+        from globe.refine.zoom import zoom_params
+
+        ep = basin_erosion_params(zoom_params(WorldParams(), 32), np.random.default_rng(5))
+        ep.lateral_rate = rate
+        ep.max_steps = 60
+        st = emaps.ErosionState.window(surf.copy(), np.full((n, n), 1.0), np.zeros((n, n)), np.zeros((n, n, 2)), np.ones((n, n)),
+                                       np.ones((n, n)), np.ones((n, n)), np.zeros((n, n)), mask,
+                                       _flat_metric(n), _flat_metric(n), 1, 30.0)
+        tally = [0, 0]
+
+        def diag(state, cl_cell, cl_vol, cl_count, cap, sp_death):
+            for p in range(cl_count.size):
+                v = cl_vol[p * cap: p * cap + cl_count[p]]
+                tally[0] += v.size
+                tally[1] += int((v == -2.0).sum())
+
+        emaps.run_iteration(st, ep, 0, particles_per_cell=0.3, rng_stage="refine", diag=diag)
+        return tally, st.height[0] + st.sediment[0]
+
+    (entries0, lat0), h0 = count(0.0)
+    (entries1, lat1), h1 = count(50.0)
+    assert lat0 == 0 and entries0 > 100
+    assert lat1 > 0.01 * entries1, (lat1, entries1)        # a real share of the steps cut a bank
+    assert not np.array_equal(h0, h1)                       # and it moves ground

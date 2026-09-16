@@ -696,7 +696,7 @@ def run_iteration(
         # soillib: deposition <= 0.25 L critSlopeSediment per step
         iter_deposit = min(iter_deposit, float(ep.slope_limit_deposit) * math.sqrt(2.0) * 0.3)
     max_steps = max_steps_of(ep, state.N)
-    cap = max_steps + 2 * pk.SPREAD
+    cap = int(pk.change_list_cap(max_steps, float(getattr(ep, "lateral_rate", 0.0)) > 0.0))
     P = sp_face.shape[0]
     chunk = chunk_size(ep, P)
     # change list buffers (reused for every chunk)
@@ -759,6 +759,7 @@ def run_iteration(
                 cell_units(ep, "fan_room", state.height_unit_m),
                 cell_units(ep, "dep_floor_m", state.height_unit_m),
                 float(ep.lake_trap),
+                float(getattr(ep, "lateral_rate", 0.0)),
                 cl_cell,
                 cl_delta,
                 cl_vol,

@@ -57,7 +57,7 @@ MASK_FROZEN = 2
 
 #: bumped whenever a kernel change alters results: part of the checkpoint
 #: hash, so stale checkpoints are never resumed after a code change
-KERNEL_VERSION = 11  # 11: discharge scales in cells (erosion.disc_saturation_cells / momentum_saturation_cells) and soillib's slope limits (erosion.slope_limit_erode / slope_limit_deposit); all off by default, where the pass is unchanged. 10: the evaporation floor is a fraction of the spawn volume (erosion.min_volume_frac). 9: the datum hold keeps the bedrock's land fraction in shelf mode (maps.datum_land_fraction)
+KERNEL_VERSION = 12  # 12: lateral erosion (erosion.lateral_rate): a particle cutting its bed also cuts the bank on the outside of its bend, which is what lets a channel migrate and meander; off by default. 11: discharge scales in cells (erosion.disc_saturation_cells / momentum_saturation_cells) and soillib's slope limits (erosion.slope_limit_erode / slope_limit_deposit); all off by default, where the pass is unchanged. 10: the evaporation floor is a fraction of the spawn volume (erosion.min_volume_frac). 9: the datum hold keeps the bedrock's land fraction in shelf mode (maps.datum_land_fraction)
 
 #: a dying particle deposits its remaining load at the cell it died in; the
 #: excess over that cell's caps moves back up its last SPREAD active cells
@@ -251,6 +251,17 @@ def _sdot(samp, f, ei, ej, a, b, c, d):
 # --------------------------------------------------------------------------
 # particle kernel
 # --------------------------------------------------------------------------
+@njit(cache=True, inline="always")
+def change_list_cap(max_steps, lateral):
+    """Entries a particle's slice of the change list holds: one an active step
+    (two where a bank is cut as well, ``erosion.lateral_rate``), then its final
+    deposits -- the death cell and ``SPREAD`` overflow slots -- and the ring
+    buffer of the last ``SPREAD`` cells, which lives in the tail of the same
+    slice.  :func:`trace_particles` and its caller must agree on this: the
+    caller sizes the arrays with it and passes it to :func:`apply_changes`."""
+    return (2 * max_steps if lateral else max_steps) + 2 * SPREAD + 1 + SPREAD
+
+
 @njit(cache=True, parallel=True)
 def trace_particles(
     # spawn (P,) arrays: face, fractional interior x, y; one volume for all
@@ -293,6 +304,7 @@ def trace_particles(
     fan_room,
     dep_floor,
     lake_trap,
+    lateral_rate,
     # change list: (P*cap,) arrays + (P,) counts, cell range, death cause
     cl_cell,
     cl_delta,
@@ -355,7 +367,7 @@ def trace_particles(
     """
     P = sp_face.shape[0]
     NE = N + 2 * H
-    cap = max_steps + 2 * SPREAD
+    cap = change_list_cap(max_steps, lateral_rate > 0.0)
     Nf = float(N)
     inv_sat = 1.0 / disc_saturation if disc_saturation > 0.0 else 0.0
     for p in prange(P):
@@ -454,6 +466,8 @@ def trace_particles(
             # inertia: the previous unit direction enters with weight
             # 1 - dt*friction (applied *before* the forces; after them it
             # would cancel in the normalisation below)
+            psa = sa  # the direction this step started with (for the bend)
+            psb = sb
             fr = 1.0 - dt * friction
             if fr < 0.0:
                 fr = 0.0
@@ -632,6 +646,50 @@ def trace_particles(
                     lo = cell
                 if cell > hi:
                     hi = cell
+                # --- the outside of the bend ------------------------------
+                # A particle that is cutting and turning also cuts the bank it
+                # is thrown against: the cell one across the flow on the
+                # outside of the bend, taken down towards the bed it just
+                # eroded.  That is what lets a channel move sideways instead
+                # of only down, so bends grow into meanders.  The entry
+                # carries volume -2: apply_changes erodes it under the same
+                # caps but tracks no discharge and leaves the path unchanged.
+                # never crowd the final deposits or the ring buffer at the
+                # tail of this particle's slice
+                if lateral_rate > 0.0 and cdiff > 0.0 and n + 2 * SPREAD + 2 < cap:
+                    cross = psa * sb - psb * sa       # sin of the turn: + left, - right
+                    turn = cross if cross > 0.0 else -cross
+                    if turn > 1e-6:
+                        sgn = 1.0 if cross > 0.0 else -1.0
+                        bx = x + sgn * sb             # one cell across, outside of the bend
+                        by = y - sgn * sa
+                        bci = int(math.floor(bx))
+                        bcj = int(math.floor(by))
+                        bei = bci + H
+                        bej = bcj + H
+                        if 0 <= bei < NE and 0 <= bej < NE and mask[f, bei, bej] == MASK_ACTIVE:
+                            hb = samp[f, bei, bej, S_SURF]
+                            bank = hb - h_here        # how far the bank stands above the bed
+                            if bank > 0.0:
+                                lat = lateral_rate * turn * cdiff
+                                lcap = bank / kexp
+                                if lcap > max_erode:
+                                    lcap = max_erode
+                                if lat * vol_rel > lcap:
+                                    lat = lcap / vol_rel
+                                if lat > 0.0:
+                                    sed += lat
+                                    bcell = (f * NE + bei) * NE + bej
+                                    cl_cell[base + n] = bcell
+                                    cl_delta[base + n] = -lat * vol_rel
+                                    cl_vol[base + n] = -2.0   # off the path: no discharge, no prev
+                                    cl_mom[base + n, 0] = 0.0
+                                    cl_mom[base + n, 1] = 0.0
+                                    n += 1
+                                    if bcell < lo:
+                                        lo = bcell
+                                    if bcell > hi:
+                                        hi = bcell
             # --- evaporation (mass conserving) ----------------------------
             ev = 1.0 - dt * evap_rate * samp[f, ei, ej, S_EVAP]
             if ev < 0.01:
