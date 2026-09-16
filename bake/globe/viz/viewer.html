@@ -87,6 +87,7 @@
     <span class="chk"><input type="checkbox" id="fade" checked>blend</span>
     <span class="chk"><input type="checkbox" id="coast">coast</span>
     <span class="chk" id="scoutchk"><input type="checkbox" id="scout" checked>scout</span>
+    <span class="chk" title="Contour lines (C): interval · major"><input type="checkbox" id="contours">contours <span id="ctv" style="color:var(--dim);font-size:11px"></span></span>
   </div>
   <div class="row"><label>Speed</label><input type="range" id="fps" min="1" max="30" step="1" value="10"><span id="fpsv" style="width:28px;text-align:right">10</span></div>
   <div class="row"><button class="plain" id="shot">Save PNG</button><button class="plain" id="copylink">Copy view link</button></div>
@@ -98,7 +99,7 @@
 <div id="help" class="panel">
   <b>Drag</b> pan / rotate · <b>Wheel</b> zoom at cursor · <b>Double-click</b> zoom in<br>
   <b>Space</b> play/pause · <b>← →</b> step frame · <b>Shift+← →</b> jump stage<br>
-  <b>G</b> globe/flat · <b>T</b> 3D · <b>Home</b> reset · <b>1–9</b> layers · <b>R</b> rivers · <b>L</b> grid<br>
+  <b>G</b> globe/flat · <b>T</b> 3D · <b>Home</b> reset · <b>1–9</b> layers · <b>R</b> rivers · <b>L</b> grid · <b>C</b> contours<br>
   <b>3D:</b> drag pan · <b>right-drag</b> or <b>Ctrl/Shift-drag</b> turn &amp; tilt · <b>Q E</b> turn · <b>PgUp PgDn</b> tilt<br>
   <b>Zoom windows</b> (list, top left): their fine levels draw in place when you zoom in; tick a level off to compare<br>
   <b>Click</b> a spot: open its zoom (outlined squares), or bake one there<br><br>
@@ -220,6 +221,7 @@ uniform float uRiverMin;       // byte at which a river starts to fade in
 uniform float uRiverSpan;      // bytes from there to full strength
 uniform float uRiverZoom;      // bytes the fade-in moves up per doubling of cells per screen pixel
 uniform int uGrid, uCoast;
+uniform float uContour;        // contour interval, metres (0 = off); every fifth line is a major one
 uniform int uLines;            // 1 when the river-line pass drew into uRL this frame
 uniform sampler2D uRL;         // river lines, canvas-sized: R coverage x fade, G width (for the colour)
 uniform float uTexelRad;       // one texel of the finest terrain drawn, radians
@@ -595,6 +597,19 @@ void main(){
     vec3 rc = mix(vec3(0.30, 0.52, 0.78), vec3(0.12, 0.30, 0.66), rl.g);
     col = mix(col, rc, rl.r * 0.95);
   }
+  if (uContour > 0.0 && wcode < 0.5) {
+    // topographic contours of the ground's own height (not exaggerated): a line
+    // ~1 px wide (major ones 2 px), fading out where they would crowd closer
+    // than ~4 px -- steep walls, or far off in the 3-D view
+    float v = h / uContour;
+    float fw = max(fwidth(v), 1e-6);
+    float k = floor(v + 0.5);
+    bool major = abs(mod(k, 5.0)) < 0.5;
+    float dist = abs(v - k) / fw;                                  // pixels to the nearest line
+    float line = 1.0 - smoothstep(major ? 0.8 : 0.45, major ? 1.8 : 1.25, dist);
+    float room = 1.0 - smoothstep(major ? 0.5 : 0.3, major ? 0.85 : 0.55, fw);
+    col = mix(col, vec3(0.22, 0.12, 0.05), line * room * (major ? 0.9 : 0.62));
+  }
   if (uCoast == 1) {
     float w = fwidth(h);
     col = mix(col, vec3(0.05), (1.0 - smoothstep(0.0, 1.2 * w, abs(h - uSea))) * 0.9);
@@ -831,6 +846,7 @@ const state = {
   playing: false, fps: 10,
   heading: 0, tilt: 55 * PI / 180, exag3: 1.5,   // the 3-D view: compass heading, tilt from straight down, vertical exaggeration
   zoff: new Set(),                               // zoom levels switched off ("name_L<R>")
+  contours: false,
 };
 // zoom 1 shows the whole planet in either view
 function baseScale() {
@@ -850,6 +866,7 @@ function readHash() {
   num("z", v => state.zoom = v); num("x", v => state.exag = v);
   if (h.has("layer")) state.layer = h.get("layer");
   for (const k of ["rivers", "grid", "coast", "fade", "scout"]) if (h.has(k)) state[k] = h.get(k) === "1";
+  if (h.has("ct")) state.contours = h.get("ct") === "1";
   if (h.get("ui") === "0") document.body.classList.add("noui");
 }
 let hashTimer = 0;
@@ -860,7 +877,7 @@ function writeHash() {
     const h = `f=${state.frame}&v=${state.view}&lat=${d(state.lat0)}&lon=${d(state.lon0)}&z=${state.zoom.toFixed(4)}`
       + `&layer=${state.layer}&x=${state.exag}&rivers=${+state.rivers}&grid=${+state.grid}&coast=${+state.coast}&fade=${+state.fade}`
       + (state.view === "tilt" ? `&hd=${(state.heading * 180 / PI).toFixed(1)}&tl=${(state.tilt * 180 / PI).toFixed(1)}&x3=${state.exag3}` : "")
-      + (state.zoff.size ? `&zoff=${[...state.zoff].join(",")}` : "");
+      + (state.zoff.size ? `&zoff=${[...state.zoff].join(",")}` : "") + (state.contours ? "&ct=1" : "");
     history.replaceState(null, "", "#" + h);
   }, 200);
 }
@@ -1084,6 +1101,28 @@ GV.zoomTex = async (name, R, b64) => {
   ztex.loaded.set(key, { tex: t, rec: rec.tex, R, name, seen: ztex.tick });
   requestDraw(); buildZoomList();
 };
+// contour interval for this view: a 1-2-5 step giving about twenty lines over the
+// height range of the land in view (5th-95th percentile of the atlas under a
+// screen grid), so a plain gets metres and a range hundreds of metres
+let ctCache = { key: "", v: 100 };
+function contourInterval() {
+  const a = loadedAtOrBefore(state.frame);
+  const key = `${a}|${state.view}|${state.lat0.toFixed(4)}|${state.lon0.toFixed(4)}|${state.zoom.toFixed(3)}|${state.heading.toFixed(2)}|${state.tilt.toFixed(2)}`;
+  if (key === ctCache.key || a < 0 || !bitmaps[a]) return ctCache.v;
+  const f = frames[a], pix = pixelsOf(a), d0 = pix[0].d, hs = [];
+  for (let y = 0.5; y < 12; y++) for (let x = 0.5; x < 16; x++) {
+    const p = screenToDir(x / 16 * canvas.width, y / 12 * canvas.height); if (!p) continue;
+    const [x0, y0] = texel(f, 0, p), o0 = 4 * (y0 * pix[0].w + x0);
+    const hh = f.h0 + (d0[o0] * 256 + d0[o0 + 1]) / 65535 * (f.h1 - f.h0);
+    if (hh > (META.sea_level_m || 0)) hs.push(hh);
+  }
+  let range = 1000;
+  if (hs.length >= 8) { hs.sort((u, w) => u - w); range = hs[Math.floor(0.95 * (hs.length - 1))] - hs[Math.floor(0.05 * (hs.length - 1))]; }
+  const raw = Math.max(range / 20, 5);
+  const e = Math.pow(10, Math.floor(Math.log10(raw))), m = raw / e;
+  ctCache = { key, v: Math.min((m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * e, 1000) };
+  return ctCache.v;
+}
 // metres of ground per canvas pixel at the view centre
 function metresPerPx() {
   // in device pixels at full resolution, so a half-resolution frame while moving does not change what loads
@@ -1254,6 +1293,10 @@ function draw() {
   gl.uniform1i(U.uOCh, ord ? ord[1] : 0);
   gl.uniform1i(U.uHasOrder, ord ? 1 : 0);
   gl.uniform1i(U.uGrid, state.grid ? 1 : 0); gl.uniform1i(U.uCoast, state.coast ? 1 : 0);
+  const ci = state.contours ? contourInterval() : 0;
+  gl.uniform1f(U.uContour, ci);
+  const fc = v => v >= 1000 ? `${v / 1000} km` : `${v} m`;
+  $("ctv").textContent = ci ? `${fc(ci)} · ${fc(5 * ci)}` : "";
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   updateLabels(a);
   updateLegend(FA);
@@ -1488,6 +1531,7 @@ function updateLabels(a) {
   $("tiltrow").classList.toggle("hidden", !tiltView); $("exag3row").classList.toggle("hidden", !tiltView);
   $("tilt").value = Math.round(state.tilt * 180 / PI); $("tiltv").textContent = Math.round(state.tilt * 180 / PI) + "°";
   $("exag3").value = state.exag3; $("exag3v").textContent = state.exag3 + "×";
+  $("contours").checked = state.contours;
   $("rivers").checked = state.rivers; $("grid").checked = state.grid; $("coast").checked = state.coast; $("fade").checked = state.fade; $("scout").checked = state.scout;
   $("fps").value = state.fps; $("fpsv").textContent = state.fps;
 }
@@ -1732,7 +1776,7 @@ $("reset").onclick = resetView;
 sel.onchange = () => { state.layer = sel.value; legendKey = ""; writeHash(); requestDraw(); };
 $("exag").oninput = e => { state.exag = +e.target.value; writeHash(); requestDraw(); };
 $("fps").oninput = e => { state.fps = +e.target.value; $("fpsv").textContent = state.fps; };
-for (const k of ["rivers", "grid", "coast", "fade", "scout"]) $(k).onchange = e => { state[k] = e.target.checked; writeHash(); requestDraw(); };
+for (const k of ["rivers", "grid", "coast", "fade", "scout", "contours"]) $(k).onchange = e => { state[k] = e.target.checked; writeHash(); requestDraw(); };
 $("play").onclick = togglePlay;
 $("prev").onclick = () => { state.playing = false; setFrame(state.frame - 1); };
 $("next").onclick = () => { state.playing = false; setFrame(state.frame + 1); };
@@ -1755,6 +1799,7 @@ window.addEventListener("keydown", ev => {
   else if (k === "Home") resetView();
   else if (k === "r" || k === "R") { state.rivers = !state.rivers; writeHash(); requestDraw(); }
   else if (k === "l" || k === "L") { state.grid = !state.grid; writeHash(); requestDraw(); }
+  else if (k === "c" || k === "C") { state.contours = !state.contours; writeHash(); requestDraw(); updateLabels(state.frame); }
   else if (/^[1-9]$/.test(k) && layerNames[+k - 1]) { state.layer = layerNames[+k - 1]; legendKey = ""; writeHash(); requestDraw(); }
 });
 window.addEventListener("resize", () => { requestDraw(); drawTimeline(); });
