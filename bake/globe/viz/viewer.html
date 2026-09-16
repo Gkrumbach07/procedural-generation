@@ -598,17 +598,17 @@ void main(){
     col = mix(col, rc, rl.r * 0.95);
   }
   if (uContour > 0.0 && wcode < 0.5) {
-    // topographic contours of the ground's own height (not exaggerated): a line
-    // ~1 px wide (major ones 2 px), fading out where they would crowd closer
-    // than ~4 px -- steep walls, or far off in the 3-D view
+    // topographic contours of the ground's own height (not exaggerated): thin,
+    // translucent lines (majors a little heavier), fading out where they would
+    // crowd closer than ~3 px -- steep walls, or far off in the 3-D view
     float v = h / uContour;
     float fw = max(fwidth(v), 1e-6);
     float k = floor(v + 0.5);
     bool major = abs(mod(k, 5.0)) < 0.5;
     float dist = abs(v - k) / fw;                                  // pixels to the nearest line
-    float line = 1.0 - smoothstep(major ? 0.8 : 0.45, major ? 1.8 : 1.25, dist);
+    float line = 1.0 - smoothstep(major ? 0.35 : 0.15, major ? 1.0 : 0.7, dist);
     float room = 1.0 - smoothstep(major ? 0.5 : 0.3, major ? 0.85 : 0.55, fw);
-    col = mix(col, vec3(0.22, 0.12, 0.05), line * room * (major ? 0.9 : 0.62));
+    col = mix(col, vec3(0.32, 0.20, 0.10), line * room * (major ? 0.45 : 0.25));
   }
   if (uCoast == 1) {
     float w = fwidth(h);
