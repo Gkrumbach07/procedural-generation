@@ -183,7 +183,8 @@ def scout(root: str | Path, planet: str | Path | None = None, spec: ScoutSpec = 
     grid = params.coarse_grid()
     N = grid.N
     if planet is None:
-        found = sorted((int(p.name.split("_R")[1]), p) for p in (root / "zoom").glob("planet_R*") if (p / "planet.json").exists())
+        found = sorted((int(p.name.split("_R")[1]), p) for p in (root / "zoom").glob("planet_R*")
+                       if (p / "planet.json").exists() and p.name.split("_R")[1].isdigit())
         if not found:
             raise FileNotFoundError(f"no finished planet level under {root / 'zoom'}")
         pdir = found[-1][1]

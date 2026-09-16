@@ -1329,3 +1329,47 @@ def test_discharge_scales_in_cells_of_upstream_rain():
     st.inflow_volume = extra
     stats2 = run_iteration(st, p, 0)
     assert stats2["disc_saturation"] == pytest.approx(1280.0 * extra / n_cells, rel=1e-3)
+
+
+def _basin_window(n: int = 60, precip: float = 1.0):
+    """A slope falling along i with a square basin dug into it."""
+    surf = 80.0 - 1.0 * np.repeat(np.arange(n, dtype=np.float64)[:, None], n, 1)
+    surf[20:30, 20:30] -= 25.0
+    mask = np.ones((n, n), np.uint8)
+    mask[0, :] = mask[-1, :] = mask[:, 0] = mask[:, -1] = 0
+    st = emaps.ErosionState.window(surf.copy(), np.zeros((n, n)), np.zeros((n, n)), np.zeros((n, n, 2)), np.ones((n, n)),
+                                   np.full((n, n), precip), np.ones((n, n)), np.zeros((n, n)), mask,
+                                   np.ones((n, n, 3)), np.ones((n, n, 3)), 1, 1.0)
+    st.refresh_route(0.001)
+    return st, surf
+
+
+def test_window_lakes_balance_a_depression_against_its_evaporation():
+    """``window_lake_evap``: a basin fed by a catchment still fills to its
+    spill, one fed by almost nothing holds a smaller lake at the level where
+    evaporation matches the inflow, and the water it does hold is what the
+    kernel sees (the routing surface) -- the dry bed above it stays at the
+    spill level so a particle can still climb out."""
+    st, surf = _basin_window(precip=1.0)
+    spill = st.refresh_lakes_window(0.5, 0.02)
+    assert spill["overflowing"] == 1 and spill["closed"] == 0
+    full = int(st.lake_flag[0].sum())
+    assert full == 100                                        # the whole basin
+
+    st2, _ = _basin_window(precip=0.001)
+    route_before = st2.route[0].copy()
+    small = st2.refresh_lakes_window(0.5, 0.02)
+    assert small["closed"] == 1 and small["overflowing"] == 0
+    wet = st2.lake_flag[0] > 0
+    assert 0 < int(wet.sum()) < full                           # a lake, but not the whole basin
+    level = float((st2.route[0])[wet].max())
+    assert level < float(route_before[wet].max())              # the water stands below the spill
+    assert (st2.route[0][wet] <= route_before[wet] + 1e-9).all()
+    dry = (st2.height[0] + st2.sediment[0] < route_before) & ~wet
+    assert np.array_equal(st2.route[0][dry], route_before[dry])  # the dry bed keeps the spill route
+    assert float(st2.base[0].max()) == 0.0                     # a window lake is never a sink
+
+    # no evaporation: the spill-point fill, as before
+    st3, _ = _basin_window(precip=0.001)
+    st3.refresh_lakes_window(0.5, 0.0)
+    assert int(st3.lake_flag[0].sum()) == full

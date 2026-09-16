@@ -395,7 +395,7 @@ class ErosionState:
                 "depressions": int(bal.get("depressions", 0)), "overflowing": int(bal.get("overflowing", 0)),
                 "closed": int(bal.get("closed", 0)), "dry": int(bal.get("dry", 0))}
 
-    def refresh_lakes_window(self, min_depth: float) -> dict:
+    def refresh_lakes_window(self, min_depth: float, lake_evap: float = 0.0) -> dict:
         """:meth:`refresh_lakes` for a window (``erosion.window_lakes``):
         every depression the routing flood fills more than ``min_depth``
         (cell units) deep is an overflowing lake -- flagged, so particles
@@ -409,17 +409,100 @@ class ErosionState:
         Without it a window's particle pass dams its own channels (92-98 % of
         new depressions at 305 m cells, docs/zoom-windows.md) and a particle
         reaching the dam climbs, dies and drops its load behind it, so the dam
-        is never incised.  Must run after :meth:`refresh_route`."""
+        is never incised.  Must run after :meth:`refresh_route`.
+
+        With ``lake_evap > 0`` (``erosion.window_lake_evap``) the level is the
+        evaporation balance instead of the spill point, as :meth:`refresh_lakes`
+        solves it on the planet: the window's own rain is accumulated down the
+        flood tree, and a depression settles where the inflow arriving at it
+        equals ``lake_evap`` times the evaporative demand of the water it
+        covers, so a divot with no catchment holds no lake.  Every depression
+        keeps the routing surface it had -- a particle still crosses it and
+        leaves, which is what cuts the outlet -- but the water, and with it
+        the bed the kernel will not touch, reaches only the balanced level;
+        the ground between that level and the rim is dry land again.
+
+        (Making a balanced lake a sink in ``base``, as the planet does, is
+        wrong here: at 1.2 km most depressions are noise the erosion should
+        drain, and trapping the particles in them left more, not fewer --
+        pits 2.6 % -> 4.3 % of a tile's land, lakes 2.8 % -> 5.4 %.)"""
         flag = np.zeros(self.height.shape, dtype=np.uint8)
         if self.route is None:
             self.lake_flag = flag
             return {"lake_cells": 0}
-        lake = ((self.route - self.surface()) > float(min_depth)) & (self.mask == pk.MASK_ACTIVE)
+        surf = self.surface()
+        lake = ((self.route - surf) > float(min_depth)) & (self.mask == pk.MASK_ACTIVE)
         H = self.H
         inter = (slice(None), slice(H, -H), slice(H, -H))
+        st = {}
+        if float(lake_evap) > 0.0:
+            lake, st = self._balance_window_lakes(surf, float(min_depth), float(lake_evap))
         flag[inter] = lake[inter]
         self.lake_flag = flag
-        return {"lake_cells": int(lake[inter].sum())}
+        return {"lake_cells": int(lake[inter].sum()), **st}
+
+    def _balance_window_lakes(self, surf: np.ndarray, min_depth: float, lake_evap: float):
+        """The evaporation balance of every depression of a window (F = 1).
+        Returns ``(overflowing lake mask, counts)`` and writes the level of a
+        closed one into ``base``."""
+        from scipy import ndimage
+
+        from ..hydro.priority_flood import priority_flood_flat
+        from ..zoom.bake import _accumulate
+
+        s = np.ascontiguousarray(surf[0], np.float32)
+        active = self.mask[0] == pk.MASK_ACTIVE
+        drain = ~active
+        drain[0, :] = drain[-1, :] = drain[:, 0] = drain[:, -1] = True
+        fr = priority_flood_flat(s, drain, None)
+        filled = fr.filled.reshape(s.shape)
+        acc = _accumulate(fr.pop_seq, fr.parent, np.ascontiguousarray(self.precip[0], np.float64).ravel()).reshape(s.shape)
+        dep = (filled > s + 1e-6) & active
+        lab, n = ndimage.label(dep, structure=np.ones((3, 3), bool))
+        out = np.zeros(s.shape, bool)
+        if n == 0:
+            return out[None], {"depressions": 0, "overflowing": 0, "closed": 0, "dry": 0}
+        cells = np.flatnonzero(lab.ravel() > 0)
+        order = np.lexsort((s.ravel()[cells], lab.ravel()[cells]))
+        cells = cells[order]
+        lab_s = lab.ravel()[cells].astype(np.int64)
+        ptr = np.searchsorted(lab_s, np.arange(1, n + 2)).astype(np.int64)
+        demand = np.cumsum(lake_evap * np.maximum(self.evap[0].ravel()[cells].astype(np.float64), 0.0))
+        z = s.ravel()[cells].astype(np.float64)
+        spill = ndimage.maximum(filled, lab, np.arange(1, n + 1))
+        inflow = ndimage.maximum(acc, lab, np.arange(1, n + 1))
+        level = np.zeros(n)
+        counts = {"depressions": n, "overflowing": 0, "closed": 0, "dry": 0}
+        for k in range(n):
+            a, b = ptr[k], ptr[k + 1]
+            if b <= a:
+                continue
+            need = float(np.atleast_1d(inflow)[k])
+            sp = float(np.atleast_1d(spill)[k])
+            before = demand[a - 1] if a > 0 else 0.0
+            loss = demand[a:b] - before                      # evaporation with the water at each cell's own level
+            if need <= 0.0:
+                level[k] = z[a] - 1.0
+                counts["dry"] += 1
+            elif loss[-1] <= need:                           # cannot evaporate what arrives: still spills
+                level[k] = sp
+                counts["overflowing"] += 1
+                continue
+            else:
+                i = int(np.searchsorted(loss, need))
+                level[k] = float(z[a + min(i, b - a - 1)])
+                counts["closed"] += 1
+        lv = np.zeros(n + 1)
+        lv[1:] = level
+        water = np.where(lab > 0, lv[lab], s)
+        out = (water - s > min_depth) & active
+        # the kernel reads the water level off the routing surface: lower it to
+        # the balanced level on the water itself, and leave the dry bed of the
+        # depression at the spill level so a particle can still climb out
+        if self.route is not None:
+            r = self.route[0]
+            r[out] = np.minimum(r[out], water[out])
+        return out[None], counts
 
     def fields(self, names=("height", "sediment", "discharge", "momentum")) -> dict[str, FaceField]:
         """Output FaceFields in metres (spherical mode)."""
@@ -1092,7 +1175,7 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
     elif not state.spherical and bool(getattr(ep, "window_lakes", False)) and ep.flood_every > 0 and \
             (state.lake_flag is None or state.iteration % ep.flood_every == 0):
         min_depth = float(params.hydro.lake_min_depth) if isinstance(params, WorldParams) else 0.5
-        st_lake = state.refresh_lakes_window(min_depth / float(state.height_unit_m))
+        st_lake = state.refresh_lakes_window(min_depth / float(state.height_unit_m), float(getattr(ep, "window_lake_evap", 0.0)))
     tr = time.time() - t0
     iso = state.spherical and float(getattr(ep, "isostasy", 0.0)) > 0.0
     if iso:

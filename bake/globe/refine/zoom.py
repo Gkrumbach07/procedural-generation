@@ -49,6 +49,10 @@ ZOOM_EROSION = {
     # load dropped at their shores -- lake area 9 -> 4 % of a catchment over
     # 300 iterations on a branching network.  McDonald removed pools from his
     # 2023 model as ill-posed; measured here they help
+    # McDonald's water layer: with `window_lake_evap` (set per level by
+    # `zoom_params`, the planet's coarse-cell rate over the fine cells) a
+    # depression holds what its catchment brings less what evaporates off it,
+    # instead of filling to its rim, so a divot with no catchment is not a lake
     "window_lakes": True,
     "flood_every": 5,
     # discharge scales in cells, as McDonald's are (his discharge is the
@@ -84,6 +88,7 @@ def zoom_params(params, R: int, **erosion):
     """``params`` (a WorldParams) for a zoom window at refinement ``R``: the
     zoom erosion profile and refine overrides, then any ``erosion`` given."""
     eo = dict(ZOOM_EROSION)
+    eo.setdefault("window_lake_evap", float(params.hydro.lake_evap) / float(R * R))
     eo.update(erosion)
     if "max_steps" in eo:
         eo["max_steps"] = int(eo["max_steps"])
