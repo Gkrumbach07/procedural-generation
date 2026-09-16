@@ -49,7 +49,7 @@ from ..hydro.priority_flood import priority_flood_flat
 from ..io.world_store import WorldStore
 from ..refine import basin_job as bj
 from ..refine.upsample import COARSE_INPUTS, Window, upsample_window
-from ..refine.zoom import ZOOM_REFINE, zoom_params
+from ..refine.zoom import ZOOM_REFINE, drain_noise, zoom_params
 from . import bake as zb
 
 #: rng / hash sub-key of planet bakes
@@ -356,6 +356,8 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
         f_hold = chained["f"]
     if noise is None:
         noise = np.where(ocean, 0.0, amp * hashed_ridged(int(params.world.seed) + PLANET_KEY, face, ta0 * R - 1, tb0 * R - 1, n, n, 2.0 * R))
+    # the noise's own basins (chained or not), filled before anything erodes
+    noise = noise + drain_noise(base["height0"] + noise + base["sediment0"], ocean)
     NF = (N + 2 * level.guard) * R
     mm = {k: open_work(Path(out), face, k, NF) for k in WORK_FIELDS}
     o = level.guard * R

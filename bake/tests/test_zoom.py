@@ -16,6 +16,7 @@ import json
 
 import numpy as np
 import pytest
+from scipy import ndimage
 
 from globe.zoom import bake as zb
 from globe.zoom import index as zindex
@@ -160,6 +161,30 @@ def test_zoom_is_deterministic_and_the_same_in_parallel(world, zoom, tmp_path):
     b = zoom["levels"][0].arrays
     for k in ("height", "sediment", "discharge"):
         assert np.array_equal(a[k], b[k]), k
+
+
+def test_detail_noise_is_drained_before_anything_erodes():
+    """``refine.zoom.drain_noise``: the noise's closed depressions are filled to
+    their spill, nothing else moves, and what is left drains to the sea or the
+    array's border."""
+    from globe.hydro.priority_flood import priority_flood_flat
+    from globe.refine.zoom import drain_noise
+
+    n = 64
+    i = np.arange(n, dtype=np.float64)[:, None]
+    surface = 300.0 - 4.0 * np.repeat(i, n, 1)              # falls towards i = n, sea beyond
+    ocean = surface < 0.0
+    rng = np.random.default_rng(4)
+    noise = 30.0 * rng.normal(size=(n, n))
+    noisy = surface + ndimage.gaussian_filter(noise, 1.2)
+    add = drain_noise(noisy, ocean)
+    filled = noisy + add
+    assert (add >= 0.0).all() and add.max() > 1.0
+    drain = ocean.copy()
+    drain[0, :] = drain[-1, :] = drain[:, 0] = drain[:, -1] = True
+    fr = priority_flood_flat(filled.astype(np.float32), drain, None)
+    assert float((fr.filled.reshape(filled.shape) - filled).max()) < 1e-3   # no closed depression left
+    assert float(drain_noise(surface, ocean).max()) == 0.0                  # a surface that already drains is untouched
 
 
 def test_pool_threads_follow_the_running_tiles_particles(monkeypatch):

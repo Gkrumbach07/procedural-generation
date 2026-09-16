@@ -52,7 +52,7 @@ from ..hydro.priority_flood import priority_flood_flat
 from ..io.world_store import WorldStore
 from ..refine import basin_job as bj
 from ..refine.upsample import Window, detail_noise, ridged_fbm, upsample_window
-from ..refine.zoom import ZOOM_REFINE, smooth_drift, zoom_params
+from ..refine.zoom import ZOOM_REFINE, drain_noise, smooth_drift, zoom_params
 
 #: D8 offsets of the hydro stage's ``flow_dir`` codes (0..7; 8 and above = sink)
 D8 = np.array([(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)], dtype=np.int64)
@@ -317,6 +317,7 @@ def level_inputs(root: Path, params: WorldParams, geo: Geometry, level: ZoomLeve
         del recv
     height0 = plain - sed0
     noise = np.where(ocean, 0.0, noise)
+    noise = noise + drain_noise(height0 + noise + sed0, ocean)      # the noise's own basins, filled before anything erodes
     precip = np.where(ocean, 0.0, np.maximum(up["precip"], 0.0)).astype(np.float64)
     return {
         "plain": plain, "height": height0 + noise, "sediment": sed0, "discharge": discharge, "depth": depth, "ocean": ocean,
