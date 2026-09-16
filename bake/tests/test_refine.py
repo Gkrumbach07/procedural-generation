@@ -974,6 +974,28 @@ def test_zoom_erosion_profile_is_a_valid_override():
     assert z.erosion.window_lakes and z.refine.detail_amp == ZOOM_REFINE["detail_amp"]
 
 
+def test_zoom_discharge_scales_are_areas_and_coarse_levels_have_their_own_profile():
+    """``zoom_params`` on the earth preset: the discharge scales are the same
+    upstream area at every level (80 / 32 cells at 1.2 km, the profile's 1280
+    / 512 at 305 m and at 76 m, where they cap), the 1.2 km level takes
+    ``COARSE_ZOOM_EROSION`` and the finer ones do not, and every level low-passes
+    its hardness."""
+    from globe.refine.zoom import COARSE_ZOOM_EROSION, DISC_SATURATION_KM2, ZOOM_EROSION, zoom_params
+    p = WorldParams()
+    km2 = lambda R: (p.world.cell_size_m / R / 1000.0) ** 2
+    z8, z32, z128 = (zoom_params(p, R) for R in (8, 32, 128))
+    assert z8.erosion.disc_saturation_cells == pytest.approx(DISC_SATURATION_KM2 / km2(8))
+    assert 60 < z8.erosion.disc_saturation_cells < 100 and 25 < z8.erosion.momentum_saturation_cells < 40
+    for z in (z32, z128):
+        assert z.erosion.disc_saturation_cells == ZOOM_EROSION["disc_saturation_cells"]
+        assert z.erosion.momentum_saturation_cells == ZOOM_EROSION["momentum_saturation_cells"]
+        assert z.erosion.window_lakes and z.erosion.k_mom == WorldParams().erosion.k_mom
+    for k, v in COARSE_ZOOM_EROSION.items():
+        assert getattr(z8.erosion, k) == v, k
+    assert zoom_params(p, 8, window_lakes=True).erosion.window_lakes          # a call's override still wins
+    assert all(z.refine.hardness_smooth_cells > 0 and z.refine.hardness_max < 1 for z in (z8, z32, z128))
+
+
 def test_smooth_drift_removes_the_coarse_scale_without_the_grid():
     """``refine.zoom.smooth_drift`` takes a smooth coarse-scale drift out as
     well as ``basin_job.block_drift`` does, and its correction has no kink

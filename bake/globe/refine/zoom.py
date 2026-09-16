@@ -75,19 +75,70 @@ ZOOM_EROSION = {
     "slope_limit_deposit": 0.25,
 }
 
+#: discharge scales as upstream *area* (km^2): ``zoom_params`` turns them
+#: into cells at each level, capped at ZOOM_EROSION's cell counts.  120 and 48
+#: km^2 are the 305 m level's 1280 and 512 cells, the settings the branching
+#: networks were measured at, and the 76 m level stays at its caps.  At 1.2 km
+#: the fixed cell counts meant 1,910 and 764 km^2: every stream under that
+#: eroded as sheet flow and the planet level had no valleys.  On three 1.2 km
+#: windows of earth-v9 (scratch/sweep, 80 iterations) 80 / 32 cells took a
+#: mountain's valley depth p90 from 85 to 468 m and its 3.7 km relief p90 from
+#: 237 to 410 m
+DISC_SATURATION_KM2 = 120.0
+MOMENTUM_SATURATION_KM2 = 48.0
+
+#: erosion overrides for a level whose cells are at least COARSE_ZOOM_CELL_M
+#: (the 1.2 km planet level), measured on the same three windows against the
+#: zoom profile (holes = cells more than 5 m below all eight neighbours):
+#: * window_lakes off: the lake treatment drops a particle's load on the shore
+#:   and leaves the bed alone, so a pit grows a rim and never fills -- holes
+#:   32.9 -> 0.14 per 10^4 land cells on a mountain (depth p90 45 -> 7 m), the
+#:   dotted 'rough bits'; relief unchanged.  What drains a depression at this
+#:   cell size is the flood that routes the particles.
+#: * k_mom 0.5: half the stored momentum push, which builds sediment ridges
+#:   along the particles' streaks (crest -11.7 -> -1.8 m).
+#: * slope_limit_erode 0.5: soillib's 0.25 held gentle mountains to ~1 cm of
+#:   incision an iteration; 0.5 doubles the plateau's valley depth (11 -> 18 m,
+#:   3.7 km relief p90 62 -> 103 m) and keeps holes away (1.0 brings speckle
+#:   lakes back, 0 cuts 300 m trenches).
+COARSE_ZOOM_CELL_M = 600.0
+COARSE_ZOOM_EROSION = {
+    "window_lakes": False,
+    "k_mom": 0.5,
+    "slope_limit_erode": 0.5,
+}
+
 #: refine overrides for a zoom window: detail noise at 3x the stage's
 #: amplitude -- the upsample has no relief below a parent cell, and
 #: McDonald's erosion organises noise into branching valleys (on a mountain
-#: catchment the drainage-relief prototype cut parallel corduroy instead)
+#: catchment the drainage-relief prototype cut parallel corduroy instead).
+#: Hardness low-passed over 1.5 coarse cells and capped at 0.85
+#: (basin_job.refined_hardness): tectonics' strata bands printed rings of
+#: stipple and rectangular caprock terraces below the coarse grid -- on a
+#: ringed window the roughness of hard against soft bands went 1.64 -> 1.04x,
+#: and in a controlled 1.2 km rebake grid-aligned riser edges went 344 -> 0
+HARDNESS_SMOOTH_CELLS = 1.5
+HARDNESS_MAX = 0.85
 ZOOM_REFINE = {
     "detail_amp": 3.0,
+    "hardness_smooth_cells": HARDNESS_SMOOTH_CELLS,
+    "hardness_max": HARDNESS_MAX,
 }
 
 
 def zoom_params(params, R: int, **erosion):
     """``params`` (a WorldParams) for a zoom window at refinement ``R``: the
-    zoom erosion profile and refine overrides, then any ``erosion`` given."""
+    zoom erosion profile with its discharge scales in area
+    (:data:`DISC_SATURATION_KM2`), the coarse-level overrides where a cell is
+    at least :data:`COARSE_ZOOM_CELL_M`, and the refine overrides; then any
+    ``erosion`` given."""
     eo = dict(ZOOM_EROSION)
+    cell_m = float(params.world.cell_size_m) / float(R)
+    cell_km2 = (cell_m / 1000.0) ** 2
+    eo["disc_saturation_cells"] = min(float(ZOOM_EROSION["disc_saturation_cells"]), DISC_SATURATION_KM2 / cell_km2)
+    eo["momentum_saturation_cells"] = min(float(ZOOM_EROSION["momentum_saturation_cells"]), MOMENTUM_SATURATION_KM2 / cell_km2)
+    if cell_m >= COARSE_ZOOM_CELL_M:
+        eo.update(COARSE_ZOOM_EROSION)
     eo.setdefault("window_lake_evap", float(params.hydro.lake_evap) / float(R * R))
     eo.update(erosion)
     if "max_steps" in eo:
@@ -142,4 +193,5 @@ def smooth_drift(delta: np.ndarray, cells: np.ndarray, R: int, tol: float = 0.05
     return F
 
 
-__all__ = ["ZOOM_EROSION", "ZOOM_REFINE", "smooth_drift", "zoom_params"]
+__all__ = ["ZOOM_EROSION", "ZOOM_REFINE", "COARSE_ZOOM_EROSION", "COARSE_ZOOM_CELL_M", "DISC_SATURATION_KM2", "MOMENTUM_SATURATION_KM2",
+           "drain_noise", "smooth_drift", "zoom_params"]
