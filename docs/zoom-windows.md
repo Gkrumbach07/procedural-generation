@@ -809,3 +809,61 @@ so the relief handed down is younger.
 
 Disk: work rasters of ~23 GB a face (sparse over the sea) and outputs of
 17 GB a face, ~250 GB in all.
+
+## The planet at 1.2 km
+
+`planet_bake.py --world worlds/earth-v9` (R = 8, 80 iterations, tiles of
+1024 fine cells, 238 with land): **3.0 h of tile time** on 20 cores, then
+~90 s a face to finish. Outputs 6.1 GB (four float32 fields a face at
+8192²) and work rasters of 7 GB that can go afterwards. Per pass the tiles
+ran at 51-157 s per million active cells (the spread is how much land a
+pass has, and what else the machine was doing).
+
+### The speckle: the detail noise invents basins
+
+The first bake came out covered in small closed depressions -- "speckled
+with divots" at high zoom, and lakes with no river in or out. Measured on
+one tile, share of land in closed depressions over 2 m deep:
+
+| | pits | pieces |
+|---|---|---|
+| the plain upsample of the planet | 0 % | 0 |
+| after the detail noise | 14.1 % | 876 |
+| eroded 20 iterations | 7.8 % | 669 |
+| eroded 80 iterations (the first bake) | 2.6 % | 279 |
+| eroded 200 iterations | 1.2 % | 129 |
+| **noise filled first, 80 iterations** | **0.77 %** | **99** |
+| noise filled first, 200 iterations | 0.57 % | 65 |
+
+The upsample of a coarser level drains everywhere -- a flood shaped it --
+but ridged noise on top of it does not, and erosion drains its basins only
+slowly. Filling them before the first iteration (`refine.zoom.drain_noise`,
+a priority flood to the sea and the array's border) beats running 2.5x
+longer, at no cost and with the same relief (3 km relief p90 70 m against
+77). On the whole planet the first bake left 20,063 depressions on face 3
+alone, and 88 % of its 14,327 lake pieces had no channel within two cells:
+those "lakes" were the divots, catching rain.
+
+### What was not wrong
+
+* **no coarse-grid imprint**: height jumps across coarse-cell boundaries are
+  the size of the jumps everywhere else (ratio 0.90-1.07 on a tile), and the
+  kernel has no direction bias worth the name (23.6 % of steep gradients
+  along the axes against 22.2 % expected, 12.6 % diagonal against 11.1 %);
+* **the "cliffs" and "staircases" are the viewer's relief exaggeration**
+  (42x by default, for the whole-globe view): the land is gentle, median
+  slope 0.4°, p95 2°, and 0.02 % of cells stand 100 m above both
+  neighbours. The viewer now scales the exaggeration down on detail levels;
+* **a square lake** at a scout candidate was a real lake basin of the 9.8 km
+  world (2 x 2 coarse cells, 248 m deep, floor 3,386 m, water 3,515 m), not
+  an artifact -- it is square because that is the resolution it was born at.
+
+## Scouting
+
+`scripts/scout.py --world worlds/earth-v9` scores 24 km windows of the
+finished planet level for a backpacking and fly-fishing map (`globe/zoom/scout.py`):
+relief, walkable ground, creeks and a river, riffle and pocket-water
+gradients, some lakes but not a lake plain, and a temperate wet forested
+climate. 2 minutes for the planet; the best 24, at least 150 km apart, go
+to `<world>/zoom/scout/` with thumbnails and to the globe viewer as
+numbered markers (click one for its measures and the zoom-bake button).
