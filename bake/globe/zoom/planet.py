@@ -511,8 +511,9 @@ def run_planet(root: str | Path, level: PlanetLevel = PlanetLevel(), out: str | 
         n_workers, threads = zb.pool_size(6, 3 if N * R <= pf.FLOOD_WHOLE else 1)
         with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp.get_context("spawn"), initializer=zb._pool_init, initargs=(threads,)) as ex:
             fin = list(ex.map(_finish_job, [(root, out, level, f) for f in range(6)]))
-        # the river map: a face at a time, a flood of it is ~6 GB at R = 8
-        flow = [pf.flow_face(root, out, R, f) for f in range(6)] if N * R <= pf.FLOOD_WHOLE else []
+        # the river map: all six faces, rivers handed over where they cross a
+        # cube edge (planet_finish.flow_faces; ~2 min and ~4 GB at R = 8)
+        flow = pf.flow_faces(root, out, R, log=log) if N * R <= pf.FLOOD_WHOLE else []
         ql = quicklook(out, R)
         info = {"level": asdict(level), "world": root.name, "cell_m": grid.cell_size_m / R, "faces": fin, "flow": flow,
                 "tiles": len(prog["tiles"]), "seconds_tiles": round(sum(v["seconds"] for v in prog["passes"].values()), 1),

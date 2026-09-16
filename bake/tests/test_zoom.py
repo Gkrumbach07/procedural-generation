@@ -570,3 +570,228 @@ def test_viewer_final_frame_from_the_planet_level(world, planet):
     h0 = np.load(zp.out_path(planet["out"], lv.R, 0, "height")) + np.load(zp.out_path(planet["out"], lv.R, 0, "sediment"))
     assert np.allclose(fin["surf"][0], h0.reshape(2 * N, k, 2 * N, k).mean(axis=(1, 3)), atol=1e-2)
     assert (fin["water"] == viewer.WATER_OCEAN).any() and (fin["ws"] >= fin["surf"] - 1e-3).all()
+
+
+def test_planet_flow_crosses_a_filled_depression_along_its_bed():
+    """``planet_finish.flow_face``'s routing (``hydro.bed_routing``): water
+    crossing a filled depression runs down its drowned bed and along it to the
+    spill, where the plain flood's queue draws a breadth-first ray.  A closed
+    basin (rough floor) holds a U-shaped channel from a river's mouth round
+    to the spill point, the channel flat, rising or falling toward the spill:
+    the fill is the plain flood's, the river's path through the basin is the
+    channel (the plain flood's leaves it), the channel's last cell carries the
+    river and the basin's rain, every cell's weight reaches a drain once, and
+    the tree is acyclic and deterministic."""
+    from globe.hydro.bed_routing import priority_flood_bed
+    from globe.hydro.priority_flood import priority_flood_flat
+
+    n = 64
+    i, j = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    rng = np.random.default_rng(3)
+    chan = [(r, 12) for r in range(32, 15, -1)] + [(16, c) for c in range(13, 47)] + [(r, 46) for r in range(17, 33)] + [(32, c) for c in range(47, 51)]
+    mouth, spill = chan[0][0] * n + chan[0][1], 32 * n + 51
+    on_chan = np.zeros(n * n, bool)
+    on_chan[[a * n + b for a, b in chan]] = True
+    basin = ((i >= 12) & (i <= 52) & (j >= 10) & (j <= 50)).ravel()
+    drain = np.zeros((n, n), bool)
+    drain[0, :] = drain[-1, :] = drain[:, 0] = drain[:, -1] = True
+    w = np.ones(n * n)
+    w[mouth] = 1e6                                                   # the river entering the basin
+
+    def path(parent):
+        p, c = [], mouth
+        while c >= 0:
+            p.append(c)
+            c = int(parent[c])
+        return np.array(p)
+
+    for tilt in (-0.05, 0.0, 0.05):
+        h = 200.0 + 0.5 * np.minimum.reduce([i, j, n - 1 - i, n - 1 - j])   # a plateau falling to the border
+        h.ravel()[basin] = 50.0 + rng.uniform(0.0, 1.0, int(basin.sum()))
+        for k, (a, b) in enumerate(chan):
+            h[a, b] = 20.0 + tilt * k
+        h[32, 51] = 80.0                                             # the spill: the lake fills to 80 m
+        h[32, 52:] = 79.0 - np.arange(n - 52)                        # its outflow to the east border
+        h = h.astype(np.float32)
+        fr, plain = priority_flood_bed(h, drain), priority_flood_flat(h, drain)
+        assert np.array_equal(fr.filled, plain.filled) and fr.filled[20, 20] == 80.0
+        live = ~drain.ravel()
+        assert (fr.parent[live] >= 0).all() and (fr.parent[~live] == -1).all()
+        assert (fr.order[fr.parent[live]] < fr.order[live]).all()
+        acc = zb._accumulate(fr.pop_seq, fr.parent, w)
+        assert acc[~live].sum() == pytest.approx(w.sum(), rel=1e-12)          # every drop reaches a drain once
+        p = path(fr.parent)
+        assert spill in p and basin[p].sum() >= 60 and on_chan[p][basin[p]].all(), tilt
+        assert acc[32 * n + 50] >= 1e6 + basin.sum()                           # the channel takes the basin's rain
+        q = path(plain.parent)
+        assert on_chan[q][basin[q]].mean() < 0.2, tilt                         # the plain flood's ray crosses the floor
+        again = priority_flood_bed(h, drain)
+        assert np.array_equal(again.parent, fr.parent) and np.array_equal(again.pop_seq, fr.pop_seq)
+
+
+def test_ltd_follows_a_planar_slopes_aspect_and_keeps_the_tree():
+    """``hydro.bed_routing.accumulate_ltd`` (D8-LTD on dry ground): on a plane
+    falling 30 degrees off the grid's axis a path stays within a cell or two
+    of the true flow line, where the lowest-neighbour tree runs a 45-degree
+    ray away from it; on rough ground with pits and flats every cell still
+    drains to a strictly earlier-popped neighbour, dry receivers are
+    strictly lower, and the accumulation is the tree's (rain conserved)."""
+    from globe.hydro.bed_routing import accumulate_ltd, priority_flood_bed
+    from globe.hydro.tree import accumulate_codes, receiver_codes
+
+    n = 160
+    i, j = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    a = np.deg2rad(30.0)
+    h = (1000.0 - 0.5 * (np.cos(a) * i + np.sin(a) * j)).astype(np.float32)
+    drain = np.zeros((n, n), bool)
+    drain[0, :] = drain[-1, :] = drain[:, 0] = drain[:, -1] = True
+    w = np.ones(n * n)
+
+    def worst_offset(parent):
+        c, i0, j0, worst, steps = 5 * n + 5, 5, 5, 0.0, 0
+        while parent[c] >= 0:
+            c = int(parent[c])
+            steps += 1
+            worst = max(worst, abs(-np.sin(a) * (c // n - i0) + np.cos(a) * (c % n - j0)))
+        return worst, steps
+
+    plain = priority_flood_bed(h, drain)
+    lowest, _ = worst_offset(plain.parent)
+    fr = priority_flood_bed(h, drain)
+    acc = accumulate_ltd(h, fr, w)
+    ltd, steps = worst_offset(fr.parent)
+    assert steps >= 100 and ltd <= 1.5 and lowest >= 10.0, (ltd, lowest, steps)
+    assert acc[drain.ravel()].sum() == pytest.approx(w.sum(), rel=1e-12)
+
+    rng = np.random.default_rng(5)
+    rough = ndimage.gaussian_filter(rng.normal(size=(n, n)), 3.0) * 200.0
+    rough = np.where(rng.uniform(size=(n, n)) < 0.3, np.round(rough / 5.0) * 5.0, rough).astype(np.float32)   # exact flats
+    drain = drain | (rough < np.percentile(rough, 2))
+    fr = priority_flood_bed(rough, drain)
+    acc = accumulate_ltd(rough, fr, w)
+    live = ~drain.ravel()
+    par = fr.parent[live].astype(np.int64)
+    cells = np.flatnonzero(live)
+    assert (par >= 0).all() and (fr.order[par] < fr.order[cells]).all()
+    assert (np.abs(par // n - cells // n) <= 1).all() and (np.abs(par % n - cells % n) <= 1).all() and (par != cells).all()
+    dry = fr.filled.ravel()[cells] == rough.ravel()[cells]
+    assert (fr.filled.ravel()[par[dry]] <= fr.filled.ravel()[cells[dry]]).all()
+    assert acc[~live].sum() == pytest.approx(w.sum(), rel=1e-12)
+    assert np.allclose(acc, zb._accumulate(fr.pop_seq, fr.parent, w))
+    assert np.allclose(accumulate_codes(receiver_codes(fr.parent, n), n, w), acc)
+
+
+def test_spill_levels_join_tiles_into_one_flood():
+    """``hydro.spill_graph``: tiles flooded alone from labelled edge seeds, their
+    labels linked across the tile edges and flooded from the sea, give the
+    whole window's filled surface exactly -- basins that straddle tiles
+    included; and ``hydro.tree.window_exits`` names where a cell's water last
+    leaves a sub-window."""
+    from globe.hydro.priority_flood import priority_flood_flat
+    from globe.hydro.spill_graph import label_flood, spill_levels
+    from globe.hydro.tree import window_exits
+
+    rng = np.random.default_rng(1)
+    for trial in range(12):
+        H, W = (int(x) for x in rng.integers(20, 90, 2))
+        s = (ndimage.gaussian_filter(rng.normal(size=(H, W)), rng.uniform(1.0, 5.0)) * 100).astype(np.float32)
+        if trial % 3 == 0:
+            s = np.round(s / 4.0) * 4.0
+        sea = s < np.percentile(s, 5)
+        outer = np.zeros((H, W), bool)
+        outer[0] = outer[-1] = outer[:, 0] = outer[:, -1] = True
+        whole = priority_flood_flat(s, sea | outer)
+        ci, cj = H // 2, W // 2
+        tid = np.zeros((H, W), int)
+        tid[:ci, cj:], tid[ci:, :cj], tid[ci:, cj:] = 1, 2, 3
+        label = np.full((H, W), -1, np.int64)
+        filled = np.zeros((H, W), np.float32)
+        A, B, Wt, nxt = [], [], [], 1
+        for t, (a0, a1, b0, b1) in enumerate([(0, ci, 0, cj), (0, ci, cj, W), (ci, H, 0, cj), (ci, H, cj, W)]):
+            seed = np.full((a1 - a0, b1 - b0), -1, np.int32)
+            rim = np.zeros(seed.shape, bool)
+            rim[0] = rim[-1] = rim[:, 0] = rim[:, -1] = True
+            seed[rim] = np.arange(nxt, nxt + rim.sum())
+            nxt += int(rim.sum())
+            seed[(sea | outer)[a0:a1, b0:b1]] = 0
+            f_, l_, (ea, eb, ew) = label_flood(s[a0:a1, b0:b1], seed)
+            filled[a0:a1, b0:b1], label[a0:a1, b0:b1] = f_, l_
+            A.append(ea), B.append(eb), Wt.append(ew)
+        for di, dj in ((0, 1), (1, 0), (1, 1), (1, -1)):
+            p = np.argwhere(np.ones((H, W), bool))
+            q = p + (di, dj)
+            ok = (q[:, 0] >= 0) & (q[:, 0] < H) & (q[:, 1] >= 0) & (q[:, 1] < W)
+            p, q = p[ok], q[ok]
+            cross = tid[p[:, 0], p[:, 1]] != tid[q[:, 0], q[:, 1]]
+            p, q = p[cross], q[cross]
+            A.append(label[p[:, 0], p[:, 1]]), B.append(label[q[:, 0], q[:, 1]])
+            Wt.append(np.maximum(filled[p[:, 0], p[:, 1]], filled[q[:, 0], q[:, 1]]))
+        lv = spill_levels(nxt, np.concatenate(A), np.concatenate(B), np.concatenate(Wt), [0])
+        assert np.array_equal(np.maximum(filled, lv[label]).astype(np.float32), whole.filled), trial
+        ex = window_exits(whole.parent, whole.pop_seq, W, 3, H - 3, 3, W - 3)
+        for c in rng.choice(np.flatnonzero(whole.order >= 0), 40):
+            path = [int(c)]
+            while whole.parent[path[-1]] >= 0:
+                path.append(int(whole.parent[path[-1]]))
+            ins = [3 <= x // W < H - 3 and 3 <= x % W < W - 3 for x in path]
+            want = -1
+            if not any(ins):
+                want = path[0]
+            else:
+                last = max(k for k, v in enumerate(ins) if v)
+                want = path[last + 1] if last + 1 < len(path) else -1
+            assert ex[c] == want, (trial, c)
+
+
+def _sphere_faces(n, fn):
+    from globe.cubesphere import to_sphere_v
+
+    i, j = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    return [fn(to_sphere_v(np.full(i.shape, f), (i + 0.5) / n, (j + 0.5) / n)).astype(np.float32) for f in range(6)]
+
+
+def test_route_faces_hands_rivers_over_cube_edges():
+    """``planet_finish.route_faces``: a planet falling to a sea around +Y, a
+    valley along the great circle through +X and +Y, and a closed basin
+    straddling the +X/+Y edge wider than the flood margin.  Every drop of
+    rain reaches the sea once (no parcel circles -- the basin's level is
+    the planet's, not each face's flood's; the far face's water crosses two
+    edges); a river cell on a face's edge that is not passed on inside its
+    face is taken up on the neighbouring face within two cells, with at least
+    its water; and without the hand-over (a lone face) the sea would miss
+    the water that crosses."""
+    from globe.zoom import planet_finish as pf
+
+    n, K = 96, 4
+    c = np.array([1.0, 1.0, 0.5]) / np.linalg.norm([1.0, 1.0, 0.5])
+
+    def ground(p):
+        basin = 900.0 * np.exp(-((np.arccos(np.clip(p @ c, -1, 1)) / 0.12) ** 2))
+        return 3000.0 * (1.0 - p[..., 1]) - 600.0 - 400.0 * np.exp(-(p[..., 2] / 0.06) ** 2) - basin + 3.0 * np.sin(40 * p[..., 0]) * np.cos(37 * p[..., 2])
+
+    S = _sphere_faces(n, ground)
+    flows = {}
+    st = pf.route_faces(n, lambda f: (S[f], S[f] < 0), lambda f: np.ones((n, n)), lambda f, i, j: (S[f][i, j], S[f][i, j] < 0),
+                        lambda f, q: flows.__setitem__(f, q.astype(np.float64)), K)
+    rain = sum(s["rain"] for s in st)
+    assert sum(s["sea"] for s in st) == pytest.approx(rain, rel=1e-9)
+    assert sum(s["unresolved"] for s in st) == 0.0 and st[0]["cycled_total"] == 0.0
+    assert st[3]["sea"] == 0.0 and st[3]["outflow"] == pytest.approx(st[3]["rain"])
+    big = 0.002 * rain
+    checked = 0
+    for f in range(6):
+        q, sea = flows[f], S[f] < 0
+        for side in range(4):
+            idx = np.arange(1, n - 1)
+            a, b, oi, oj = {0: (0 * idx, idx, -1, 0), 1: (0 * idx + n - 1, idx, 1, 0), 2: (idx, 0 * idx, 0, -1), 3: (idx, 0 * idx + n - 1, 0, 1)}[side]
+            for x, y in zip(a, b):
+                if q[x, y] < big or sea[x, y]:
+                    continue
+                nb = q[max(x - 1, 0):x + 2, max(y - 1, 0):y + 2]
+                if (nb >= q[x, y]).sum() > 1:
+                    continue                                       # passed on inside its face
+                g, gi, gj = pf._beyond(f, np.array([x + oi]), np.array([y + oj]), n)
+                win = flows[int(g[0])][max(gi[0] - 2, 0):gi[0] + 3, max(gj[0] - 2, 0):gj[0] + 3]
+                assert win.max() >= q[x, y] * (1 - 1e-9), (f, x, y)
+                checked += 1
+    assert checked >= 3
