@@ -17,8 +17,9 @@ it, loaded only where the view is:
   :func:`viewer.encode_height`), ``B`` = the signed lake depth byte, ``A`` =
   255 - the smoothed ocean mask byte (land opaque, so a browser that
   premultiplies can only touch the sea) -- and its bottom half the water:
-  ``R`` = the log discharge byte the rivers are drawn from, so the stream map
-  stays the erosion's own at every zoom instead of the atlas' blur;
+  ``R`` = the log byte of the water the rivers are drawn from (a planet
+  level's accumulated flow, :func:`river_field`), so the stream map keeps
+  the source's resolution at every zoom instead of the atlas' blur;
 * written as ``tiles/L{L}/{face}_{ti}_{tj}.js`` (``GLOBE_VIEWER.tile(...)``:
   ``file://`` pages cannot fetch); a tile with no land and no lake in it is
   not written, and ``meta.detail`` carries a bitset of the ones that are.
@@ -38,6 +39,13 @@ from scipy import ndimage
 
 TILE = 256
 WATER_LAND, WATER_LAKE, WATER_OCEAN = 0, 1, 2
+
+#: rivers from a planet level's accumulated flow: a channel from this
+#: percentile of land flow (98.5: ~800 km^2 of catchment at 1.2 km on
+#: earth-v9 -- the 88th the erosion's discharge used draws 12 % of the land as
+#: a hairline web), at full strength by the second, and widened up to
+#: ``RIVER_RADIUS`` cells as it nears it (:func:`widen_rivers`)
+RIVER_MIN_PCT, RIVER_FULL_PCT, RIVER_RADIUS = 98.5, 99.97, 3
 
 
 # --------------------------------------------------------------------------
@@ -61,12 +69,17 @@ class RefinedSource:
 
 class PlanetSource:
     """A planet zoom level's faces (``L{R}.f{k}.*.npy``), water by derive's
-    rules as :func:`viewer._planet_final` draws them."""
+    rules as :func:`viewer._planet_final` draws them.  Its rivers are the
+    level's ``flow`` (rain accumulated down the final surface,
+    :func:`planet_finish.flow_face`) where the level has one, else the
+    erosion's ``discharge``."""
 
     def __init__(self, pdir: Path, R: int, N: int, sea_near_c: np.ndarray, lake_min_depth: float, lake_min_cells: int):
         self.pdir, self.R, self.N = Path(pdir), int(R), int(N)
         self.sea_near_c, self.depth, self.min_cells = sea_near_c, float(lake_min_depth), int(lake_min_cells)
         self.res = self.N * self.R
+        self.river = river_field(self.pdir, self.R)
+        self.scale = river_scale(self.pdir, self.R) if self.river == "flow" else None
 
     def rows(self, f: int, r0: int, r1: int) -> dict:
         """Rows ``[r0, r1)`` of face ``f``.  A lake piece smaller than
@@ -74,7 +87,7 @@ class PlanetSource:
         it, judged over the rows plus a margin as wide as such a piece."""
         from ..derive import lakes as lakes_mod
 
-        m = int(np.ceil(np.sqrt(self.min_cells))) + 2
+        m = max(int(np.ceil(np.sqrt(self.min_cells))) + 2, RIVER_RADIUS)
         e0, e1 = max(r0 - m, 0), min(r1 + m, self.res)
         load = lambda name: np.load(self.pdir / f"L{self.R}.f{f}.{name}.npy", mmap_mode="r")[e0:e1]
         surf = np.asarray(load("height"), np.float32) + np.asarray(load("sediment"), np.float32)
@@ -87,8 +100,54 @@ class PlanetSource:
         lake = lakes_mod.kept_lake_mask(lakes_mod.lake_mask(surf, ws, self.depth, ocean=ocean), self.min_cells)
         water[lake] = WATER_LAKE
         c = slice(r0 - e0, r1 - e0)
-        q = np.asarray(load("discharge"), np.float32)
+        q = np.asarray(load(self.river), np.float32)
+        if self.scale is not None:
+            q = widen_rivers(q, self.scale)
         return {"surf": surf[c], "ws": ws[c], "water": water[c], "discharge": q[c]}
+
+
+def river_field(pdir: Path, R: int) -> str:
+    """``"flow"`` when every face of the planet level at ``pdir`` has its
+    accumulated flow, else ``"discharge"``."""
+    return "flow" if all((Path(pdir) / f"L{int(R)}.f{f}.flow.npy").exists() for f in range(6)) else "discharge"
+
+
+def river_scale(pdir: Path, R: int, stride: int = 7) -> dict:
+    """The byte scale of a planet level's flow over all six faces (every
+    ``stride``-th cell of land): ``lo`` its median (byte 1), ``hi`` its
+    maximum (byte 255), rivers from ``river_min`` to full at
+    ``river_full``."""
+    qs = []
+    for f in range(6):
+        q = np.asarray(np.load(Path(pdir) / f"L{int(R)}.f{f}.flow.npy", mmap_mode="r")[::stride, ::stride], np.float64)
+        z = np.asarray(np.load(Path(pdir) / f"L{int(R)}.f{f}.height.npy", mmap_mode="r")[::stride, ::stride], np.float64)
+        qs.append(q[(z > 0.0) & (q > 0.0)])
+    q = np.concatenate(qs) if qs else np.array([1.0])
+    lo = max(float(np.percentile(q, 50)), 1e-9)
+    hi = max(float(q.max()), lo * 10.0)
+    rmin = max(float(np.percentile(q, RIVER_MIN_PCT)), lo * 1.001)
+    return {"lo": lo, "hi": hi, "river_min": rmin, "river_full": max(float(np.percentile(q, RIVER_FULL_PCT)), rmin * 1.001)}
+
+
+def widen_rivers(q: np.ndarray, scale: dict, radius: int = RIVER_RADIUS) -> np.ndarray:
+    """``q`` with each channel spread over a disc that grows with its
+    strength ``s`` (0 at ``river_min``, 1 at ``river_full``, log): radius
+    ``r`` where ``s >= (r - 0.5) / radius``, so a creek stays a cell wide and
+    a trunk is ``2 radius + 1``, each ring a little weaker than the one inside
+    it (soft banks).  Never lowers a cell; float32."""
+    q = np.asarray(q, np.float32)
+    qmin, qfull = float(scale["river_min"]), float(scale["river_full"])
+    L = np.log(np.maximum(q, qmin) / qmin, dtype=np.float64)
+    s = np.clip(L / math.log(qfull / qmin), 0.0, 1.0)
+    out = q.copy()
+    for r in range(1, int(radius) + 1):
+        src = s >= (r - 0.5) / radius
+        if not src.any():
+            break
+        ring = np.where(src, qmin * np.exp(L * 0.85 ** r), 0.0).astype(np.float32)   # the ring's strength a step down
+        yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
+        out = np.maximum(out, ndimage.grey_dilation(ring, footprint=np.hypot(yy, xx) <= r + 0.01, mode="nearest"))
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -215,26 +274,30 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
     lo, hi = np.inf, -np.inf
     step = 4 * TILE
     qs = []
+    scale = getattr(src, "scale", None)
     for f in range(6):
         for r0 in range(0, src.res, step):
             d = src.rows(f, r0, min(src.res, r0 + step))
             s = d["surf"]
             lo, hi = min(lo, float(s.min())), max(hi, float(s.max()))
             q = d.get("discharge")
-            if q is not None:
+            if q is not None and scale is None:
                 qq = np.asarray(q)[(np.asarray(s) > 0) & (np.asarray(q) > 0)]
                 if qq.size:
                     qs.append(qq[::7])
     h0, h1 = height_grid(lo, hi)
-    # the discharge byte: the land's own range, so the rivers at every level
-    # are the same stream map the erosion left
-    qall = np.concatenate(qs) if qs else np.array([1.0])
-    q_lo = max(float(np.percentile(qall, 50)), 1e-9)
-    q_hi = max(float(qall.max()), q_lo * 10.0)
+    if scale is None:
+        # the discharge byte: the land's own range, so the rivers at every
+        # level are the same stream map the erosion left
+        qall = np.concatenate(qs) if qs else np.array([1.0])
+        q_lo = max(float(np.percentile(qall, 50)), 1e-9)
+        scale = {"lo": q_lo, "hi": max(float(qall.max()), q_lo * 10.0),
+                 "river_min": max(float(np.percentile(qall, 88)), q_lo), "river_full": max(float(np.percentile(qall, 99.5)), q_lo)}
+    q_lo, q_hi = scale["lo"], scale["hi"]
+    byte = lambda q: int(round(255.0 * math.log(max(q, q_lo) / q_lo) / math.log(q_hi / q_lo)))
     meta = {"tile": TILE, "pad": 1, "h0": h0, "h1": h1, "lake_range": float(lake_range), "q_lo": q_lo, "q_hi": q_hi,
-            "river_min_byte": int(np.clip(round(255.0 * math.log(max(float(np.percentile(qall, 88)), q_lo) / q_lo) / math.log(q_hi / q_lo)), 1, 254)),
-            "river_span_byte": max(int(round(255.0 * math.log(max(float(np.percentile(qall, 99.5)), q_lo) / q_lo) / math.log(q_hi / q_lo))) -
-                                   int(round(255.0 * math.log(max(float(np.percentile(qall, 88)), q_lo) / q_lo) / math.log(q_hi / q_lo))), 8),
+            "river_min_byte": int(np.clip(byte(scale["river_min"]), 1, 254)),
+            "river_span_byte": max(byte(scale["river_full"]) - byte(scale["river_min"]), 8),
             "levels": []}
     for L, res in levels:
         nT = -(-res // TILE)
@@ -272,5 +335,6 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
     return meta
 
 
-__all__ = ["TILE", "RefinedSource", "PlanetSource", "reduce_face", "face_lake_depth", "face_smooth_mask", "height_grid",
+__all__ = ["TILE", "RIVER_MIN_PCT", "RIVER_FULL_PCT", "RIVER_RADIUS", "RefinedSource", "PlanetSource", "river_field", "river_scale",
+           "widen_rivers", "reduce_face", "face_lake_depth", "face_smooth_mask", "height_grid",
            "encode_height_on", "tile_image", "levels_for", "export_tiles"]

@@ -147,6 +147,51 @@ def finish_face(root: Path, out: Path, level, face: int) -> dict:
             "land_cells": land_cells, "lake_cells": lake_cells, "seconds": round(time.time() - t0, 1)}
 
 
+def flow_face(root: Path, out: Path, R: int, face: int) -> dict:
+    """The river map of a finished face, ``L{R}.f{k}.flow.npy`` (float32): the
+    planet's rain accumulated down the flood tree of the face's final surface,
+    in the coarse ``flow_acc``'s volume units.
+
+    The erosion's ``discharge`` is an average of the particles' tracks, not a
+    sum over a catchment.  Measured on earth-v9 at R = 8 (face 2), it falls on
+    74 % of the downstream steps from its brightest cells, only 4 % of those
+    cells lie on the surface's own drainage, and below a lake it is 3-9 % of
+    what flows in.  A river drawn from it starts, runs a way and stops.
+    Accumulation never falls downstream, carries a lake's inflow on from its
+    spill point, and follows the valleys the surface shows.  The sea and the
+    face border drain; the planet's drainage carries water in across the
+    edges (:func:`planet.planet_inflow`).  One flood of the whole face,
+    ~6 GB at 8192^2; a larger face raises."""
+    from ..hydro.priority_flood import priority_flood_flat
+    from . import bake as zb
+    from . import planet as zp
+
+    t0 = time.time()
+    root, out, R = Path(root), Path(out), int(R)
+    precip = np.maximum(np.load(root / "coarse" / f"precip.f{face}.npy").astype(np.float64), 0.0)
+    N = precip.shape[0]
+    n = N * R
+    if n > FLOOD_WHOLE:
+        raise NotImplementedError(f"flow_face floods a face whole: {n}^2 cells is past FLOOD_WHOLE = {FLOOD_WHOLE}")
+    surf = np.asarray(np.load(zp.out_path(out, R, face, "height"), mmap_mode="r"), np.float32) + \
+        np.asarray(np.load(zp.out_path(out, R, face, "sediment"), mmap_mode="r"), np.float32)
+    sea_near = ndimage.binary_dilation(np.load(root / "coarse" / f"flow_dir.f{face}.npy") == 255, structure=np.ones((3, 3), bool))
+    drain = (surf < 0.0) & np.repeat(np.repeat(sea_near, R, axis=0), R, axis=1)
+    drain[0, :] = drain[-1, :] = drain[:, 0] = drain[:, -1] = True
+    land = int((~drain).sum())
+    weight = np.repeat(np.repeat(precip / float(R * R), R, axis=0), R, axis=1)
+    fd, fa = zp.planet_flow(root)
+    weight += zp.planet_inflow(fd, fa, face, 0, N, 0, N, R, np.pad(surf, 1, mode="edge"))[1:-1, 1:-1]
+    fr = priority_flood_flat(surf, drain, None)
+    del surf, drain
+    parent, pop_seq = fr.parent, fr.pop_seq
+    del fr
+    acc = zb._accumulate(pop_seq, parent, weight.ravel()).reshape(n, n)
+    del parent, pop_seq, weight
+    np.save(zp.out_path(out, R, face, "flow"), acc.astype(np.float32))
+    return {"face": face, "land_cells": land, "flow_max": float(acc.max()), "seconds": round(time.time() - t0, 1)}
+
+
 def quicklook_rows(out: Path, R: int, face: int, name: str, k: int, m: int, how: str = "mean") -> np.ndarray:
     """``name`` of a face reduced by ``k x k`` blocks, a block row at a time."""
     from . import planet as zp
@@ -159,4 +204,4 @@ def quicklook_rows(out: Path, R: int, face: int, name: str, k: int, m: int, how:
     return res
 
 
-__all__ = ["FLOOD_WHOLE", "FLOOD_BLOCK", "FLOOD_OVERLAP", "strip_rows", "finish_face", "quicklook_rows"]
+__all__ = ["FLOOD_WHOLE", "FLOOD_BLOCK", "FLOOD_OVERLAP", "strip_rows", "finish_face", "flow_face", "quicklook_rows"]

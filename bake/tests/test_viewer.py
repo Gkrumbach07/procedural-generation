@@ -252,6 +252,31 @@ def test_shader_sources_are_not_cut_short_by_a_stray_backtick():
         assert body.rstrip().endswith("}"), f"{name} shader does not end at a closing brace"
 
 
+
+def test_rivers_widen_with_their_flow():
+    """``detail.widen_rivers``: a channel spreads over a disc that grows with
+    its strength -- a trunk at full strength to ``RIVER_RADIUS`` cells, a creek
+    just over the threshold not at all, flow below it never -- each ring
+    weaker than the one inside it, and no cell is lowered."""
+    from globe.viz import detail as dt
+
+    n = 64
+    q = np.full((n, n), 0.5, np.float32)
+    q[:, 16] = 1000.0                         # trunk: full strength
+    q[:, 40] = 10.5                           # creek: just past river_min
+    q[:, 56] = 5.0                            # below the threshold
+    sc = {"lo": 1.0, "hi": 1000.0, "river_min": 10.0, "river_full": 1000.0}
+    w = dt.widen_rivers(q, sc)
+    assert (w >= q).all()
+    row = w[n // 2]
+    r = dt.RIVER_RADIUS
+    assert (row[16 - r:16 + r + 1] >= sc["river_min"]).all() and row[16 - r - 1] < sc["river_min"]
+    assert row[15] > row[14] > row[13] and row[15] < 1000.0                # soft banks
+    assert row[39] < sc["river_min"] and row[41] < sc["river_min"]         # a creek stays a cell wide
+    assert (row[54:59] == q[n // 2, 54:59]).all()
+
+
+
 # --------------------------------------------------------------------------
 # river lines (viewer.river_lines, globe/viz/river_lines.py)
 # --------------------------------------------------------------------------

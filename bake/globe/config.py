@@ -384,6 +384,8 @@ class RefineParams:
     workers: int = 0  # 0 -> os.cpu_count()
     feather_cells: int = 8  # fine cells over which a basin's refined detail ramps in from its (frozen) divide; keep >= 2R (a coarse cell): a 2-cell ramp reads as a crease in the LOD-0 hillshade
     particles_per_cell: float = 0.25
+    hardness_smooth_cells: float = 0.0  # Gaussian sigma (coarse cells, seamless over cube edges) of the hardness every level below the coarse grid sees (refine, zoom windows, planet levels): tectonics' strata bands are closed loops of equal crust age, 1-2 coarse cells wide (aliased) on 5-15 % of land, and they print into the fine surface as rings and zebra patches of stipple -- through the detail noise's (0.5 + 0.5 hardness) and, twice as much, through the kernel's bedrock erodibility (1 - hardness). 0 = off
+    hardness_max: float = 1.0  # cap on that hardness: rock at 1 does not erode, so a hard band keeps all its noise while a soft one is smoothed. 1 = off
 
 
 @dataclass

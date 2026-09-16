@@ -356,9 +356,12 @@ def _planet_final(root: Path, manifest: dict, surf_c: np.ndarray, flow_dir_c: np
     face to ``res`` cells per face -- a face of it is 8192^2, and the atlas
     of six at full resolution is past what a browser texture holds.  Heights
     and water surfaces are block means, discharge the block maximum (a river
-    narrower than a block still shows).  Sea and lakes follow derive's rules
-    as :func:`_fine_final`'s do.  None when the level is not there."""
+    narrower than a block still shows) -- of the level's accumulated flow
+    where it has one (:func:`detail.river_field`).  Sea and lakes follow
+    derive's rules as :func:`_fine_final`'s do.  None when the level is not
+    there."""
     from ..derive import lakes as lakes_mod
+    from . import detail as dt
 
     pdir = Path(root) / planet if not Path(planet).is_absolute() else Path(planet)
     info_path = pdir / "planet.json"
@@ -375,6 +378,8 @@ def _planet_final(root: Path, manifest: dict, surf_c: np.ndarray, flow_dir_c: np
     min_cells = max(1, int(round(float((params.get("derive", {}) or {}).get("lake_min_cells", 1.0)) * R * R)))
     ocean_c = (np.asarray(flow_dir_c) == 255) if flow_dir_c is not None else (surf_c < 0.0)
     sea_near = _dilate_max(ocean_c.astype(np.float32), 0.0) > 0.0
+    river = dt.river_field(pdir, R_lvl)
+    scale = dt.river_scale(pdir, R_lvl) if river == "flow" else None
 
     def red(face, name, how):
         a = np.load(pdir / f"L{R_lvl}.f{face}.{name}.npy", mmap_mode="r")
@@ -382,6 +387,20 @@ def _planet_final(root: Path, manifest: dict, surf_c: np.ndarray, flow_dir_c: np
         for i in range(res):                                  # a block row at a time: never a whole face resident
             blk = np.asarray(a[i * k:(i + 1) * k, :res * k], np.float32).reshape(k, res, k)
             out[i] = blk.max(axis=(0, 2)) if how == "max" else blk.mean(axis=(0, 2))
+        return out
+
+    def red_rivers(face):
+        """The flow widened at full resolution (:func:`detail.widen_rivers`),
+        then block maxima: strips of block rows with the widening's reach
+        beyond them."""
+        a = np.load(pdir / f"L{R_lvl}.f{face}.flow.npy", mmap_mode="r")
+        out = np.empty((res, res), np.float32)
+        m, S = dt.RIVER_RADIUS, 64
+        for i0 in range(0, res, S):
+            i1 = min(res, i0 + S)
+            r0, r1 = max(i0 * k - m, 0), min(i1 * k + m, n)
+            w = dt.widen_rivers(np.asarray(a[r0:r1, :res * k], np.float32), scale)[i0 * k - r0:i1 * k - r0]
+            out[i0:i1] = w.reshape(i1 - i0, k, res, k).max(axis=(1, 3))
         return out
 
     surf = np.empty((6, res, res), np.float32)
@@ -393,13 +412,13 @@ def _planet_final(root: Path, manifest: dict, surf_c: np.ndarray, flow_dir_c: np
         sed[f] = red(f, "sediment", "mean")
         surf[f] = red(f, "height", "mean") + sed[f]
         ws[f] = np.maximum(red(f, "water_surface", "mean"), surf[f])
-        q[f] = red(f, "discharge", "max")
+        q[f] = red_rivers(f) if scale is not None else red(f, river, "max")
         ocean = (surf[f] < 0.0) & np.repeat(np.repeat(sea_near[f], R, axis=0), R, axis=1)
         water[f][ocean] = WATER_OCEAN
         lake = lakes_mod.kept_lake_mask(lakes_mod.lake_mask(surf[f], ws[f], depth, ocean=ocean), min_cells)
         water[f][lake] = WATER_LAKE
-    log(f"[viewer] final frame from {pdir.name} (R={R_lvl}, {k}x{k} blocks -> {res}² per face)")
-    return {"surf": surf, "sed": sed, "ws": ws, "water": water, "discharge": q, "biome": None, "basin": None}
+    log(f"[viewer] final frame from {pdir.name} (R={R_lvl}, {k}x{k} blocks -> {res}² per face; rivers from {river})")
+    return {"surf": surf, "sed": sed, "ws": ws, "water": water, "discharge": q, "biome": None, "basin": None, "river_scale": scale}
 
 
 class _Frame:
@@ -409,6 +428,7 @@ class _Frame:
         self.stage, self.key, self.label = stage, key, label
         self.height = np.asarray(height, np.float32)
         self.ch = {k: v for k, v in ch.items() if v is not None}
+        self.river_scale = None           # the rivers' byte scale when the source sets it (a planet level's flow)
 
     @property
     def res(self) -> int:
@@ -506,6 +526,7 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
         sediment=ds(sed),
         crust=ds(up(crust), "nearest") if crust is not None else None,
     ))
+    frames[-1].river_scale = fine.get("river_scale") if fine is not None else None
     src = (f"planet level {planet}" if planet else f"refined grid, R={R}") if fine is not None else "coarse grid"
     log(f"[viewer] {len(tect) if scale else 0} tectonics + {sum(f.stage == 'erosion' for f in frames)} erosion frames + final ({r}² per face, {src})")
     return frames, manifest
@@ -554,6 +575,10 @@ def channel_specs(final: _Frame, river_threshold: float | None = None) -> dict:
         # channel has soft banks and the faint paths beside it show
         specs["discharge"] = {"label": "Discharge", "kind": "log", "lo": lo, "hi": hi, "unit": "", "cmap": "viridis",
                               "river_min": _pctl(ql, 85, lo * 2), "river_full": _pctl(ql, 99.5, lo * 40)}
+        if getattr(final, "river_scale", None):
+            # a planet level's accumulated flow, widened: the scale of its
+            # source's cells, so the globe and the detail tiles draw one map
+            specs["discharge"] = {"label": "Rivers (accumulated flow)", "kind": "log", "unit": "", "cmap": "viridis", **final.river_scale}
     if "temperature" in final.ch:
         specs["temperature"] = {"label": "Temperature", "kind": "linear", "lo": -45.0, "hi": 35.0, "unit": "°C", "cmap": "thermal"}
     if "precip" in final.ch:

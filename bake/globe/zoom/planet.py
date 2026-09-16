@@ -197,9 +197,10 @@ def planet_flow(root: str | Path) -> tuple[np.ndarray, np.ndarray]:
 _SHARED: dict[str, tuple] = {}
 
 
-def _input_stamp(root: Path) -> str:
-    """Sizes and modification times of the coarse files the inputs come from."""
-    parts = []
+def _input_stamp(root: Path, params: WorldParams | None = None) -> str:
+    """Sizes and modification times of the coarse files the inputs come
+    from, and the knobs that reshape them (:func:`basin_job.hardness_key`)."""
+    parts = [] if params is None else ["hardness:%g:%g" % bj.hardness_key(params)]
     for name in COARSE_INPUTS + ("flow_dir", "flow_acc"):
         for f in range(6):
             st = (Path(root) / "coarse" / f"{name}.f{f}.npy").stat()
@@ -214,7 +215,7 @@ def write_shared_inputs(root: str | Path, params: WorldParams, out: str | Path) 
     files change.  Workers map them (:func:`planet_inputs`), so the ~1 GB
     they are at N = 1024 is in memory once, not once per worker."""
     root, d = Path(root), Path(out) / "inputs"
-    stamp = _input_stamp(root)
+    stamp = _input_stamp(root, params)
     info_path = d / "inputs.json"
     if info_path.exists() and json.loads(info_path.read_text()).get("stamp") == stamp:
         return d
@@ -243,10 +244,10 @@ def planet_inputs(root: str | Path, params: WorldParams, out: str | Path) -> tup
     info_path = d / "inputs.json"
     key = str(d.resolve())
     hit = _SHARED.get(key)
-    if hit is not None and hit[0] == _input_stamp(root):
+    if hit is not None and hit[0] == _input_stamp(root, params):
         return hit[1]
     info = json.loads(info_path.read_text()) if info_path.exists() else {}
-    if info.get("stamp") != _input_stamp(root):
+    if info.get("stamp") != _input_stamp(root, params):
         grid, fields, derived = bj.coarse_inputs(root, params)
         fd, fa = planet_flow(root)
         return grid, fields, derived, fd, fa
@@ -510,8 +511,10 @@ def run_planet(root: str | Path, level: PlanetLevel = PlanetLevel(), out: str | 
         n_workers, threads = zb.pool_size(6, 3 if N * R <= pf.FLOOD_WHOLE else 1)
         with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp.get_context("spawn"), initializer=zb._pool_init, initargs=(threads,)) as ex:
             fin = list(ex.map(_finish_job, [(root, out, level, f) for f in range(6)]))
+        # the river map: a face at a time, a flood of it is ~6 GB at R = 8
+        flow = [pf.flow_face(root, out, R, f) for f in range(6)] if N * R <= pf.FLOOD_WHOLE else []
         ql = quicklook(out, R)
-        info = {"level": asdict(level), "world": root.name, "cell_m": grid.cell_size_m / R, "faces": fin,
+        info = {"level": asdict(level), "world": root.name, "cell_m": grid.cell_size_m / R, "faces": fin, "flow": flow,
                 "tiles": len(prog["tiles"]), "seconds_tiles": round(sum(v["seconds"] for v in prog["passes"].values()), 1),
                 "active_cells": int(sum(t_.get("active_cells", 0) for t_ in prog["tiles"])), "quicklook": ql.name}
         (out / "planet.json").write_text(json.dumps(info, indent=1))

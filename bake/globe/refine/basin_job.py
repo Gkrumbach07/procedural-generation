@@ -115,23 +115,44 @@ class BasinResult:
 # --------------------------------------------------------------------------
 # per-process cache of the coarse inputs
 # --------------------------------------------------------------------------
-_CACHE: dict[str, tuple] = {}
+_CACHE: dict[tuple, tuple] = {}
 
 
 def coarse_inputs(root: str | Path, params: WorldParams) -> tuple:
     """``(grid, fields, derived)`` of the world at ``root`` — loaded once
     per process (workers keep it across jobs)."""
-    key = str(Path(root).resolve())
+    key = (str(Path(root).resolve()), hardness_key(params))
     hit = _CACHE.get(key)
     if hit is None:
         grid = params.coarse_grid()
         store = WorldStore(root)
         fields = {n: store.load_field(n, grid) for n in COARSE_INPUTS}
+        fields["hardness"] = refined_hardness(fields["hardness"], params)
         derived = coarse_derived(fields)
         _CACHE.clear()
         hit = (grid, fields, derived)
         _CACHE[key] = hit
     return hit
+
+
+def hardness_key(params: WorldParams) -> tuple[float, float]:
+    rp = params.refine
+    return float(getattr(rp, "hardness_smooth_cells", 0.0)), float(getattr(rp, "hardness_max", 1.0))
+
+
+def refined_hardness(hardness, params: WorldParams):
+    """The coarse hardness the levels below the coarse grid see
+    (``refine.hardness_smooth_cells``, ``refine.hardness_max``): tectonics'
+    strata low-passed seamlessly and capped; the field itself when both are
+    off."""
+    sigma, top = hardness_key(params)
+    if sigma <= 0.0 and top >= 1.0:
+        return hardness
+    from ..tectonics.collision import gaussian_smooth
+
+    out = gaussian_smooth(hardness, sigma)
+    out.data = np.minimum(out.data, top).astype(hardness.data.dtype)
+    return out
 
 
 # --------------------------------------------------------------------------

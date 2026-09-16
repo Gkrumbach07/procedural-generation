@@ -187,6 +187,35 @@ def test_detail_noise_is_drained_before_anything_erodes():
     assert float(drain_noise(surface, ocean).max()) == 0.0                  # a surface that already drains is untouched
 
 
+def test_levels_below_the_coarse_grid_see_hardness_low_passed_and_capped(world):
+    """``refine.hardness_smooth_cells`` / ``hardness_max``: the hardness every
+    level below the coarse grid reads is tectonics' field low-passed without
+    seams and capped -- a 2-cell zebra of strata loses most of its contrast --
+    and the field itself when both are off; the planet's shared inputs are
+    rewritten when the knobs change."""
+    from globe.io.world_store import WorldStore
+    from globe.refine import basin_job as bj
+    from globe.zoom import planet as zp
+
+    params = world["params"]
+    grid = params.coarse_grid()
+    h = WorldStore(world["root"]).load_field("hardness", grid)
+    assert bj.refined_hardness(h, params) is h
+    from globe.field import FaceField
+
+    data = np.empty(np.shape(h.data), np.float64)
+    data[:] = np.where(np.arange(data.shape[1]) % 2 == 0, 0.3, 0.95)[None, :, None]      # strata a cell wide
+    zebra = FaceField(grid, data, name="hardness")
+    zebra.exchange_halos()
+    soft = params.with_overrides(refine={"hardness_smooth_cells": 1.5, "hardness_max": 0.85})
+    out = bj.refined_hardness(zebra, soft)
+    H = grid.H
+    core = lambda f: np.asarray(f.data)[:, H:-H, H:-H]
+    assert core(out).max() <= 0.85 + 1e-6
+    assert np.ptp(core(out)[:, 8:-8, 8:-8]) < 0.1 * np.ptp(core(zebra)[:, 8:-8, 8:-8])
+    assert zp._input_stamp(world["root"], params) != zp._input_stamp(world["root"], soft)
+
+
 def test_pool_threads_follow_the_running_tiles_particles(monkeypatch):
     """A worker takes the share of the cores its tile's particles are of the
     running tiles' (one thread at least), and a tile's demand counts only
@@ -446,6 +475,42 @@ def test_planet_finish_in_bounded_memory_matches_the_whole_face_finish(world, pl
     assert sum(lakes) >= 0
 
 
+def test_planet_flow_is_the_rain_down_the_final_surface(world, planet, tmp_path):
+    """``planet_finish.flow_face``: the river map of a finished face is rain
+    accumulated down its surface's flood tree -- on a valley tilted to one
+    border cell, it never falls down the valley floor and the outlet carries
+    the face's rain; a finished level has one for every face."""
+    from globe.zoom import planet as zp
+    from globe.zoom import planet_finish as pf
+
+    out, lv = planet["out"], planet["level"]
+    N = world["params"].coarse_grid().N
+    n = N * lv.R
+    info = json.loads((out / "planet.json").read_text())
+    assert [s["face"] for s in info["flow"]] == list(range(6))
+    for f in range(6):
+        q = np.load(zp.out_path(out, lv.R, f, "flow"))
+        assert q.shape == (n, n) and np.isfinite(q).all() and (q >= 0).all()
+
+    syn = tmp_path / "valley"
+    syn.mkdir()
+    i, j = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    c = n // 2
+    h = 5000.0 + 5.0 * i + 20.0 * np.abs(j - c)
+    rim = (i == 0) | (i == n - 1) | (j == 0) | (j == n - 1)
+    h[rim & ~((i == 0) & (j == c))] = 9000.0                       # the border drains; only the valley's mouth is low
+    np.save(zp.out_path(syn, lv.R, 0, "height"), h.astype(np.float32))
+    np.save(zp.out_path(syn, lv.R, 0, "sediment"), np.zeros((n, n), np.float32))
+    st = pf.flow_face(world["root"], syn, lv.R, 0)
+    q = np.load(zp.out_path(syn, lv.R, 0, "flow")).astype(np.float64)
+    floor = q[1:-1, c]
+    assert (np.diff(floor) <= 1e-3 * floor[1:]).all()          # downstream is toward row 0
+    rain = np.maximum(np.load(world["root"] / "coarse" / "precip.f0.npy").astype(np.float64), 0.0) / lv.R ** 2
+    interior = np.repeat(np.repeat(rain, lv.R, axis=0), lv.R, axis=1)[1:-1, 1:-1].sum()
+    assert q[0, c] >= 0.999 * interior and q[0, c] == q.max()      # the mouth takes the face's rain (from three cells)
+    assert st["flow_max"] == pytest.approx(q[0, c], rel=1e-6)
+
+
 def test_planet_inflow_crosses_cube_edges():
     """A window on a face edge takes water from the neighbouring face's
     drainage: a donor beyond the edge is looked up on the face that owns it,
@@ -481,8 +546,9 @@ def test_planet_inflow_crosses_cube_edges():
 
 def test_viewer_final_frame_from_the_planet_level(world, planet):
     """``viewer._planet_final`` reduces the planet level to the frame
-    resolution: block-mean surface, block-max discharge, sea and lakes by
-    derive's rules."""
+    resolution: block-mean surface, block-max rivers (the level's
+    accumulated flow, which a finished level has), sea and lakes by derive's
+    rules."""
     from globe.viz import viewer
     from globe.zoom import planet as zp
 
@@ -496,7 +562,10 @@ def test_viewer_final_frame_from_the_planet_level(world, planet):
     fin = viewer._planet_final(root, json.loads((root / "manifest.json").read_text()), surf_c, fd, planet["out"].relative_to(root), res=N * 2, log=lambda m: None)
     assert fin["surf"].shape == (6, 2 * N, 2 * N)
     k = lv.R // 2
-    q0 = np.load(zp.out_path(planet["out"], lv.R, 0, "discharge"))
+    from globe.viz import detail as dt
+
+    assert dt.river_field(planet["out"], lv.R) == "flow" and fin["river_scale"]["river_full"] > fin["river_scale"]["river_min"]
+    q0 = dt.widen_rivers(np.load(zp.out_path(planet["out"], lv.R, 0, "flow")), fin["river_scale"])     # strips give the whole face's widening
     assert np.allclose(fin["discharge"][0], q0.reshape(2 * N, k, 2 * N, k).max(axis=(1, 3)))
     h0 = np.load(zp.out_path(planet["out"], lv.R, 0, "height")) + np.load(zp.out_path(planet["out"], lv.R, 0, "sediment"))
     assert np.allclose(fin["surf"][0], h0.reshape(2 * N, k, 2 * N, k).mean(axis=(1, 3)), atol=1e-2)
