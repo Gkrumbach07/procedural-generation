@@ -69,7 +69,10 @@ def main(argv=None) -> int:
     erosion = {}
     for kv in a.erosion:
         k, _, v = kv.partition("=")
-        erosion[k] = float(v)
+        # booleans by name (window_lakes=false), numbers otherwise
+        erosion[k] = {"true": True, "false": False}.get(v.strip().lower(), None)
+        if erosion[k] is None:
+            erosion[k] = float(v)
     t0 = time.time()
 
     def log(msg):

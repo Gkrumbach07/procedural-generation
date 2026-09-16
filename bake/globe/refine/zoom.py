@@ -52,8 +52,16 @@ ZOOM_EROSION = {
     # McDonald's water layer: with `window_lake_evap` (set per level by
     # `zoom_params`, the planet's coarse-cell rate over the fine cells) a
     # depression holds what its catchment brings less what evaporates off it,
-    # instead of filling to its rim, so a divot with no catchment is not a lake
-    "window_lakes": True,
+    # instead of filling to its rim, so a divot with no catchment is not a lake.
+    # Off at every level (2026-09-16): the lake treatment drops a particle's load
+    # on the shore and leaves the bed untouched, so a pit grows a rim and never
+    # fills.  On two earth-v9 windows, holes more than 5 m below all eight
+    # neighbours fell 6-160x with it off at 305 m and 76 m (lakes up to 861 m
+    # deep over a planet level whose lakes there are <= 100 m), relief and
+    # valley depth unchanged within run-to-run noise; at 1.2 km 32.9 -> 0.14
+    # per 10^4 land cells.  The routing flood still carries water across a
+    # depression, and the finish floods the lakes
+    "window_lakes": False,
     "flood_every": 5,
     # discharge scales in cells, as McDonald's are (his discharge is the
     # volume of 512 particles per cycle over a 512^2 map): erf(0.4 q) is
@@ -88,25 +96,28 @@ DISC_SATURATION_KM2 = 120.0
 MOMENTUM_SATURATION_KM2 = 48.0
 
 #: erosion overrides for a level whose cells are at least COARSE_ZOOM_CELL_M
-#: (the 1.2 km planet level), measured on the same three windows against the
-#: zoom profile (holes = cells more than 5 m below all eight neighbours):
-#: * window_lakes off: the lake treatment drops a particle's load on the shore
-#:   and leaves the bed alone, so a pit grows a rim and never fills -- holes
-#:   32.9 -> 0.14 per 10^4 land cells on a mountain (depth p90 45 -> 7 m), the
-#:   dotted 'rough bits'; relief unchanged.  What drains a depression at this
-#:   cell size is the flood that routes the particles.
+#: (the 1.2 km planet level), measured on three 1.2 km windows against the
+#: zoom profile (scratch/sweep):
 #: * k_mom 0.5: half the stored momentum push, which builds sediment ridges
-#:   along the particles' streaks (crest -11.7 -> -1.8 m).
-#: * slope_limit_erode 0.5: soillib's 0.25 held gentle mountains to ~1 cm of
-#:   incision an iteration; 0.5 doubles the plateau's valley depth (11 -> 18 m,
-#:   3.7 km relief p90 62 -> 103 m) and keeps holes away (1.0 brings speckle
-#:   lakes back, 0 cuts 300 m trenches).
+#:   along the particles' streaks (crest -11.7 -> -1.8 m).  Not below: at
+#:   305 m / 76 m it cut relief and valley depth 10-40 % with no ridges to
+#:   remove (streak crests already incised, -6 to -48 m on a mountain).
 COARSE_ZOOM_CELL_M = 600.0
 COARSE_ZOOM_EROSION = {
-    "window_lakes": False,
     "k_mom": 0.5,
-    "slope_limit_erode": 0.5,
 }
+
+#: soillib's erosion limit where a cell is at least WIDE_SLOPE_LIMIT_CELL_M
+#: (1.2 km and 305 m): 0.25 held gentle mountains at 1.2 km to ~1 cm of
+#: incision an iteration; 0.5 took a plateau's valley depth 11 -> 18 m and its
+#: 3.7 km relief p90 62 -> 103 m, and at 305 m a mountain's 1 km relief p50
+#: 132 -> 154 m and 6 km valley depth p90 825 -> 941 m, with holes near zero
+#: (1.0 brought the speckle lakes back at 1.2 km).  At 76 m it stays 0.25:
+#: 0.5 printed an axis-aligned stair texture on a steep mountain (axis /
+#: diagonal spectral power at 2-4 cells 2.4 -> 6.3, straight risers 18 -> 50
+#: per 10^4 cells).
+WIDE_SLOPE_LIMIT_CELL_M = 150.0
+WIDE_SLOPE_LIMIT_ERODE = 0.5
 
 #: refine overrides for a zoom window: detail noise at 3x the stage's
 #: amplitude -- the upsample has no relief below a parent cell, and
@@ -130,13 +141,16 @@ def zoom_params(params, R: int, **erosion):
     """``params`` (a WorldParams) for a zoom window at refinement ``R``: the
     zoom erosion profile with its discharge scales in area
     (:data:`DISC_SATURATION_KM2`), the coarse-level overrides where a cell is
-    at least :data:`COARSE_ZOOM_CELL_M`, and the refine overrides; then any
+    at least :data:`COARSE_ZOOM_CELL_M`, the wider erosion limit where it is
+    at least :data:`WIDE_SLOPE_LIMIT_CELL_M`, and the refine overrides; then any
     ``erosion`` given."""
     eo = dict(ZOOM_EROSION)
     cell_m = float(params.world.cell_size_m) / float(R)
     cell_km2 = (cell_m / 1000.0) ** 2
     eo["disc_saturation_cells"] = min(float(ZOOM_EROSION["disc_saturation_cells"]), DISC_SATURATION_KM2 / cell_km2)
     eo["momentum_saturation_cells"] = min(float(ZOOM_EROSION["momentum_saturation_cells"]), MOMENTUM_SATURATION_KM2 / cell_km2)
+    if cell_m >= WIDE_SLOPE_LIMIT_CELL_M:
+        eo["slope_limit_erode"] = WIDE_SLOPE_LIMIT_ERODE
     if cell_m >= COARSE_ZOOM_CELL_M:
         eo.update(COARSE_ZOOM_EROSION)
     eo.setdefault("window_lake_evap", float(params.hydro.lake_evap) / float(R * R))
@@ -193,5 +207,5 @@ def smooth_drift(delta: np.ndarray, cells: np.ndarray, R: int, tol: float = 0.05
     return F
 
 
-__all__ = ["ZOOM_EROSION", "ZOOM_REFINE", "COARSE_ZOOM_EROSION", "COARSE_ZOOM_CELL_M", "DISC_SATURATION_KM2", "MOMENTUM_SATURATION_KM2",
+__all__ = ["ZOOM_EROSION", "ZOOM_REFINE", "COARSE_ZOOM_EROSION", "COARSE_ZOOM_CELL_M", "WIDE_SLOPE_LIMIT_CELL_M", "WIDE_SLOPE_LIMIT_ERODE", "DISC_SATURATION_KM2", "MOMENTUM_SATURATION_KM2",
            "drain_noise", "smooth_drift", "zoom_params"]
