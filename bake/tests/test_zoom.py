@@ -795,3 +795,106 @@ def test_route_faces_hands_rivers_over_cube_edges():
                 assert win.max() >= q[x, y] * (1 - 1e-9), (f, x, y)
                 checked += 1
     assert checked >= 3
+
+
+# --------------------------------------------------------------------------
+# zoom level textures for the globe viewer (globe/viz/zoomtex.py)
+# --------------------------------------------------------------------------
+def _decode_tex(js_path, name, R):
+    import base64
+    import io
+
+    from PIL import Image
+
+    text = js_path.read_text()
+    head = 'GLOBE_VIEWER.zoomTex("%s", %d, "' % (name, R)
+    assert text.startswith(head) and text.endswith('");\n')
+    return np.asarray(Image.open(io.BytesIO(base64.b64decode(text[len(head):-4]))).convert("RGBA"))   # no alpha stored when it is all 255
+
+
+def test_zoom_level_texture_encodes_ground_lakes_ocean_and_rivers(tmp_path):
+    """A synthetic level: a slope out of the sea along i, a pit lake on it and
+    one channel of large flux down column 40.  ``index.write`` writes its
+    texture and sidecar and lists them as the level's ``tex``: the image is
+    ``NE`` wide and ``2 NE`` tall, the heights decode back within a code step,
+    the sea is transparent and the land opaque, the lake's depth byte is
+    above the middle, the channel's river byte above ``river_min_byte`` and
+    the dry hillside's 0; a second write leaves the fresh texture alone."""
+    root = tmp_path / "w"
+    (root / "viewer").mkdir(parents=True)
+    (root / "manifest.json").write_text(json.dumps({"N_c": 64}))
+    zdir = root / "zoom" / "syn"
+    zdir.mkdir(parents=True)
+    geo = zb.Geometry(face=2, ci0=10, cj0=12, cells=4, guard=1, R=8)
+    NE, p0, n = geo.NE, geo.p0, geo.n
+    i, j = np.meshgrid(np.arange(NE), np.arange(NE), indexing="ij")
+    rng = np.random.default_rng(3)
+    height = ((i - 19.5) * 2.0).astype(np.float32)
+    sediment = rng.uniform(0.0, 0.4, (NE, NE)).astype(np.float32)
+    surf = height + sediment
+    ocean = i < 20
+    ws = np.maximum(surf, 0.0)
+    lake = (i >= 36) & (i <= 38) & (j >= 24) & (j <= 26)
+    ws[lake] = surf[lake] + 5.0
+    flux = np.ones((NE, NE), np.float32)
+    chan = (j == 40) & ~ocean
+    flux[chan] = 50.0 * (i[chan] - 19)
+    flux[ocean] = 0.0
+    arrays = {"height": height, "sediment": sediment, "discharge": flux.copy(), "momentum": np.zeros((NE, NE, 2), np.float32),
+              "water_surface": ws.astype(np.float32), "flux": flux, "plain": np.zeros((NE, NE), np.float32), "ocean": ocean,
+              "done": np.ones((NE, NE), bool)}
+    zb.save_level(zb.LevelResult(geo, arrays, {"geometry": {"face": 2, "ci0": 10, "cj0": 12, "cells": 4, "guard": 1, "R": 8}, "cell_m": 1000.0}), zdir)
+    level = {"R": 8, "cell_m": 1000.0, "geometry": {"face": 2, "ci0": 10, "cj0": 12, "cells": 4, "guard": 1, "R": 8}}
+    no_npz = {"R": 32, "cell_m": 250.0, "geometry": {"face": 2, "ci0": 11, "cj0": 13, "cells": 2, "guard": 1, "R": 32}}
+    (zdir / "zoom.json").write_text(json.dumps({"name": "syn", "spot": [2, 12, 14], "lat": 0.0, "lon": 0.0, "levels": [level, no_npz]}))
+    (zdir / "view.html").write_text("<html></html>")
+
+    zooms = zindex.write(root, log=None)
+    js = root / "viewer" / "zoomtex" / "syn_L8.js"
+    side = root / "viewer" / "zoomtex" / "syn_L8.json"
+    assert js.exists() and side.exists()
+    lv8, lv32 = zooms[0]["levels"]
+    assert "tex" not in lv32 and not (root / "viewer" / "zoomtex" / "syn_L32.js").exists()
+    tex = lv8["tex"]
+    assert tex == json.loads(side.read_text())
+    assert (tex["file"], tex["face"], tex["N"], tex["R"], tex["ci0"], tex["cj0"], tex["cells"], tex["guard"]) == ("zoomtex/syn_L8.js", 2, 64, 8, 10, 12, 4, 1)
+    assert (tex["NE"], tex["p0"], tex["n"], tex["lake_range"], tex["cell_m"]) == (NE, p0, n, 200.0, 1000.0)
+    listed = json.loads((root / "viewer" / "zooms.js").read_text()[len("GLOBE_VIEWER.setZooms("):-3])
+    assert listed[0]["levels"][0]["tex"] == tex and "corners" in listed[0]["levels"][0]
+
+    img = _decode_tex(js, "syn", 8)
+    assert img.shape == (2 * NE, NE, 4) and img.dtype == np.uint8
+    ground, water = img[:NE], img[NE:]                       # (y, x) = (j, i)
+    step = (tex["h1"] - tex["h0"]) / 65535.0
+    for ci, cj in ((5, 5), (19, 30), (20, 30), (p0 + 3, p0 + 7), (NE - 1, NE - 1), (37, 25)):
+        code = int(ground[cj, ci, 0]) * 256 + int(ground[cj, ci, 1])
+        assert abs(tex["h0"] + code * step - float(surf[ci, cj])) <= step * 1.01, (ci, cj)
+        assert (code < round(-tex["h0"] / step)) == (surf[ci, cj] < 0)     # sea level on a code
+    assert ground[:, :20, 3].max() < 128 and ground[:, 20:, 3].min() >= 128
+    assert ground[25, 37, 2] > 127.5 and ground[30, 45, 2] < 127.5
+    assert water[40, p0 + n - 1, 0] > tex["river_min_byte"] and water[40, 30, 0] > 0
+    assert water[20, 30, 0] == 0 and water[:, :, 3].min() == 255 and water[:, :, 1:3].max() == 0
+    assert 1 <= tex["river_min_byte"] <= 254 and tex["river_span_byte"] >= 8
+
+    before = (js.stat().st_mtime_ns, side.stat().st_mtime_ns)
+    assert zindex.write(root, log=None)[0]["levels"][0]["tex"] == tex
+    assert (js.stat().st_mtime_ns, side.stat().st_mtime_ns) == before
+
+
+def test_zoom_textures_for_every_baked_level(world, zoom):
+    zooms = {z["name"]: z for z in zindex.write(world["root"], log=None)}
+    z = zooms["t"]
+    assert [lv["R"] for lv in z["levels"]] == [lv.R for lv in LEVELS]
+    for lv, res in zip(z["levels"], zoom["levels"]):
+        tex, geo = lv["tex"], res.geo
+        assert (tex["face"], tex["R"], tex["ci0"], tex["cj0"], tex["cells"], tex["guard"]) == (geo.face, geo.R, geo.ci0, geo.cj0, geo.cells, geo.guard)
+        assert (tex["NE"], tex["p0"], tex["n"]) == (geo.NE, geo.p0, geo.n)
+        img = _decode_tex(world["root"] / "viewer" / tex["file"], "t", geo.R)
+        assert img.shape == (2 * geo.NE, geo.NE, 4)
+        surf = res.surface()
+        step = (tex["h1"] - tex["h0"]) / 65535.0
+        c = geo.p0 + geo.n // 2
+        code = int(img[c, c, 0]) * 256 + int(img[c, c, 1])
+        assert abs(tex["h0"] + code * step - float(surf[c, c])) <= step * 1.01
+    js = (world["root"] / "viewer" / "zooms.js").read_text()
+    assert all("tex" in lv for lv in json.loads(js[len("GLOBE_VIEWER.setZooms("):-3])[0]["levels"])

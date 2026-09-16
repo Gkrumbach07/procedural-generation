@@ -54,6 +54,12 @@
     font-size:11px; white-space:pre-wrap; word-break:break-all; user-select:all; }
   #zoompop a { color:var(--accent); }
   #zoompop .x { position:absolute; top:4px; right:8px; cursor:pointer; color:var(--dim); }
+  #zoomlist { margin-top:8px; border-top:1px solid var(--line); padding-top:6px; max-height:34vh; overflow:auto; }
+  #zoomlist .zt { color:var(--dim); font-size:11px; margin-bottom:3px; }
+  #zoomlist .zr { display:flex; align-items:center; gap:6px; margin:3px 0; flex-wrap:wrap; }
+  #zoomlist .zn { color:var(--accent); cursor:pointer; min-width:84px; }
+  #zoomlist .zn:hover { text-decoration:underline; }
+  #zoomlist .ld { color:var(--dim); font-size:10px; }
 </style>
 </head>
 <body>
@@ -65,11 +71,16 @@
   <h1 id="title">Globe</h1>
   <div class="sub" id="subtitle"></div>
   <div class="row"><label>View</label>
-    <span class="seg" id="viewseg"><button data-v="globe" class="on">Globe</button><button data-v="flat">Flat</button></span>
+    <span class="seg" id="viewseg"><button data-v="globe" class="on">Globe</button><button data-v="flat">Flat</button><button data-v="tilt" title="3-D: tilt and turn (T)">3D</button></span>
     <button class="plain" id="reset" title="Reset view (Home)">⟲</button>
   </div>
   <div class="row"><label>Layer</label><select id="layer"></select></div>
   <div class="row"><label>Relief</label><input type="range" id="exag" min="0" max="60" step="0.5" value="12"><span id="exagv" style="width:28px;text-align:right">12×</span></div>
+  <div class="row hidden" id="tiltrow"><label>3D</label>
+    <button class="plain" id="rotl" title="Turn left (Q)">⟲</button><button class="plain" id="rotr" title="Turn right (E)">⟳</button>
+    <button class="plain" id="north" title="North up, straight down">N</button>
+    <input type="range" id="tilt" min="0" max="80" step="1" value="55" title="Tilt"><span id="tiltv" style="width:28px;text-align:right">55°</span></div>
+  <div class="row hidden" id="exag3row"><label>Height</label><input type="range" id="exag3" min="0.5" max="6" step="0.1" value="1.5"><span id="exag3v" style="width:28px;text-align:right">1.5×</span></div>
   <div class="row">
     <span class="chk"><input type="checkbox" id="rivers" checked>rivers</span>
     <span class="chk"><input type="checkbox" id="grid">grid</span>
@@ -80,13 +91,16 @@
   <div class="row"><label>Speed</label><input type="range" id="fps" min="1" max="30" step="1" value="10"><span id="fpsv" style="width:28px;text-align:right">10</span></div>
   <div class="row"><button class="plain" id="shot">Save PNG</button><button class="plain" id="copylink">Copy view link</button></div>
   <div id="legend"><canvas id="legendc" width="256" height="12"></canvas><div class="ticks"><span id="lg0"></span><span id="lgmid"></span><span id="lg1"></span></div></div>
+  <div id="zoomlist" class="hidden"></div>
 </div>
 
 <button class="plain" id="helpbtn">?</button>
 <div id="help" class="panel">
   <b>Drag</b> pan / rotate · <b>Wheel</b> zoom at cursor · <b>Double-click</b> zoom in<br>
   <b>Space</b> play/pause · <b>← →</b> step frame · <b>Shift+← →</b> jump stage<br>
-  <b>G</b> globe/flat · <b>Home</b> reset · <b>1–9</b> layers · <b>R</b> rivers · <b>L</b> grid<br>
+  <b>G</b> globe/flat · <b>T</b> 3D · <b>Home</b> reset · <b>1–9</b> layers · <b>R</b> rivers · <b>L</b> grid<br>
+  <b>3D:</b> drag pan · <b>right-drag</b> or <b>Ctrl/Shift-drag</b> turn &amp; tilt · <b>Q E</b> turn · <b>PgUp PgDn</b> tilt<br>
+  <b>Zoom windows</b> (list, top left): their fine levels draw in place when you zoom in; tick a level off to compare<br>
   <b>Click</b> a spot: open its zoom (outlined squares), or bake one there<br><br>
   The URL keeps the view, so a link reopens exactly this frame and camera.
 </div>
@@ -215,6 +229,19 @@ uniform sampler2D uDP;         // page table of the level: texel (f%3 nT + ti, f
 uniform float uDRes, uDTile, uDSlot, uDSlotH; uniform int uDnT;
 uniform vec2 uDH;              // detail height decode range, metres
 uniform float uDRiverMin, uDRiverSpan;   // the detail tiles' own discharge bytes
+// zoom levels drawn inline (globe/viz/zoomtex.py), finest first: slot k's texture is
+// uZT<k>, (x, y) = array cell (i, j), ground on top (R,G height, B signed lake depth,
+// A 255 - ocean mask), rivers below (R, y + NE); cell (i, j) is face fine cell
+// (i + uZOi, j + uZOj) of uZRes per face, the eroded core [uZP0, uZP0 + uZCore)
+uniform int uZN;
+uniform sampler2D uZT0, uZT1, uZT2, uZT3;
+uniform ivec4 uZFace;
+uniform vec4 uZRes, uZOi, uZOj, uZP0, uZCore, uZNE, uZH0, uZH1, uZRmin, uZRspan;
+uniform float uExagBase, uFARes;  // the relief slider, and the atlas' cells per face its exaggeration is set for
+// tilt: a perspective camera over the terrain, heights x uExag3.  Positions are
+// metres relative to the target point uTgt * uRT (uRT = R + uTgtH)
+uniform vec3 uTgt, uCamPos, uCamF, uCamR, uCamU;
+uniform float uRT, uTgtH, uTanHalf, uExag3, uHTop, uSlope3, uPixAng, uFar, uFog;
 const float PI = 3.14159265358979;
 const float TWO_OVER_PI = 0.636619772367581;
 
@@ -269,12 +296,106 @@ float heightIn(sampler2D t, vec3 geo, vec2 hr, vec3 p){
   float h01 = decodeH(texelFetch(t, a + ivec2(0,1), 0), hr), h11 = decodeH(texelFetch(t, a + ivec2(1,1), 0), hr);
   return mix(mix(h00, h10, fr.x), mix(h01, h11, fr.x), fr.y);
 }
-float heightAt(vec3 p){
+float baseHeight(vec3 p){
   vec2 dxy;
   if (uDetail == 1 && detailXY(p, dxy)) return detailHeight(dxy);
   float h = heightIn(uT0a, uGeoA, uHA, p);
   if (uMix > 0.0) h = mix(h, heightIn(uT0b, uGeoB, uHB, p), uMix);
   return h;
+}
+vec4 zTex(int k, ivec2 c){
+  if (k == 0) return texelFetch(uZT0, c, 0);
+  if (k == 1) return texelFetch(uZT1, c, 0);
+  if (k == 2) return texelFetch(uZT2, c, 0);
+  return texelFetch(uZT3, c, 0);
+}
+// the finest loaded zoom level whose core holds p: its slot, the array coordinate
+// (texel centres at integers) and a weight rising from 0 at the core's edge to 1
+// sixteen cells in, so a zoom level blends into the terrain around it
+int zoomSlot(vec3 p, out vec2 a, out float w){
+  w = 0.0; a = vec2(0.0);
+  if (uZN == 0) return -1;
+  int f = faceOf(p); float d = dot(p, BN[f]);
+  vec2 uv = vec2(atan(dot(p, BR[f]) / d), atan(dot(p, BU[f]) / d)) * TWO_OVER_PI + 0.5;
+  for (int k = 0; k < 4; k++) {
+    if (k >= uZN) break;
+    if (uZFace[k] != f) continue;
+    vec2 ai = uv * uZRes[k] - vec2(uZOi[k], uZOj[k]) - 0.5;
+    vec2 lo = ai - uZP0[k], hi = vec2(uZP0[k] + uZCore[k] - 2.0) - ai;
+    float m = min(min(lo.x, lo.y), min(hi.x, hi.y));
+    if (m < 0.0) continue;
+    a = ai; w = clamp(m / 16.0, 0.0, 1.0);
+    return k;
+  }
+  return -1;
+}
+vec4 zLinear(int k, vec2 a){
+  vec2 i0 = floor(a); vec2 fr = a - i0; ivec2 c = ivec2(i0);
+  return mix(mix(zTex(k, c), zTex(k, c + ivec2(1,0)), fr.x), mix(zTex(k, c + ivec2(0,1)), zTex(k, c + ivec2(1,1)), fr.x), fr.y);
+}
+float zHeight(int k, vec2 a){
+  vec2 i0 = floor(a); vec2 fr = a - i0; ivec2 c = ivec2(i0); vec2 hr = vec2(uZH0[k], uZH1[k]);
+  float h00 = decodeH(zTex(k, c), hr), h10 = decodeH(zTex(k, c + ivec2(1,0)), hr);
+  float h01 = decodeH(zTex(k, c + ivec2(0,1)), hr), h11 = decodeH(zTex(k, c + ivec2(1,1)), hr);
+  return mix(mix(h00, h10, fr.x), mix(h01, h11, fr.x), fr.y);
+}
+float heightAt(vec3 p){
+  vec2 za; float zw;
+  int k = zoomSlot(p, za, zw);
+  if (k < 0) return baseHeight(p);
+  float hz = zHeight(k, za);
+  return zw >= 1.0 ? hz : mix(baseHeight(p), hz, zw);
+}
+
+// ---- tilt: ray-marched terrain -------------------------------------------
+// altitude above the sphere of the point x (metres from the target), and its
+// direction; the difference form keeps float32 to centimetres at planet radius
+float altOf(vec3 x, out vec3 p){
+  vec3 A = uTgt * uRT + x; float L = length(A); p = A / L;
+  return (uTgtH * (2.0 * uRplanet + uTgtH) + 2.0 * uRT * dot(uTgt, x) + dot(x, x)) / (L + uRplanet);
+}
+float groundAt(vec3 p){ return max(heightAt(p), uSea) * uExag3; }
+// march from ro along rd to the terrain: the step is the gap over the fastest it
+// can close (the ray's descent plus the steepest terrain slope, uSlope3), never
+// finer than a pixel's footprint, then bisection
+bool marchTerrain(vec3 ro, vec3 rd, out float t, out vec3 p){
+  vec3 pp; float alt0 = altOf(ro, pp);
+  t = 0.0; p = pp;
+  if (alt0 > uHTop) {                      // enter the shell the terrain lives in
+    vec3 A0 = uTgt * uRT + ro;
+    float b = dot(rd, A0);
+    float Rs = uRplanet + uHTop;
+    float c = (alt0 - uHTop) * (length(A0) + Rs);
+    float disc = b * b - c;
+    if (b >= 0.0 || disc <= 0.0) return false;
+    t = c / (-b + sqrt(disc));
+  }
+  float tPrev = t;
+  for (int i = 0; i < 220; i++) {
+    float alt = altOf(ro + t * rd, p);
+    float dz = alt - groundAt(p);
+    if (dz <= 0.0) {
+      float lo = tPrev, hi = t; vec3 pm;
+      for (int j = 0; j < 8; j++) {
+        float m = 0.5 * (lo + hi);
+        if (altOf(ro + m * rd, pm) - groundAt(pm) <= 0.0) hi = m; else lo = m;
+      }
+      t = hi; altOf(ro + t * rd, p);
+      return true;
+    }
+    float sinE = dot(rd, p);
+    if (alt > uHTop && sinE > 0.0) return false;     // climbing out of the shell
+    float stp = dz / max(-sinE + uSlope3 * sqrt(max(1.0 - sinE * sinE, 0.0)), 1e-3);
+    stp = clamp(stp, max(t * uPixAng, 1.0), 40000.0);
+    tPrev = t; t += stp;
+    if (t > uFar) return false;
+  }
+  return false;
+}
+vec3 skyColor(vec3 rd){
+  float e = dot(rd, uTgt);
+  vec3 horizon = vec3(0.70, 0.78, 0.86), zenith = vec3(0.24, 0.42, 0.72);
+  return mix(horizon, zenith, smoothstep(-0.02, 0.45, e));
 }
 float chan(vec4 c, int ch){ return ch == 0 ? c.r : (ch == 1 ? c.g : c.b); }
 float byteNearest(sampler2D t, vec3 geo, int ch, vec3 p){
@@ -354,7 +475,12 @@ vec3 space(vec2 q, float r){
 void main(){
   vec2 q = (gl_FragCoord.xy - 0.5 * uView) / uScale;
   vec3 p; float zc = 1.0;
-  if (uMode == 0) {
+  float tHit = 0.0; vec3 rd = vec3(0.0);
+  if (uMode == 2) {
+    vec2 nd = (gl_FragCoord.xy - 0.5 * uView) / (0.5 * uView.y);
+    rd = normalize(uCamF + nd.x * uTanHalf * uCamR + nd.y * uTanHalf * uCamU);
+    if (!marchTerrain(uCamPos, rd, tHit, p)) { outColor = vec4(pow(skyColor(rd), vec3(0.95)), 1.0); return; }
+  } else if (uMode == 0) {
     float r2 = dot(q, q);
     if (r2 > 1.0) { outColor = vec4(space(q, sqrt(r2)), 1.0); return; }
     zc = sqrt(1.0 - r2);
@@ -370,7 +496,12 @@ void main(){
   vec3 e = vec3(-p.y, p.x, 0.0);
   e = dot(e, e) < 1e-10 ? vec3(0.0, 1.0, 0.0) : normalize(e);
   vec3 n = cross(p, e);
-  float d = uTexelRad;
+  vec2 za; float zw;
+  int zk = zoomSlot(p, za, zw);
+  // relief is measured over the cells of whatever is drawn here: a zoom level's
+  // own, and in tilt no finer than the pixel's footprint
+  float d = zk >= 0 ? min(uTexelRad, 0.5 * PI / uZRes[zk]) : uTexelRad;
+  if (uMode == 2) d = max(d, 0.7 * tHit * uPixAng / uRplanet);
   float h  = heightAt(p);
   float hE = heightAt(normalize(p + d * e)), hW = heightAt(normalize(p - d * e));
   float hN = heightAt(normalize(p + d * n)), hS = heightAt(normalize(p - d * n));
@@ -386,7 +517,11 @@ void main(){
   // lake is wherever the interpolated signed lake depth is above 0
   float wcode;
   vec2 dxy;
-  if (uDetail == 1 && detailXY(p, dxy)) {
+  if (zk >= 0 && zw > 0.5) {
+    vec4 t = zLinear(zk, za) * 255.0;
+    float ld = (t.b / 127.5 - 1.0) * uLakeRange;
+    wcode = 255.0 - t.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
+  } else if (uDetail == 1 && detailXY(p, dxy)) {
     vec4 t = detailLinear(dxy) * 255.0;
     float ld = (t.b / 127.5 - 1.0) * uLakeRange;
     wcode = 255.0 - t.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
@@ -398,7 +533,11 @@ void main(){
     wcode = uHasWater == 1 ? byteNearest(uWT, uWGeo, uWCh, p) : (h < uSea ? 2.0 : 0.0);
   }
   bool wet = wcode > 0.5;
-  float ex = uExag * (wet ? 0.35 : 1.0);
+  // the slider's exaggeration is set for the atlas' cells; finer cells show real
+  // relief with less of it.  In tilt the shading follows the geometry's
+  float exz = zk >= 0 ? max(uExagBase * uFARes / uZRes[zk], uExagBase / 16.0) : uExag;
+  if (uMode == 2) exz = max(uExag3 * 2.0, 1.0);
+  float ex = exz * (wet ? 0.35 : 1.0);
   vec3 nrm = normalize(vec3(-g.x * ex, -g.y * ex, 1.0));
   vec3 L = normalize(vec3(-0.6, 0.6, 0.75));
   float shade = clamp(dot(nrm, L) / L.z, 0.0, 2.0);
@@ -429,8 +568,13 @@ void main(){
   // view has one (the level's own stream map, sharp at any zoom), from the
   // atlas otherwise.
   if (uRivers == 1 && !wet) {
-    float b, rmin, rspan;
-    if (uDetail == 1 && detailXY(p, dxy)) {
+    float b, rmin, rspan, texr = uTexelRad;
+    if (zk >= 0 && zw > 0.5) {
+      b = zLinear(zk, za + vec2(0.0, uZNE[zk])).r * 255.0;     // the zoom level's river half
+      rmin = uZRmin[zk];
+      rspan = uZRspan[zk];
+      texr = 0.5 * PI / uZRes[zk];
+    } else if (uDetail == 1 && detailXY(p, dxy)) {
       b = detailLinear(dxy + vec2(0.0, uDSlot)).r * 255.0;   // the tile's water half
       rmin = uDRiverMin;
       rspan = uDRiverSpan;
@@ -439,7 +583,8 @@ void main(){
       rmin = uRiverMin;
       rspan = uRiverSpan;
     }
-    float cpp = max(1.0 / (uScale * uTexelRad), 1.0);
+    float pxAng = uMode == 2 ? tHit * uPixAng / uRplanet : 1.0 / uScale;
+    float cpp = max(pxAng / texr, 1.0);
     float t = clamp((b - rmin - uRiverZoom * log2(cpp)) / max(rspan, 1.0), 0.0, 1.0);
     float w = t * t * (3.0 - 2.0 * t);
     vec3 rc = mix(vec3(0.42, 0.62, 0.80), vec3(0.14, 0.34, 0.70), w);
@@ -464,6 +609,7 @@ void main(){
     col = mix(col, eq ? vec3(1.0, 0.85, 0.4) : vec3(1.0), line * 0.35);
   }
   if (uMode == 0) col *= 0.72 + 0.28 * zc;
+  if (uMode == 2) col = mix(col, skyColor(rd), 1.0 - exp(-tHit / uFog));   // aerial haze
   outColor = vec4(pow(col, vec3(0.95)), 1.0);
 }`;
 
@@ -610,7 +756,7 @@ function drawRiverLines(w, h, FA) {
   gl.uniform1f(LU.uRplanet, META.R_planet_m);
   gl.uniform1f(LU.uMinB, info.min_byte); gl.uniform1f(LU.uSpan, info.span_byte); gl.uniform1f(LU.uZoomK, 10.0);
   gl.uniform1f(LU.uLogCpp, Math.log2(1 / (scalePx() * HALF_PI / FA.res)));
-  gl.uniform1f(LU.uPx, window.devicePixelRatio || 1);
+  gl.uniform1f(LU.uPx, cssPx());
   gl.enable(gl.BLEND); gl.blendEquation(gl.MAX); gl.blendFunc(gl.ONE, gl.ONE);
   gl.bindVertexArray(rivers.vao);
   gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, rivers.count);
@@ -683,6 +829,8 @@ const state = {
   view: "globe", lat0: 0.35, lon0: 0.0, zoom: 1.0,
   layer: "elevation", exag: META.default_exag ?? 12, rivers: true, grid: false, coast: false, fade: true, scout: true,
   playing: false, fps: 10,
+  heading: 0, tilt: 55 * PI / 180, exag3: 1.5,   // the 3-D view: compass heading, tilt from straight down, vertical exaggeration
+  zoff: new Set(),                               // zoom levels switched off ("name_L<R>")
 };
 // zoom 1 shows the whole planet in either view
 function baseScale() {
@@ -694,7 +842,10 @@ function readHash() {
   const h = new URLSearchParams(location.hash.slice(1));
   const num = (k, f) => h.has(k) && isFinite(+h.get(k)) ? f(+h.get(k)) : undefined;
   num("f", v => state.frame = state.fpos = Math.max(0, Math.min(NF - 1, Math.round(v))));
-  if (h.get("v") === "flat" || h.get("v") === "globe") state.view = h.get("v");
+  if (h.get("v") === "flat" || h.get("v") === "globe" || h.get("v") === "tilt") state.view = h.get("v");
+  num("hd", v => state.heading = v * PI / 180); num("tl", v => state.tilt = Math.max(0, Math.min(80, v)) * PI / 180);
+  num("x3", v => state.exag3 = v);
+  if (h.has("zoff")) state.zoff = new Set(h.get("zoff").split(",").filter(Boolean));
   num("lat", v => state.lat0 = v * PI / 180); num("lon", v => state.lon0 = v * PI / 180);
   num("z", v => state.zoom = v); num("x", v => state.exag = v);
   if (h.has("layer")) state.layer = h.get("layer");
@@ -707,7 +858,9 @@ function writeHash() {
   hashTimer = setTimeout(() => {
     const d = v => (v * 180 / PI).toFixed(3);
     const h = `f=${state.frame}&v=${state.view}&lat=${d(state.lat0)}&lon=${d(state.lon0)}&z=${state.zoom.toFixed(4)}`
-      + `&layer=${state.layer}&x=${state.exag}&rivers=${+state.rivers}&grid=${+state.grid}&coast=${+state.coast}&fade=${+state.fade}`;
+      + `&layer=${state.layer}&x=${state.exag}&rivers=${+state.rivers}&grid=${+state.grid}&coast=${+state.coast}&fade=${+state.fade}`
+      + (state.view === "tilt" ? `&hd=${(state.heading * 180 / PI).toFixed(1)}&tl=${(state.tilt * 180 / PI).toFixed(1)}&x3=${state.exag3}` : "")
+      + (state.zoff.size ? `&zoff=${[...state.zoff].join(",")}` : "");
     history.replaceState(null, "", "#" + h);
   }, 200);
 }
@@ -739,8 +892,41 @@ function camBasis() {
   const N = [-Math.sin(lat0) * Math.cos(lon0), -Math.sin(lat0) * Math.sin(lon0), Math.cos(lat0)];
   return { C, E, N };
 }
+// ---------------------------------------------------------------------------
+// The 3-D view: a perspective camera looking at the target (lat0, lon0) from
+// behind it along the heading, tilted up from straight down, at the distance
+// that shows as much ground at the target as the globe view does at this zoom.
+// Heights are exaggerated state.exag3 times.  Positions are metres relative to
+// the target on the (exaggerated) surface, as the shader has them.
+// ---------------------------------------------------------------------------
+const FOV3 = 40 * PI / 180, TAN3 = Math.tan(FOV3 / 2);
+const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const add3 = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const mul3 = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm3 = a => mul3(a, 1 / Math.hypot(a[0], a[1], a[2]));
+let targetH = 0;                                 // the terrain height under the target, metres (the atlas', set per draw)
+function cam3() {
+  const R = META.R_planet_m, { C: T, E, N } = camBasis();
+  const hT = Math.max(targetH, META.sea_level_m || 0) * state.exag3;
+  const D = R * (canvas.height / 2) / scalePx() / TAN3;
+  const fw = add3(mul3(N, Math.cos(state.heading)), mul3(E, Math.sin(state.heading)));   // the heading on the ground
+  const right = norm3(cross3(fw, T));
+  const pos = add3(mul3(T, D * Math.cos(state.tilt)), mul3(fw, -D * Math.sin(state.tilt)));   // camera, from the target
+  const F = norm3(mul3(pos, -1)), U3 = cross3(right, F);
+  return { T, hT, rT: R + hT, D, fw, right, pos, F, U: U3 };
+}
 // canvas pixel (top-left origin, device px) -> unit direction or null
 function screenToDir(px, py) {
+  if (state.view === "tilt") {
+    const c = cam3(), h2 = canvas.height / 2;
+    const nx = (px - canvas.width / 2) / h2, ny = (h2 - py) / h2;
+    const rd = norm3(add3(c.F, add3(mul3(c.right, nx * TAN3), mul3(c.U, ny * TAN3))));
+    const A0 = add3(mul3(c.T, c.rT), c.pos), Rs = c.rT;          // the sphere through the target's height
+    const b = dot3(rd, A0), cc = dot3(A0, A0) - Rs * Rs, disc = b * b - cc;
+    if (b >= 0 || disc <= 0) return null;
+    return norm3(add3(A0, mul3(rd, -b - Math.sqrt(disc))));
+  }
   const s = scalePx();
   const qx = (px - canvas.width / 2) / s, qy = (canvas.height / 2 - py) / s;
   if (state.view === "globe") {
@@ -754,6 +940,16 @@ function screenToDir(px, py) {
 
 let drawQueued = false;
 function requestDraw() { if (!drawQueued) { drawQueued = true; requestAnimationFrame(draw); } }
+// canvas pixels per CSS pixel: the device ratio, or less while the 3-D view is
+// drawn at half resolution during a drag / wheel / key turn (the ray march is
+// heavy); a quarter second after the last move it is drawn sharp again
+const cssPx = () => canvas.width / Math.max(canvas.clientWidth, 1);
+let moving = false, movingTimer = 0;
+function bumpMoving() {
+  if (state.view !== "tilt") return;
+  moving = true; clearTimeout(movingTimer);
+  movingTimer = setTimeout(() => { moving = false; requestDraw(); }, 250);
+}
 
 // ---------------------------------------------------------------------------
 // Detail tiles (globe/viz/detail.py): the final frame's terrain beyond its
@@ -795,16 +991,18 @@ function setPage(lv, f, ti, tj, slot) {
 // the level for this view: the coarsest whose cells are at most ~1.3 px, none while the atlas' are
 function detailLevel(FA) {
   if (!detail.tex || FA.stage !== "final") return null;
-  const cellsPerPx = 1 / (scalePx() * HALF_PI / FA.res);
+  const cellsPerPx = 1 / (scalePx() * (window.devicePixelRatio || 1) / cssPx() * HALF_PI / FA.res);
   const want = Math.ceil(Math.log2(1 / cellsPerPx) - 0.4);
   if (want < 1) return null;
   return detail.levels[Math.min(want, detail.levels.length) - 1];
 }
 function visibleTiles(lv) {
   const keys = new Set(), step = 48;
+  const tilt = state.view === "tilt", C = camBasis().C, reach = tilt ? 6 * cam3().D / META.R_planet_m : 0;
   for (let y = 0; y <= canvas.height + step - 1; y += step) {
     for (let x = 0; x <= canvas.width + step - 1; x += step) {
       const p = screenToDir(Math.min(x, canvas.width - 1), Math.min(y, canvas.height - 1)); if (!p) continue;
+      if (tilt && Math.acos(Math.min(1, dot3(p, C))) > reach) continue;
       const [f, u, v] = fromSphere(p);
       const ti = Math.min(Math.floor(u * lv.res / DET.tile), lv.nT - 1), tj = Math.min(Math.floor(v * lv.res / DET.tile), lv.nT - 1);
       if (tileExists(lv, f, ti, tj)) keys.add(`${lv.L}_${f}_${ti}_${tj}`);
@@ -862,6 +1060,88 @@ function updateDetail(FA) {
   pumpTiles();
   return lv;
 }
+// ---------------------------------------------------------------------------
+// Zoom levels inline (globe/viz/zoomtex.py): each level of a zoom window with a
+// `tex` record is a texture of its whole array, loaded when the level is on,
+// in view, and its cells are within a few pixels (so a 76 m level does not load
+// for a continent), and drawn by the shader wherever it covers the ground --
+// the finest first, up to four at once.  At most ZT_KEEP stay in memory.
+// ---------------------------------------------------------------------------
+const ZT_KEEP = 8;
+const ztex = { loaded: new Map(), loading: new Set(), failed: new Set(), tick: 0 };
+const zkey = (z, L) => `${z.name}_L${L.R}`;
+GV.zoomTex = async (name, R, b64) => {
+  const key = `${name}_L${R}`;
+  const rec = zooms.flatMap(z => z.name === name ? z.levels.filter(L => L.R === R && L.tex) : [])[0];
+  ztex.loading.delete(key);
+  if (!rec) return;
+  const bm = await createImageBitmap(b64ToBlob(b64, "image/webp"), { premultiplyAlpha: "none", colorSpaceConversion: "none" });
+  const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bm);
+  for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.NEAREST);
+  for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
+  bm.close && bm.close();
+  ztex.loaded.set(key, { tex: t, rec: rec.tex, R, name, seen: ztex.tick });
+  requestDraw(); buildZoomList();
+};
+// metres of ground per canvas pixel at the view centre
+function metresPerPx() {
+  // in device pixels at full resolution, so a half-resolution frame while moving does not change what loads
+  const full = canvas.clientHeight * (window.devicePixelRatio || 1);
+  return state.view === "tilt" ? 2 * cam3().D * TAN3 / full : META.R_planet_m / (scalePx() * full / Math.max(canvas.height, 1));
+}
+function zoomLevelInView(L) {
+  const c = L.corners.map(([la, lo]) => dirOf(la * PI / 180, lo * PI / 180));
+  const mid = norm3(c.reduce((a, q) => add3(a, q), [0, 0, 0]));
+  const half = Math.max(...c.map(q => Math.acos(Math.max(-1, Math.min(1, dot3(q, mid))))));
+  const { C } = camBasis();
+  const view = state.view === "tilt" ? 8 * cam3().D / META.R_planet_m : Math.hypot(canvas.width, canvas.height) / 2 / scalePx();
+  return Math.acos(Math.max(-1, Math.min(1, dot3(mid, C)))) < half + view;
+}
+// the slots to draw: loaded, on, in view, finest first; asks for what is missing
+function updateZoomTex(FA) {
+  ztex.tick++;
+  if (!FA || FA.stage !== "final") return [];
+  const mpp = metresPerPx(), want = [];
+  for (const z of zooms) for (const L of z.levels || []) {
+    if (!L.tex) continue;
+    const key = zkey(z, L);
+    // off, finer than a few pixels can show, as coarse as the planet level (1.2 km: nothing to add), or elsewhere
+    if (state.zoff.has(key) || L.tex.cell_m < mpp / 6 || L.tex.cell_m >= 1000 || !zoomLevelInView(L)) continue;
+    const got = ztex.loaded.get(key);
+    if (got) { got.seen = ztex.tick; want.push(got); }
+    else if (!ztex.loading.has(key) && !ztex.failed.has(key) && ztex.loading.size < 2) {
+      ztex.loading.add(key);
+      const sc = document.createElement("script"); sc.src = L.tex.file;
+      sc.onload = () => sc.remove();
+      sc.onerror = () => { ztex.loading.delete(key); ztex.failed.add(key); sc.remove(); };
+      document.head.appendChild(sc);
+    }
+  }
+  if (ztex.loaded.size > ZT_KEEP) {
+    const old = [...ztex.loaded.entries()].filter(([, v]) => v.seen < ztex.tick).sort((a, b) => a[1].seen - b[1].seen);
+    for (const [k, v] of old.slice(0, ztex.loaded.size - ZT_KEEP)) { gl.deleteTexture(v.tex); ztex.loaded.delete(k); }
+  }
+  return want.sort((a, b) => b.R - a.R).slice(0, 4);
+}
+function bindZoomSlots(slots, fallback) {
+  const f = [0, 0, 0, 0], v = n => new Float32Array(4).fill(n);
+  const res = v(1), oi = v(0), oj = v(0), p0 = v(0), core = v(0), ne = v(1), h0 = v(0), h1 = v(1), rmin = v(255), rspan = v(1);
+  for (let k = 0; k < 4; k++) {
+    const sl = slots[k];
+    bindTex(9 + k, sl ? sl.tex : fallback, `uZT${k}`);
+    if (!sl) continue;
+    const t = sl.rec;
+    f[k] = t.face; res[k] = t.N * t.R; oi[k] = t.ci0 * t.R - t.p0; oj[k] = t.cj0 * t.R - t.p0;
+    p0[k] = t.p0; core[k] = t.n; ne[k] = t.NE; h0[k] = t.h0; h1[k] = t.h1;
+    rmin[k] = t.river_min_byte; rspan[k] = t.river_span_byte;
+  }
+  gl.uniform1i(U.uZN, slots.length);
+  gl.uniform4iv(U.uZFace, new Int32Array(f));
+  gl.uniform4fv(U.uZRes, res); gl.uniform4fv(U.uZOi, oi); gl.uniform4fv(U.uZOj, oj); gl.uniform4fv(U.uZP0, p0);
+  gl.uniform4fv(U.uZCore, core); gl.uniform4fv(U.uZNE, ne); gl.uniform4fv(U.uZH0, h0); gl.uniform4fv(U.uZH1, h1);
+  gl.uniform4fv(U.uZRmin, rmin); gl.uniform4fv(U.uZRspan, rspan);
+}
 // rivers.js loads before this script, so its data may be waiting already
 GV.onRivers = r => ingestRivers(r);
 if (GV.riverData) ingestRivers(GV.riverData);
@@ -873,7 +1153,7 @@ function loadedAtOrBefore(i) { for (let k = i; k >= 0; k--) if (tex[k]) return k
 
 function draw() {
   drawQueued = false;
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = (window.devicePixelRatio || 1) * (state.view === "tilt" && moving ? 0.5 : 1);
   const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   gl.viewport(0, 0, w, h);
@@ -890,7 +1170,7 @@ function draw() {
   gl.uniform1i(U.uLines, lines ? 1 : 0);
   bindTex(6, lines ? rivers.tex : tex[a][0], "uRL");
   gl.uniform2f(U.uView, w, h);
-  gl.uniform1i(U.uMode, state.view === "globe" ? 0 : 1);
+  gl.uniform1i(U.uMode, state.view === "tilt" ? 2 : state.view === "globe" ? 0 : 1);
   gl.uniform1f(U.uScale, scalePx());
   gl.uniform1f(U.uLat0, state.lat0); gl.uniform1f(U.uLon0, state.lon0);
   gl.uniform3fv(U.uE, E); gl.uniform3fv(U.uN, N); gl.uniform3fv(U.uC, C);
@@ -908,6 +1188,24 @@ function draw() {
   // the exaggeration is set for the atlas' cells; a detail level's slopes are
   // over cells 2^L smaller, and real relief shows at that scale without it
   gl.uniform1f(U.uExag, state.exag * (dlv ? Math.max(FA.res / dlv.res, 1 / 16) : 1));
+  gl.uniform1f(U.uExagBase, state.exag); gl.uniform1f(U.uFARes, FA.res);
+  const zslots = mix === 0 ? updateZoomTex(FA) : [];
+  bindZoomSlots(zslots, tex[a][0]);
+  if (state.view === "tilt") {
+    if (bitmaps[a]) {                                         // the terrain under the target, from the atlas
+      const pix = pixelsOf(a), [x0, y0] = texel(FA, 0, camBasis().C), d0 = pix[0].d, o0 = 4 * (y0 * pix[0].w + x0);
+      targetH = FA.h0 + (d0[o0] * 256 + d0[o0 + 1]) / 65535 * (FA.h1 - FA.h0);
+    }
+    const c = cam3();
+    gl.uniform3fv(U.uTgt, c.T); gl.uniform1f(U.uRT, c.rT); gl.uniform1f(U.uTgtH, c.hT);
+    gl.uniform3fv(U.uCamPos, c.pos); gl.uniform3fv(U.uCamF, c.F); gl.uniform3fv(U.uCamR, c.right); gl.uniform3fv(U.uCamU, c.U);
+    gl.uniform1f(U.uTanHalf, TAN3); gl.uniform1f(U.uExag3, state.exag3);
+    gl.uniform1f(U.uHTop, Math.max(META.land_top_m * 1.6, 9000) * state.exag3);
+    gl.uniform1f(U.uSlope3, 0.9 * state.exag3);
+    gl.uniform1f(U.uPixAng, 2 * TAN3 / h);
+    gl.uniform1f(U.uFar, Math.min(40 * c.D, Math.sqrt(2 * META.R_planet_m * (c.D + 20000)) * 1.5));
+    gl.uniform1f(U.uFog, 6 * c.D);
+  }
   bindTex(7, dlv ? detail.tex : tex[a][0], "uDT");
   bindTex(8, dlv ? dlv.page : tex[a][0], "uDP");
   if (dlv) {
@@ -970,7 +1268,32 @@ function draw() {
 // ---------------------------------------------------------------------------
 const ovl = $("ovl"), ovx = ovl.getContext("2d"), pop = $("zoompop");
 let zooms = GV.zooms || [], zoomHits = [];
-GV.onZooms = z => { zooms = z || []; requestDraw(); };
+GV.onZooms = z => { zooms = z || []; buildZoomList(); requestDraw(); };
+const fmtCell = m => m >= 1000 ? (m / 1000).toFixed(1) + " km" : Math.round(m) + " m";
+const fineLevels = z => (z.levels || []).filter(L => L.tex && L.tex.cell_m < 1000);
+// the zoom windows with fine levels: the name flies there, a box per level turns it on or off
+function buildZoomList() {
+  const el = $("zoomlist"), rows = zooms.filter(z => fineLevels(z).length);
+  if (!rows.length) { el.classList.add("hidden"); return; }
+  el.classList.remove("hidden");
+  el.innerHTML = `<div class="zt">Zoom windows · fine levels drawn in place</div>` + rows.map(z =>
+    `<div class="zr"><span class="zn" data-z="${z.name}" title="Fly there">${z.name}</span>` + fineLevels(z).map(L => {
+      const key = zkey(z, L), st = ztex.loading.has(key) ? `<span class="ld">loading</span>` : "";
+      return `<label class="chk"><input type="checkbox" data-k="${key}"${state.zoff.has(key) ? "" : " checked"}>${fmtCell(L.tex.cell_m)}</label>${st}`;
+    }).join("") + `</div>`).join("");
+  el.querySelectorAll("input[data-k]").forEach(i => i.onchange = () => {
+    i.checked ? state.zoff.delete(i.dataset.k) : state.zoff.add(i.dataset.k); writeHash(); requestDraw(); });
+  el.querySelectorAll(".zn").forEach(n => n.onclick = () => flyToZoom(zooms.find(z => z.name === n.dataset.z)));
+}
+function flyToZoom(z) {
+  if (!z) return;
+  const L = fineLevels(z).sort((a, b) => a.tex.cell_m - b.tex.cell_m)[0] || z.levels[z.levels.length - 1];
+  const c = L.corners.map(([la, lo]) => dirOf(la * PI / 180, lo * PI / 180)), mid = norm3(c.reduce((a, q) => add3(a, q), [0, 0, 0]));
+  [state.lat0, state.lon0] = latLonOf(mid);
+  const half = Math.max(...c.map(q => Math.acos(Math.min(1, dot3(q, mid)))));
+  state.zoom = Math.max(0.35, Math.min(maxZoom(), 0.45 * Math.min(canvas.width, canvas.height) / (half * baseScale())));
+  writeHash(); requestDraw();
+}
 // Scout candidates (globe/zoom/scout.py): numbered markers, a square of the
 // scored window once it is a few pixels, a popup with the measures, the
 // thumbnail and the zoom-bake button
@@ -978,6 +1301,13 @@ let scoutCands = GV.scout || [], scoutHits = [];
 GV.onScout = c => { scoutCands = c || []; requestDraw(); };
 function dirToScreen(p) {   // unit direction -> canvas px, null on the far side
   const s = scalePx();
+  if (state.view === "tilt") {
+    const c = cam3(), P = mul3(p, c.rT), A0 = add3(mul3(c.T, c.rT), c.pos), v = sub3(P, A0);
+    if (dot3(p, sub3(A0, P)) < 0) return null;                   // over the horizon
+    const z = dot3(v, c.F); if (z <= 0) return null;
+    const h2 = canvas.height / 2;
+    return [canvas.width / 2 + dot3(v, c.right) / (z * TAN3) * h2, h2 - dot3(v, c.U) / (z * TAN3) * h2];
+  }
   if (state.view === "globe") {
     const { C, E, N } = camBasis();
     if (dot3(p, C) < 0.02) return null;
@@ -990,7 +1320,7 @@ function drawZooms() {
   if (ovl.width !== canvas.width || ovl.height !== canvas.height) { ovl.width = canvas.width; ovl.height = canvas.height; }
   ovx.clearRect(0, 0, ovl.width, ovl.height);
   zoomHits = [];
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = cssPx();
   for (const z of zooms) {
     const lv = z.levels || [];
     lv.forEach((L, k) => {
@@ -1081,7 +1411,7 @@ async function pollJobs() {
   } catch (e) { apiOK = false; }
 }
 function placePop(px, py) {
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = cssPx();
   pop.style.left = `${Math.min(px / dpr + 12, innerWidth - 350)}px`; pop.style.top = `${Math.min(py / dpr + 12, innerHeight - 220)}px`;
   pop.classList.remove("hidden");
 }
@@ -1123,7 +1453,7 @@ let clickTimer = null, down = null;
 canvas.addEventListener("pointerdown", ev => { down = { x: ev.clientX, y: ev.clientY }; });
 canvas.addEventListener("click", ev => {
   if (!down || Math.hypot(ev.clientX - down.x, ev.clientY - down.y) > 4) return;
-  const dpr = window.devicePixelRatio || 1, px = ev.offsetX * dpr, py = ev.offsetY * dpr;
+  const dpr = cssPx(), px = ev.offsetX * dpr, py = ev.offsetY * dpr;
   clearTimeout(clickTimer);
   clickTimer = setTimeout(() => {
     const sc = scoutHits.find(hh => Math.hypot(px - hh.x, py - hh.y) < 11 * dpr);
@@ -1154,6 +1484,10 @@ function updateLabels(a) {
   sel.value = state.layer;
   for (const o of sel.options) o.disabled = o.value !== "elevation" && !(f.layers && f.layers[o.value]);
   $("exag").value = state.exag; $("exagv").textContent = state.exag + "×";
+  const tiltView = state.view === "tilt";
+  $("tiltrow").classList.toggle("hidden", !tiltView); $("exag3row").classList.toggle("hidden", !tiltView);
+  $("tilt").value = Math.round(state.tilt * 180 / PI); $("tiltv").textContent = Math.round(state.tilt * 180 / PI) + "°";
+  $("exag3").value = state.exag3; $("exag3v").textContent = state.exag3 + "×";
   $("rivers").checked = state.rivers; $("grid").checked = state.grid; $("coast").checked = state.coast; $("fade").checked = state.fade; $("scout").checked = state.scout;
   $("fps").value = state.fps; $("fpsv").textContent = state.fps;
 }
@@ -1324,10 +1658,21 @@ function jumpStage(dir) {
 // ---------------------------------------------------------------------------
 // Camera interaction
 // ---------------------------------------------------------------------------
-const MAXZ = Math.max(4, (frames[META.final_index ?? NF - 1].res || 512) / 16);
+// as far in as ~3 px a cell of the finest terrain there is: the atlas' / 16, or a zoom level's
+function maxZoom() {
+  let z = Math.max(4, (frames[META.final_index ?? NF - 1].res || 512) / 16);
+  for (const zz of zooms) for (const L of zz.levels || []) if (L.tex && L.tex.cell_m < 1000)
+    z = Math.max(z, 3 * META.R_planet_m / (baseScale() * L.tex.cell_m));
+  return z;
+}
 function zoomAt(px, py, factor) {
+  if (state.view === "tilt") {                   // toward the view centre: the cursor ray can skim the horizon
+    bumpMoving();
+    state.zoom = Math.max(0.35, Math.min(maxZoom(), state.zoom * factor));
+    writeHash(); requestDraw(); return;
+  }
   const before = screenToDir(px, py);
-  state.zoom = Math.max(0.35, Math.min(MAXZ, state.zoom * factor));
+  state.zoom = Math.max(0.35, Math.min(maxZoom(), state.zoom * factor));
   if (before) {
     for (let it = 0; it < 3; it++) {           // keep the point under the cursor fixed
       const after = screenToDir(px, py); if (!after) break;
@@ -1339,10 +1684,28 @@ function zoomAt(px, py, factor) {
   writeHash(); requestDraw();
 }
 let drag = null;
-canvas.addEventListener("pointerdown", ev => { drag = { x: ev.clientX, y: ev.clientY }; canvas.setPointerCapture(ev.pointerId); canvas.classList.add("dragging"); });
+canvas.addEventListener("contextmenu", ev => { if (state.view === "tilt") ev.preventDefault(); });
+canvas.addEventListener("pointerdown", ev => {
+  drag = { x: ev.clientX, y: ev.clientY, rot: state.view === "tilt" && (ev.button === 2 || ev.ctrlKey || ev.shiftKey || ev.altKey || ev.metaKey) };
+  canvas.setPointerCapture(ev.pointerId); canvas.classList.add("dragging");
+});
 canvas.addEventListener("pointermove", ev => {
-  const dpr = window.devicePixelRatio || 1;
-  if (drag) {
+  const dpr = cssPx();
+  if (drag && state.view === "tilt") {
+    const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
+    drag.x = ev.clientX; drag.y = ev.clientY;
+    if (drag.rot) {                              // turn and tilt
+      state.heading = wrapLon(state.heading + dx * 0.006);
+      state.tilt = Math.max(0, Math.min(80 * PI / 180, state.tilt - dy * 0.005));
+    } else {                                     // pan: the ground follows the pointer
+      const c = cam3(), mpp = 2 * c.D * TAN3 / canvas.clientHeight;
+      const fwd = dy * mpp / Math.max(Math.cos(state.tilt), 0.25), side = -dx * mpp;
+      const P = add3(mul3(c.T, META.R_planet_m), add3(mul3(c.fw, fwd), mul3(c.right, side)));
+      [state.lat0, state.lon0] = latLonOf(norm3(P));
+      state.lat0 = Math.max(-HALF_PI + 1e-3, Math.min(HALF_PI - 1e-3, state.lat0));
+    }
+    bumpMoving(); writeHash(); requestDraw(); updateLabels(state.frame);
+  } else if (drag) {
     const s = scalePx() / dpr, dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
     drag = { x: ev.clientX, y: ev.clientY };
     const k = state.view === "globe" ? 1 / Math.max(Math.cos(state.lat0), 0.15) : 1;
@@ -1354,12 +1717,17 @@ canvas.addEventListener("pointermove", ev => {
 });
 canvas.addEventListener("pointerup", () => { drag = null; canvas.classList.remove("dragging"); });
 canvas.addEventListener("pointerleave", () => $("readout").classList.add("hidden"));
-canvas.addEventListener("wheel", ev => { ev.preventDefault(); const dpr = window.devicePixelRatio || 1;
+canvas.addEventListener("wheel", ev => { ev.preventDefault(); const dpr = cssPx();
   zoomAt(ev.offsetX * dpr, ev.offsetY * dpr, Math.exp(-ev.deltaY * (ev.deltaMode ? 0.05 : 0.0015))); }, { passive: false });
-canvas.addEventListener("dblclick", ev => { const dpr = window.devicePixelRatio || 1; zoomAt(ev.offsetX * dpr, ev.offsetY * dpr, 2); });
+canvas.addEventListener("dblclick", ev => { const dpr = cssPx(); zoomAt(ev.offsetX * dpr, ev.offsetY * dpr, 2); });
 
 function resetView() { state.lat0 = 0.35; state.lon0 = 0; state.zoom = 1; writeHash(); requestDraw(); }
-for (const btn of $("viewseg").children) btn.onclick = () => { state.view = btn.dataset.v; writeHash(); requestDraw(); };
+for (const btn of $("viewseg").children) btn.onclick = () => { state.view = btn.dataset.v; writeHash(); requestDraw(); updateLabels(state.frame); };
+$("tilt").oninput = e => { bumpMoving(); state.tilt = +e.target.value * PI / 180; writeHash(); requestDraw(); updateLabels(state.frame); };
+$("exag3").oninput = e => { state.exag3 = +e.target.value; writeHash(); requestDraw(); updateLabels(state.frame); };
+const turn = deg => { bumpMoving(); state.heading = wrapLon(state.heading + deg * PI / 180); writeHash(); requestDraw(); };
+$("rotl").onclick = () => turn(-15); $("rotr").onclick = () => turn(15);
+$("north").onclick = () => { state.heading = 0; state.tilt = 0; writeHash(); requestDraw(); updateLabels(state.frame); };
 $("reset").onclick = resetView;
 sel.onchange = () => { state.layer = sel.value; legendKey = ""; writeHash(); requestDraw(); };
 $("exag").oninput = e => { state.exag = +e.target.value; writeHash(); requestDraw(); };
@@ -1378,7 +1746,12 @@ window.addEventListener("keydown", ev => {
   if (k === " ") { ev.preventDefault(); togglePlay(); }
   else if (k === "ArrowRight") { ev.preventDefault(); state.playing = false; ev.shiftKey ? jumpStage(1) : setFrame(state.frame + 1); }
   else if (k === "ArrowLeft") { ev.preventDefault(); state.playing = false; ev.shiftKey ? jumpStage(-1) : setFrame(state.frame - 1); }
-  else if (k === "g" || k === "G") { state.view = state.view === "globe" ? "flat" : "globe"; writeHash(); requestDraw(); }
+  else if (k === "g" || k === "G") { state.view = state.view === "globe" ? "flat" : "globe"; writeHash(); requestDraw(); updateLabels(state.frame); }
+  else if (k === "t" || k === "T") { state.view = state.view === "tilt" ? "globe" : "tilt"; if (state.view === "tilt" && state.tilt < 0.05) state.tilt = 55 * PI / 180; writeHash(); requestDraw(); updateLabels(state.frame); }
+  else if (state.view === "tilt" && (k === "q" || k === "Q")) turn(-10);
+  else if (state.view === "tilt" && (k === "e" || k === "E")) turn(10);
+  else if (state.view === "tilt" && (k === "PageUp" || k === "PageDown")) { ev.preventDefault();
+    state.tilt = Math.max(0, Math.min(80 * PI / 180, state.tilt + (k === "PageUp" ? 5 : -5) * PI / 180)); writeHash(); requestDraw(); updateLabels(state.frame); }
   else if (k === "Home") resetView();
   else if (k === "r" || k === "R") { state.rivers = !state.rivers; writeHash(); requestDraw(); }
   else if (k === "l" || k === "L") { state.grid = !state.grid; writeHash(); requestDraw(); }
@@ -1388,6 +1761,7 @@ window.addEventListener("resize", () => { requestDraw(); drawTimeline(); });
 window.addEventListener("hashchange", () => { readHash(); requestDraw(); drawTimeline(); });
 if (document.body.classList.contains("noui")) for (const id of ["top", "timeline", "helpbtn", "loading"]) $(id).classList.add("hidden");
 GV.state = state; GV.setFrame = setFrame; GV.draw = draw;
+buildZoomList();
 requestDraw(); drawTimeline();
 })();
 </script>
