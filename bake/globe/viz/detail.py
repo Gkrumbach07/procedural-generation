@@ -44,13 +44,16 @@ class RefinedSource:
     """The refined grid (``fine/``), from the arrays the final frame was built
     from (surface, water surface, water code at full resolution)."""
 
-    def __init__(self, surf: np.ndarray, ws: np.ndarray | None, water: np.ndarray):
-        self.surf, self.ws, self.water = surf, ws, water
+    def __init__(self, surf: np.ndarray, ws: np.ndarray | None, water: np.ndarray, discharge: np.ndarray | None = None):
+        self.surf, self.ws, self.water, self.q = surf, ws, water, discharge
         self.res = int(surf.shape[1])
 
     def rows(self, f: int, r0: int, r1: int) -> dict:
         ws = self.ws[f, r0:r1] if self.ws is not None else self.surf[f, r0:r1]
-        return {"surf": np.asarray(self.surf[f, r0:r1], np.float32), "ws": np.asarray(ws, np.float32), "water": np.asarray(self.water[f, r0:r1])}
+        d = {"surf": np.asarray(self.surf[f, r0:r1], np.float32), "ws": np.asarray(ws, np.float32), "water": np.asarray(self.water[f, r0:r1])}
+        if self.q is not None:
+            d["discharge"] = np.asarray(self.q[f, r0:r1], np.float32)
+        return d
 
 
 class PlanetSource:
@@ -81,7 +84,8 @@ class PlanetSource:
         lake = lakes_mod.kept_lake_mask(lakes_mod.lake_mask(surf, ws, self.depth, ocean=ocean), self.min_cells)
         water[lake] = WATER_LAKE
         c = slice(r0 - e0, r1 - e0)
-        return {"surf": surf[c], "ws": ws[c], "water": water[c]}
+        q = np.asarray(load("discharge"), np.float32)
+        return {"surf": surf[c], "ws": ws[c], "water": water[c], "discharge": q[c]}
 
 
 # --------------------------------------------------------------------------

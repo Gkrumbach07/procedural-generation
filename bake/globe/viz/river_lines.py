@@ -166,18 +166,27 @@ def trace(discharge: np.ndarray, water: np.ndarray, surface: np.ndarray, q_min: 
     land, surface metres).  Returns ``{"xyz": (n, 3) float32 unit vectors,
     "discharge": (n,) float32 carried discharge, "lengths": (m,) int64
     vertices per line}`` and counts."""
+    return trace_faces(lambda f: {"discharge": discharge[f], "water": water[f], "surface": surface[f]},
+                       int(discharge.shape[1]), q_min, min_length, smooth_passes, tolerance)
+
+
+def trace_faces(load, res: int, q_min: float, min_length: int = 4, smooth_passes: int = 3, tolerance: float = 0.25) -> dict:
+    """:func:`trace` with the faces read one at a time -- ``load(face)`` gives
+    that face's ``discharge``, ``water`` and ``surface`` -- so a planet level
+    is traced at its own resolution without six faces in memory at once."""
     from ..hydro.priority_flood import priority_flood_flat
 
-    res = discharge.shape[1]
+    res = int(res)
     rr = res * res
     border = np.zeros((res, res), np.bool_)
     border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
     cells, recs, mouths, carried_all = [], [], [], []
     base = 0
     for f in range(6):
-        wet = water[f] > 0
-        fr = priority_flood_flat(surface[f].astype(np.float32), wet | border)
-        carried = _face_network(fr.parent, fr.pop_seq, wet.reshape(-1), discharge[f].reshape(-1).astype(np.float64))
+        d = load(f)
+        wet = np.asarray(d["water"]) > 0
+        fr = priority_flood_flat(np.ascontiguousarray(d["surface"], np.float32), wet | border)
+        carried = _face_network(fr.parent, fr.pop_seq, wet.reshape(-1), np.asarray(d["discharge"], np.float64).reshape(-1))
         chan = (carried >= q_min) & ~wet.reshape(-1)
         idx = np.flatnonzero(chan)
         par = fr.parent[idx]
@@ -195,6 +204,7 @@ def trace(discharge: np.ndarray, water: np.ndarray, surface: np.ndarray, q_min: 
         mouths.append(mouth)
         carried_all.append(carried[idx])
         base += idx.size
+        del d, wet, fr, carried, chan, par
     flat = np.concatenate(cells)
     rec = np.concatenate(recs)
     mouth = np.concatenate(mouths)
@@ -244,4 +254,4 @@ def trace(discharge: np.ndarray, water: np.ndarray, surface: np.ndarray, q_min: 
             "lengths": np.asarray(lengths, np.int64), **stats}
 
 
-__all__ = ["RIVER_WIDTH_MAX_M", "RIVER_WIDTH_EXPONENT", "trace"]
+__all__ = ["RIVER_WIDTH_MAX_M", "RIVER_WIDTH_EXPONENT", "trace", "trace_faces"]

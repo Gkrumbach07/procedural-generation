@@ -642,9 +642,45 @@ def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
 #: sheet flow becomes parallel hatching), with this many cells upstream
 TRACED_RIVER_PERCENTILE = 97.0
 TRACED_MIN_LENGTH = 8
+#: tracing the source at its own resolution (a planet level: 8192² a face at
+#: R = 8) finds far more, so the line is drawn higher up and short tributaries
+#: are dropped, to keep the payload a few MB
+TRACED_FULL_PERCENTILE = 99.0
+TRACED_FULL_MIN_LENGTH = 12
+TRACED_FULL_TOLERANCE = 0.4
 
 
-def river_lines(root: Path, final: _Frame, specs: dict, source: str = "graph", log=print) -> dict | None:
+def _traced_full(src, s: dict, log) -> tuple[dict, np.ndarray] | None:
+    """Lines traced from the frame's own source at its resolution (``src``:
+    :mod:`globe.viz.detail`'s), face by face."""
+    from . import river_lines as rl
+
+    step = max(1, src.res // 1024)
+    qs = []
+    for f in range(6):
+        d = src.rows(f, 0, src.res)
+        q, surf = d.get("discharge"), d["surf"]
+        if q is None:
+            return None
+        qs.append(np.asarray(q[::step, ::step])[np.asarray(surf[::step, ::step]) > 0])
+        del d, q, surf
+    qs = np.concatenate(qs)
+    qs = qs[qs > 0]
+    if not qs.size:
+        return None
+    q_min = float(np.percentile(qs, TRACED_FULL_PERCENTILE))
+
+    def load(f):
+        d = src.rows(f, 0, src.res)
+        water = np.where(d["water"] == 2, 2, np.where(d["water"] == 1, 1, 0)).astype(np.uint8)
+        return {"discharge": d["discharge"], "water": water, "surface": d["surf"]}
+
+    out = rl.trace_faces(load, src.res, q_min, min_length=TRACED_FULL_MIN_LENGTH, tolerance=TRACED_FULL_TOLERANCE)
+    log(f"[viewer] traced river lines at {src.res}² a face: {({k: v for k, v in out.items() if not isinstance(v, np.ndarray)})}")
+    return out, out["discharge"].astype(np.float64)
+
+
+def river_lines(root: Path, final: _Frame, specs: dict, source: str = "graph", log=print, full=None) -> dict | None:
     """The final frame's rivers as polylines for the viewer to draw at their
     own width: ``source`` ``"graph"`` reads derive's ``graph/rivers.json``
     (the drainage graph's reaches traced through the refined channel and
@@ -678,17 +714,24 @@ def river_lines(root: Path, final: _Frame, specs: dict, source: str = "graph", l
         if not {"discharge", "water"} <= final.ch.keys() or "discharge" not in specs:
             return None
         s = specs["discharge"]
-        land_q = final.ch["discharge"][(final.height >= 0) & (final.ch["discharge"] > 0)]
-        q_min = _pctl(land_q, TRACED_RIVER_PERCENTILE, s["river_min"])
-        out = rl.trace(final.ch["discharge"], final.ch["water"], final.height, q_min, min_length=TRACED_MIN_LENGTH)
-        q = out["discharge"].astype(np.float64)
-        qmax = max(float(final.ch["discharge"].max()), 1e-9)
+        res = _traced_full(full, s, log) if full is not None else None
+        if res is not None:
+            out, q = res
+        else:
+            land_q = final.ch["discharge"][(final.height >= 0) & (final.ch["discharge"] > 0)]
+            q_min = _pctl(land_q, TRACED_RIVER_PERCENTILE, s["river_min"])
+            out = rl.trace(final.ch["discharge"], final.ch["water"], final.height, q_min, min_length=TRACED_MIN_LENGTH)
+            q = out["discharge"].astype(np.float64)
+        if not out["lengths"].size:
+            return None
+        qmax = max(float(q.max()), float(final.ch["discharge"].max()), 1e-9)
         pts = [out["xyz"]] if out["lengths"].size else []
         widths = [np.maximum(rl.RIVER_WIDTH_MAX_M * (q / qmax) ** rl.RIVER_WIDTH_EXPONENT, 30.0)]
         bytes_ = [log_byte(q, s["lo"], s["hi"])]
         lengths = list(out["lengths"])
         channel = "discharge"
-        log(f"[viewer] traced river lines: {({k: v for k, v in out.items() if not isinstance(v, np.ndarray)})}")
+        if res is None:
+            log(f"[viewer] traced river lines on the frame ({final.res}² a face): {({k: v for k, v in out.items() if not isinstance(v, np.ndarray)})}")
     else:
         return None
     if not pts:
@@ -740,7 +783,7 @@ def detail_source(root: Path, manifest: dict, refined: bool, planet: str | None)
         return dt.PlanetSource(pdir, R, surf_c.shape[1], sea_near, depth, min_cells)
     if refined:
         fine = _fine_final(root, manifest, surf_c, flow_dir_c)
-        return None if fine is None else dt.RefinedSource(fine["surf"], fine["ws"], fine["water"])
+        return None if fine is None else dt.RefinedSource(fine["surf"], fine["ws"], fine["water"], fine["discharge"])
     return None
 
 
@@ -789,9 +832,9 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
     rivers_js, rivers_info = None, None
     lines = None
     if river_source == "auto":
-        lines = (None if planet else river_lines(root, final, specs, "graph", log)) or river_lines(root, final, specs, "traced", log)
+        lines = (None if planet else river_lines(root, final, specs, "graph", log)) or river_lines(root, final, specs, "traced", log, full=detail_source(root, manifest, refined, planet))
     elif river_source and river_source != "none":
-        lines = river_lines(root, final, specs, river_source, log)
+        lines = river_lines(root, final, specs, river_source, log, full=detail_source(root, manifest, refined, planet) if river_source == "traced" else None)
     if lines is not None:
         rivers_js, rivers_info = river_lines_script(lines, specs)
         rivers_info["file"] = "data/rivers.js"
