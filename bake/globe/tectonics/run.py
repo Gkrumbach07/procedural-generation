@@ -284,7 +284,7 @@ class TectonicSim:
                     float(tp.height_scale_m), float(tp.orogen_shaping), CONTINENTAL,
                     accretion=float(tp.arc_accretion), flat_slab_age=float(tp.flat_slab_age),
                     along_strike=float(tp.orogen_along_strike), census=self.belt_census,
-                    shortening=float(tp.continental_shortening))
+                    shortening=float(tp.continental_shortening), width_scale=float(tp.orogen_width_scale))
             else:
                 spread_collisions(seg, tree, losers, survivors, alive, tp.belt_width_factor * self.spacing,
                                   accretion=float(tp.arc_accretion), shortening=float(tp.continental_shortening))
@@ -877,6 +877,12 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     # land fraction drifts (measured 14.4 % -> 14.0 % when it was not)
     bed = inject_detail(bed, coarse, tp, params.rng("tectonics", 8))
     bed -= sea_level(bed, area, shelf_mask, params)
+    if float(tp.ranges_amp) > 0.0:
+        # ranges and basins along the belts' strike (globe/tectonics/ranges.py)
+        from .ranges import inject_ranges
+
+        bed = inject_ranges(bed, bed_t.interior, coarse, grid, tp, params.rng("tectonics", 9), params.R_planet, float(tp.height_scale_m))
+        bed -= sea_level(bed, area, shelf_mask, params)
     land = bed > 0
     # vertical scale: tie the relief to the *horizontal* scale of the
     # tectonic pattern (the mean segment spacing, in metres) unless an

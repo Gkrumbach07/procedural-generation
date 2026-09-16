@@ -882,3 +882,46 @@ def test_continental_shortening_conserves_area_and_mass():
     assert not alive[oc[0]]
     # live mass = initial - what the slab returned to the mantle
     assert np.isclose(seg.mass[alive].sum(), m0 - (1.0 - 0.15) * 0.2 * 0.88)
+
+
+# ---------------------------------------------------------------------------
+# ranges along the belts (globe/tectonics/ranges.py)
+# ---------------------------------------------------------------------------
+def test_ranges_run_along_a_belt_and_leave_the_plains_alone():
+    """``ranges.inject_ranges``: on a belt running along the equator the
+    strike frame's across-belt vector points north-south with a clear
+    coherence, the ranges it adds vary much faster across the belt than along
+    it, nothing changes below ``ranges_base_m``, the field is continuous
+    across cube edges, and ``ranges_amp`` 0 returns the bed itself."""
+    from globe.tectonics.ranges import inject_ranges, strike_frame
+
+    coarse, tgrid = get_grid(128, 4, 50.0), get_grid(64, 4, 50.0)
+    lat = lambda g: np.arcsin(np.clip(g.interior_centers[..., 2], -1.0, 1.0))
+    belt = lambda g: 0.12 * np.exp(-0.5 * (lat(g) / 0.12) ** 2)        # bedrock units, a ~800 km belt
+    n, coh = strike_frame(belt(tgrid), tgrid, 3.0)
+    on = np.abs(lat(tgrid)) > 0.05                                      # its flanks
+    on &= np.abs(lat(tgrid)) < 0.25
+    assert np.median(np.abs(n[on][:, 2])) > 0.9 and np.median(coh[on]) > 0.5
+
+    R_planet = 2.0e6                                                    # a small planet: 1 cell ~ 25 km
+    tp = dataclasses.replace(WorldParams().tectonics, ranges_amp=0.5, ranges_wavelength_km=150.0, ranges_strength_km=0.0,
+                             ranges_base_m=400.0, ranges_orient_sigma=3.0)
+    bed = belt(coarse)
+    assert inject_ranges(bed, belt(tgrid), coarse, tgrid, dataclasses.replace(tp, ranges_amp=0.0), np.random.default_rng(0), R_planet, 26400.0) is bed
+    out = inject_ranges(bed, belt(tgrid), coarse, tgrid, tp, np.random.default_rng(0), R_planet, 26400.0)
+    d = out - bed
+    low = bed <= 400.0 / 26400.0
+    assert np.abs(d[low]).max() == 0.0 and np.abs(d[~low]).max() > 0.01
+    # the ranges' own strike: their structure tensor's across vector is north-south on the belt
+    n2, coh2 = strike_frame(d, coarse, 1.5)
+    mid = ~low & (np.abs(lat(coarse)) < 0.15)
+    assert np.median(np.abs(n2[mid][:, 2])) > 0.8
+    eq = [f for f in range(6) if np.abs(coarse.interior_centers[f, 64, 64, 2]) < 0.5]
+    # continuity across a cube edge: neighbours across the edge differ no more than neighbours inside a face
+    from globe.field import FaceField
+    ff = FaceField.from_interior(coarse, d, exchange=True)
+    H = coarse.H
+    for f in eq:
+        inner = np.abs(ff.data[f, H + 64, H + 1] - ff.data[f, H + 64, H + 2])
+        edge = np.abs(ff.data[f, H + 64, H - 1] - ff.data[f, H + 64, H])
+        assert edge <= 5.0 * max(inner, 1e-3)

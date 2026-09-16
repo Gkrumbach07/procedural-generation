@@ -228,7 +228,7 @@ def relax_orogens(seg, baseline_m: float, floor_m: float, height_unit_m: float,
 def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet_m: float,
                height_unit_m: float, strength: float, continental: int, accretion: float = 1.0,
                flat_slab_age: float = 0.0, along_strike: float = 1.5, census: dict | None = None,
-               shortening: float = 0.0) -> float:
+               shortening: float = 0.0, width_scale: float = 1.0) -> float:
     """Build each collision belt with a cross-section. Returns thickness moved.
 
     This *replaces* :func:`~globe.tectonics.collision.spread_collisions` for
@@ -332,7 +332,8 @@ def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet
         # geometric reason, and can be negative.  Clamping at pi means the
         # query covers the whole sphere once the belt does, which is the
         # honest answer for a world smaller than one orogen.
-        theta = min(max(typ.reach_km, typ.lead_km) / km_per_rad, np.pi)
+        ws = float(width_scale)
+        theta = min(ws * max(typ.reach_km, typ.lead_km) / km_per_rad, np.pi)
         idx = np.asarray(tree.query_ball_point(c, r=2.0 * np.sin(0.5 * theta)), dtype=np.int64)
         if idx.size == 0:
             continue
@@ -343,7 +344,9 @@ def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet
         rel = seg.pos[idx] - c
         x = (rel @ d) * km_per_rad
         y = (rel @ t) * km_per_rad
-        prof = typ.profile(x) * np.exp(-0.5 * (y / sigma_km) ** 2)
+        # ``width_scale`` narrows every zone of the cross-section alike; the
+        # heights are only weights, so the same mass stacks onto fewer segments
+        prof = (typ.profile(x) if ws == 1.0 else typ.profile(x / ws)) * np.exp(-0.5 * (y / sigma_km) ** 2)
         up = prof > 0.0
         if not up.any():
             continue
