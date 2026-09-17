@@ -441,6 +441,16 @@ vec4 detailLinear(vec2 xy){
   return mix(mix(texelFetch(uDT, a, 0), texelFetch(uDT, a + ivec2(1,0), 0), fr.x),
              mix(texelFetch(uDT, a + ivec2(0,1), 0), texelFetch(uDT, a + ivec2(1,1), 0), fr.x), fr.y);
 }
+vec4 bspline4(float t);
+// the same bicubic read of a detail tile's texel (see zSmooth)
+vec4 detailSmooth(vec2 xy){
+  vec2 i0 = floor(xy); vec2 f = xy - i0; ivec2 a = ivec2(i0);
+  vec4 wx = bspline4(f.x), wy = bspline4(f.y);
+  vec4 v = vec4(0.0);
+  for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++)
+    v += wx[i] * wy[j] * texelFetch(uDT, a + ivec2(i - 1, j - 1), 0);
+  return v;
+}
 float detailHeight(vec2 xy){
   vec2 i0 = floor(xy); vec2 fr = xy - i0; ivec2 a = ivec2(i0);
   float h00 = decodeH(texelFetch(uDT, a, 0), uDH), h10 = decodeH(texelFetch(uDT, a + ivec2(1,0), 0), uDH);
@@ -498,6 +508,18 @@ int zoomSlotDrawn(vec3 p, out vec2 a, out float w){
   if (k2 < 0) return k;
   a = a2; w = w2;
   return k2;
+}
+vec4 bspline4(float t);
+// A cubic B-spline read of a zoom level's texel.  Bilinear has a kink at every texel edge, so
+// a water mask filtered with it keeps the cells' staircase however wide the fade; the spline
+// is smooth in its slope as well, and the line where it crosses zero is a curve
+vec4 zSmooth(int k, vec2 a){
+  vec2 i0 = floor(a); vec2 f = a - i0; ivec2 c = ivec2(i0);
+  vec4 wx = bspline4(f.x), wy = bspline4(f.y);
+  vec4 v = vec4(0.0);
+  for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++)
+    v += wx[i] * wy[j] * zTex(k, c + ivec2(i - 1, j - 1));
+  return v;
 }
 vec4 zLinear(int k, vec2 a){
   vec2 i0 = floor(a); vec2 fr = a - i0; ivec2 c = ivec2(i0);
@@ -620,16 +642,8 @@ vec4 bspline(float t);
 // A cubic B-spline read of one channel: the planet's shoreline texels are kilometres across,
 // and reading them bilinearly leaves a lake's edge as a staircase of squares.  The B-spline
 // is smooth in its slope as well as its value, so the shore curves
-// A shoreline drawn from cells is a staircase whatever it is filtered with: the steps are in
-// the data, not in the sampling.  Shifting where the depth is read by a fraction of a texel,
-// with a wobble a couple of texels across, bends the edge off the grid -- the coast keeps its
-// shape and its length but reads as a coast rather than as pixels
-vec2 shoreWarp(vec2 xy, float amp){
-  return amp * 2.0 * (vec2(vnoise(xy * 0.42), vnoise(xy * 0.42 + 31.7)) - 0.5);
-}
 float byteSmooth(sampler2D t, vec3 geo, int ch, vec3 p){
   vec2 xy = atlasXY(p, geo);
-  xy += shoreWarp(xy, 0.75);
   vec2 i0 = floor(xy); vec2 f = xy - i0; ivec2 a = ivec2(i0);
   vec4 wx = bspline(f.x), wy = bspline(f.y);
   float v = 0.0;
@@ -659,6 +673,10 @@ void addClass(int k, float w){
   gRocky += w * ((k == 12 || k == 13) ? 1.0 : 0.0); gIcy += w * (k == 1 ? 1.0 : 0.0);
   int kind = uTreeKind[k];
   if (kind == 6) gShrubW += w; else if (kind == 5) gSavW += w; else if (kind != 0) gTreeW += w;
+}
+vec4 bspline4(float t){
+  float t2 = t * t, t3 = t2 * t, it = 1.0 - t;
+  return vec4(it * it * it, 3.0 * t3 - 6.0 * t2 + 4.0, -3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0, t3) / 6.0;
 }
 vec4 bspline(float t){
   float t2 = t * t, t3 = t2 * t, it = 1.0 - t;
@@ -1072,17 +1090,15 @@ void main(){
   // wide, whichever is coarser here
   float wCov = 0.0;
   if (zk >= 0 && zw > 0.5) {
-    vec4 t = zLinear(zk, za) * 255.0;
-    vec4 tw = zLinear(zk, za + shoreWarp(za, 0.75)) * 255.0;         // the shore, bent off the grid
-    float ld = (tw.b / 127.5 - 1.0) * uLakeRange;
-    wcode = 255.0 - tw.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
-    fineW = true; fineLd = ld; fineOc = 1.0 - tw.a / 255.0; lakeD = ld;
+    vec4 t = zSmooth(zk, za) * 255.0;                 // the water, read smoothly (zSmooth)
+    float ld = (t.b / 127.5 - 1.0) * uLakeRange;
+    wcode = 255.0 - t.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
+    fineW = true; fineLd = ld; fineOc = 1.0 - t.a / 255.0; lakeD = ld;
   } else if (inDetail) {
-    vec4 t = detailLinear(dxy) * 255.0;
-    vec4 tw = detailLinear(dxy + shoreWarp(dxy, 0.75)) * 255.0;
-    float ld = (tw.b / 127.5 - 1.0) * uLakeRange;
-    wcode = 255.0 - tw.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
-    fineW = true; fineLd = ld; fineOc = 1.0 - tw.a / 255.0; lakeD = ld;
+    vec4 t = detailSmooth(dxy) * 255.0;
+    float ld = (t.b / 127.5 - 1.0) * uLakeRange;
+    wcode = 255.0 - t.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
+    fineW = true; fineLd = ld; fineOc = 1.0 - t.a / 255.0; lakeD = ld;
   } else if (uHasShore == 1) {
     float oc = byteSmooth(uST, uSGeo, 2, p);
     float ld = (byteSmooth(uST, uSGeo, 1, p) / 127.5 - 1.0) * uLakeRange;
