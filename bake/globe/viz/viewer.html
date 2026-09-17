@@ -486,6 +486,7 @@ vec3 satColor(float b, float h, vec3 p, float slopeDeg, float cellM, float simCo
   // rock: past the slope a cell this size can hold soil on; tan when dry, grey-brown when wet, grey in the cold
   float thr = clamp(35.0 * pow(max(cellM, 5.0) / 5.0, -0.25), 4.0, 38.0);
   float rock = smoothstep(0.8 * thr, 1.25 * thr, slopeDeg);
+  if (simCover >= 0.0) rock *= 1.0 - smoothstep(0.1, 0.4, simCover);   // soil where the level grew trees
   if (cls == 12 || cls == 13) rock = max(rock, 0.55);
   vec3 rockC = mix(vec3(0.45, 0.43, 0.40), vec3(0.63, 0.56, 0.47), 1.0 - w);
   rockC = mix(rockC, vec3(0.62, 0.62, 0.63), smoothstep(2.0, -10.0, Tloc));
@@ -524,11 +525,19 @@ vec2 treeGrid(vec3 p, out int f){
   return uv * (0.5 * PI * uRplanet / uTreeSpacing);
 }
 // the cover as sites kept: stands and clearings, in metres so a stand stays put as the
-// spacing steps with zoom
+// spacing steps with zoom.  A scale of the cover, never added to it: no forest, no trees
 float treeDensity(vec2 gm, int f, float forest){
+  if (forest <= 0.02) return 0.0;
   vec2 pq = mod(gm * (uTreeSpacing / 40.0), 8192.0) + vec2(float(f) * 517.0, 0.0);
   float stand = 0.65 * vnoise(pq / 3.0) + 0.35 * vnoise(pq);
-  return clamp(forest * 1.4 + 1.8 * (stand - 0.55), 0.0, 1.0);
+  return clamp(forest * mix(0.35, 1.75, smoothstep(0.3, 0.75, stand)), 0.0, 1.0);
+}
+// the cover a zoom level grew at p, or fallback where the level carries none
+float coverAt(vec3 p, float fallback){
+  vec2 za; float zw;
+  int zk = zoomSlot(p, za, zw);
+  if (zk < 0 || zw <= 0.5) return 0.0;
+  return uZVeg[zk] > 0.5 ? zLinear(zk, za + vec2(0.0, uZNE[zk])).a : fallback;
 }
 bool treeSite(vec2 c, int f, float dens, out vec2 ctr, out float rad, out float hgt, out float tone){
   vec3 hs = hash3(c + vec2(float(f) * 1013.0, 0.0));
@@ -609,14 +618,17 @@ vec3 drawTrees(vec3 col, vec3 p, vec3 e, vec3 n, float forest, float Tloc, float
 // tilt: march the ray through the canopy over the terrain it hit at tHit, from where it
 // is a tallest tree above the ground.  Returns true with the crown's colour where it meets
 // a cone first
-bool canopyMarch(vec3 rd, float tHit, vec3 p, vec3 e, vec3 n, float forest, float Tloc, float shade, out vec3 crown){
+bool canopyMarch(vec3 rd, float tHit, vec3 p, vec3 e, vec3 n, float forest, float riverW, float Tloc, float shade, out vec3 crown){
   crown = vec3(0.0);
   float S = uTreeSpacing;
   float hTop = 1.45 * S;                                            // the tallest cone, metres
   float sinE = max(-dot(rd, p), 0.03);
   float t0 = max(tHit - min(hTop / sinE, 14.0 * S), 0.0);
-  int f0; vec2 gm0 = treeGrid(p, f0);
-  if (treeDensity(gm0, f0, forest) <= 0.0 && forest < 0.05) return false;
+  // the cover where each step is, not where the ray lands: a crown standing in front of a
+  // cliff belongs to the forest at its foot.  The drawn river is known at the landing only,
+  // so it clears the crowns within a spacing of it
+  float riverCut = 1.0 - smoothstep(0.03, 0.3, riverW);
+  float cosE = sqrt(max(1.0 - sinE * sinE, 0.0));
   const int STEPS = 48;
   float dt = (tHit - t0) / float(STEPS);
   float tPrev = t0;
@@ -626,7 +638,8 @@ bool canopyMarch(vec3 rd, float tHit, vec3 p, vec3 e, vec3 n, float forest, floa
     float rel = (alt - groundAt(pp)) / S;
     if (rel > 1.45) { tPrev = t; continue; }
     int f; vec2 gm = treeGrid(pp, f);
-    float dens = treeDensity(gm, f, forest);
+    float dens = treeDensity(gm, f, coverAt(pp, forest) * ((tHit - t) * cosE < S ? riverCut : 1.0));
+    if (dens <= 0.0) { tPrev = t; continue; }
     vec2 dv, cB; float rad, hgt, tone;
     float z = crownAt(gm, f, dens, dv, rad, hgt, tone, cB);
     if (z >= 0.0 && rel <= z) {
@@ -840,7 +853,7 @@ void main(){
     float pxPerM = uMode == 2 ? 1.0 / max(tHit * uPixAng, 1e-6) : uScale / uRplanet;
     float tf = treeF * (1.0 - smoothstep(0.03, 0.3, riverW));
     vec3 crown;
-    if (uMode == 2 && uTreeSpacing * pxPerM > 3.0 && canopyMarch(rd, tHit, p, e, n, tf, treeT, shade, crown))
+    if (uMode == 2 && uTreeSpacing * pxPerM > 3.0 && canopyMarch(rd, tHit, p, e, n, treeF, riverW, treeT, shade, crown))
       col = mix(col, crown, smoothstep(3.0, 6.0, uTreeSpacing * pxPerM));
     else col = drawTrees(col, p, e, n, tf, treeT, pxPerM, shade, uMode != 2);
   }
