@@ -115,6 +115,35 @@ def zoom(world, tmp_path_factory):
     return {"spot": spot, "out": out, "levels": [zb.load_level(out, lv.R) for lv in LEVELS]}
 
 
+def test_zoom_bake_reports_its_progress(zoom, tmp_path, monkeypatch):
+    """globe/zoom/progress.py: a finished bake leaves its plan with every level
+    done (fraction 1); on a synthetic plan a running level counts the tiles'
+    iterations over its expected work, the first level cut from nothing
+    counts nothing, and a tile writes only when the environment names a
+    directory."""
+    from globe.zoom import progress
+
+    rep = progress.read(zoom["out"])
+    assert rep is not None and rep["fraction"] == 1.0 and rep["level"] is None
+    assert [e["state"] for e in json.loads((zoom["out"] / "progress" / "plan.json").read_text())["levels"]] == ["done"] * len(LEVELS)
+
+    out = tmp_path / "z"
+    d = progress.write_plan(out, [{"R": 8, "work": 0.0, "tiles": 1, "state": "pending"},
+                                  {"R": 32, "work": 100.0, "tiles": 2, "state": "pending"},
+                                  {"R": 128, "work": 300.0, "tiles": 1, "state": "pending"}])
+    progress.set_level(out, 8, "done")
+    progress.set_level(out, 32, "running")
+    monkeypatch.delenv(progress.ENV, raising=False)
+    progress.tile_tick(32, 0, 0, 49, 100)
+    assert not list(d.glob("L32_*.json"))
+    monkeypatch.setenv(progress.ENV, str(d))
+    progress.tile_tick(32, 0, 0, 49, 100)                  # tile 1 half way, tile 2 not started
+    rep = progress.read(out)
+    assert rep["level"] == 32 and rep["level_index"] == 1 and rep["levels"] == [8, 32, 128]
+    assert rep["fraction"] == pytest.approx((1.0 + 100.0 * 0.25) / 401.0, abs=1e-3)
+    assert "iteration 50/100" in rep["detail"] and "1/2 tiles" in rep["detail"]
+
+
 def test_zoom_levels_write_every_product_cell_and_stay_physical(world, zoom):
     for lv, res in zip(LEVELS, zoom["levels"]):
         a = res.arrays

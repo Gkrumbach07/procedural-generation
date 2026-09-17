@@ -8,12 +8,20 @@ Static files come from the world directory (the globe viewer, the zoom
 pages).  The viewer finds ``/api/zoom`` and turns a click on a spot into a
 "Bake a zoom here" button:
 
-* ``GET /api/zoom`` -- ``{"jobs": [...], "zooms": [...]}``;
+* ``GET /api/zoom`` -- ``{"jobs": [...], "zooms": [...]}``; a running job
+  carries ``progress`` (globe/zoom/progress.py: fraction, the level running,
+  seconds elapsed and an estimate of those left);
 * ``POST /api/zoom`` with ``{"face", "i", "j"}`` (a coarse cell) or
-  ``{"lat", "lon"}`` -- queues ``scripts/zoom_bake.py`` for that spot.
+  ``{"lat", "lon"}``, and ``"game": true`` for the game-scale levels (19 m,
+  4.8 m) below the zoom's -- queues ``scripts/zoom_bake.py`` for that spot;
+* ``POST /api/zoom/cancel`` with ``{"name"}`` -- stops a queued or running job
+  (a re-bake of the spot resumes from the levels it finished);
+* ``GET /api/zoom/log?name=...`` -- the last lines of a job's log.
 
 One bake runs at a time (a zoom uses every core); the rest wait in order.
-Each job's log is ``<world>/zoom/<name>/bake.log``.  Listens on localhost
+Each job's log is ``<world>/zoom/<name>/bake.log``; the list is kept in
+``<world>/zoom/jobs.json``, so it survives a restart (a job that was running
+when the server stopped is marked ``interrupted``).  Listens on localhost
 unless ``--host`` says otherwise (a Tailscale address: the tailnet only):
 this runs code on the machine for whoever can reach the port.
 """
@@ -21,6 +29,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 import subprocess
 import sys
 import threading
@@ -36,22 +46,74 @@ class Jobs:
     def __init__(self, root: Path, python: str, extra: list[str]):
         self.root, self.python, self.extra = root, python, extra
         self.lock = threading.Lock()
-        self.jobs: list[dict] = []
+        self.path = root / "zoom" / "jobs.json"
+        self.jobs: list[dict] = self._load()
+        self.procs: dict[str, subprocess.Popen] = {}
         threading.Thread(target=self._worker, daemon=True).start()
 
-    def submit(self, spot: tuple[int, int, int]) -> dict:
-        name = f"f{spot[0]}_{spot[1]}_{spot[2]}"
+    def _load(self) -> list[dict]:
+        try:
+            jobs = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return []
+        for j in jobs:
+            if j.get("state") == "running":
+                j["state"] = "interrupted"
+                j["message"] = "the server stopped while it ran; bake again to resume from the levels it finished"
+        return jobs
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(self.jobs, indent=1))
+        tmp.replace(self.path)
+
+    def submit(self, spot: tuple[int, int, int], game: bool = False) -> dict:
+        name = f"f{spot[0]}_{spot[1]}_{spot[2]}" + ("_game" if game else "")
         with self.lock:
             for j in self.jobs:
                 if j["name"] == name and j["state"] in ("queued", "running"):
                     return j
-            job = {"name": name, "spot": list(spot), "state": "queued", "message": "", "submitted": time.time()}
+            job = {"name": name, "spot": list(spot), "game": bool(game), "state": "queued", "message": "", "submitted": time.time()}
             self.jobs.append(job)
+            self._save()
+        return job
+
+    def cancel(self, name: str) -> dict | None:
+        with self.lock:
+            job = next((j for j in reversed(self.jobs) if j["name"] == name and j["state"] in ("queued", "running")), None)
+            if job is None:
+                return None
+            if job["state"] == "queued":
+                job["state"], job["message"] = "cancelled", "cancelled before it started"
+                self._save()
+                return job
+            proc = self.procs.get(name)
+        if proc is not None and proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)          # the bake and its tile workers
+            except ProcessLookupError:
+                pass
+        with self.lock:
+            job["cancel"] = True
         return job
 
     def snapshot(self) -> list[dict]:
+        from globe.zoom import progress
+
         with self.lock:
-            return [dict(j) for j in self.jobs]
+            out = [dict(j) for j in self.jobs]
+        for j in out:
+            if j["state"] in ("running", "interrupted", "cancelled", "failed"):
+                j["progress"] = progress.read(self.root / "zoom" / j["name"])
+        return out
+
+    def log_tail(self, name: str, lines: int = 60) -> str:
+        path = self.root / "zoom" / Path(name).name / "bake.log"
+        try:
+            return "\n".join(path.read_text(errors="replace").splitlines()[-lines:])
+        except OSError:
+            return ""
 
     def _worker(self):
         while True:
@@ -62,24 +124,34 @@ class Jobs:
                         job = j
                         j["state"] = "running"
                         j["started"] = time.time()
+                        self._save()
                         break
             if job is None:
                 time.sleep(1.0)
                 continue
             out = self.root / "zoom" / job["name"]
             out.mkdir(parents=True, exist_ok=True)
-            cmd = [self.python, str(HERE / "zoom_bake.py"), "--world", str(self.root), "--cell", *map(str, job["spot"]), *self.extra]
-            with open(out / "bake.log", "w") as log:
-                proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+            cmd = [self.python, str(HERE / "zoom_bake.py"), "--world", str(self.root), "--cell", *map(str, job["spot"]),
+                   "--name", job["name"], *(["--game"] if job.get("game") else []), *self.extra]
+            with open(out / "bake.log", "a") as log:
+                proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                with self.lock:
+                    self.procs[job["name"]] = proc
+                    job["pid"] = proc.pid
                 while proc.poll() is None:
                     time.sleep(2.0)
                     last = _last_line(out / "bake.log")
                     with self.lock:
                         job["message"] = last
             with self.lock:
-                job["state"] = "done" if proc.returncode == 0 else "failed"
+                self.procs.pop(job["name"], None)
+                if job.pop("cancel", False):
+                    job["state"] = "cancelled"
+                else:
+                    job["state"] = "done" if proc.returncode == 0 else "failed"
                 job["message"] = _last_line(out / "bake.log")
                 job["seconds"] = round(time.time() - job["started"], 1)
+                self._save()
 
 
 def _last_line(path: Path) -> str:
@@ -115,16 +187,26 @@ def make_handler(root: Path, jobs: Jobs):
             super().end_headers()
 
         def do_GET(self):
-            if self.path.split("?")[0] == "/api/zoom":
+            path, _, query = self.path.partition("?")
+            if path == "/api/zoom":
                 return self._json(200, {"jobs": jobs.snapshot(), "zooms": index.scan(root)})
+            if path == "/api/zoom/log":
+                from urllib.parse import parse_qs
+
+                name = (parse_qs(query).get("name") or [""])[0]
+                return self._json(200, {"name": name, "log": jobs.log_tail(name)})
             return super().do_GET()
 
         def do_POST(self):
-            if self.path.split("?")[0] != "/api/zoom":
+            path = self.path.split("?")[0]
+            if path not in ("/api/zoom", "/api/zoom/cancel"):
                 return self._json(404, {"error": "not found"})
             try:
                 n = int(self.headers.get("Content-Length") or 0)
                 d = json.loads(self.rfile.read(n) or b"{}")
+                if path == "/api/zoom/cancel":
+                    job = jobs.cancel(str(d["name"]))
+                    return self._json(200, job) if job is not None else self._json(404, {"error": "no queued or running job of that name"})
                 if "face" in d:
                     spot = (int(d["face"]), int(d["i"]), int(d["j"]))
                 else:
@@ -133,7 +215,7 @@ def make_handler(root: Path, jobs: Jobs):
                     raise ValueError(f"cell {spot} is not on the grid")
             except (ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
                 return self._json(400, {"error": str(e)})
-            return self._json(200, jobs.submit(spot))
+            return self._json(200, jobs.submit(spot, bool(d.get("game", False))))
 
         def log_message(self, fmt, *args):
             if "/api/" in (args[0] if args else ""):

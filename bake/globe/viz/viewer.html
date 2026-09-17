@@ -60,6 +60,19 @@
   #zoomlist .zn { color:var(--accent); cursor:pointer; min-width:84px; }
   #zoomlist .zn:hover { text-decoration:underline; }
   #zoomlist .ld { color:var(--dim); font-size:10px; }
+  #bakes { top:48px; right:10px; width:320px; max-height:60vh; overflow:auto; font-size:12px; }
+  #bakes .bt { font-weight:600; margin-bottom:4px; display:flex; justify-content:space-between; }
+  #bakes .job { border-top:1px solid var(--line); padding:6px 0; }
+  #bakes .jn { display:flex; justify-content:space-between; gap:6px; align-items:baseline; }
+  #bakes .st { font-size:10px; padding:1px 5px; border-radius:3px; background:#24344d; }
+  #bakes .st.running { background:#1f5f3f; } #bakes .st.failed, #bakes .st.interrupted { background:#6a2a2a; } #bakes .st.queued { background:#4a4a2a; }
+  #bakes .bar { height:6px; background:var(--line); border-radius:3px; margin:4px 0; overflow:hidden; }
+  #bakes .bar i { display:block; height:100%; background:var(--accent); }
+  #bakes .d { color:var(--dim); font-size:11px; }
+  #bakes .chips span { font-size:10px; margin-right:4px; color:var(--dim); } #bakes .chips span.done { color:#7bc96f; } #bakes .chips span.run { color:#fff; font-weight:600; }
+  #bakes pre { max-height:180px; overflow:auto; background:#0e131b; border:1px solid var(--line); border-radius:4px; padding:4px; font-size:10px; white-space:pre-wrap; margin:4px 0 0; }
+  #bakes button { margin-right:4px; }
+  #bakesbtn { position:fixed; top:10px; right:44px; }
 </style>
 </head>
 <body>
@@ -96,6 +109,8 @@
 </div>
 
 <button class="plain" id="helpbtn">?</button>
+<button class="plain hidden" id="bakesbtn" title="Zoom bakes: progress, logs">Bakes</button>
+<div id="bakes" class="panel hidden"></div>
 <div id="help" class="panel">
   <b>Drag</b> pan / rotate · <b>Wheel</b> zoom at cursor · <b>Double-click</b> zoom in<br>
   <b>Space</b> play/pause · <b>← →</b> step frame · <b>Shift+← →</b> jump stage<br>
@@ -1466,15 +1481,16 @@ function showScout(h, px, py) {
     `<div class="d">relief ${Math.round(m.relief_m)} m · walkable ${pct(m.walkable)} · creeks ${pct(m.creek_share)} · lakes ${pct(m.lake_share)}<br>` +
     `riffle ${pct(m.riffle_share)} · pocket water ${pct(m.pocket_share)} · ${m.temperature_c.toFixed(1)} °C · rain ×${m.wetness.toFixed(2)} · forest ${pct(m.forest_share)}</div>`;
   if (job) html += `<div>zoom ${job.name}: <b>${job.state}</b>${job.message ? " — " + job.message : ""}</div>`;
-  if (apiOK && (!job || job.state === "failed")) html += `<div class="row"><button class="plain" id="bakezoom">Bake a zoom here</button><span class="d">~10–20 min</span></div>`;
+  if (apiOK && (!job || job.state === "failed")) html += `<div class="row"><button class="plain" id="bakezoom">Bake a zoom here</button><span class="d" id="bakeeta">~10–20 min</span></div>` +
+    `<div class="row"><label class="chk"><input type="checkbox" id="bakegame">game levels too (19 m, 5 m) · ~+35 min</label></div>`;
   else if (!apiOK) html += `<code>python scripts/zoom_bake.py --world worlds/${META.world} --cell ${f} ${i} ${j}</code>`;
   pop.innerHTML = html;
   const btn = $("bakezoom");
   if (btn) btn.onclick = async () => {
     btn.disabled = true;
-    try { const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ face: f, i, j }) });
+    try { const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ face: f, i, j, game: !!($("bakegame") && $("bakegame").checked) }) });
       if (!r.ok) throw new Error(await r.text()); } catch (e) { btn.textContent = "failed: " + e.message; return; }
-    pollJobs();
+    bakesOpen = true; pollJobs();
   };
   placePop(px, py);
 }
@@ -1489,19 +1505,81 @@ function inPoly(x, y, pts) {
 const API = location.protocol.startsWith("http") ? "../api/zoom" : null;
 let apiOK = false, jobs = [];
 function reloadZooms() { const s = document.createElement("script"); s.src = `zooms.js?t=${Date.now()}`; document.body.appendChild(s); }
+let pollTimer = 0, bakesOpen = false;
+const logOpen = new Map();                        // job name -> last log text, while its log is shown
 async function pollJobs() {
   if (!API) return;
+  clearTimeout(pollTimer);
+  let active = 0;
   try {
     const r = await fetch(API); if (!r.ok) return;
     const d = await r.json(); apiOK = true;
     const was = jobs.filter(j => j.state === "running" || j.state === "queued").length;
     jobs = d.jobs || [];
-    const now = jobs.filter(j => j.state === "running" || j.state === "queued").length;
-    if (now < was || (d.zooms || []).length !== zooms.length) reloadZooms();
-    if (now) setTimeout(pollJobs, 3000);
+    active = jobs.filter(j => j.state === "running" || j.state === "queued").length;
+    if (active < was || (d.zooms || []).length !== zooms.length) reloadZooms();
+    for (const name of logOpen.keys()) {
+      const lr = await fetch(`${API}/log?name=${encodeURIComponent(name)}`);
+      if (lr.ok) logOpen.set(name, (await lr.json()).log);
+    }
     if (pop.dataset.kind === "spot") showSpot(+pop.dataset.px, +pop.dataset.py);
   } catch (e) { apiOK = false; }
+  renderBakes();
+  pollTimer = setTimeout(pollJobs, active ? 3000 : 20000);
 }
+const fmtDur = s => s == null ? "—" : s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.round(s % 3600 / 60)} min` : s >= 60 ? `${Math.round(s / 60)} min` : `${Math.round(s)} s`;
+const cellOfR = R => fmtCell((META.cell_size_m || 9773) / R);
+// the bakes panel: every queued / running job and the last few finished, newest first
+function renderBakes() {
+  const btn = $("bakesbtn"), el = $("bakes");
+  if (!apiOK) { btn.classList.add("hidden"); el.classList.add("hidden"); return; }
+  btn.classList.remove("hidden");
+  const active = jobs.filter(j => j.state === "running" || j.state === "queued");
+  btn.textContent = active.length ? `Bakes (${active.length})` : "Bakes";
+  el.classList.toggle("hidden", !bakesOpen);
+  if (!bakesOpen) return;
+  const finished = jobs.filter(j => !(j.state === "running" || j.state === "queued")).slice(-6);
+  const shown = [...active, ...finished.reverse()];
+  let html = `<div class="bt"><span>Zoom bakes</span><span class="x" style="cursor:pointer;color:var(--dim)" id="bakesclose">×</span></div>`;
+  if (!shown.length) html += `<div class="d">No bakes yet. Click a spot on the globe, then "Bake a zoom here".</div>`;
+  for (const j of shown) {
+    const pr = j.progress, frac = pr ? pr.fraction : (j.state === "done" ? 1 : 0);
+    const levels = pr ? pr.levels : (j.game ? [8, 32, 128, 512, 2048] : [8, 32, 128]);
+    const chips = levels.map((R, k) => {
+      const cls = j.state === "done" || (pr && pr.level_index != null && k < pr.level_index) ? "done" : (pr && k === pr.level_index && j.state === "running" ? "run" : "");
+      return `<span class="${cls}">${cls === "done" ? "✓" : cls === "run" ? "▶" : "·"} ${cellOfR(R)}</span>`;
+    }).join("");
+    html += `<div class="job"><div class="jn"><b>${j.name}</b><span class="st ${j.state}">${j.state}</span></div>`;
+    html += `<div class="bar"><i style="width:${(100 * frac).toFixed(1)}%"></i></div><div class="chips">${chips}</div>`;
+    if (j.state === "running" && pr) html += `<div class="d">${pr.level ? cellOfR(pr.level) + " level" : "starting"}${pr.detail ? " · " + pr.detail : ""} · ${(100 * frac).toFixed(0)} %<br>elapsed ${fmtDur(pr.elapsed_s)} · left ${pr.eta_s != null ? "~" + fmtDur(pr.eta_s) : "estimating…"}</div>`;
+    else if (j.state === "queued") html += `<div class="d">waiting for the bake before it</div>`;
+    else if (j.seconds) html += `<div class="d">${j.state} after ${fmtDur(j.seconds)}</div>`;
+    if (j.state !== "done" && j.state !== "running" && j.state !== "queued" && j.message) html += `<div class="d">${j.message.replace(/</g, "&lt;")}</div>`;
+    html += `<div style="margin-top:4px">`;
+    if (j.state === "running" || j.state === "queued") html += `<button class="plain" data-cancel="${j.name}">Cancel</button>`;
+    if (j.state === "failed" || j.state === "interrupted" || j.state === "cancelled") html += `<button class="plain" data-again="${j.name}">Bake again</button>`;
+    const z = zooms.find(zz => zz.name === j.name);
+    if (z) html += `<button class="plain" data-fly="${j.name}">Fly there</button>`;
+    html += `<button class="plain" data-log="${j.name}">${logOpen.has(j.name) ? "Hide log" : "Log"}</button></div>`;
+    if (logOpen.has(j.name)) html += `<pre>${(logOpen.get(j.name) || "…").replace(/</g, "&lt;")}</pre>`;
+    html += `</div>`;
+  }
+  el.innerHTML = html;
+  $("bakesclose").onclick = () => { bakesOpen = false; renderBakes(); };
+  el.querySelectorAll("[data-cancel]").forEach(b => b.onclick = async () => {
+    if (!confirm(`Stop the bake ${b.dataset.cancel}? Levels it finished are kept.`)) return;
+    await fetch(`${API}/cancel`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: b.dataset.cancel }) });
+    pollJobs(); });
+  el.querySelectorAll("[data-again]").forEach(b => b.onclick = async () => {
+    const j = jobs.find(jj => jj.name === b.dataset.again);
+    await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ face: j.spot[0], i: j.spot[1], j: j.spot[2], game: !!j.game }) });
+    pollJobs(); });
+  el.querySelectorAll("[data-fly]").forEach(b => b.onclick = () => flyToZoom(zooms.find(z => z.name === b.dataset.fly)));
+  el.querySelectorAll("[data-log]").forEach(b => b.onclick = () => {
+    logOpen.has(b.dataset.log) ? logOpen.delete(b.dataset.log) : logOpen.set(b.dataset.log, ""); renderBakes(); pollJobs(); });
+  el.querySelectorAll("pre").forEach(pre => pre.scrollTop = pre.scrollHeight);
+}
+$("bakesbtn").onclick = () => { bakesOpen = !bakesOpen; renderBakes(); if (bakesOpen) pollJobs(); };
 function placePop(px, py) {
   const dpr = cssPx();
   pop.style.left = `${Math.min(px / dpr + 12, innerWidth - 350)}px`; pop.style.top = `${Math.min(py / dpr + 12, innerHeight - 220)}px`;
@@ -1529,15 +1607,16 @@ function showSpot(px, py) {
   let html = `<span class="x" onclick="this.parentNode.classList.add('hidden')">×</span><div class="t">${(lat * 180 / PI).toFixed(2)}°, ${(lon * 180 / PI).toFixed(2)}°</div>` +
     `<div class="d">cell ${f} ${i} ${j} · no zoom here yet</div>`;
   if (job) html += `<div>zoom ${job.name}: <b>${job.state}</b>${job.message ? " — " + job.message : ""}</div>`;
-  if (apiOK && (!job || job.state === "failed")) html += `<div class="row"><button class="plain" id="bakezoom">Bake a zoom here</button><span class="d">~10–20 min</span></div>`;
+  if (apiOK && (!job || job.state === "failed")) html += `<div class="row"><button class="plain" id="bakezoom">Bake a zoom here</button><span class="d" id="bakeeta">~10–20 min</span></div>` +
+    `<div class="row"><label class="chk"><input type="checkbox" id="bakegame">game levels too (19 m, 5 m) · ~+35 min</label></div>`;
   else if (!apiOK) html += `<div class="d">Bake one (then reload this page):</div><code>${cmd}</code>`;
   pop.innerHTML = html;
   const btn = $("bakezoom");
   if (btn) btn.onclick = async () => {
     btn.disabled = true;
-    try { const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ face: f, i, j }) });
+    try { const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ face: f, i, j, game: !!($("bakegame") && $("bakegame").checked) }) });
       if (!r.ok) throw new Error(await r.text()); } catch (e) { btn.textContent = "failed: " + e.message; return; }
-    pollJobs();
+    bakesOpen = true; pollJobs();
   };
   placePop(px, py);
 }

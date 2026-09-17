@@ -41,6 +41,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -58,6 +59,7 @@ from ..io.world_store import WorldStore
 from ..refine import basin_job as bj
 from ..refine.upsample import FineWindow, Window, detail_noise, ridged_fbm, upsample_window
 from ..refine.zoom import ZOOM_REFINE, drain_noise, smooth_drift, zoom_params
+from . import progress
 
 #: D8 offsets of the hydro stage's ``flow_dir`` codes (0..7; 8 and above = sink)
 D8 = np.array([(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)], dtype=np.int64)
@@ -634,6 +636,7 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
         for it in range(int(level.iterations)):
             _share_threads(demand)
             st = step(state, ep, it, particles_per_cell=ppc, rng_stage="refine")
+            progress.tile_tick(int(level.R), int(job["a"]), int(job["b"]), it, int(level.iterations))
             particles += int(st.get("particles", 0))
             for k, v in (st.get("deaths") or {}).items():
                 deaths[k] += int(v)
@@ -982,9 +985,34 @@ def run_zoom(root: str | Path, spot: tuple[int, int, int], levels=DEFAULT_LEVELS
     out = Path(out) if out is not None else root / "zoom" / name
     out.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
+    # progress for whoever watches (globe/zoom/progress.py): the plan, and the
+    # directory the tiles' workers tick into
+    N = params.coarse_grid().N
+    plan = []
+    for k, level in enumerate(levels):
+        cut = k == 0 and planet is not False and planet_dir(root, level.R) is not None
+        try:
+            tiles = len(tile_starts(place(face, ci, cj, level, N).p0, place(face, ci, cj, level, N).n, level.tile)[0]) ** 2
+        except (ValueError, AttributeError):
+            tiles = 1
+        plan.append({"R": int(level.R), "work": 0.0 if cut else progress.level_work(level, tiles), "tiles": tiles, "state": "pending"})
+    env_before = os.environ.get(progress.ENV)
+    os.environ[progress.ENV] = str(progress.write_plan(out, plan))
+    try:
+        return _run_zoom_levels(root, store, params, (face, ci, cj), levels, out, name, log, erosion, resume, workers, planet, t0)
+    finally:
+        if env_before is None:
+            os.environ.pop(progress.ENV, None)
+        else:
+            os.environ[progress.ENV] = env_before
+
+
+def _run_zoom_levels(root, store, params, spot, levels, out, name, log, erosion, resume, workers, planet, t0) -> Path:
+    face, ci, cj = spot
     parent = None
     records = []
     for level in levels:
+        progress.set_level(out, int(level.R), "running")
         pdir = planet_dir(root, level.R) if parent is None and planet is not False else None
         if planet is True and parent is None and pdir is None:
             raise FileNotFoundError(f"no finished planet level at R={level.R} under {root / 'zoom'}")
@@ -1010,6 +1038,7 @@ def run_zoom(root: str | Path, spot: tuple[int, int, int], levels=DEFAULT_LEVELS
             if log is not None:
                 log(f"R={level.R}: done in {res.stats['seconds']:.0f}s")
         records.append({"R": level.R, "cell_m": res.stats["cell_m"], "geometry": res.stats["geometry"], "seconds": res.stats["seconds"]})
+        progress.set_level(out, int(level.R), "done")
         parent = res
     lat, lon = lonlat_of_spot(params, (face, ci, cj))
     write_views(out, levels, lat, lon, name)
