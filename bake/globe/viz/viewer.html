@@ -191,6 +191,9 @@
         <span class="chk"><input type="checkbox" id="fade" checked>blend</span>
         <span class="chk" id="scoutchk"><input type="checkbox" id="scout" checked>scout marks</span>
       </div>
+      <h3>Performance</h3>
+      <div class="row"><span class="chk" title="Fewer ray-march steps and flat trees in the 3-D view: what a phone's GPU can carry"><input type="checkbox" id="lightfx">lighter 3-D</span></div>
+      <div class="note" id="lightnote"></div>
       <h3>Share</h3>
       <div class="row"><button class="plain" id="shot">Save PNG</button><button class="plain" id="copylink">Copy view link</button></div>
       <div class="note">The link keeps this place, style and camera.</div>
@@ -1826,11 +1829,10 @@ function contourInterval() {
   const a = loadedAtOrBefore(state.frame);
   const key = `${a}|${state.view}|${state.lat0.toFixed(4)}|${state.lon0.toFixed(4)}|${state.zoom.toFixed(3)}|${state.heading.toFixed(2)}|${state.tilt.toFixed(2)}`;
   if (key === ctCache.key || a < 0 || !bitmaps[a]) return ctCache.v;
-  const f = frames[a], pix = pixelsOf(a), d0 = pix[0].d, hs = [];
+  const hs = [];
   for (let y = 0.5; y < 12; y++) for (let x = 0.5; x < 16; x++) {
     const p = screenToDir(x / 16 * canvas.width, y / 12 * canvas.height); if (!p) continue;
-    const [x0, y0] = texel(f, 0, p), o0 = 4 * (y0 * pix[0].w + x0);
-    const hh = f.h0 + (d0[o0] * 256 + d0[o0 + 1]) / 65535 * (f.h1 - f.h0);
+    const hh = heightOfFrame(a, p);
     if (hh > (META.sea_level_m || 0)) hs.push(hh);
   }
   let range = 1000;
@@ -1996,8 +1998,7 @@ function draw() {
   bindZoomSlots(zslots, tex[a][0]);
   if (state.view === "tilt") {
     if (bitmaps[a]) {                                         // the terrain under the target, from the atlas
-      const pix = pixelsOf(a), [x0, y0] = texel(FA, 0, camBasis().C), d0 = pix[0].d, o0 = 4 * (y0 * pix[0].w + x0);
-      targetH = FA.h0 + (d0[o0] * 256 + d0[o0 + 1]) / 65535 * (FA.h1 - FA.h0);
+      targetH = heightOfFrame(a, camBasis().C);
     }
     const c = cam3();
     gl.uniform3fv(U.uTgt, c.T); gl.uniform1f(U.uRT, c.rT); gl.uniform1f(U.uTgtH, c.hT);
@@ -2252,14 +2253,14 @@ function hereHTML(html, fill) {
 function placeRows(p) {
   const a = loadedAtOrBefore(state.frame);
   if (!p || a < 0 || !bitmaps[a]) return [];
-  const f = frames[a], pix = pixelsOf(a);
+  const f = frames[a];
   const rows = [];
-  const [x0, y0] = texel(f, 0, p), o0 = 4 * (y0 * pix[0].w + x0), d0 = pix[0].d;
-  const hq = d0[o0] * 256 + d0[o0 + 1];
-  rows.push(["elevation", fmtM(f.h0 + hq / 65535 * (f.h1 - f.h0))]);
+  rows.push(["elevation", fmtM(heightOfFrame(a, p))]);
   for (const [name, [k, c]] of Object.entries(f.layers || {})) {
     const ch = CHANNELS[name]; if (!ch || ch.hidden || name === "satellite") continue;
-    const [x, y] = texel(f, k, p), b = pix[k].d[4 * (y * pix[k].w + x) + c];
+    const [x, y] = texel(f, k, p), px = samplePixel(a, k, x, y);
+    if (!px) continue;
+    const b = px[c];
     let v = decodeByte(ch, b);
     if (ch.kind === "category") v = ch.names ? (ch.names[b] ?? b) : (b === 0 ? "—" : b - (ch.offset ?? 0));
     else v = fmtVal(ch, v) + (ch.unit ? " " + ch.unit : "");
@@ -2506,15 +2507,26 @@ function decodeByte(ch, b) {   // byte -> physical value, per meta.channels
 }
 
 // readout: sample the frame's bitmap on the CPU (lazy, one frame cached)
-const rd = { frame: -1, data: [] };
-function pixelsOf(a) {
-  if (rd.frame === a) return rd.data;
-  rd.frame = a;
-  rd.data = bitmaps[a].map(bm => {
-    const c = new OffscreenCanvas(bm.width, bm.height), x = c.getContext("2d", { willReadFrequently: true });
-    x.drawImage(bm, 0, 0); return { w: bm.width, d: x.getImageData(0, 0, bm.width, bm.height).data };
-  });
-  return rd.data;
+// One texel of one atlas, read by drawing that texel alone into a 1 x 1 canvas.  Decoding the
+// whole atlas instead (which this did) is ~300 MB of pixels for the final frame, built on
+// every pointer move -- enough on its own to have a phone's browser kill the tab.
+const rd = { ctx: null };
+function samplePixel(a, k, x, y) {
+  const bm = bitmaps[a] && bitmaps[a][k];
+  if (!bm) return null;
+  if (!rd.ctx) {
+    const c = typeof OffscreenCanvas === "function" ? new OffscreenCanvas(1, 1) : document.createElement("canvas");
+    c.width = c.height = 1;
+    rd.ctx = c.getContext("2d", { willReadFrequently: true });
+  }
+  rd.ctx.clearRect(0, 0, 1, 1);
+  rd.ctx.drawImage(bm, x, y, 1, 1, 0, 0, 1, 1);
+  return rd.ctx.getImageData(0, 0, 1, 1).data;
+}
+// the height at a point of a frame, in metres (0 when the frame is not loaded)
+function heightOfFrame(a, p) {
+  const f = frames[a], [x, y] = texel(f, 0, p), d = samplePixel(a, 0, x, y);
+  return d ? f.h0 + (d[0] * 256 + d[1]) / 65535 * (f.h1 - f.h0) : 0;
 }
 function texel(f, k, p) {
   const g = (f.tex && f.tex[k]) || f, T = g.res + 2 * g.pad, [fc, u, v] = fromSphere(p);
@@ -2777,6 +2789,18 @@ for (const k of ["rivers", "grid", "coast", "fade", "scout", "contours", "trees"
 $("play").onclick = togglePlay;
 $("prev").onclick = () => { state.playing = false; setFrame(state.frame - 1); };
 $("next").onclick = () => { state.playing = false; setFrame(state.frame + 1); };
+// the light 3-D pass: on by default where the device looks small, and latched on after the
+// browser has dropped the graphics once
+$("lightfx").checked = LIGHT;
+$("lightnote").textContent = LIGHT
+  ? "The 3-D view is drawn cheaply here. Turn this off for the full detail if your device can take it."
+  : "Turn this on if the 3-D view stutters or the page reloads itself.";
+$("lightfx").onchange = e => {
+  LIGHT = e.target.checked;
+  try { localStorage.setItem("globe.lowfx", LIGHT ? "1" : "0"); } catch (err) { /* private mode */ }
+  $("lightnote").textContent = LIGHT ? "The 3-D view is drawn cheaply here." : "Full detail. If the page reloads itself, turn this back on.";
+  requestDraw();
+};
 for (const b of $("rail").children) b.onclick = () => togglePanel(b.dataset.tab);
 $("pclose").onclick = closePanel;
 // the sheet's handle: drag it up or down to choose how much of the map to keep (a phone
