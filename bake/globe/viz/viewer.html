@@ -1334,9 +1334,19 @@ gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
 // ---------------------------------------------------------------------------
 const frames = META.frames;
 const NF = frames.length;
+const FINAL = META.final_index ?? NF - 1;
+// What a device can hold.  Every frame is an atlas (the final one ~100 MB), the tile cache
+// one big texture, a 5 m zoom level 54 MB: all of it together is over a gigabyte, which a
+// phone's tab is killed for -- it looked like the page reloading whenever you panned or
+// zoomed.  On a small device the timeline's frames load only when asked for, few stay
+// resident, the tile cache is a quarter of the side, and the zoom levels run to a budget
+const LOWMEM = matchMedia("(pointer: coarse)").matches || (navigator.deviceMemory || 8) <= 4;
+const FRAME_KEEP = LOWMEM ? 8 : NF;          // frames whose atlas stays on the GPU
+const ZT_BYTES = LOWMEM ? 120e6 : 500e6;     // zoom level textures
 const tex = new Array(NF).fill(null);        // [WebGLTexture per atlas]
 const bitmaps = new Array(NF).fill(null);    // ImageBitmaps (kept for the readout)
-let loaded = 0;
+const frameSeen = new Array(NF).fill(-1);
+let frameTick = 0, loaded = 0;
 
 function b64ToBlob(b64, type) {
   const bin = atob(b64); const u = new Uint8Array(bin.length);
@@ -1355,28 +1365,54 @@ async function ingest(i) {
     return t;
   });
   bitmaps[i] = bms;
+  frameSeen[i] = ++frameTick;
+  trimFrames();
   loaded++;
-  $("loadbar").style.width = (100 * loaded / NF).toFixed(1) + "%";
-  if (loaded === NF) { $("loading").classList.add("hidden"); document.body.dataset.ready = "1"; }
+  const want = LOWMEM ? 1 : NF;
+  $("loadbar").style.width = (100 * Math.min(loaded, want) / want).toFixed(1) + "%";
+  if (tex[FINAL] && (LOWMEM || loaded === NF)) { $("loading").classList.add("hidden"); document.body.dataset.ready = "1"; }
   if (i === state.frame || i === state.frame + 1) requestDraw();
   drawTimeline();
 }
-// Frame scripts are injected one at a time: the final frame first, then in order.
-const order = [META.final_index ?? NF - 1, ...frames.map((_, i) => i).filter(i => i !== (META.final_index ?? NF - 1))];
+// the atlases that stay on the GPU: the final frame and the last FRAME_KEEP asked for
+function trimFrames() {
+  let live = [];
+  for (let i = 0; i < NF; i++) if (tex[i]) live.push(i);
+  if (live.length <= FRAME_KEEP) return;
+  live = live.filter(i => i !== FINAL && i !== state.frame && i !== state.fpos).sort((a, b) => frameSeen[a] - frameSeen[b]);
+  for (const i of live.slice(0, Math.max(0, (live.length + 1) - FRAME_KEEP))) {
+    for (const t of tex[i]) gl.deleteTexture(t);
+    if (bitmaps[i]) for (const bm of bitmaps[i]) bm.close && bm.close();
+    tex[i] = null; bitmaps[i] = null; loaded--;
+  }
+}
+// Frame scripts are injected one at a time: the final frame first, then in order.  On a
+// small device only the final frame loads up front; the rest come when the timeline asks
+const order = [FINAL, ...frames.map((_, i) => i).filter(i => i !== FINAL)];
 let orderPos = 0;
 const queue = [];
+const asked = new Set();
 GV.onFrame = i => { queue.push(ingest(i)); };
 for (const k of Object.keys(GV.pending)) GV.onFrame(+k);   // frames inlined before this script ran
-function loadNext() {
-  while (orderPos < order.length && (tex[order[orderPos]] || !frames[order[orderPos]].file)) orderPos++;
-  if (orderPos >= order.length) return;
-  const i = order[orderPos++];
+function loadFrame(i) {
+  if (i < 0 || i >= NF || tex[i] || asked.has(i) || !frames[i].file) return false;
+  asked.add(i);
   const s = document.createElement("script");
-  s.src = frames[i].file; s.onload = () => loadNext();
-  s.onerror = () => { console.warn("frame failed", frames[i].file); loadNext(); };
+  s.src = frames[i].file; s.onload = () => { s.remove(); if (!LOWMEM) loadNext(); };
+  s.onerror = () => { console.warn("frame failed", frames[i].file); s.remove(); if (!LOWMEM) loadNext(); };
   document.head.appendChild(s);
+  return true;
 }
-loadNext(); loadNext();   // two in flight
+function loadNext() {
+  while (orderPos < order.length && (tex[order[orderPos]] || asked.has(order[orderPos]) || !frames[order[orderPos]].file)) orderPos++;
+  if (orderPos < order.length) loadFrame(order[orderPos++]);
+}
+// what the timeline is about to want: this frame and the next few
+function wantFrames(i) {
+  if (!LOWMEM) return;
+  for (let k = 0; k < 3; k++) { frameSeen[i + k] = ++frameTick; loadFrame(i + k); }
+}
+if (LOWMEM) loadFrame(FINAL); else { loadNext(); loadNext(); }   // two in flight
 
 // ---------------------------------------------------------------------------
 // State, URL hash
@@ -1532,11 +1568,14 @@ function bumpMoving() {
 // table.  A tile not loaded yet is drawn from the atlas.
 // ---------------------------------------------------------------------------
 const DET = META.detail || null;
+let detailSide = 0;
 const detail = { slotPx: 0, slotH: 0, per: 0, rows: 0, tex: null, levels: [], slotKey: [], keySlot: new Map(), seen: [], inflight: 0, queue: [], queued: new Set(), missing: new Set(), tick: 0 };
 if (DET && DET.levels && DET.levels.length) {
   detail.slotPx = DET.tile + 2 * DET.pad;                 // a tile is this wide
   detail.slotH = 2 * detail.slotPx;                        // and twice that tall: ground, then water
-  const size = Math.min(8192, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+  // 8192² RGBA is 268 MB, which a phone will not give a tab: a quarter of that side holds
+  // the tiles of a screenful anyway
+  const size = detailSide = Math.min(LOWMEM ? 2048 : 8192, gl.getParameter(gl.MAX_TEXTURE_SIZE));
   detail.per = Math.floor(size / detail.slotPx);
   detail.rows = Math.floor(size / detail.slotH);
   detail.tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, detail.tex);
@@ -1637,15 +1676,22 @@ function updateDetail(FA) {
 // `tex` record is a texture of its whole array, loaded when the level is on,
 // in view, and its cells are within a few pixels (so a 76 m level does not load
 // for a continent), and drawn by the shader wherever it covers the ground --
-// the finest first, up to four at once.  At most ZT_KEEP stay in memory.
+// the finest first, up to four at once.  They stay in memory up to ZT_BYTES.
 // ---------------------------------------------------------------------------
-const ZT_KEEP = 8;
+const texBytes = rec => (rec && rec.NE ? rec.NE * 3 * rec.NE * 4 : 4e6);
 const ztex = { loaded: new Map(), loading: new Set(), failed: new Set(), tick: 0 };
 const zkey = (z, L) => `${z.name}_L${L.R}`;
 // a level's time lapse (globe/viz/zoomtex.write_frames): one texture per frame of its
 // erosion, played in place of the level itself
 const tkey = (name, R, k) => `${name}_L${R}#${k}`;
 let play = null;                      // { name, R, count, k, last } while a time lapse runs
+// what the page is holding, for a look from outside it (tests, and a phone that misbehaves)
+GV.debug = () => ({
+  lowmem: LOWMEM, frames: tex.filter(Boolean).length, frameCount: NF,
+  frameBytes: tex.reduce((b, t, i) => b + (t ? t.length * 3 * (frames[i].res + 2 * frames[i].pad) * 2 * (frames[i].res + 2 * frames[i].pad) * 4 / t.length : 0), 0),
+  zoomTextures: ztex.loaded.size, zoomBytes: [...ztex.loaded.values()].reduce((b, v) => b + texBytes(v.rec), 0),
+  detailSide: detail.tex ? detailSide : 0, contextLost: gl.isContextLost(), layer: state.layer, zoom: state.zoom,
+});
 // play (or stop) a level's time lapse from outside the page, and what is playing
 GV.timeLapse = (name, R) => {
   const z = zooms.find(x => x.name === name), L = z && (z.levels || []).find(x => x.R === R);
@@ -1746,7 +1792,7 @@ function updateZoomTex(FA) {
     const fr = L.frames ? playSlot(L, z.name) : null;
     if (fr) { want.push(fr); continue; }
     const got = ztex.loaded.get(key);
-    if (got) { got.seen = ztex.tick; want.push(got); }
+    if (got) { want.push(got); }
     else if (!ztex.loading.has(key) && !ztex.failed.has(key) && ztex.loading.size < 2) {
       ztex.loading.add(key);
       const sc = document.createElement("script"); sc.src = L.tex.file;
@@ -1754,15 +1800,6 @@ function updateZoomTex(FA) {
       sc.onerror = () => { ztex.loading.delete(key); ztex.failed.add(key); sc.remove(); };
       document.head.appendChild(sc);
     }
-  }
-  // the levels' own textures are kept to ZT_KEEP; a playing time lapse keeps all its frames
-  // (they are small and every one of them is drawn each loop)
-  const lapse = play ? tkey(play.name, play.R, "").slice(0, -1) : null;
-  const keep = ZT_KEEP + (play ? play.count : 0);
-  if (ztex.loaded.size > keep) {
-    const old = [...ztex.loaded.entries()].filter(([k, v]) => v.seen < ztex.tick && !(lapse && k.startsWith(lapse)))
-      .sort((a, b) => a[1].seen - b[1].seen);
-    for (const [k, v] of old.slice(0, ztex.loaded.size - keep)) { gl.deleteTexture(v.tex); ztex.loaded.delete(k); }
   }
   // finest first; of two zooms over the same ground only the newer bake's levels, or the
   // shader would blend one bake's level into the other's and draw the step between them
@@ -1776,6 +1813,23 @@ function updateZoomTex(FA) {
     const r = rect(w.rec);
     if (picked.some(q => q.name !== w.name && overlap(rect(q.rec), r) && baked(q.name) >= baked(w.name))) continue;
     picked.push(w);
+  }
+  // the levels' textures run to a budget in bytes (a 5 m level is 54 MB, and eight of those
+  // is more than a phone has); a playing time lapse keeps its frames, which are small and
+  // all drawn each loop
+  // only the levels actually drawn count as in use: where two zooms cover the same ground the
+  // one not drawn should fall out of memory, not sit there holding 54 MB
+  for (const w of picked) w.seen = ztex.tick;
+  const lapse = play ? tkey(play.name, play.R, "").slice(0, -1) : null;
+  let bytes = 0;
+  for (const v of ztex.loaded.values()) bytes += texBytes(v.rec);
+  if (bytes > ZT_BYTES) {
+    const old = [...ztex.loaded.entries()].filter(([k, v]) => v.seen < ztex.tick && !(lapse && k.startsWith(lapse)))
+      .sort((a, b) => a[1].seen - b[1].seen);
+    for (const [k, v] of old) {
+      if (bytes <= ZT_BYTES) break;
+      bytes -= texBytes(v.rec); gl.deleteTexture(v.tex); ztex.loaded.delete(k);
+    }
   }
   return picked;
 }
@@ -1819,6 +1873,7 @@ function draw() {
   const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   gl.viewport(0, 0, w, h);
+  if (!tex[state.frame]) wantFrames(state.frame);   // a frame the timeline has not asked for yet
   const a = loadedAtOrBefore(state.frame);
   if (a < 0) return;
   let b = a, mix = 0;
@@ -1961,7 +2016,7 @@ function openTab(name, show) {
   for (const b of $("tabs").children) b.classList.toggle("on", b.dataset.tab === name);
   for (const sec of document.querySelectorAll("section.tab")) sec.classList.toggle("on", sec.dataset.tab === name);
   if (show !== false) showSide(true);
-  if (name === "time") drawTimeline();
+  if (name === "time") { wantFrames(state.frame); drawTimeline(); }
 }
 function showSide(on) {
   document.body.classList.toggle("ui", on);
@@ -2385,6 +2440,7 @@ function drawTimeline() {
 function setFrame(i, keepPos) {
   i = Math.max(0, Math.min(NF - 1, i));
   state.frame = Math.floor(i); if (!keepPos) state.fpos = state.frame; else state.fpos = i;
+  wantFrames(state.frame);
   writeHash(); requestDraw(); drawTimeline();
 }
 function tlPick(ev) {
@@ -2407,6 +2463,7 @@ function tick(t) {
   let np = state.fpos + dt * state.fps;
   if (np >= NF - 1) { np = NF - 1; state.playing = false; }
   const nextInt = Math.floor(np);
+  wantFrames(nextInt);
   if (!tex[nextInt] || (nextInt + 1 < NF && !tex[nextInt + 1] && np > nextInt)) np = Math.min(np, state.fpos); // wait for loader
   state.frame = Math.floor(np); state.fpos = state.fade ? np : state.frame;
   requestDraw(); drawTimeline(); writeHash();
@@ -2602,6 +2659,14 @@ window.addEventListener("keydown", ev => {
   else if (k === "l" || k === "L") { state.grid = !state.grid; writeHash(); requestDraw(); }
   else if (k === "c" || k === "C") { state.contours = !state.contours; writeHash(); requestDraw(); updateLabels(state.frame); }
   else if (/^[1-9]$/.test(k) && layerNames[+k - 1]) { state.layer = layerNames[+k - 1]; legendKey = ""; writeHash(); requestDraw(); }
+});
+canvas.addEventListener("webglcontextlost", ev => {
+  // the browser took the GPU back (it does that when memory runs short); without this the
+  // page just freezes
+  ev.preventDefault();
+  $("loading").classList.remove("hidden");
+  $("loading").firstChild.nodeValue = "The browser dropped the graphics context. Reloading…";
+  setTimeout(() => location.reload(), 1200);
 });
 window.addEventListener("resize", () => { requestDraw(); drawTimeline(); });
 window.addEventListener("hashchange", () => { readHash(); requestDraw(); drawTimeline(); });
