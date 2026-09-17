@@ -20,8 +20,11 @@ import numpy as np
 
 def _corners(N: int, geo: dict) -> list[list[float]]:
     from ..cubesphere import to_sphere_v
+    from .bake import Geometry
 
-    i0, j0, n = geo["ci0"], geo["cj0"], geo["cells"]
+    g = Geometry(**geo)
+    a, b = g.product_origin          # fine cells: a fine-cell level's product need not start on a coarse cell
+    i0, j0, n = a / g.R, b / g.R, g.n / g.R
     ii = np.array([i0, i0 + n, i0 + n, i0], dtype=np.float64)
     jj = np.array([j0, j0, j0 + n, j0 + n], dtype=np.float64)
     p = to_sphere_v(np.full(4, int(geo["face"])), ii / N, jj / N)

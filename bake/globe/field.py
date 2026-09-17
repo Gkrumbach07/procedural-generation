@@ -254,11 +254,17 @@ class FaceField:
         Points outside the face are looked up on the face that owns them
         (via ``from_sphere``); vector fields are rotated into ``face``'s
         components.  ``order`` 1 = bilinear, 3 = cubic (use 3 for height)."""
+        return self.sample_fine(face, i0 * R, i1 * R, j0 * R, j1 * R, R, order=order)
+
+    def sample_fine(self, face: int, a0: int, a1: int, b0: int, b1: int, R: int = 1, order: int = 1) -> np.ndarray:
+        """:meth:`sample_window` on a range of the face's *fine* cells at
+        refinement ``R``: ``[a0, a1) × [b0, b1)``, centres at ``u = (a + 0.5)
+        / (N R)``, so a range need not start or end on a coarse cell."""
         from .cubesphere import from_sphere_v, to_sphere_v, transfer_vector_v
 
         N = self.grid.N
-        ui = (np.arange(i0 * R, i1 * R) + 0.5) / (N * R)
-        vj = (np.arange(j0 * R, j1 * R) + 0.5) / (N * R)
+        ui = (np.arange(a0, a1) + 0.5) / (N * R)
+        vj = (np.arange(b0, b1) + 0.5) / (N * R)
         U, V = np.meshgrid(ui, vj, indexing="ij")
         inside = (U >= 0) & (U < 1) & (V >= 0) & (V < 1)
         faces = np.full(U.shape, face, dtype=np.int64)

@@ -88,6 +88,35 @@ class Window:
         """Fine extended index of the first fine cell of coarse cell (i, j)."""
         return (i - self.ci0) * self.R + self.H, (j - self.cj0) * self.R + self.H
 
+    def fine_ext(self) -> tuple[int, int, int, int]:
+        """Face-fine range ``(a0, a1, b0, b1)`` of the extended array."""
+        a0, a1, b0, b1 = self.ext_range()
+        return a0 * self.R, a1 * self.R, b0 * self.R, b1 * self.R
+
+
+@dataclass(frozen=True)
+class FineWindow:
+    """An extended array given directly as face fine cells ``[a0, a0 + NE)
+    x [b0, b0 + NE)`` on ``face`` at refinement ``R`` (no halo added: the
+    caller's array is the extended one).  Its corner need not be on a coarse
+    cell, so a zoom level far below the coarse grid can take a guard of a few
+    fine cells instead of whole coarse cells (``zoom.bake.Geometry``).  It
+    serves :func:`sample`, :func:`window_metric`, :func:`detail_noise` and
+    :func:`upsample_window` in place of a :class:`Window`."""
+
+    face: int
+    a0: int
+    b0: int
+    size: int
+    R: int
+
+    @property
+    def NE(self) -> int:
+        return self.size
+
+    def fine_ext(self) -> tuple[int, int, int, int]:
+        return self.a0, self.a0 + self.size, self.b0, self.b0 + self.size
+
 
 def basin_piece(basin: dict, face: int) -> dict:
     """The ``pieces`` entry (``face``, ``bbox``, ``area_cells``, ``tiles``)
@@ -149,12 +178,20 @@ SAMPLE_STRIP_CELLS = 1 << 20
 METRIC_CHUNK_CELLS = 1 << 18
 
 
-def sample(field: FaceField, win: Window, order: int = 1) -> np.ndarray:
+def sample(field: FaceField, win: Window | FineWindow, order: int = 1) -> np.ndarray:
     """Field on the window's extended fine array ``(NE, NE[, C])``.  Large
-    windows are sampled in coarse-row strips (identical values: every point
-    is sampled independently)."""
-    a0, a1, b0, b1 = win.ext_range()
+    windows are sampled in coarse-row strips (a :class:`FineWindow` in
+    fine-row strips; identical values: every point is sampled
+    independently)."""
     R = win.R
+    if isinstance(win, FineWindow):
+        a0, a1, b0, b1 = win.fine_ext()
+        rows = max(1, SAMPLE_STRIP_CELLS // max(1, b1 - b0))  # fine rows per strip
+        parts = [field.sample_fine(win.face, s0, min(a1, s0 + rows), b0, b1, R, order=order) for s0 in range(a0, a1, rows)]
+        out = parts[0] if len(parts) == 1 else np.concatenate(parts, axis=0)
+        assert out.shape[:2] == (win.NE, win.NE), (out.shape, win)
+        return np.ascontiguousarray(out)
+    a0, a1, b0, b1 = win.ext_range()
     rows = max(1, SAMPLE_STRIP_CELLS // max(1, (b1 - b0) * R * R))  # coarse rows per strip
     if a1 - a0 <= rows:
         out = field.sample_window(win.face, a0, a1, b0, b1, R, order=order)
@@ -165,17 +202,17 @@ def sample(field: FaceField, win: Window, order: int = 1) -> np.ndarray:
     return np.ascontiguousarray(out)
 
 
-def window_metric(win: Window, grid: Grid) -> tuple[np.ndarray, np.ndarray]:
+def window_metric(win: Window | FineWindow, grid: Grid) -> tuple[np.ndarray, np.ndarray]:
     """Dimensionless metric ``(g_ii, g_ij, g_jj)`` and its inverse at the
     extended fine cell centres (fine cell units; the same arithmetic as
     ``Grid.metric`` evaluated on the window face's extended
     parametrisation, so it is valid beyond the face edge)."""
     R, N = win.R, grid.N
     Nf = N * R
-    a0, a1, b0, b1 = win.ext_range()
+    a0, a1, b0, b1 = win.fine_ext()
     NE = win.NE
-    u = (np.arange(a0 * R, a1 * R) + 0.5) / Nf
-    v = (np.arange(b0 * R, b1 * R) + 0.5) / Nf
+    u = (np.arange(a0, a1) + 0.5) / Nf
+    v = (np.arange(b0, b1) + 0.5) / Nf
     cell_fine = grid.cell_size_m / R
     k = (grid.R_planet / (Nf * cell_fine)) ** 2
     metric = np.empty((NE, NE, 3), dtype=np.float32)
@@ -283,7 +320,7 @@ def ridged_fbm(shape: tuple[int, int], base_wavelength: float, rng: np.random.Ge
     return out.astype(np.float32)
 
 
-def detail_noise(win: Window, slope: np.ndarray, relief: np.ndarray, hardness: np.ndarray, detail_amp: float, cell_size_m: float, rng: np.random.Generator,
+def detail_noise(win: Window | FineWindow, slope: np.ndarray, relief: np.ndarray, hardness: np.ndarray, detail_amp: float, cell_size_m: float, rng: np.random.Generator,
                  surface: np.ndarray | None = None, coast_taper_m: float = 0.0) -> np.ndarray:
     """Detail noise in metres on the extended window (``NE x NE``):
     ``detail_amp * min(slope * cell_size_m, relief) * (0.5 + 0.5 hardness)
@@ -307,7 +344,7 @@ def detail_noise(win: Window, slope: np.ndarray, relief: np.ndarray, hardness: n
 # --------------------------------------------------------------------------
 # everything a basin job needs on its window
 # --------------------------------------------------------------------------
-def upsample_window(fields: dict[str, FaceField], derived: dict[str, FaceField], win: Window, grid: Grid) -> dict[str, np.ndarray]:
+def upsample_window(fields: dict[str, FaceField], derived: dict[str, FaceField], win: Window | FineWindow, grid: Grid) -> dict[str, np.ndarray]:
     """Upsampled inputs on the extended window (``NE x NE[, C]``, float32
     unless noted):
 
@@ -362,6 +399,6 @@ def upsample_face(fields: dict[str, FaceField], derived: dict[str, FaceField], f
 
 
 __all__ = [
-    "COARSE_INPUTS", "Window", "basin_window", "sample", "window_metric", "coarse_derived",
+    "COARSE_INPUTS", "Window", "FineWindow", "basin_window", "sample", "window_metric", "coarse_derived",
     "value_noise_2d", "ridged_fbm", "detail_noise", "upsample_window", "upsample_face",
 ]

@@ -5,7 +5,11 @@ stage").
 A level is a square *product* of ``cells`` coarse cells around the spot at
 refinement ``R``, inside a *work* array that adds ``guard`` coarse cells and
 the one-coarse-cell halo of :class:`refine.upsample.Window` on every side.
-All arrays of a level are that extended work array (``NE x NE``).
+All arrays of a level are that extended work array (``NE x NE``).  A level
+given a ``size`` in fine cells is placed in fine cells instead (a game-scale
+level, where a coarse cell is thousands of fine ones): its product is
+``size`` fine cells centred on the same point, and its guard
+:func:`fine_pad` fine cells (:class:`Geometry`).
 
 Per level:
 
@@ -34,6 +38,7 @@ Per level:
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import time
@@ -51,7 +56,7 @@ from ..erosion.maps import ErosionState, step
 from ..hydro.priority_flood import priority_flood_flat
 from ..io.world_store import WorldStore
 from ..refine import basin_job as bj
-from ..refine.upsample import Window, detail_noise, ridged_fbm, upsample_window
+from ..refine.upsample import FineWindow, Window, detail_noise, ridged_fbm, upsample_window
 from ..refine.zoom import ZOOM_REFINE, drain_noise, smooth_drift, zoom_params
 
 #: D8 offsets of the hydro stage's ``flow_dir`` codes (0..7; 8 and above = sink)
@@ -73,6 +78,68 @@ class ZoomLevel:
     chain_detail: float = 0.5  # detail noise below the parent's cell, x min(parent slope x parent cell, parent 3x3 relief)
     hold_every: int = 10  # hold each tile to its parent while it erodes, as an uplift rate reset every this many iterations (0 = only the correction after the tiles)
     hold_scale: float = 4.0  # the drift correction's Gaussian sigma, in parent cells: below it a level may reshape its parent
+    size: int = 0  # > 0: the product side in fine cells, placed in fine cells with a guard of fine_pad(margin) fine cells (`cells` unused); 0: `cells` coarse cells
+    inflow_cap: float = 0.0  # > 0: a tile's inflow spawns at most this multiple of its rain (see erode_tile); 0: all of it
+
+
+#: ZoomLevel fields added after zooms were baked, left out of a level's
+#: resume key at their defaults (so existing zooms still resume)
+_LEVEL_KEY_DEFAULTS = {"size": 0, "inflow_cap": 0.0}
+
+
+def level_key(level: ZoomLevel) -> dict:
+    """``asdict(level)`` without the later fields at their defaults."""
+    d = asdict(level)
+    for k, v in _LEVEL_KEY_DEFAULTS.items():
+        if d.get(k) == v:
+            d.pop(k)
+    return d
+
+
+def fine_pad(margin: int) -> int:
+    """Guard of a fine-cell level, fine cells from the work array's edge to
+    its product: the tiles' margin and the kernel's ring (``margin + 2``,
+    what :func:`prepare_tile` needs), then as much again, so the inflow from
+    the parent -- spawned within a few cells of the array's border -- enters
+    outside every tile's window and reaches the tiles down the flood tree
+    (spawned on an active cell it would be lost)."""
+    return 2 * (int(margin) + 2)
+
+
+def parse_level(spec: str) -> ZoomLevel:
+    """``R:cells:iterations[:tile[:margin]][:name=value ...]``
+    (``scripts/zoom_bake.py --levels``).  ``cells`` is coarse cells (``8``);
+    a fraction of them (``0.5``) or fine cells with an ``f`` (``1024f``)
+    places the level in fine cells (``ZoomLevel.size``).  ``name=value``
+    sets any other field (``inflow_cap=2``, ``chain_detail=0.5``)."""
+    fields = {f.name: f.type for f in dataclasses.fields(ZoomLevel)}
+    kw = {}
+    parts = []
+    for x in spec.split(":"):
+        if "=" in x:
+            k, _, v = x.partition("=")
+            if k not in fields or k in ("R", "cells", "iterations", "size"):
+                raise ValueError(f"zoom level {spec!r}: no field {k!r} to set by name")
+            kw[k] = float(v) if fields[k] in ("float", float) else int(v)
+        else:
+            parts.append(x)
+    if not 3 <= len(parts) <= 5:
+        raise ValueError(f"zoom level {spec!r}: want R:cells:iterations[:tile[:margin]]")
+    R = int(parts[0])
+    rest = [int(x) for x in parts[2:]]
+    c = parts[1].strip().lower()
+    if c.endswith("f"):
+        size = int(c[:-1])
+    elif any(ch in c for ch in ".e"):
+        size = float(c) * R
+        if size != int(size):
+            raise ValueError(f"zoom level {spec!r}: {c} coarse cells is not a whole number of fine cells at R={R}")
+        size = int(size)
+    else:
+        return ZoomLevel(R, int(c), *rest, **kw)
+    if size <= 0:
+        raise ValueError(f"zoom level {spec!r}: size must be positive")
+    return ZoomLevel(R, -(-size // R), *rest, size=size, **kw)
 
 
 #: 1.2 km over 469 km, 305 m over 156 km, 76 m over 78 km on the earth preset
@@ -83,47 +150,138 @@ DEFAULT_LEVELS = (
     ZoomLevel(128, 8, 150),
 )
 
+#: game-scale levels to chain below DEFAULT_LEVELS (``zoom_bake.py --game``),
+#: placed in fine cells: 19 m over 19.5 km and 4.8 m over 9.8 km on the earth
+#: preset, both centred where the levels above are.  Iterations from
+#: convergence runs on earth-v9's peaks (5, 212, 902): at 19 m relief,
+#: valley depth and slopes move < 5 % from 150 to 300 iterations (valley depth
+#: p50 69 -> 73 m); at 5 m (a 1,024-cell core) the added detail is within
+#: ~7 % from 50 to 100.  The 5 m level caps its inflow at twice its rain:
+#: its window took 46x its rain in inflow, so 98 % of its particles spawned
+#: at the crossings and its slopes stayed the 19 m bicubic (holes >0.5 m
+#: 5.4 -> 1.6 per 10^4 with the cap, axis/diagonal power at 2-4 cells 2.5 ->
+#: 0.9, 6-cell high-pass 6.4 -> 8.0 m against the plain's 5.8)
+GAME_LEVELS = (
+    ZoomLevel(512, 2, 150, size=1024),
+    ZoomLevel(2048, 1, 60, tile=2048, size=2048, inflow_cap=2.0),
+)
+
 
 @dataclass(frozen=True)
 class Geometry:
+    """Where a level's arrays sit on the face.
+
+    A coarse-cell level (``size`` 0, every level baked before game-scale
+    levels): the product is coarse cells ``[ci0, ci0 + cells)`` (and the same
+    along j) at ``R``; the work array adds ``guard`` coarse cells and a
+    one-coarse-cell halo on every side.
+
+    A fine-cell level (``size`` > 0): the product is face fine cells ``[fi0,
+    fi0 + size) x [fj0, fj0 + size)``; the work array adds ``pad`` fine cells
+    on every side.  ``ci0`` / ``cj0`` are then the coarse cells holding the
+    product's first fine cell, ``cells`` its side in coarse cells rounded up,
+    ``guard`` 0 (information only: nothing reads them for such a level).
+
+    Either way, work-array index ``i`` is face fine cell ``fine_origin[0] +
+    i``, the product is ``[p0, p0 + n)`` of the ``NE``-cell array, and
+    ``product_origin`` = ``fine_origin + p0``."""
+
     face: int
     ci0: int  # product origin, coarse cells
     cj0: int
     cells: int
     guard: int
     R: int
+    size: int = 0  # fine-cell level: product side, fine cells
+    fi0: int = 0  # fine-cell level: product origin, face fine cells
+    fj0: int = 0
+    pad: int = 0  # fine-cell level: work-array cells outside the product on every side
 
     @property
-    def win(self) -> Window:
+    def fine(self) -> bool:
+        return self.size > 0
+
+    @property
+    def win(self) -> Window | FineWindow:
+        if self.fine:
+            a0, b0 = self.fine_origin
+            return FineWindow(self.face, a0, b0, self.NE, self.R)
         g = self.guard
         return Window(self.face, self.ci0 - g, self.ci0 + self.cells + g, self.cj0 - g, self.cj0 + self.cells + g, self.R)
 
     @property
     def NE(self) -> int:
+        if self.fine:
+            return self.size + 2 * self.pad
         return (self.cells + 2 * self.guard + 2) * self.R
 
     @property
     def p0(self) -> int:
         """Work-array index of the product's first fine row / column."""
-        return (self.guard + 1) * self.R
+        return self.pad if self.fine else (self.guard + 1) * self.R
 
     @property
     def n(self) -> int:
-        return self.cells * self.R
+        return self.size if self.fine else self.cells * self.R
+
+    @property
+    def product_origin(self) -> tuple[int, int]:
+        """Face fine cell of the product's first row / column."""
+        if self.fine:
+            return self.fi0, self.fj0
+        return self.ci0 * self.R, self.cj0 * self.R
+
+    @property
+    def fine_origin(self) -> tuple[int, int]:
+        """Face fine cell of the work array's corner (index 0, 0)."""
+        a, b = self.product_origin
+        return a - self.p0, b - self.p0
+
+    @property
+    def corner(self) -> tuple[float, float]:
+        """Coarse coordinates of the work array's corner (``origin`` as
+        floats, fractional for a fine-cell level)."""
+        a, b = self.fine_origin
+        return a / self.R, b / self.R
 
     @property
     def origin(self) -> tuple[int, int]:
-        """Coarse coordinates of the work array's corner."""
+        """Coarse coordinates of the work array's corner (a coarse-cell level)."""
+        if self.fine:
+            raise ValueError("a fine-cell level's work array does not start on a coarse cell: use fine_origin / corner")
         return self.ci0 - self.guard - 1, self.cj0 - self.guard - 1
 
     def product(self) -> tuple[slice, slice]:
         return slice(self.p0, self.p0 + self.n), slice(self.p0, self.p0 + self.n)
 
+    def to_dict(self) -> dict:
+        """The fields as saved (``L{R}.json``, ``zoom.json``): a coarse-cell
+        level's without the fine-cell fields, as before they existed."""
+        d = asdict(self)
+        if not self.fine:
+            for k in ("size", "fi0", "fj0", "pad"):
+                d.pop(k)
+        return d
+
 
 def place(face: int, ci: int, cj: int, level: ZoomLevel, N: int) -> Geometry:
     """The level's region centred on coarse cell ``(ci, cj)`` of ``face``,
     shifted onto the face if it would cross an edge (a zoom stays on one
-    face: the planet's drainage it takes inflow from is read per face)."""
+    face: the planet's drainage it takes inflow from is read per face).
+
+    A fine-cell level (``level.size``) is centred on the corner ``(ci, cj)``
+    of the spot's cell, where an even-``cells`` level is centred, and kept a
+    coarse cell off the face's edges."""
+    if int(level.size) > 0:
+        R, s = int(level.R), int(level.size)
+        pad = fine_pad(level.margin)
+        lo = R + pad
+        hi = (int(N) - 1) * R - s - pad
+        if hi < lo:
+            raise ValueError(f"a {s}-fine-cell zoom level does not fit on a {N}-cell face at R={R}")
+        fi0 = min(max(int(ci) * R - s // 2, lo), hi)
+        fj0 = min(max(int(cj) * R - s // 2, lo), hi)
+        return Geometry(int(face), fi0 // R, fj0 // R, -(-s // R), 0, R, size=s, fi0=fi0, fj0=fj0, pad=pad)
     guard = max(1, math.ceil((level.margin + 2) / level.R))
     lo = guard + 2
     hi = int(N) - level.cells - guard - 2
@@ -192,6 +350,8 @@ def planet_inflow(root: Path, geo: Geometry, surface: np.ndarray) -> np.ndarray:
     ``flow_acc``, precip volume) carries into the work array: every coarse
     cell outside it whose D8 receiver is inside sends its whole
     accumulation, entering at the lowest cell next to the crossing."""
+    if geo.fine:
+        raise ValueError("a zoom's first level takes the planet's inflow in coarse cells: make it a coarse-cell level (size 0)")
     fd = np.load(Path(root) / "coarse" / f"flow_dir.f{geo.face}.npy").astype(np.int64)
     acc = np.load(Path(root) / "coarse" / f"flow_acc.f{geo.face}.npy").astype(np.float64)
     N = fd.shape[0]
@@ -221,8 +381,8 @@ def level_inflow(parent: LevelResult, parent_recv: np.ndarray, geo: Geometry, su
     f = geo.R // pg.R
     # parent cell centres in child work-array coordinates
     e = np.arange(NEp) + 0.5
-    ci_1 = ((pg.origin[0] + e / pg.R) - geo.origin[0]) * geo.R - 0.5
-    cj_1 = ((pg.origin[1] + e / pg.R) - geo.origin[1]) * geo.R - 0.5
+    ci_1 = ((pg.corner[0] + e / pg.R) - geo.corner[0]) * geo.R - 0.5
+    cj_1 = ((pg.corner[1] + e / pg.R) - geo.corner[1]) * geo.R - 0.5
     in_i = (ci_1 >= 1.0) & (ci_1 <= NEc - 2.0)
     in_j = (cj_1 >= 1.0) & (cj_1 <= NEc - 2.0)
     inside = (in_i[:, None] & in_j[None, :]).ravel()
@@ -242,9 +402,11 @@ def level_inflow(parent: LevelResult, parent_recv: np.ndarray, geo: Geometry, su
 # inputs of a level
 # --------------------------------------------------------------------------
 def _child_coords(geo: Geometry, pg: Geometry) -> tuple[np.ndarray, np.ndarray]:
+    # coarse coordinates (the corners are dyadic: exact in float64, and for a
+    # coarse-cell level the same numbers as its integer origin)
     e = np.arange(geo.NE) + 0.5
-    pi = ((geo.origin[0] + e / geo.R) - pg.origin[0]) * pg.R - 0.5
-    pj = ((geo.origin[1] + e / geo.R) - pg.origin[1]) * pg.R - 0.5
+    pi = ((geo.corner[0] + e / geo.R) - pg.corner[0]) * pg.R - 0.5
+    pj = ((geo.corner[1] + e / geo.R) - pg.corner[1]) * pg.R - 0.5
     lo = 1.0
     if pi.min() < lo or pj.min() < lo or pi.max() > pg.NE - 1 - lo or pj.max() > pg.NE - 1 - lo:
         raise ValueError(f"zoom level R={geo.R} is not inside its parent R={pg.R}: place the spot further from the face edge")
@@ -437,9 +599,21 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
     mask[active] = pk.MASK_ACTIVE
     src = job["src"]
     rain = np.where(active, arr["precip"], 0.0)
-    inflow = float(src[active].sum())
-    weight = (rain + np.where(active, src, 0.0)).astype(np.float32)
+    inflow = inflow_raw = float(src[active].sum())
     rain_total = float(rain.sum())
+    cap = float(level.inflow_cap)
+    if cap > 0.0 and rain_total > 0.0 and inflow > cap * rain_total:
+        # a particle erodes the same whatever water it stands for (its change
+        # scales with its volume over the spawn volume, 1 at birth), so where
+        # the inflow is many times the tile's rain nearly every particle
+        # spawns at a few crossings and the slopes go unworn: a 4.9 km 5 m
+        # level took 43x its rain in inflow and 3 % of its particles fell on
+        # its slopes.  The cap spawns the inflow as at most `cap` x the rain
+        # (its crossings keep their shares; the flux the finish routes keeps
+        # all of it)
+        src = src * (cap * rain_total / inflow)
+        inflow = cap * rain_total
+    weight = (rain + np.where(active, src, 0.0)).astype(np.float32)
     ppc = float(params.refine.particles_per_cell) * (min(1.0 + inflow / rain_total, MAX_INFLOW_PARTICLES) if rain_total > 0 else 1.0)
     unit = params.fine_grid().cell_size_m
     state = ErosionState.window(
@@ -474,6 +648,7 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
                 off_prev = off
     tot = max(sum(deaths.values()), 1)
     stats = {"core": [job["a"], job["b"], job["c"]], "active_cells": int(active.sum()), "inflow": inflow, "rain": rain_total,
+             **({"inflow_uncapped": inflow_raw} if inflow_raw != inflow else {}),
              "particles_per_cell": ppc, "particles": particles, "seconds": round(time.time() - t0, 1),
              "deaths_pct": {k: round(100.0 * v / tot, 1) for k, v in deaths.items() if v}}
     return {"height": state.height_m()[0], "sediment": state.sediment_m()[0], "discharge": state.discharge[0].copy(),
@@ -594,6 +769,9 @@ def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level
     face, ci, cj = spot
     N = params.coarse_grid().N
     geo = place(face, ci, cj, level, N)
+    if geo.fine and parent is not None and geo.p0 - int(level.margin) <= level.R // parent.geo.R + 2:
+        # the parent's inflow enters within about a parent cell of the border
+        raise ValueError(f"R={level.R}: a guard of {geo.p0} fine cells leaves no room between the inflow and the tiles' margin {level.margin}")
     lp = zoom_params(params, level.R, **(erosion or {}))
     gen = params.rng("refine", ZOOM_KEY, face, ci, cj, level.R)
     inp = level_inputs(root, lp, geo, level, parent, gen)
@@ -664,7 +842,7 @@ def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level
     prod = geo.product()
     lake = (ws - surface > float(params.hydro.lake_min_depth)) & ~inp["ocean"]
     stats = {
-        "R": geo.R, "cell_m": params.coarse_grid().cell_size_m / geo.R, "geometry": asdict(geo), "level": asdict(level), "tiles": tiles,
+        "R": geo.R, "cell_m": params.coarse_grid().cell_size_m / geo.R, "geometry": geo.to_dict(), "level": level_key(level), "tiles": tiles,
         "seconds": round(time.time() - t0, 1), "seconds_inputs": round(t_in, 1), "seconds_tiles": round(t_tiles, 1),
         "passes": len(passes), "workers": n_workers,
         "noise_max_m": round(inp["noise_max_m"], 1), "drift_max_m": round(float(np.abs(fd).max()), 1),
@@ -747,7 +925,7 @@ def level_from_planet(root: Path, params: WorldParams, spot: tuple[int, int, int
     inp = level_inputs(root, lp, geo, level, None, params.rng("refine", ZOOM_KEY, face, ci, cj, level.R))
     info = json.loads((pdir / "planet.json").read_text())
     R, NE = geo.R, geo.NE
-    a0, b0 = geo.origin[0] * R, geo.origin[1] * R
+    a0, b0 = geo.fine_origin
     if a0 < 0 or b0 < 0 or a0 + NE > N * R or b0 + NE > N * R:
         raise ValueError(f"zoom level R={R} at {spot} leaves face {face}")
     sl = (slice(a0, a0 + NE), slice(b0, b0 + NE))
@@ -764,7 +942,7 @@ def level_from_planet(root: Path, params: WorldParams, spot: tuple[int, int, int
     arrays = {"height": arr["height"].astype(np.float32), "sediment": arr["sediment"].astype(np.float32), "discharge": arr["discharge"].astype(np.float32),
               "momentum": momentum.astype(np.float32), "water_surface": ws.astype(np.float32), "flux": flux.astype(np.float32),
               "plain": inp["plain"].astype(np.float32), "ocean": ocean, "done": np.ones((NE, NE), bool)}
-    stats = {"R": R, "cell_m": params.coarse_grid().cell_size_m / R, "geometry": asdict(geo), "level": asdict(level), "tiles": [],
+    stats = {"R": R, "cell_m": params.coarse_grid().cell_size_m / R, "geometry": geo.to_dict(), "level": level_key(level), "tiles": [],
              "source": "planet", "planet": pdir.name, "planet_iterations": int(info["level"]["iterations"]),
              "seconds": round(time.time() - t0, 1), "inflow_total": float(inp["inflow"].sum()),
              "lake_share": round(float(lake[prod].mean()), 4), "lake_cells_product": int(lake[prod].sum()),
@@ -810,7 +988,7 @@ def run_zoom(root: str | Path, spot: tuple[int, int, int], levels=DEFAULT_LEVELS
         pdir = planet_dir(root, level.R) if parent is None and planet is not False else None
         if planet is True and parent is None and pdir is None:
             raise FileNotFoundError(f"no finished planet level at R={level.R} under {root / 'zoom'}")
-        key = {"spot": [face, ci, cj], "level": asdict(level), "erosion": erosion or {}, "kernel": pk.KERNEL_VERSION}
+        key = {"spot": [face, ci, cj], "level": level_key(level), "erosion": erosion or {}, "kernel": pk.KERNEL_VERSION}
         if pdir is not None:
             key["planet"] = [pdir.name, (pdir / "planet.json").stat().st_mtime_ns]
         meta = out / f"L{level.R}.json"
@@ -825,7 +1003,7 @@ def run_zoom(root: str | Path, spot: tuple[int, int, int], levels=DEFAULT_LEVELS
                 res = level_from_planet(root, params, (face, ci, cj), level, pdir)
             else:
                 if log is not None:
-                    log(f"R={level.R}: {level.cells} coarse cells, {level.iterations} iterations")
+                    log(f"R={level.R}: " + (f"{level.size} fine cells" if level.size else f"{level.cells} coarse cells") + f", {level.iterations} iterations")
                 res = run_level(root, params, (face, ci, cj), level, parent, log=log, erosion=erosion, workers=workers)
             res.stats["key"] = key
             save_level(res, out)
@@ -841,5 +1019,5 @@ def run_zoom(root: str | Path, spot: tuple[int, int, int], levels=DEFAULT_LEVELS
     return out
 
 
-__all__ = ["ZoomLevel", "DEFAULT_LEVELS", "Geometry", "LevelResult", "place", "drainage", "planet_inflow", "level_inflow",
+__all__ = ["ZoomLevel", "DEFAULT_LEVELS", "GAME_LEVELS", "Geometry", "LevelResult", "place", "fine_pad", "level_key", "parse_level", "drainage", "planet_inflow", "level_inflow",
            "level_inputs", "tile_starts", "tile_passes", "prepare_tile", "erode_tile", "write_tile", "pool_size", "run_level", "planet_dir", "level_from_planet", "run_zoom", "spot_of_lonlat", "lonlat_of_spot", "save_level", "load_level"]

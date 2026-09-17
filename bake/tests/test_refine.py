@@ -997,6 +997,12 @@ def test_zoom_discharge_scales_are_areas_and_coarse_levels_have_their_own_profil
     assert z128.erosion.slope_limit_erode == ZOOM_EROSION["slope_limit_erode"]
     assert zoom_params(p, 8, window_lakes=True).erosion.window_lakes          # a call's override still wins
     assert all(z.refine.hardness_smooth_cells > 0 and z.refine.hardness_max < 1 for z in (z8, z32, z128))
+    # the game-scale levels (19 m, 5 m) take the gentler talus pass, 76 m and up keep the profile's
+    from globe.refine.zoom import FINE_THERMAL_RATE
+    z512, z2048 = (zoom_params(p, R) for R in (512, 2048))
+    assert z512.erosion.thermal_rate == z2048.erosion.thermal_rate == FINE_THERMAL_RATE
+    assert all(z.erosion.thermal_rate == ZOOM_EROSION["thermal_rate"] for z in (z8, z32, z128))
+    assert z2048.erosion.disc_saturation_cells == ZOOM_EROSION["disc_saturation_cells"] and z2048.erosion.slope_limit_erode == ZOOM_EROSION["slope_limit_erode"]
 
 
 def test_smooth_drift_removes_the_coarse_scale_without_the_grid():

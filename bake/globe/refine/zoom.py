@@ -119,6 +119,23 @@ COARSE_ZOOM_EROSION = {
 WIDE_SLOPE_LIMIT_CELL_M = 150.0
 WIDE_SLOPE_LIMIT_ERODE = 0.5
 
+#: the talus pass's rate where a cell is below FINE_THERMAL_CELL_M (the
+#: game-scale levels: 19 m and 5 m on the earth preset).  The pass moves
+#: ``0.5 rate`` of each neighbour's excess over the talus line at once, from
+#: every cell together; at 0.8 it overshoots, and the overshoot grows into a
+#: one-to-two-cell stair on every slope past the talus -- half the land at 19 m
+#: (slopes p50 35 deg; at 76 m p90 42 deg and the stair was mild).  On a 19 m
+#: mountain level (earth-v9 peaks, 512 fine cells, 60 iterations): straight
+#: axis-aligned risers per 10^4 land cells 117 / 5.1 / 0.7 / 0.7 / 1.6 at rates
+#: 0.8 / 0.6 / 0.5 / 0.4 / 0.2, axis/diagonal spectral power at 2-4 cells
+#: 21.2 / 3.4 / 0.96 / 0.83 / 1.0; slopes over 45 deg 6.9 / 14 / 17 / 20 / 27 %,
+#: relief and drainage density within a few per cent.  0.4 keeps a margin
+#: below the onset (the stair grew with iterations at 0.8: 38 -> 121 risers
+#: from 25 to 100).  A talus of 1.2 (50 deg) also removed it, with 34 % over
+#: 45 deg; the erosion limit off was a runaway (holes >1 m 5.7 -> 145 per 10^4).
+FINE_THERMAL_CELL_M = 40.0
+FINE_THERMAL_RATE = 0.4
+
 #: refine overrides for a zoom window: detail noise at 3x the stage's
 #: amplitude -- the upsample has no relief below a parent cell, and
 #: McDonald's erosion organises noise into branching valleys (on a mountain
@@ -142,7 +159,8 @@ def zoom_params(params, R: int, **erosion):
     zoom erosion profile with its discharge scales in area
     (:data:`DISC_SATURATION_KM2`), the coarse-level overrides where a cell is
     at least :data:`COARSE_ZOOM_CELL_M`, the wider erosion limit where it is
-    at least :data:`WIDE_SLOPE_LIMIT_CELL_M`, and the refine overrides; then any
+    at least :data:`WIDE_SLOPE_LIMIT_CELL_M`, the gentler talus pass where it
+    is below :data:`FINE_THERMAL_CELL_M`, and the refine overrides; then any
     ``erosion`` given."""
     eo = dict(ZOOM_EROSION)
     cell_m = float(params.world.cell_size_m) / float(R)
@@ -153,6 +171,8 @@ def zoom_params(params, R: int, **erosion):
         eo["slope_limit_erode"] = WIDE_SLOPE_LIMIT_ERODE
     if cell_m >= COARSE_ZOOM_CELL_M:
         eo.update(COARSE_ZOOM_EROSION)
+    if cell_m < FINE_THERMAL_CELL_M:
+        eo["thermal_rate"] = FINE_THERMAL_RATE
     eo.setdefault("window_lake_evap", float(params.hydro.lake_evap) / float(R * R))
     eo.update(erosion)
     if "max_steps" in eo:
@@ -207,5 +227,5 @@ def smooth_drift(delta: np.ndarray, cells: np.ndarray, R: int, tol: float = 0.05
     return F
 
 
-__all__ = ["ZOOM_EROSION", "ZOOM_REFINE", "COARSE_ZOOM_EROSION", "COARSE_ZOOM_CELL_M", "WIDE_SLOPE_LIMIT_CELL_M", "WIDE_SLOPE_LIMIT_ERODE", "DISC_SATURATION_KM2", "MOMENTUM_SATURATION_KM2",
+__all__ = ["ZOOM_EROSION", "ZOOM_REFINE", "COARSE_ZOOM_EROSION", "COARSE_ZOOM_CELL_M", "WIDE_SLOPE_LIMIT_CELL_M", "WIDE_SLOPE_LIMIT_ERODE", "FINE_THERMAL_CELL_M", "FINE_THERMAL_RATE", "DISC_SATURATION_KM2", "MOMENTUM_SATURATION_KM2",
            "drain_noise", "smooth_drift", "zoom_params"]

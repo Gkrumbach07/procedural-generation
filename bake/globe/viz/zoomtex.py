@@ -7,9 +7,19 @@ One image per level of a listed zoom, ``viewer/zoomtex/{name}_L{R}.js``
 ``{name}_L{R}.json`` that :func:`globe.zoom.index.scan` reads as the
 level's ``tex`` record, so listing the zooms never opens an npz.
 
-The image is the whole work array, ``NE`` pixels wide and ``2 NE`` tall;
-pixel ``(x, y)`` is array cell ``(i, j) = (x, y)`` (row ``i`` along the
-face's u axis), its fine face cell ``(ci0 R - p0 + i, cj0 R - p0 + j)``.
+The image is the level's product (its eroded core) and :data:`CROP` cells
+of the work array around it (fewer where the array has fewer), ``NE``
+pixels wide and ``2 NE`` tall; pixel ``(x, y)`` is work-array cell ``(x0 +
+x, x0 + y)`` (row along the face's u axis), its fine face cell ``(ci0 R -
+p0 + x, cj0 R - p0 + y)``, the core pixels ``[p0, p0 + n)``.  ``ci0`` /
+``cj0`` are the product's origin in coarse cells -- an integer for a level
+placed in coarse cells, a dyadic fraction (``fi0 / R``, exact) for one
+placed in fine cells -- and ``fi0`` / ``fj0`` the same in fine cells.
+Until the crop the image was the whole work array (``x0`` 0, ``NE`` and
+``p0`` the array's): at 5 m that is ~10,000 cells a side for a 2,048-cell
+core.  WebGL textures stop at ``MAX_TEXTURE_SIZE`` (8192 here): a core over
+:data:`MAX_TEX` / 2 is not written.
+
 The top half is the ground as the detail tiles carry it
 (:func:`detail.tile_image`): ``R, G`` the 16-bit code of the surface
 (height + sediment) on ``(h0, h1)``, ``B`` the signed lake depth byte over
@@ -30,6 +40,14 @@ from pathlib import Path
 import numpy as np
 
 LAKE_RANGE = 200.0
+#: cells of the work array kept around the product (the viewer blends a level
+#: in over its core's last 16 cells and reads a cell's neighbours)
+CROP = 32
+#: the tallest texture the viewer takes (2 NE <= MAX_TEX)
+MAX_TEX = 8192
+#: the record's format: 2 = cropped (``x0``, ``fi0``, ``array_NE``); a
+#: sidecar of another version is stale, so the next ``index.write`` crops it
+TEX_VERSION = 2
 #: rivers from this percentile of the product's land flux, full at the second
 RIVER_MIN_PCT, RIVER_FULL_PCT = 97.0, 99.9
 
@@ -49,15 +67,16 @@ def _fresh(path: Path, src: Path) -> bool:
 
 def record(viewer: Path, name: str, R: int, npz: Path) -> dict | None:
     """The level's ``tex`` record from its sidecar, or None when there is no
-    texture or it is older than the level's npz (cheap: two stats and a small
-    read)."""
+    texture, it is older than the level's npz or of another
+    :data:`TEX_VERSION` (cheap: two stats and a small read)."""
     js, side = paths(viewer, name, R)
     if not (_fresh(js, npz) and _fresh(side, npz)):
         return None
     try:
-        return json.loads(side.read_text())
+        rec = json.loads(side.read_text())
     except (OSError, ValueError):
         return None
+    return rec if rec.get("version") == TEX_VERSION else None
 
 
 def river_scale(surf: np.ndarray, ocean: np.ndarray, flux: np.ndarray) -> dict:
@@ -75,51 +94,82 @@ def river_scale(surf: np.ndarray, ocean: np.ndarray, flux: np.ndarray) -> dict:
     return {"lo": lo, "hi": hi, "river_min": rmin, "river_full": max(float(np.percentile(q, RIVER_FULL_PCT)), rmin * 1.001)}
 
 
-def level_image(a: dict, geo: dict, lake_range: float = LAKE_RANGE) -> tuple[np.ndarray, dict]:
+def crop_window(NE: int, p0: int, n: int, crop: int = CROP, max_tex: int = MAX_TEX) -> tuple[int, int]:
+    """``(x0, side)``: the square of a work array (``NE`` cells, product
+    ``[p0, p0 + n)``) a level's texture covers -- the product and up to
+    ``crop`` cells around it, as many as the array has on its narrower side
+    and as ``2 side <= max_tex`` allows.  ValueError when the product alone
+    is too tall."""
+    if 2 * n > max_tex:
+        raise ValueError(f"a {n}-cell core makes a texture taller than {max_tex}")
+    m = max(0, min(int(crop), p0, NE - p0 - n, (max_tex // 2 - n) // 2))
+    return p0 - m, n + 2 * m
+
+
+def level_image(a: dict, geo: dict, lake_range: float = LAKE_RANGE, crop: int = CROP) -> tuple[np.ndarray, dict]:
     """The ``(2 NE, NE, 4)`` RGBA image of a level's work arrays ``a`` (as
-    :func:`bake.load_level` or the npz holds them) and its scales ``{h0, h1,
-    lake_range, river_min_byte, river_span_byte}``."""
+    :func:`bake.load_level` or the npz holds them) over :func:`crop_window`,
+    and its scales ``{h0, h1, lake_range, river_min_byte, river_span_byte}``
+    and window ``{x0, NE, p0, n}`` (``NE`` the image's side, ``p0`` its core's
+    first pixel, ``x0`` the work-array cell of its pixel 0).  Every byte is
+    what the whole array would give there (the filters see a few cells past
+    the crop), except the height codes, whose range is the crop's own."""
+    from ..zoom.bake import Geometry
     from . import detail as dt
 
-    R, g = int(geo["R"]), int(geo["guard"])
-    NE, p0, n = (int(geo["cells"]) + 2 * g + 2) * R, (g + 1) * R, int(geo["cells"]) * R
-    surf = np.asarray(a["height"], np.float32) + np.asarray(a["sediment"], np.float32)
-    if surf.shape != (NE, NE):
-        raise ValueError(f"level arrays {surf.shape} do not match the geometry's {NE}^2")
-    ocean = np.asarray(a["ocean"]) > 0
-    ws = np.maximum(np.asarray(a["water_surface"], np.float32), surf)
-    water = np.zeros((NE, NE), np.uint8)
+    g = Geometry(**geo)
+    NEw, p0w, n = g.NE, g.p0, g.n
+    shape = np.shape(a["height"])
+    if tuple(shape) != (NEw, NEw):
+        raise ValueError(f"level arrays {shape} do not match the geometry's {NEw}^2")
+    x0, NE = crop_window(NEw, p0w, n, crop)
+    p0 = p0w - x0
+    ctx = dt.RIVER_RADIUS + 3                      # widest stencil below: the river discs
+    e0, e1 = max(x0 - ctx, 0), min(x0 + NE + ctx, NEw)
+    k = slice(x0 - e0, x0 - e0 + NE)               # the crop within the context slice
+    ex = slice(e0, e1)
+    surf = np.asarray(a["height"][ex, ex], np.float32) + np.asarray(a["sediment"][ex, ex], np.float32)
+    ocean = np.asarray(a["ocean"][ex, ex]) > 0
+    ws = np.maximum(np.asarray(a["water_surface"][ex, ex], np.float32), surf)
+    water = np.zeros(surf.shape, np.uint8)
     water[(ws - surf > 0.5) & ~ocean] = dt.WATER_LAKE
     water[ocean] = dt.WATER_OCEAN
 
     # the ground: as detail.tile_image
-    h0, h1 = dt.height_grid(float(surf.min()), float(surf.max()))
-    h = dt.encode_height_on(surf, h0, h1)
-    ld = dt.face_lake_depth(surf, ws, water, lake_range)
+    sk = surf[k, k]
+    h0, h1 = dt.height_grid(float(sk.min()), float(sk.max()))
+    h = dt.encode_height_on(sk, h0, h1)
+    ld = dt.face_lake_depth(surf, ws, water, lake_range)[k, k]
     b = np.clip(np.round(255.0 * (ld + lake_range) / (2.0 * lake_range)), 0, 255).astype(np.uint8)
-    om = dt.face_smooth_mask(water == dt.WATER_OCEAN)
+    om = dt.face_smooth_mask(water == dt.WATER_OCEAN)[k, k]
     alpha = (255 - np.clip(np.round(255.0 * om), 0, 255)).astype(np.uint8)
     ground = np.stack([(h >> 8).astype(np.uint8), (h & 255).astype(np.uint8), b, alpha], axis=-1)
-    del h, ld, om, b, alpha
+    del h, ld, om, b, alpha, ws, water
 
     # the water: the flood-tree flux, widened, on the product's land scale
-    flux = np.asarray(a["flux"], np.float32)
-    c = slice(p0, p0 + n)
+    flux = np.asarray(a["flux"][ex, ex], np.float32)
+    c = slice(p0w - e0, p0w - e0 + n)
     scale = river_scale(surf[c, c], ocean[c, c], flux[c, c])
     q_lo, q_hi = scale["lo"], scale["hi"]
-    q = np.asarray(dt.widen_rivers(flux, scale), np.float64)
+    q = np.asarray(dt.widen_rivers(flux, scale)[k, k], np.float64)
     t = np.log(np.maximum(q, q_lo) / q_lo) / math.log(max(q_hi / q_lo, 1.0000001))
     qb = np.where(q > q_lo, np.clip(np.round(255.0 * t), 1, 255), 0).astype(np.uint8)
     del q, t
     zero = np.zeros_like(qb)
     wimg = np.stack([qb, zero, zero, np.full_like(qb, 255)], axis=-1)
-    img = np.ascontiguousarray(np.concatenate([ground, wimg], axis=1).transpose(1, 0, 2))   # cell (i, j): ground at (x, y) = (i, j), water at (i, NE + j)
+    img = np.ascontiguousarray(np.concatenate([ground, wimg], axis=1).transpose(1, 0, 2))   # cell (x0 + x, x0 + y): ground at (x, y), water at (x, NE + y)
 
     byte = lambda v: int(round(255.0 * math.log(max(v, q_lo) / q_lo) / math.log(q_hi / q_lo)))
     scales = {"h0": h0, "h1": h1, "lake_range": float(lake_range),
               "river_min_byte": int(np.clip(byte(scale["river_min"]), 1, 254)),
-              "river_span_byte": max(byte(scale["river_full"]) - byte(scale["river_min"]), 8)}
+              "river_span_byte": max(byte(scale["river_full"]) - byte(scale["river_min"]), 8),
+              "x0": int(x0), "NE": int(NE), "p0": int(p0), "n": int(n)}
     return img, scales
+
+
+def _coarse(fine: int, R: int):
+    """Fine cells as coarse cells: an int when whole, else the exact float."""
+    return fine // R if fine % R == 0 else fine / R
 
 
 def _replace(path: Path, text: str) -> None:
@@ -149,6 +199,8 @@ def write_level(viewer: Path, name: str, zdir: Path, R: int, N: int, cell_m: flo
     if geo is None:
         raise ValueError(f"no geometry for {npz}")
     cell_m = stats.get("cell_m", cell_m)
+    from ..zoom.bake import Geometry
+
     keys = ("height", "sediment", "water_surface", "flux", "ocean")
     with np.load(npz) as z:
         a = {k: z[k] for k in keys}
@@ -158,9 +210,13 @@ def write_level(viewer: Path, name: str, zdir: Path, R: int, N: int, cell_m: flo
     b64 = dt.webp_rgba_b64(img)
     js, side = paths(viewer, name, R)
     js.parent.mkdir(parents=True, exist_ok=True)
-    g, Rg = int(geo["guard"]), int(geo["R"])
-    rec = {"file": f"zoomtex/{js.name}", "face": int(geo["face"]), "N": int(N), "R": Rg, "ci0": int(geo["ci0"]), "cj0": int(geo["cj0"]),
-           "cells": int(geo["cells"]), "guard": g, "NE": int(img.shape[1]), "p0": (g + 1) * Rg, "n": int(geo["cells"]) * Rg,
+    gm = Geometry(**geo)
+    Rg = gm.R
+    fi0, fj0 = gm.product_origin
+    assert int(img.shape[1]) == scales["NE"] and scales["n"] == gm.n
+    # ci0 R - p0 is the face fine cell of pixel 0 (the viewer's offset), p0 the core's first pixel
+    rec = {"file": f"zoomtex/{js.name}", "version": TEX_VERSION, "face": gm.face, "N": int(N), "R": Rg, "ci0": _coarse(fi0, Rg), "cj0": _coarse(fj0, Rg),
+           "cells": gm.cells, "guard": gm.guard, "fi0": int(fi0), "fj0": int(fj0), "array_NE": gm.NE,
            **scales, "cell_m": None if cell_m is None else float(cell_m)}
     _replace(js, 'GLOBE_VIEWER.zoomTex("%s", %d, "%s");\n' % (name, Rg, b64))
     _replace(side, json.dumps(rec, indent=1))
@@ -170,4 +226,4 @@ def write_level(viewer: Path, name: str, zdir: Path, R: int, N: int, cell_m: flo
     return rec
 
 
-__all__ = ["LAKE_RANGE", "RIVER_MIN_PCT", "RIVER_FULL_PCT", "paths", "record", "river_scale", "level_image", "write_level"]
+__all__ = ["LAKE_RANGE", "CROP", "MAX_TEX", "TEX_VERSION", "RIVER_MIN_PCT", "RIVER_FULL_PCT", "paths", "record", "river_scale", "crop_window", "level_image", "write_level"]

@@ -7,9 +7,14 @@ the globe viewer's zoom list.
     python scripts/zoom_bake.py --world worlds/earth-v9 --lat -12.5 --lon 131.2
     python scripts/zoom_bake.py --world worlds/earth-v9 --cell 5 239 913 --shot
     python scripts/zoom_bake.py --world worlds/earth-v9 --cell 5 239 913 --levels 8:48:200 32:16:400 128:16:150:1024
+    python scripts/zoom_bake.py --world worlds/earth-v9 --cell 5 212 902 --name peaks_game --game
 
-``--levels R:cells:iterations[:tile[:margin]]`` replaces the default
-levels.  Output: ``<world>/zoom/<name>/`` (``L{R}.npz`` / ``.json`` /
+``--game`` chains the game-scale levels (19 m, 4.8 m) below them.
+``--levels R:cells:iterations[:tile[:margin]][:name=value]`` replaces the default
+levels; ``cells`` given as a fraction of a coarse cell (``2048:0.5:100``)
+or in fine cells (``2048:1024f:100``) places that level in fine cells, with
+a guard of a few hundred fine cells instead of whole coarse cells (the
+game-scale levels: 19 m and 5 m on the earth preset).  Output: ``<world>/zoom/<name>/`` (``L{R}.npz`` / ``.json`` /
 ``.html`` per level, ``view.html`` = the finest, ``zoom.json``), and
 ``<world>/viewer/zooms.js`` so the globe viewer marks it.
 """
@@ -33,7 +38,8 @@ def main(argv=None) -> int:
     where.add_argument("--lat", type=float, help="latitude of the spot (with --lon)")
     ap.add_argument("--lon", type=float)
     ap.add_argument("--name", default=None, help="directory under <world>/zoom (default f<face>_<i>_<j>)")
-    ap.add_argument("--levels", nargs="*", default=None, help="R:cells:iterations[:tile[:margin]] per level, coarse to fine")
+    ap.add_argument("--levels", nargs="*", default=None, help="R:cells:iterations[:tile[:margin]] per level, coarse to fine; cells as a fraction (0.5) or fine cells (1024f) places a level in fine cells")
+    ap.add_argument("--game", action="store_true", help="chain the game-scale levels (19 m, 4.8 m; globe.zoom.bake.GAME_LEVELS) below the levels")
     ap.add_argument("--erosion", nargs="*", default=[], help="erosion overrides k=v on top of the zoom profile")
     ap.add_argument("--threads", type=int, default=0, help="numba threads of this process (default all)")
     ap.add_argument("--workers", type=int, default=0, help="tile worker processes per pass (default one per tile, up to one per core)")
@@ -47,7 +53,7 @@ def main(argv=None) -> int:
     from globe.config import WorldParams
     from globe.io.world_store import WorldStore
     from globe.zoom import index
-    from globe.zoom.bake import DEFAULT_LEVELS, ZoomLevel, run_zoom, spot_of_lonlat
+    from globe.zoom.bake import DEFAULT_LEVELS, GAME_LEVELS, parse_level, run_zoom, spot_of_lonlat
 
     if a.threads > 0:
         numba.set_num_threads(min(a.threads, numba.config.NUMBA_NUM_THREADS))
@@ -61,11 +67,9 @@ def main(argv=None) -> int:
         spot = spot_of_lonlat(params, a.lat, a.lon)
     levels = DEFAULT_LEVELS
     if a.levels:
-        levels = []
-        for s in a.levels:
-            v = [int(x) for x in s.split(":")]
-            levels.append(ZoomLevel(*v))
-        levels = tuple(levels)
+        levels = tuple(parse_level(s) for s in a.levels)
+    if a.game:
+        levels = tuple(levels) + GAME_LEVELS
     erosion = {}
     for kv in a.erosion:
         k, _, v = kv.partition("=")

@@ -261,6 +261,222 @@ def test_zoom_pages_and_viewer_list(world, zoom):
 
 
 # --------------------------------------------------------------------------
+# levels placed in fine cells (game-scale levels: Geometry.size / pad)
+# --------------------------------------------------------------------------
+#: a level of 1.5 coarse cells at R = 32 with a 12-cell guard, below LEVELS
+FINE = zb.ZoomLevel(32, 2, 4, tile=24, margin=4, hold_every=2, hold_scale=1.0, size=48)
+
+
+def test_fine_cell_geometry_and_level_specs():
+    """A level with ``size`` is placed in fine cells: its product is ``size``
+    fine cells centred on the spot's corner, its guard ``fine_pad(margin)``
+    fine cells, and every work-array index is one face fine cell; a
+    coarse-cell level's geometry, saved fields and resume key are what they
+    were before fine cells existed; ``--levels`` specs parse both."""
+    N = 1024
+    lv = zb.ZoomLevel(2048, 1, 100, size=1024)
+    g = zb.place(5, 212, 902, lv, N)
+    pad = zb.fine_pad(lv.margin)
+    assert g.fine and (g.size, g.pad, g.p0, g.n, g.NE) == (1024, pad, pad, 1024, 1024 + 2 * pad)
+    assert g.product_origin == (212 * 2048 - 512, 902 * 2048 - 512)
+    assert (g.ci0, g.cj0, g.cells, g.guard) == (211, 901, 1, 0)
+    assert g.fine_origin == (g.fi0 - pad, g.fj0 - pad) and g.corner == ((g.fi0 - pad) / 2048, (g.fj0 - pad) / 2048)
+    assert g.win.fine_ext() == (g.fi0 - pad, g.fi0 - pad + g.NE, g.fj0 - pad, g.fj0 - pad + g.NE) and g.win.NE == g.NE
+    with pytest.raises(ValueError):
+        g.origin
+    assert zb.Geometry(**g.to_dict()) == g
+    # the tiles' windows fit the work array (prepare_tile's bounds), and cover the product
+    starts, c = zb.tile_starts(g.p0, g.n, 768)
+    for a in starts:
+        assert a - lv.margin >= 1 and a + c + lv.margin <= g.NE - 1
+    assert starts[0] == g.p0 and starts[-1] + c == g.p0 + g.n
+    # shifted onto the face near an edge, never within a coarse cell of it
+    e = zb.place(0, 0, N - 1, lv, N)
+    assert e.fine_origin[0] >= lv.R and e.fine_origin[1] + e.NE <= (N - 1) * lv.R
+
+    # coarse-cell levels: unchanged
+    for lvc in zb.DEFAULT_LEVELS:
+        gc = zb.place(5, 212, 902, lvc, N)
+        guard = max(1, -(-(lvc.margin + 2) // lvc.R))
+        assert not gc.fine and gc.to_dict() == {"face": 5, "ci0": 212 - lvc.cells // 2, "cj0": 902 - lvc.cells // 2, "cells": lvc.cells, "guard": guard, "R": lvc.R}
+        assert (gc.NE, gc.p0, gc.n) == ((lvc.cells + 2 * guard + 2) * lvc.R, (guard + 1) * lvc.R, lvc.cells * lvc.R)
+        assert gc.corner == gc.origin and gc.fine_origin == (gc.origin[0] * lvc.R, gc.origin[1] * lvc.R)
+        assert "size" not in zb.level_key(lvc)
+    assert zb.level_key(lv)["size"] == 1024
+
+    assert zb.parse_level("128:8:150") == zb.ZoomLevel(128, 8, 150)
+    assert zb.parse_level("2048:0.5:100") == zb.ZoomLevel(2048, 1, 100, size=1024)
+    assert zb.parse_level("512:1024f:200:512:32") == zb.ZoomLevel(512, 2, 200, 512, 32, size=1024)
+    with pytest.raises(ValueError):
+        zb.parse_level("512:0.3:10")
+    assert zb.parse_level("2048:2048f:60:2048:64:inflow_cap=2") == zb.GAME_LEVELS[1]
+    assert "inflow_cap" not in zb.level_key(zb.DEFAULT_LEVELS[0]) and zb.level_key(zb.GAME_LEVELS[1])["inflow_cap"] == 2.0
+
+    # the game levels below the default ones: each product inside its parent's (face fine cells), and
+    # every level's texture within the viewer's limit
+    from globe.viz import zoomtex
+
+    chain = [zb.place(5, 212, 902, lvc, N) for lvc in zb.DEFAULT_LEVELS + zb.GAME_LEVELS]
+    for gp, gc in zip(chain, chain[1:]):
+        k = gc.R // gp.R
+        a, b = gp.product_origin
+        assert a * k <= gc.product_origin[0] and gc.product_origin[0] + gc.n <= (a + gp.n) * k
+        assert b * k <= gc.product_origin[1] and gc.product_origin[1] + gc.n <= (b + gp.n) * k
+        zb._child_coords(gc, gp)                                  # inside the parent's work array
+    for gc in chain:
+        x0, side = zoomtex.crop_window(gc.NE, gc.p0, gc.n)
+        assert 2 * side <= zoomtex.MAX_TEX and side == gc.n + 2 * zoomtex.CROP
+
+
+def test_child_coordinates_follow_the_face_across_fine_and_coarse_levels():
+    """``_child_coords``: a child's array cell and the parent coordinate it
+    samples are the same point of the face, whether either is placed in
+    coarse or in fine cells."""
+    N = 256
+    pairs = [
+        (zb.ZoomLevel(32, 8, 1), zb.ZoomLevel(128, 2, 1)),                   # coarse -> coarse
+        (zb.ZoomLevel(128, 2, 1), zb.ZoomLevel(512, 1, 1, size=384)),        # coarse -> fine, off the coarse grid
+        (zb.ZoomLevel(512, 1, 1, size=384), zb.ZoomLevel(2048, 1, 1, size=1000)),   # fine -> fine
+    ]
+    for lp, lc in pairs:
+        gp, gc = zb.place(3, 100, 57, lp, N), zb.place(3, 100, 57, lc, N)
+        I, J = zb._child_coords(gc, gp)
+        fo_c, fo_p = gc.fine_origin, gp.fine_origin
+        for k in (0, gc.p0, gc.NE // 2, gc.NE - 1):
+            u = (fo_c[0] + k + 0.5) / (N * gc.R)             # the child cell's centre, as a face coordinate
+            v = (fo_c[1] + k + 0.5) / (N * gc.R)
+            assert I[k, 0] == pytest.approx(u * N * gp.R - fo_p[0] - 0.5, abs=1e-9)
+            assert J[0, k] == pytest.approx(v * N * gp.R - fo_p[1] - 0.5, abs=1e-9)
+        # the child's product lies in the parent's
+        pr = gc.product()[0]
+        assert I[pr.start, 0] >= gp.p0 - 0.5 and I[pr.stop - 1, 0] <= gp.p0 + gp.n - 0.5
+
+
+def test_inflow_cap_lets_the_rain_spawn_on_the_slopes():
+    """``ZoomLevel.inflow_cap``: a tile whose inflow is 100x its rain spawns
+    nearly every particle at the crossing and leaves its slopes unworn; capped
+    at 2x the rain, the inflow keeps its crossing but the rain's particles
+    reach the slopes (many more cells change away from the inflow's path),
+    the particle budget is the same, and the stats keep the uncapped inflow."""
+    from globe.config import WorldParams
+    from globe.refine.zoom import zoom_params
+
+    params = zoom_params(WorldParams.tiny_world(), 8)
+    n = 42
+    i, j = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    height = (2.0 * i + 0.3 * np.sin(j * 0.9) + 0.2 * np.cos(i * 1.3 + j * 0.4)).astype(np.float64)   # falls towards i = 0
+    inwin = np.zeros((n, n), bool)
+    inwin[1:-1, 1:-1] = True
+    precip = np.full((n, n), 0.01)
+    src = np.zeros((n, n))
+    src[n - 3, 21] = 100.0 * float(precip[inwin].sum())            # a river entering at the top edge
+    metric = np.zeros((n, n, 3), np.float32)
+    metric[..., 0] = metric[..., 2] = 1.0
+    arrays = {"height": height, "sediment": np.zeros((n, n)), "discharge": np.zeros((n, n)), "momentum": np.zeros((n, n, 2)),
+              "hardness": np.full((n, n), 0.5), "precip": precip, "evap": np.ones((n, n)), "metric": metric, "metric_inv": metric.copy(), "plain": height.copy()}
+    job = {"a": 1, "b": 1, "c": n - 2, "sl": None, "land": inwin, "active": inwin, "inwin": inwin, "ocean": np.zeros((n, n), bool), "src": src, "arrays": arrays, "f": 1}
+    out = {}
+    for cap in (0.0, 2.0):
+        lv = zb.ZoomLevel(8, 1, 2, tile=n - 2, margin=0, hold_every=0, inflow_cap=cap)
+        out[cap] = zb.erode_tile(params, lv, 8, job, (1, 2, 3))
+    rain = out[0.0]["stats"]["rain"]
+    assert out[0.0]["stats"]["inflow"] == pytest.approx(100.0 * rain) and "inflow_uncapped" not in out[0.0]["stats"]
+    assert out[2.0]["stats"]["inflow"] == pytest.approx(2.0 * rain) and out[2.0]["stats"]["inflow_uncapped"] == pytest.approx(100.0 * rain)
+    assert out[2.0]["stats"]["particles_per_cell"] == out[0.0]["stats"]["particles_per_cell"]
+    off_path = inwin & (np.abs(j - 21) > 6)
+    moved = {cap: int((np.abs(o["height"] - height) > 1e-6)[off_path].sum()) for cap, o in out.items()}
+    assert moved[2.0] > 3 * max(moved[0.0], 1), moved
+
+
+@pytest.fixture(scope="module")
+def fine_zoom(world, zoom, tmp_path_factory):
+    """``LEVELS`` and ``FINE`` below them, in a world-like directory of its own
+    (so the zoom list of the other tests stays as it was): the coarse levels
+    resume from the ``zoom`` fixture's files."""
+    import shutil
+
+    base = tmp_path_factory.mktemp("fine") / "w"
+    out = base / "zoom" / "tf"
+    out.mkdir(parents=True)
+    for lv in LEVELS:
+        for ext in ("npz", "json"):
+            shutil.copy(zoom["out"] / f"L{lv.R}.{ext}", out / f"L{lv.R}.{ext}")
+    logs = []
+    zb.run_zoom(world["root"], zoom["spot"], LEVELS + (FINE,), out=out, name="tf", resume=True, planet=False, log=logs.append)
+    shutil.copy(world["root"] / "manifest.json", base / "manifest.json")
+    (base / "viewer").mkdir()
+    return {"out": out, "base": base, "logs": logs, "levels": [zb.load_level(out, lv.R) for lv in LEVELS + (FINE,)]}
+
+
+def test_fine_cell_level_chains_writes_its_product_and_is_held(world, zoom, fine_zoom):
+    assert sum("resumed" in m for m in fine_zoom["logs"]) == len(LEVELS)
+    parent, res = fine_zoom["levels"][-2], fine_zoom["levels"][-1]
+    g = res.geo
+    assert g.fine and (g.n, g.p0, g.NE) == (48, zb.fine_pad(FINE.margin), 48 + 2 * zb.fine_pad(FINE.margin))
+    json_geo = json.loads((fine_zoom["out"] / "L32.json").read_text())["geometry"]
+    assert zb.Geometry(**json_geo) == g
+    a = res.arrays
+    assert a["height"].shape == (g.NE, g.NE)
+    sl = g.product()
+    land = ~a["ocean"][sl]
+    assert land.any() and a["done"][sl][land].all()
+    outside = np.ones((g.NE, g.NE), bool)
+    outside[g.p0 - FINE.margin:g.p0 + g.n + FINE.margin, g.p0 - FINE.margin:g.p0 + g.n + FINE.margin] = False
+    assert not a["done"][outside].any()                       # nothing written beyond the tiles' windows
+    for k in ("height", "sediment", "discharge", "water_surface", "flux"):
+        assert np.isfinite(a[k]).all(), k
+    surf = a["height"] + a["sediment"]
+    assert np.all(a["water_surface"][sl][land] >= surf[sl][land] - 1e-3)
+    assert len(res.stats["tiles"]) == 4 and res.stats["inflow_total"] > 0.0
+    before, after = res.stats["held_p90_m"]
+    assert after <= before + 1e-6
+    # the level starts from its parent: the plain is the parent's surface at the same points of the face
+    from scipy.ndimage import map_coordinates
+
+    I, J = zb._child_coords(g, parent.geo)
+    plain = map_coordinates(parent.surface().astype(np.float64), [I, J], order=3, mode="nearest")
+    assert np.allclose(a["plain"], plain, atol=1e-3)
+    # the level's product is inside its parent's, in face fine cells
+    pf0, pn = parent.geo.product_origin[0] * (g.R // parent.geo.R), parent.geo.n * (g.R // parent.geo.R)
+    assert pf0 <= g.product_origin[0] and g.product_origin[0] + g.n <= pf0 + pn
+
+
+def test_fine_cell_level_texture_maps_its_core_onto_the_face(fine_zoom):
+    """``index.write`` writes the fine level's texture cropped to its core and
+    the guard it has (under ``CROP``); the record's ``ci0 R - p0`` is the face
+    fine cell of pixel 0 -- the viewer's offset -- with ``ci0`` fractional,
+    and the pixels are the work array's cells from ``x0``; the corners
+    outline the product in fine cells."""
+    from globe.viz import zoomtex
+
+    zooms = zindex.write(fine_zoom["base"], log=None)
+    z = zooms[0]
+    assert [lv["R"] for lv in z["levels"]] == [lv.R for lv in LEVELS + (FINE,)]
+    for lv, res in zip(z["levels"], fine_zoom["levels"]):
+        tex, g = lv["tex"], res.geo
+        m = min(zoomtex.CROP, g.p0)
+        assert (tex["NE"], tex["p0"], tex["n"], tex["x0"], tex["array_NE"]) == (g.n + 2 * m, m, g.n, g.p0 - m, g.NE)
+        assert tex["ci0"] * tex["R"] - tex["p0"] == g.fine_origin[0] + tex["x0"]
+        assert tex["cj0"] * tex["R"] - tex["p0"] == g.fine_origin[1] + tex["x0"]
+        assert (tex["fi0"], tex["fj0"]) == g.product_origin
+        img = _decode_tex(fine_zoom["base"] / "viewer" / tex["file"], "tf", g.R)
+        assert img.shape == (2 * tex["NE"], tex["NE"], 4)
+        surf = res.surface()
+        step = (tex["h1"] - tex["h0"]) / 65535.0
+        for x, y in ((tex["p0"], tex["p0"]), (tex["p0"] + g.n - 1, tex["p0"] + 3), (0, tex["NE"] - 1)):
+            code = int(img[y, x, 0]) * 256 + int(img[y, x, 1])
+            assert abs(tex["h0"] + code * step - float(surf[tex["x0"] + x, tex["x0"] + y])) <= step * 1.01
+    g = fine_zoom["levels"][-1].geo
+    assert isinstance(z["levels"][-1]["tex"]["ci0"], float) and z["levels"][-1]["tex"]["ci0"] == g.fi0 / g.R
+    from globe.cubesphere import to_sphere_v
+
+    N = world_N = json.loads((fine_zoom["base"] / "manifest.json").read_text())["N_c"]
+    p = to_sphere_v(np.array([g.face]), np.array([g.fi0 / g.R / N]), np.array([g.fj0 / g.R / N]))[0]
+    assert z["levels"][-1]["corners"][0] == pytest.approx([np.degrees(np.arcsin(p[2])), np.degrees(np.arctan2(p[1], p[0]))], abs=1e-4)
+    assert world_N == N
+
+
+# --------------------------------------------------------------------------
 # the planet at a zoom level's resolution (globe/zoom/planet.py)
 # --------------------------------------------------------------------------
 def test_hashed_noise_agrees_where_windows_overlap():
@@ -879,6 +1095,57 @@ def test_zoom_level_texture_encodes_ground_lakes_ocean_and_rivers(tmp_path):
     before = (js.stat().st_mtime_ns, side.stat().st_mtime_ns)
     assert zindex.write(root, log=None)[0]["levels"][0]["tex"] == tex
     assert (js.stat().st_mtime_ns, side.stat().st_mtime_ns) == before
+
+
+def test_zoom_texture_is_cropped_to_the_core_and_a_margin(tmp_path):
+    """A level with a whole coarse cell of guard at R = 64 and one placed in
+    fine cells: the texture keeps the core and ``CROP`` cells round it (as
+    many as the array has), every byte the whole-array image has there but
+    the height codes (their range is the crop's), and the record's offset
+    and core still place each pixel on its face cell.  ``crop_window`` keeps
+    ``2 NE`` within ``MAX_TEX`` and refuses a core that cannot fit."""
+    from globe.viz import zoomtex
+
+    rng = np.random.default_rng(5)
+    for geo in (zb.Geometry(face=2, ci0=10, cj0=12, cells=2, guard=1, R=64),
+                zb.Geometry(face=2, ci0=10, cj0=12, cells=1, guard=0, R=64, size=48, fi0=648, fj0=808, pad=40)):
+        NE, p0, n = geo.NE, geo.p0, geo.n
+        i, j = np.meshgrid(np.arange(NE), np.arange(NE), indexing="ij")
+        height = ((i - NE / 3) * 1.5 + 3.0 * np.sin(j / 7.0)).astype(np.float32)
+        sediment = rng.uniform(0.0, 0.4, (NE, NE)).astype(np.float32)
+        surf = height + sediment
+        ocean = surf < 0.0
+        ws = np.maximum(surf, 0.0)
+        pit = (np.abs(i - (p0 + n // 2)) <= 2) & (np.abs(j - (p0 + 3)) <= 2)
+        ws[pit] = surf[pit] + 4.0
+        flux = rng.uniform(0.5, 1.5, (NE, NE)).astype(np.float32)
+        for col in (p0 - 2, p0 + n // 2, p0 + n + 1):
+            flux[:, col] += 40.0 * np.arange(NE)
+        flux[ocean] = 0.0
+        a = {"height": height, "sediment": sediment, "water_surface": ws.astype(np.float32), "flux": flux, "ocean": ocean}
+        full, sc_full = zoomtex.level_image(a, geo.to_dict(), crop=10 ** 6)
+        img, sc = zoomtex.level_image(a, geo.to_dict())
+        m = min(zoomtex.CROP, p0)
+        assert (sc_full["x0"], sc_full["NE"], sc_full["p0"]) == (0, NE, p0)
+        assert (sc["x0"], sc["NE"], sc["p0"], sc["n"]) == (p0 - m, n + 2 * m, m, n) and img.shape == (2 * (n + 2 * m), n + 2 * m, 4)
+        x0, side = sc["x0"], sc["NE"]
+        top, bottom = img[:side], img[side:]
+        ftop, fbottom = full[:NE], full[NE:]
+        assert np.array_equal(top[:, :, 2:], ftop[x0:x0 + side, x0:x0 + side, 2:])        # lakes, ocean mask
+        assert np.array_equal(bottom, fbottom[x0:x0 + side, x0:x0 + side])                # rivers
+        assert (bottom[:, :, 0] > sc["river_min_byte"]).any()
+        code = top[:, :, 0].astype(np.int64) * 256 + top[:, :, 1]
+        step = (sc["h1"] - sc["h0"]) / 65535.0
+        assert np.abs(sc["h0"] + code * step - surf[x0:x0 + side, x0:x0 + side].T).max() <= step * 1.01
+        # the viewer's mapping: face fine cell of pixel x is ci0 R - p0 + x
+        fi0 = geo.product_origin[0]
+        ci0 = zoomtex._coarse(fi0, geo.R)
+        assert ci0 * geo.R - sc["p0"] == geo.fine_origin[0] + x0 and isinstance(ci0, int) == (not geo.fine)
+    assert zoomtex.crop_window(10000, 3000, 4000) == (2968, 4064)
+    assert zoomtex.crop_window(10000, 3000, 4090) == (2997, 4096)
+    assert zoomtex.crop_window(100, 10, 80) == (0, 100)
+    with pytest.raises(ValueError):
+        zoomtex.crop_window(10000, 3000, 4097)
 
 
 def test_zoom_textures_for_every_baked_level(world, zoom):
