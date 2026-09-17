@@ -14,6 +14,8 @@
     overscroll-behavior:none; touch-action:none; -webkit-user-select:none; user-select:none;
     -webkit-tap-highlight-color:transparent; -webkit-touch-callout:none; }
   #gl { position:fixed; inset:0; width:100%; height:100%; display:block; cursor:grab; touch-action:none; }
+  /* the zoom outlines and the scout marks are drawn on this, over the map */
+  #ovl { position:fixed; inset:0; width:100%; height:100%; display:block; pointer-events:none; z-index:2; }
   #gl.dragging { cursor:grabbing; }
   .panel { position:fixed; background:var(--panel); border:1px solid var(--line); border-radius:8px;
     backdrop-filter:blur(6px); padding:10px 12px; touch-action:pan-y; }
@@ -576,6 +578,19 @@ vec3 elevColor(float h, float w){
 // temperature at this height Tloc come back for the trees.
 vec3 hash3(vec2 q);
 float vnoise(vec2 q);
+vec4 bspline(float t);
+// A cubic B-spline read of one channel: the planet's shoreline texels are kilometres across,
+// and reading them bilinearly leaves a lake's edge as a staircase of squares.  The B-spline
+// is smooth in its slope as well as its value, so the shore curves
+float byteSmooth(sampler2D t, vec3 geo, int ch, vec3 p){
+  vec2 xy = atlasXY(p, geo);
+  vec2 i0 = floor(xy); vec2 f = xy - i0; ivec2 a = ivec2(i0);
+  vec4 wx = bspline(f.x), wy = bspline(f.y);
+  float v = 0.0;
+  for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++)
+    v += wx[i] * wy[j] * chan(texelFetch(t, a + ivec2(i - 1, j - 1), 0), ch);
+  return v * 255.0;
+}
 // the classes round the pixel, set once per pixel in main (setClasses).  The class texels are
 // big -- a planet texel is kilometres, a zoom level's up to 76 m -- and a class edge along
 // them is a staircase, so the satellite's class properties (colour, vegetation, bare rock,
@@ -1004,25 +1019,42 @@ void main(){
   vec2 dxy;
   bool fineW = false; float fineLd = 0.0, fineOc = 0.0, lakeD = -1.0;      // lake depth (m) and ocean mask from a tile or zoom level
   bool inDetail = uDetail == 1 && detailXY(p, dxy);
+  // How much of the pixel the water covers, rather than in or out.  A cell either water or
+  // not drew every lake as a cut-out pasted on the map, with the source's own squares along
+  // its edge; the depth read across the shore is a smooth field, so the shore is where it
+  // crosses zero and the pixel takes its share of both.  The fade is a texel or a pixel
+  // wide, whichever is coarser here
+  float wCov = 0.0, texelM = uTexelRad * uRplanet;
   if (zk >= 0 && zw > 0.5) {
     vec4 t = zLinear(zk, za) * 255.0;
     float ld = (t.b / 127.5 - 1.0) * uLakeRange;
     wcode = 255.0 - t.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
     fineW = true; fineLd = ld; fineOc = 1.0 - t.a / 255.0; lakeD = ld;
+    texelM = 0.5 * PI * uRplanet / uZRes[zk];
   } else if (inDetail) {
     vec4 t = detailLinear(dxy) * 255.0;
     float ld = (t.b / 127.5 - 1.0) * uLakeRange;
     wcode = 255.0 - t.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
     fineW = true; fineLd = ld; fineOc = 1.0 - t.a / 255.0; lakeD = ld;
   } else if (uHasShore == 1) {
-    float oc = byteLinear(uST, uSGeo, 2, p);
-    float ld = (byteLinear(uST, uSGeo, 1, p) / 127.5 - 1.0) * uLakeRange;
+    float oc = byteSmooth(uST, uSGeo, 2, p);
+    float ld = (byteSmooth(uST, uSGeo, 1, p) / 127.5 - 1.0) * uLakeRange;
     wcode = oc > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
     lakeD = ld;
+    fineOc = oc / 255.0;
+    texelM = 0.5 * PI * uRplanet / uSGeo.x;
   } else {
     wcode = uHasWater == 1 ? byteNearest(uWT, uWGeo, uWCh, p) : (h < uSea ? 2.0 : 0.0);
   }
   bool wet = wcode > 0.5;
+  {
+    float px = uMode == 2 ? tHit * uPixAng : uRplanet / uScale;      // metres a pixel covers
+    float soft = max(0.6 * max(texelM, px), 0.5);
+    wCov = lakeD > -1e5 ? smoothstep(-soft, soft, lakeD) : (wet ? 1.0 : 0.0);
+    if (wcode > 1.5) wCov = max(wCov, smoothstep(0.35, 0.65, fineOc));  // the sea, by its own smoothed mask
+    if (!wet) wCov = min(wCov, 0.5);
+    if (wet && wcode < 1.5 && lakeD <= -1e5) wCov = 1.0;
+  }
   // the slider's exaggeration is set for the atlas' cells; finer cells show real
   // relief with less of it.  In tilt the shading follows the geometry's
   float exz = zk >= 0 ? max(uExagBase * uFARes / uZRes[zk], uExagBase / 16.0) : uExag;
@@ -1031,12 +1063,13 @@ void main(){
   vec3 nrm = normalize(vec3(-g.x * ex, -g.y * ex, 1.0));
   vec3 L = normalize(vec3(-0.6, 0.6, 0.75));
   float shade = clamp(dot(nrm, L) / L.z, 0.0, 2.0);
-  if (wet) shade = mix(shade, 1.0, 0.85);        // water lies flat: its light is its own (satWater), not the bed's
+  if (wCov > 0.0) shade = mix(shade, 1.0, 0.85 * wCov);        // water lies flat: its light is its own (satWater), not the bed's
   bool treesHere = false; float treeF = 0.0, treeT = 0.0, riverW = 0.0;
 
   vec3 col;
   if (uLayer == 0) {
-    col = elevColor(h, wcode);
+    // the shore is a blend, not a cut: a lake's edge takes its share of both
+    col = wCov >= 0.997 ? elevColor(h, wcode) : mix(elevColor(h, 0.0), elevColor(h, wcode < 0.5 ? 1.0 : wcode), wCov);
   } else {
     float b = -1.0;
     if (uFineLayer >= 3 && uFineLayer <= 5 && fineW) {
@@ -1070,16 +1103,17 @@ void main(){
     if (b < 0.0) b = uLKind == 1 ? byteNearest(uLT, uLGeo, uLCh, p) : byteLinear(uLT, uLGeo, uLCh, p);
     if (uLKind == 1) {
       if (uCmap == 6) {
-        if (wet) {
-          vec4 life = zk >= 0 && zw > 0.5 && uZLife[zk] > 0.5 ? zLinear(zk, za + vec2(0.0, 2.0 * uZNE[zk])) : vec4(0.0);
-          col = satWater(h, wcode, lakeD, p, life);
-        }
+        vec4 life = zk >= 0 && zw > 0.5 && uZLife[zk] > 0.5 ? zLinear(zk, za + vec2(0.0, 2.0 * uZNE[zk])) : vec4(0.0);
+        vec3 water = wCov > 0.003 ? satWater(h, wcode < 0.5 ? 1.0 : wcode, lakeD, p, life) : vec3(0.0);
+        if (wCov >= 0.997) col = water;
         else {
           float sim = zk >= 0 && zw > 0.5 && uZVeg[zk] > 0.5 ? zLinear(zk, za + vec2(0.0, uZNE[zk])).a : -1.0;
           gPxM = uMode == 2 ? tHit * uPixAng : uRplanet / uScale;
           setClasses(p, zk, za, zw);
           col = satColor(b, h, p, degrees(atan(length(g))), d * uRplanet, sim, treeF, treeT);
-          treesHere = uTrees == 1 && uTreeSpacing > 0.0 && zk >= 0 && zw > 0.5 && 0.5 * PI * uRplanet / uZRes[zk] < 100.0;
+          col = mix(col, water, wCov);                    // the shore is a blend, not a cut
+          treesHere = uTrees == 1 && uTreeSpacing > 0.0 && wCov < 0.4 && zk >= 0 && zw > 0.5 && 0.5 * PI * uRplanet / uZRes[zk] < 100.0;
+          treeF *= 1.0 - smoothstep(0.05, 0.4, wCov);
         }
       }
       else if (uCmap == 7) col = wet ? vec3(0.30, 0.34, 0.40) : (b < 0.5 ? vec3(0.82, 0.80, 0.76) : orderColor(b));   // a reach across a lake is the lake
@@ -1100,7 +1134,7 @@ void main(){
   // Rivers are the erosion's own discharge: from the detail tile where the
   // view has one (the level's own stream map, sharp at any zoom), from the
   // atlas otherwise.
-  if (uRivers == 1 && !wet) {
+  if (uRivers == 1 && wCov < 0.6) {
     float b, rmin, rspan, texr = uTexelRad;
     if (zk >= 0 && zw > 0.5) {
       b = zLinear(zk, za + vec2(0.0, uZNE[zk])).r * 255.0;     // the zoom level's river half
