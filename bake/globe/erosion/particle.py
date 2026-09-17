@@ -305,6 +305,10 @@ def trace_particles(
     dep_floor,
     lake_trap,
     lateral_rate,
+    # roots (F, NE, NE) float32 in [0, 1]: the share of the bed's exchange with a particle
+    # the plants hold back (erosion.vegetation); used when use_roots, else any 3-d array
+    roots,
+    use_roots,
     # change list: (P*cap,) arrays + (P,) counts, cell range, death cause
     cl_cell,
     cl_delta,
@@ -601,6 +605,10 @@ def trace_particles(
                     k_e = deposition_rate * (w_cover + (1.0 - w_cover) * (1.0 - samp[f, ei, ej, S_HARD]))
                 else:
                     k_e = deposition_rate
+                if use_roots:
+                    # McDonald's trees: roots hold the ground together, so a particle
+                    # takes up and lays down less where they grow
+                    k_e *= 1.0 - roots[f, ei, ej]
                 cdiff = k_e * (c_eq - sed)
                 if in_lake:
                     # crossing a lake: the water surface is what the particle

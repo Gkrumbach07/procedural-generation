@@ -53,11 +53,12 @@ from scipy.ndimage import map_coordinates
 
 from ..config import WorldParams
 from ..erosion import particle as pk
+from ..erosion import vegetation as veg
 from ..erosion.maps import ErosionState, step
 from ..hydro.priority_flood import priority_flood_flat
 from ..io.world_store import WorldStore
 from ..refine import basin_job as bj
-from ..refine.upsample import FineWindow, Window, detail_noise, ridged_fbm, upsample_window
+from ..refine.upsample import FineWindow, Window, detail_noise, ridged_fbm, sample, upsample_window
 from ..refine.zoom import ZOOM_REFINE, drain_noise, smooth_drift, zoom_params
 from . import progress
 
@@ -329,6 +330,21 @@ def drainage(surface: np.ndarray, ocean: np.ndarray, weight: np.ndarray) -> tupl
     return fr.parent, acc.reshape(surface.shape)
 
 
+def tile_water(surface: np.ndarray, ocean: np.ndarray, weight: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(accumulated weight, standing water depth)`` of a tile's surface: its
+    flood tree draining to the ocean and the array border, and how deep the
+    fill stands over each cell.  What the vegetation reads for streams and
+    pools -- the particles' discharge counts a particle at every cell it
+    crosses (hillslope cells came out ~40x their upstream area at 19 m) and
+    the routing surface lifts every tiny hollow."""
+    drain = np.asarray(ocean, bool).copy()
+    drain[0, :] = drain[-1, :] = drain[:, 0] = drain[:, -1] = True
+    fr = priority_flood_flat(np.asarray(surface, np.float32), drain, None)
+    acc = _accumulate(fr.pop_seq, fr.parent, np.asarray(weight, np.float64).ravel()).reshape(surface.shape)
+    depth = np.maximum(fr.filled.reshape(surface.shape) - surface, 0.0)
+    return acc, np.where(drain, 0.0, depth)
+
+
 def spawn_at(ci: np.ndarray, cj: np.ndarray, vol: np.ndarray, surface: np.ndarray, radius: int) -> np.ndarray:
     """Spawn weight (``surface.shape``) of inflows entering at work-array
     coordinates ``(ci, cj)``: each at the lowest cell of ``surface`` within
@@ -432,10 +448,64 @@ def _ocean(surface: np.ndarray, seed: np.ndarray) -> np.ndarray:
     return keep[lab]
 
 
+#: sub-key of a tile's vegetation stream (after its particles' key)
+VEG_KEY = 7919
+#: iterations between a tile's flood fills for its vegetation
+VEG_WATER_EVERY = 10
+#: the coarse climate fields the vegetation reads, per world root
+_CLIMATE: dict = {}
+
+
+def climate_inputs(root: Path, params: WorldParams, win, grid) -> dict:
+    """``forest`` (the climate's forest, :func:`veg.climate_forest`) and
+    ``temp0`` (mean annual temperature at sea level, C: the coarse field's
+    lapse undone at the bedrock it was computed on) over a level's work array; None
+    where the world has no temperature or biome."""
+    from ..derive.biomes import VEG_FACTOR
+
+    key = str(Path(root).resolve())
+    if key not in _CLIMATE:
+        store = WorldStore(root)
+        try:
+            _CLIMATE.clear()
+            _CLIMATE[key] = {n: store.load_field(n, grid) for n in ("temperature", "biome", "bedrock")}
+        except (OSError, KeyError, ValueError):
+            _CLIMATE[key] = None
+    f = _CLIMATE[key]
+    if f is None:
+        return None
+    # the stored temperature is the climate's, on the pre-erosion bedrock (derive/run.py)
+    bed = sample(f["bedrock"], win, order=1)
+    temp0 = sample(f["temperature"], win, order=1) + float(params.climate.lapse) * np.maximum(bed, 0.0) / 1000.0
+    forest = veg.climate_forest(sample(f["biome"], win), VEG_FACTOR)
+    return {"forest": forest.astype(np.float32), "temp0": temp0.astype(np.float32)}
+
+
+def temperature_at(params: WorldParams, temp0: np.ndarray, surface_m: np.ndarray) -> np.ndarray:
+    return temp0 - float(params.climate.lapse) * np.maximum(surface_m, 0.0) / 1000.0
+
+
+def initial_cover(params: WorldParams, inp: dict, parent: LevelResult | None, geo: Geometry) -> np.ndarray:
+    """A level's cover before it erodes: its parent's where the parent grew
+    one, else half the climate's forest below the tree line (the first
+    iterations take it off the channels, pools and cliffs)."""
+    NE = geo.NE
+    if parent is not None and "vegetation" in parent.arrays:
+        I, J = _child_coords(geo, parent.geo)
+        return np.clip(map_coordinates(parent.arrays["vegetation"].astype(np.float32), [I, J], order=1, mode="nearest"), 0.0, 1.0).astype(np.float32)
+    if inp.get("forest") is None:
+        return np.zeros((NE, NE), np.float32)
+    p = veg.VegParams()
+    t = temperature_at(params, inp["temp0"], inp["height"] + inp["sediment"])
+    warm = np.clip((t - (p.tree_line_c - p.tree_line_fade_c)) / (2.0 * p.tree_line_fade_c), 0.0, 1.0)
+    return np.where(inp["ocean"], 0.0, 0.5 * inp["forest"] * warm).astype(np.float32)
+
+
 def level_inputs(root: Path, params: WorldParams, geo: Geometry, level: ZoomLevel, parent: LevelResult | None, gen: np.random.Generator) -> dict:
     grid, fields, derived = bj.coarse_inputs(root, params)
     win = geo.win
     up = upsample_window(fields, derived, win, grid)
+    clim = climate_inputs(root, params, win, grid)
     assert up["height0"].shape == (geo.NE, geo.NE), (up["height0"].shape, geo)
     coast_taper = float(params.refine.coast_taper_m)
     if parent is None:
@@ -487,6 +557,7 @@ def level_inputs(root: Path, params: WorldParams, geo: Geometry, level: ZoomLeve
         "plain": plain, "height": height0 + noise, "sediment": sed0, "discharge": discharge, "depth": depth, "ocean": ocean,
         "precip": precip, "inflow": inflow, "evap": up["evap"], "hardness": up["hardness"], "momentum": momentum,
         "metric": up["metric"], "metric_inv": up["metric_inv"], "f": f, "noise_max_m": float(np.abs(noise).max()),
+        "forest": None if clim is None else clim["forest"], "temp0": None if clim is None else clim["temp0"],
     }
 
 
@@ -584,8 +655,8 @@ def prepare_tile(level: ZoomLevel, geo: Geometry, inp: dict, cur: dict, flux_w: 
     src = np.zeros(NE * NE)
     np.add.at(src, recv[cross], flux_w.ravel()[cross])
     src = src.reshape(NE, NE)[sl]
-    arr = {k: np.array(cur[k][sl]) for k in ("height", "sediment", "discharge", "momentum")}
-    arr.update({k: np.array(inp[k][sl]) for k in ("hardness", "precip", "evap", "metric", "metric_inv", "plain")})
+    arr = {k: np.array(cur[k][sl]) for k in ("height", "sediment", "discharge", "momentum", "vegetation") if k in cur}
+    arr.update({k: np.array(inp[k][sl]) for k in ("hardness", "precip", "evap", "metric", "metric_inv", "plain", "forest", "temp0") if inp.get(k) is not None})
     return {"a": a, "b": b, "c": c, "sl": sl, "land": land, "active": active, "inwin": inwin, "ocean": ocean, "src": src, "arrays": arr, "f": int(inp["f"])}
 
 
@@ -624,6 +695,15 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
     )
     state.inflow_volume = inflow
     ep = bj.basin_erosion_params(params, params.rng("refine", *key))
+    vp = job.get("veg")
+    grows = vp is not None and "vegetation" in arr and "forest" in arr
+    if grows:
+        cover = arr["vegetation"].astype(np.float32)
+        state.roots = veg.roots(vp, cover)
+        vrng = params.rng("refine", *key, VEG_KEY)
+        cell_m = float(params.world.cell_size_m) / float(R)
+        cell_km2 = (cell_m / 1000.0) ** 2
+        rain_cell = max(rain_total / max(float(active.sum()), 1.0), 1e-30)
     t0 = time.time()
     deaths = {k: 0 for k in pk.DEATH_NAMES}
     particles = 0
@@ -636,6 +716,16 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
         for it in range(int(level.iterations)):
             _share_threads(demand)
             st = step(state, ep, it, particles_per_cell=ppc, rng_stage="refine")
+            if grows:
+                # the trees after the water: the tile's streams (upstream area of its
+                # rain and inflow) and pools, every few iterations
+                surf_m = (state.height[0] + state.sediment[0]) * unit
+                if it % VEG_WATER_EVERY == 0:
+                    acc, pool = tile_water(surf_m, job["ocean"] | ~job["inwin"], weight)
+                    area = acc / rain_cell * cell_km2
+                cap = veg.capacity(vp, arr["forest"], temperature_at(params, arr["temp0"], surf_m), surf_m, pool, area, cell_m, active)
+                cover = veg.grow(vp, cover, cap, vrng)
+                state.roots = veg.roots(vp, cover)
             progress.tile_tick(int(level.R), int(job["a"]), int(job["b"]), it, int(level.iterations))
             particles += int(st.get("particles", 0))
             for k, v in (st.get("deaths") or {}).items():
@@ -654,8 +744,13 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
              **({"inflow_uncapped": inflow_raw} if inflow_raw != inflow else {}),
              "particles_per_cell": ppc, "particles": particles, "seconds": round(time.time() - t0, 1),
              "deaths_pct": {k: round(100.0 * v / tot, 1) for k, v in deaths.items() if v}}
-    return {"height": state.height_m()[0], "sediment": state.sediment_m()[0], "discharge": state.discharge[0].copy(),
-            "momentum": state.momentum[0].copy(), "stats": stats}
+    out = {"height": state.height_m()[0], "sediment": state.sediment_m()[0], "discharge": state.discharge[0].copy(),
+           "momentum": state.momentum[0].copy(), "stats": stats}
+    if grows:
+        out["vegetation"] = cover
+        land = active
+        stats["cover_mean"] = round(float(cover[land].mean()), 3) if land.any() else 0.0
+    return out
 
 
 def write_tile(level: ZoomLevel, cur: dict, done: np.ndarray, job: dict, out: dict) -> int:
@@ -676,7 +771,9 @@ def write_tile(level: ZoomLevel, cur: dict, done: np.ndarray, job: dict, out: di
     old = done[sl]
     new = land & ~old & (d >= m - m // 2)
     blend = land & old
-    for name in ("height", "sediment", "discharge", "momentum"):
+    for name in ("height", "sediment", "discharge", "momentum", "vegetation"):
+        if name not in out or name not in cur:
+            continue
         arr = out[name]
         view = cur[name][sl]
         view[new] = arr[new]
@@ -775,11 +872,16 @@ def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level
     if geo.fine and parent is not None and geo.p0 - int(level.margin) <= level.R // parent.geo.R + 2:
         # the parent's inflow enters within about a parent cell of the border
         raise ValueError(f"R={level.R}: a guard of {geo.p0} fine cells leaves no room between the inflow and the tiles' margin {level.margin}")
-    lp = zoom_params(params, level.R, **(erosion or {}))
+    erosion = dict(erosion or {})
+    vp = veg.VegParams(**erosion.pop("vegetation")) if isinstance(erosion.get("vegetation"), dict) else \
+        (None if erosion.pop("vegetation", True) is False else veg.VegParams())
+    lp = zoom_params(params, level.R, **erosion)
     gen = params.rng("refine", ZOOM_KEY, face, ci, cj, level.R)
     inp = level_inputs(root, lp, geo, level, parent, gen)
     t_in = time.time() - t0
     cur = {"height": inp["height"].copy(), "sediment": inp["sediment"].copy(), "discharge": inp["discharge"].copy(), "momentum": inp["momentum"].copy()}
+    if vp is not None and inp.get("forest") is not None:
+        cur["vegetation"] = initial_cover(params, inp, parent, geo)
     done = np.zeros((geo.NE, geo.NE), bool)
     starts, c = tile_starts(geo.p0, geo.n, level.tile)
     windows = tile_windows(starts, c, level.margin)
@@ -801,6 +903,8 @@ def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level
             recv, flux_w = drainage(cur["height"] + cur["sediment"], inp["ocean"], weight)
             jobs = [(w, prepare_tile(level, geo, inp, cur, flux_w, recv, w[2], w[3], c)) for w in ps]
             jobs = [(w, jb) for w, jb in jobs if jb is not None]
+            for _, jb in jobs:
+                jb["veg"] = vp
             args = [(lp, level, geo.R, jb, (ZOOM_KEY, face, ci, cj, level.R, w[0], w[1])) for w, jb in jobs]
             outs = list(pool.map(_erode_job, args)) if pool is not None and len(args) > 1 else [_erode_job(x) for x in args]
             for (w, jb), out in zip(jobs, outs):
@@ -842,6 +946,8 @@ def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level
         "momentum": cur["momentum"].astype(np.float32), "water_surface": ws.astype(np.float32), "flux": flux.astype(np.float32), "plain": plain.astype(np.float32),
         "ocean": inp["ocean"], "done": done,
     }
+    if "vegetation" in cur:
+        arrays["vegetation"] = np.where(inp["ocean"], 0.0, cur["vegetation"]).astype(np.float32)
     prod = geo.product()
     lake = (ws - surface > float(params.hydro.lake_min_depth)) & ~inp["ocean"]
     stats = {
@@ -945,6 +1051,8 @@ def level_from_planet(root: Path, params: WorldParams, spot: tuple[int, int, int
     arrays = {"height": arr["height"].astype(np.float32), "sediment": arr["sediment"].astype(np.float32), "discharge": arr["discharge"].astype(np.float32),
               "momentum": momentum.astype(np.float32), "water_surface": ws.astype(np.float32), "flux": flux.astype(np.float32),
               "plain": inp["plain"].astype(np.float32), "ocean": ocean, "done": np.ones((NE, NE), bool)}
+    if inp.get("forest") is not None:
+        arrays["vegetation"] = initial_cover(params, {**inp, "height": arr["height"], "sediment": arr["sediment"]}, None, geo)
     stats = {"R": R, "cell_m": params.coarse_grid().cell_size_m / R, "geometry": geo.to_dict(), "level": level_key(level), "tiles": [],
              "source": "planet", "planet": pdir.name, "planet_iterations": int(info["level"]["iterations"]),
              "seconds": round(time.time() - t0, 1), "inflow_total": float(inp["inflow"].sum()),

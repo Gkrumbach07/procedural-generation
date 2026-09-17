@@ -50,6 +50,9 @@ from . import glacial
 from . import particle as pk
 
 
+#: the roots argument of a state without plants (erosion.vegetation)
+_NO_ROOTS = np.zeros((1, 1, 1), dtype=np.float32)
+
 @dataclass
 class ErosionState:
     """Plain-array erosion state (see module docstring).
@@ -92,6 +95,7 @@ class ErosionState:
     iteration: int = 0
     land_target: float | None = None  # the land fraction `hold_datum` holds (`datum_land_fraction`, set by erosion.run.build_state); None = world.land_fraction
     deposit_on_exit: bool = False  # window mode: deposit the load at the last active cell when leaving
+    roots: np.ndarray | None = None  # (F, NE, NE) float32 [0, 1]: the share of the particles' exchange with the bed the plants hold back (erosion.vegetation); None = bare ground
     inflow_volume: float = 0.0  # window mode: the part of the spawn weight (`precip`) that is not rain on the window but water flowing in across its edge (zoom tiles, globe/zoom/bake.py); excluded from the rain per cell the cell-count discharge scales use
 
     def __post_init__(self):
@@ -760,6 +764,8 @@ def run_iteration(
                 cell_units(ep, "dep_floor_m", state.height_unit_m),
                 float(ep.lake_trap),
                 float(getattr(ep, "lateral_rate", 0.0)),
+                state.roots if state.roots is not None else _NO_ROOTS,
+                state.roots is not None,
                 cl_cell,
                 cl_delta,
                 cl_vol,

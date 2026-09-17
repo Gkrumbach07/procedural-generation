@@ -1123,13 +1123,24 @@ def test_zoom_level_texture_encodes_ground_lakes_ocean_and_rivers(tmp_path):
     assert water[40, p0 + n - 1, 1] > tex["river_min_byte"] and water[39, p0 + n - 1, 1] == 0 < water[39, p0 + n - 1, 0]
     # B: sediment on its log byte (all under SED_LO_M here but the odd cell; decodes within a byte)
     from globe.viz import detail as dt
-    assert tex["q_hi"] > tex["q_lo"] > 0 and (tex["sed_lo"], tex["sed_hi"], tex["version"]) == (dt.SED_LO_M, dt.SED_HI_M, 3)
+    assert tex["q_hi"] > tex["q_lo"] > 0 and (tex["sed_lo"], tex["sed_hi"], tex["version"]) == (dt.SED_LO_M, dt.SED_HI_M, 4)
+    assert tex["veg"] is False                                # no cover grown: A stays 255
     assert (water[:, :, 2] == dt.log_byte(sediment[:NE, :NE], dt.SED_LO_M, dt.SED_HI_M).T).all()
     assert 1 <= tex["river_min_byte"] <= 254 and tex["river_span_byte"] >= 8
 
     before = (js.stat().st_mtime_ns, side.stat().st_mtime_ns)
     assert zindex.write(root, log=None)[0]["levels"][0]["tex"] == tex
     assert (js.stat().st_mtime_ns, side.stat().st_mtime_ns) == before
+
+    # A: the canopy cover a level grew (version 4)
+    from globe.viz import zoomtex as ztex
+    arrays["vegetation"] = np.where(ocean, 0.0, (j / (NE - 1.0))).astype(np.float32)
+    zb.save_level(zb.LevelResult(geo, arrays, {"geometry": {"face": 2, "ci0": 10, "cj0": 12, "cells": 4, "guard": 1, "R": 8}, "cell_m": 1000.0}), zdir)
+    rec = ztex.write_level(root / "viewer", "syn", zdir, 8, 64, force=True)
+    assert rec["veg"] is True
+    water = _decode_tex(js, "syn", 8)[NE:]
+    for ci, cj in ((30, 0), (30, NE - 1), (45, 20), (5, 20)):
+        assert abs(int(water[cj, ci, 3]) - round(255.0 * float(arrays["vegetation"][ci, cj]))) <= 1, (ci, cj)
 
 
 def test_zoom_texture_is_cropped_to_the_core_and_a_margin(tmp_path):

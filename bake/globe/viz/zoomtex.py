@@ -29,7 +29,9 @@ channels (:func:`detail.widen_rivers`), on a scale from the land of the
 level's product (byte 1 at its median, 255 at its maximum; a river from
 ``river_min_byte`` to full ``river_span_byte`` above); ``G`` the flux itself on
 that scale (``q_lo``, ``q_hi``: the flow layer); ``B`` the sediment log byte
-over ``sed_lo`` .. ``sed_hi`` metres (version 3).
+over ``sed_lo`` .. ``sed_hi`` metres (version 3); ``A`` the canopy cover the
+level grew (:mod:`globe.erosion.vegetation`), 0..255, where the record says
+``veg`` (version 4; 255 on a level without one).
 """
 from __future__ import annotations
 
@@ -48,9 +50,9 @@ CROP = 32
 #: the tallest texture the viewer takes (2 NE <= MAX_TEX)
 MAX_TEX = 8192
 #: the record's format: 2 = cropped (``x0``, ``fi0``, ``array_NE``), 3 = the water half
-#: also carries the flow (G) and sediment (B); a
+#: also carries the flow (G) and sediment (B), 4 = and the canopy cover (A); a
 #: sidecar of another version is stale, so the next ``index.write`` crops it
-TEX_VERSION = 3
+TEX_VERSION = 4
 #: rivers from this percentile of the product's land flux, full at the second
 RIVER_MIN_PCT, RIVER_FULL_PCT = 97.0, 99.9
 
@@ -157,7 +159,10 @@ def level_image(a: dict, geo: dict, lake_range: float = LAKE_RANGE, crop: int = 
     qb = dt.log_byte(dt.widen_rivers(flux, scale)[k, k], q_lo, q_hi)
     fb = dt.log_byte(flux[k, k], q_lo, q_hi)                                        # G: the flux itself (the flow layer)
     sb = dt.log_byte(np.asarray(a["sediment"][ex, ex], np.float32)[k, k], dt.SED_LO_M, dt.SED_HI_M)   # B: sediment
-    wimg = np.stack([qb, fb, sb, np.full_like(qb, 255)], axis=-1)
+    has_veg = "vegetation" in a
+    vb = (np.clip(np.round(255.0 * np.asarray(a["vegetation"][ex, ex], np.float32)[k, k]), 0, 255).astype(np.uint8)
+          if has_veg else np.full_like(qb, 255))                                    # A: canopy cover
+    wimg = np.stack([qb, fb, sb, vb], axis=-1)
     img = np.ascontiguousarray(np.concatenate([ground, wimg], axis=1).transpose(1, 0, 2))   # cell (x0 + x, x0 + y): ground at (x, y), water at (x, NE + y)
 
     byte = lambda v: int(round(255.0 * math.log(max(v, q_lo) / q_lo) / math.log(q_hi / q_lo)))
@@ -165,7 +170,7 @@ def level_image(a: dict, geo: dict, lake_range: float = LAKE_RANGE, crop: int = 
               "river_min_byte": int(np.clip(byte(scale["river_min"]), 1, 254)),
               "river_span_byte": max(byte(scale["river_full"]) - byte(scale["river_min"]), 8),
               "q_lo": float(q_lo), "q_hi": float(q_hi), "sed_lo": dt.SED_LO_M, "sed_hi": dt.SED_HI_M,
-              "x0": int(x0), "NE": int(NE), "p0": int(p0), "n": int(n)}
+              "x0": int(x0), "NE": int(NE), "p0": int(p0), "n": int(n), "veg": bool(has_veg)}
     return img, scales
 
 
@@ -203,9 +208,9 @@ def write_level(viewer: Path, name: str, zdir: Path, R: int, N: int, cell_m: flo
     cell_m = stats.get("cell_m", cell_m)
     from ..zoom.bake import Geometry
 
-    keys = ("height", "sediment", "water_surface", "flux", "ocean")
+    keys = ("height", "sediment", "water_surface", "flux", "ocean", "vegetation")
     with np.load(npz) as z:
-        a = {k: z[k] for k in keys}
+        a = {k: z[k] for k in keys if k in z.files}
     img, scales = level_image(a, geo)
     del a
     t1 = time.time()
