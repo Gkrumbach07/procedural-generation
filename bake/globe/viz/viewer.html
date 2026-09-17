@@ -57,6 +57,7 @@
   #zoomlist { margin-top:8px; border-top:1px solid var(--line); padding-top:6px; max-height:34vh; overflow:auto; }
   #zoomlist .zt { color:var(--dim); font-size:11px; margin-bottom:3px; }
   #zoomlist .zr { display:flex; align-items:center; gap:6px; margin:3px 0; flex-wrap:wrap; }
+  #zoomlist .zr button.tl { padding:0 5px; font-size:11px; line-height:16px; }
   #zoomlist .zn { color:var(--accent); cursor:pointer; min-width:84px; }
   #zoomlist .zn:hover { text-decoration:underline; }
   #zoomlist .ld { color:var(--dim); font-size:10px; }
@@ -1541,18 +1542,59 @@ function updateDetail(FA) {
 const ZT_KEEP = 8;
 const ztex = { loaded: new Map(), loading: new Set(), failed: new Set(), tick: 0 };
 const zkey = (z, L) => `${z.name}_L${L.R}`;
-GV.zoomTex = async (name, R, b64) => {
-  const key = `${name}_L${R}`;
-  const rec = zooms.flatMap(z => z.name === name ? z.levels.filter(L => L.R === R && L.tex) : [])[0];
+// a level's time lapse (globe/viz/zoomtex.write_frames): one texture per frame of its
+// erosion, played in place of the level itself
+const tkey = (name, R, k) => `${name}_L${R}#${k}`;
+let play = null;                      // { name, R, count, k, last } while a time lapse runs
+// play (or stop) a level's time lapse from outside the page, and what is playing
+GV.timeLapse = (name, R) => {
+  const z = zooms.find(x => x.name === name), L = z && (z.levels || []).find(x => x.R === R);
+  if (L && L.frames) playFrames(name, R, L.frames);
+  return play && { name: play.name, R: play.R, count: play.count, k: play.k,
+                   loaded: [...ztex.loaded.keys()], loading: [...ztex.loading], failed: [...ztex.failed] };
+};
+function playFrames(name, R, frames) {
+  if (play && play.name === name && play.R === R) {
+    // stopping: drop the frames' textures, the level's own is drawn again
+    const pre = tkey(name, R, "").slice(0, -1);
+    for (const [k, v] of [...ztex.loaded]) if (k.startsWith(pre)) { gl.deleteTexture(v.tex); ztex.loaded.delete(k); }
+    play = null; buildZoomList(); requestDraw(); return;
+  }
+  play = { name, R, count: frames.count, k: 0, last: performance.now() };
+  buildZoomList(); requestDraw();
+}
+// the frame a playing level draws now, loading what it has not got yet (a couple at a time)
+function playSlot(L, name) {
+  if (!play || play.name !== name || play.R !== L.R) return null;
+  const want = Math.min(Math.floor(play.k), play.count - 1);
+  let got = ztex.loaded.get(tkey(name, L.R, want));
+  // load ahead of the frame being drawn, and keep loading the rest so a loop runs smoothly
+  for (let d = 0; d < play.count; d++) {
+    const k = (want + d) % play.count, key = tkey(name, L.R, k);
+    if (ztex.loaded.has(key) || ztex.loading.has(key) || ztex.failed.has(key) || ztex.loading.size >= 4) continue;
+    ztex.loading.add(key);
+    const sc = document.createElement("script"); sc.src = L.frames.files[k];
+    sc.onload = () => sc.remove();
+    sc.onerror = () => { ztex.loading.delete(key); ztex.failed.add(key); sc.remove(); };
+    document.head.appendChild(sc);
+  }
+  if (!got) for (let k = want; k >= 0 && !got; k--) got = ztex.loaded.get(tkey(name, L.R, k));   // hold the last frame drawn
+  if (got) got.seen = ztex.tick;
+  return got || null;
+}
+GV.zoomTex = async (name, R, b64, frame) => {
+  const lv = zooms.flatMap(z => z.name === name ? z.levels.filter(L => L.R === R) : [])[0];
+  const timeLapse = frame !== undefined && lv && lv.frames;
+  const key = timeLapse ? tkey(name, R, frame) : `${name}_L${R}`;
   ztex.loading.delete(key);
-  if (!rec) return;
+  if (!lv || (!timeLapse && !lv.tex)) return;
   const bm = await createImageBitmap(b64ToBlob(b64, "image/webp"), { premultiplyAlpha: "none", colorSpaceConversion: "none" });
   const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bm);
   for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.NEAREST);
   for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
   bm.close && bm.close();
-  ztex.loaded.set(key, { tex: t, rec: rec.tex, R, name, seen: ztex.tick });
+  ztex.loaded.set(key, { tex: t, rec: timeLapse ? lv.frames : lv.tex, R, name, seen: ztex.tick, frame: timeLapse ? frame : undefined });
   requestDraw(); buildZoomList();
 };
 // contour interval for this view: a 1-2-5 step giving about twenty lines over the
@@ -1601,6 +1643,8 @@ function updateZoomTex(FA) {
     const key = zkey(z, L);
     // off, finer than a few pixels can show, as coarse as the planet level (1.2 km: nothing to add), or elsewhere
     if (state.zoff.has(key) || L.tex.cell_m < mpp / 6 || L.tex.cell_m >= 1000 || !zoomLevelInView(L)) continue;
+    const fr = L.frames ? playSlot(L, z.name) : null;
+    if (fr) { want.push(fr); continue; }
     const got = ztex.loaded.get(key);
     if (got) { got.seen = ztex.tick; want.push(got); }
     else if (!ztex.loading.has(key) && !ztex.failed.has(key) && ztex.loading.size < 2) {
@@ -1611,15 +1655,20 @@ function updateZoomTex(FA) {
       document.head.appendChild(sc);
     }
   }
-  if (ztex.loaded.size > ZT_KEEP) {
-    const old = [...ztex.loaded.entries()].filter(([, v]) => v.seen < ztex.tick).sort((a, b) => a[1].seen - b[1].seen);
-    for (const [k, v] of old.slice(0, ztex.loaded.size - ZT_KEEP)) { gl.deleteTexture(v.tex); ztex.loaded.delete(k); }
+  // the levels' own textures are kept to ZT_KEEP; a playing time lapse keeps all its frames
+  // (they are small and every one of them is drawn each loop)
+  const lapse = play ? tkey(play.name, play.R, "").slice(0, -1) : null;
+  const keep = ZT_KEEP + (play ? play.count : 0);
+  if (ztex.loaded.size > keep) {
+    const old = [...ztex.loaded.entries()].filter(([k, v]) => v.seen < ztex.tick && !(lapse && k.startsWith(lapse)))
+      .sort((a, b) => a[1].seen - b[1].seen);
+    for (const [k, v] of old.slice(0, ztex.loaded.size - keep)) { gl.deleteTexture(v.tex); ztex.loaded.delete(k); }
   }
   // finest first; of two zooms over the same ground only the newer bake's levels, or the
   // shader would blend one bake's level into the other's and draw the step between them
   const baked = n => (zooms.find(z => z.name === n) || {}).baked || 0;
   want.sort((a, b) => b.R - a.R || baked(b.name) - baked(a.name));
-  const rect = t => { const s = t.N * t.R, i = t.ci0 * t.R, j = t.cj0 * t.R; return [t.face, i / s, j / s, (i + t.n) / s, (j + t.n) / s]; };
+  const rect = t => { const s = t.res ?? t.N * t.R, i = t.oi ?? t.ci0 * t.R, j = t.oj ?? t.cj0 * t.R; return [t.face, i / s, j / s, (i + t.n) / s, (j + t.n) / s]; };
   const overlap = (a, b) => a[0] === b[0] && a[1] < b[3] && b[1] < a[3] && a[2] < b[4] && b[2] < a[4];
   const picked = [];
   for (const w of want) {
@@ -1639,7 +1688,8 @@ function bindZoomSlots(slots, fallback) {
     bindTex(9 + k, sl ? sl.tex : fallback, `uZT${k}`);
     if (!sl) continue;
     const t = sl.rec;
-    f[k] = t.face; res[k] = t.N * t.R; oi[k] = t.ci0 * t.R - t.p0; oj[k] = t.cj0 * t.R - t.p0;
+    f[k] = t.face;
+    res[k] = t.res ?? t.N * t.R; oi[k] = t.oi ?? t.ci0 * t.R - t.p0; oj[k] = t.oj ?? t.cj0 * t.R - t.p0;
     p0[k] = t.p0; core[k] = t.n; ne[k] = t.NE; h0[k] = t.h0; h1[k] = t.h1;
     rmin[k] = t.river_min_byte; rspan[k] = t.river_span_byte;
     if ((t.version ?? 0) >= 3) { gb[k] = 1; qlo[k] = t.q_lo; qhi[k] = t.q_hi; slo[k] = t.sed_lo; shi[k] = t.sed_hi; }
@@ -1700,6 +1750,13 @@ function draw() {
   // over cells 2^L smaller, and real relief shows at that scale without it
   gl.uniform1f(U.uExag, state.exag * (dlv ? Math.max(FA.res / dlv.res, 1 / 16) : 1));
   gl.uniform1f(U.uExagBase, state.exag); gl.uniform1f(U.uFARes, FA.res);
+  if (play) {
+    // the time lapse runs at the Speed slider's frames a second, looping
+    const now = performance.now();
+    play.k = (play.k + (now - play.last) / 1000 * state.fps) % play.count;
+    play.last = now;
+    requestDraw();
+  }
   const zslots = mix === 0 ? updateZoomTex(FA) : [];
   bindZoomSlots(zslots, tex[a][0]);
   if (state.view === "tilt") {
@@ -1807,8 +1864,14 @@ function buildZoomList() {
   el.innerHTML = `<div class="zt">Zoom windows · fine levels drawn in place</div>` + rows.map(z =>
     `<div class="zr"><span class="zn" data-z="${z.name}" title="Fly there">${z.name}</span>` + fineLevels(z).map(L => {
       const key = zkey(z, L), st = ztex.loading.has(key) ? `<span class="ld">loading</span>` : "";
-      return `<label class="chk"><input type="checkbox" data-k="${key}"${state.zoff.has(key) ? "" : " checked"}>${fmtCell(L.tex.cell_m)}</label>${st}`;
+      const on = play && play.name === z.name && play.R === L.R;
+      const tl = L.frames ? `<button class="plain tl" data-z="${z.name}" data-r="${L.R}" title="Play this level's erosion (${L.frames.count} frames)">${on ? "\u25a0" : "\u25b6"}</button>` : "";
+      return `<label class="chk"><input type="checkbox" data-k="${key}"${state.zoff.has(key) ? "" : " checked"}>${fmtCell(L.tex.cell_m)}</label>${tl}${st}`;
     }).join("") + `</div>`).join("");
+  el.querySelectorAll("button.tl").forEach(b => b.onclick = () => {
+    const z = zooms.find(x => x.name === b.dataset.z), L = (z.levels || []).find(x => x.R === +b.dataset.r);
+    if (L && L.frames) playFrames(z.name, L.R, L.frames);
+  });
   el.querySelectorAll("input[data-k]").forEach(i => i.onchange = () => {
     i.checked ? state.zoff.delete(i.dataset.k) : state.zoff.add(i.dataset.k); writeHash(); requestDraw(); });
   el.querySelectorAll(".zn").forEach(n => n.onclick = () => flyToZoom(zooms.find(z => z.name === n.dataset.z)));

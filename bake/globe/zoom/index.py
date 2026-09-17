@@ -68,6 +68,14 @@ def scan(root: str | Path) -> list[dict]:
             tex = zoomtex.record(viewer, name, lv["R"], npz) if has_viewer and npz.exists() else None
             if tex is not None:
                 rec["tex"] = tex
+            if has_viewer:
+                # the level's time lapse, when it kept one (globe.zoom.bake ZoomLevel.snapshots)
+                try:
+                    frec = json.loads(zoomtex.frames_record(viewer, name, lv["R"]).read_text())
+                    if frec.get("version") == zoomtex.TEX_VERSION:
+                        rec["frames"] = frec
+                except (OSError, ValueError):
+                    pass
             levels.append(rec)
         out.append({"name": name, "spot": info.get("spot"), "lat": info.get("lat"), "lon": info.get("lon"),
                     "href": f"../zoom/{d.name}/view.html", "levels": levels, "seconds": info.get("seconds"),
@@ -99,6 +107,7 @@ def write_textures(root: str | Path, force: bool = False, log=print) -> int:
             try:
                 zoomtex.write_level(viewer, name, d, lv["R"], N, cell_m=lv.get("cell_m"), geometry=lv.get("geometry"), force=True, log=log)
                 written += 1
+                zoomtex.write_frames(viewer, name, d, lv["R"], N, cell_m=lv.get("cell_m"), geometry=lv.get("geometry"), force=True, log=log)
             except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile) as e:
                 if log is not None:
                     log(f"[zoomtex] {name} L{lv['R']}: not written ({type(e).__name__}: {e})")

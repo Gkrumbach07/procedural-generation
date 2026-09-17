@@ -1053,16 +1053,20 @@ def test_route_faces_hands_rivers_over_cube_edges():
 # --------------------------------------------------------------------------
 # zoom level textures for the globe viewer (globe/viz/zoomtex.py)
 # --------------------------------------------------------------------------
-def _decode_tex(js_path, name, R):
+def _decode_tex(js_path, name, R, frame=None):
     import base64
     import io
+    import re
 
     from PIL import Image
 
     text = js_path.read_text()
     head = 'GLOBE_VIEWER.zoomTex("%s", %d, "' % (name, R)
-    assert text.startswith(head) and text.endswith('");\n')
-    return np.asarray(Image.open(io.BytesIO(base64.b64decode(text[len(head):-4]))).convert("RGBA"))   # no alpha stored when it is all 255
+    assert text.startswith(head)
+    tail = '", %d);\n' % frame if frame is not None else '");\n'
+    assert text.endswith(tail) or re.search(r'", \d+\);\n$', text), text[-20:]
+    b64 = text[len(head):text.rindex('"')]
+    return np.asarray(Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGBA"))   # no alpha stored when it is all 255
 
 
 def test_zoom_level_texture_encodes_ground_lakes_ocean_and_rivers(tmp_path):
@@ -1151,6 +1155,43 @@ def test_zoom_level_texture_encodes_ground_lakes_ocean_and_rivers(tmp_path):
     water = _decode_tex(js, "syn", 8)[NE:2 * NE]
     for ci, cj in ((30, 0), (30, NE - 1), (45, 20), (5, 20)):
         assert abs(int(water[cj, ci, 3]) - round(255.0 * float(arrays["vegetation"][ci, cj]))) <= 1, (ci, cj)
+
+
+def test_time_lapse_frames_are_written_and_share_one_scale(tmp_path):
+    """A level's time lapse (``ZoomLevel.snapshots``: its product's surface and
+    streams every few iterations, block-averaged): one texture per frame laid
+    out as a level's own -- ground on top, streams below -- all on one height
+    and one river scale so nothing jumps between them, and a record placing
+    them on the face (a frame's cell is the level's times the block factor)."""
+    from globe.viz import zoomtex
+
+    zdir = tmp_path / "w" / "zoom" / "syn"
+    viewer = tmp_path / "w" / "viewer"
+    zdir.mkdir(parents=True)
+    geo = zb.Geometry(face=1, ci0=10, cj0=12, cells=4, guard=1, R=8)
+    T, S = 3, 64
+    i, j = np.meshgrid(np.arange(S), np.arange(S), indexing="ij")
+    surf = np.stack([(i * 2.0 + k * 40.0 + j * 0.5).astype(np.float32) for k in range(T)])
+    disch = np.stack([np.full((S, S), 1.0 + k, np.float32) for k in range(T)])
+    disch[:, :, 20] = 500.0
+    np.savez(zdir / "L8.frames.npz", surface=surf, discharge=disch,
+             iterations=np.array([1, 40, 80], np.int32), factor=np.array([2] * T, np.int32))
+    (zdir / "L8.json").write_text(json.dumps({"geometry": geo.to_dict(), "cell_m": 1000.0}))
+
+    rec = zoomtex.write_frames(viewer, "syn", zdir, 8, 64, cell_m=1000.0, force=True, log=None)
+    assert rec["count"] == T and rec["iterations"] == [1, 40, 80] and rec["cell_m"] == 2000.0
+    assert (rec["face"], rec["n"], rec["NE"], rec["p0"]) == (1, S, S, 0)
+    fi0, fj0 = geo.product_origin
+    assert (rec["res"], rec["oi"], rec["oj"]) == (64 * 8 / 2, fi0 / 2, fj0 / 2)
+    step = (rec["h1"] - rec["h0"]) / 65535.0
+    for k in range(T):
+        img = _decode_tex(viewer / rec["files"][k], "syn", 8)
+        assert img.shape == (2 * S, S, 4)
+        ground, water = img[:S], img[S:]
+        code = ground[:, :, 0].astype(np.int64) * 256 + ground[:, :, 1]
+        assert np.abs(rec["h0"] + code * step - surf[k].T).max() <= step * 1.01     # one scale for every frame
+        assert (ground[:, :, 3] == 255).all() and (ground[:, :, 2] < 128).all()     # all land, no lake
+        assert (water[20, :, 0] > rec["river_min_byte"]).all() and water[10, 10, 0] < rec["river_min_byte"]
 
 
 def test_zoom_texture_is_cropped_to_the_core_and_a_margin(tmp_path):

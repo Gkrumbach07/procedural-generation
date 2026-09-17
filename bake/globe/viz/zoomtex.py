@@ -190,6 +190,91 @@ def _coarse(fine: int, R: int):
     return fine // R if fine % R == 0 else fine / R
 
 
+def frame_paths(viewer: Path, name: str, R: int, k: int) -> Path:
+    """The file of time-lapse frame ``k`` of a level (:func:`write_frames`)."""
+    return Path(viewer) / "zoomtex" / f"{name}_L{int(R)}.t{int(k):02d}.js"
+
+
+def frames_record(viewer: Path, name: str, R: int) -> Path:
+    return Path(viewer) / "zoomtex" / f"{name}_L{int(R)}.frames.json"
+
+
+def frames_image(surface: np.ndarray, discharge: np.ndarray, h0: float, h1: float, q_lo: float, q_hi: float) -> np.ndarray:
+    """One time-lapse frame as a ``(2 S, S, 4)`` RGBA image, laid out as a
+    level's texture so the viewer draws it the same way: the ground on top
+    (the 16-bit surface code, no lake, opaque), its streams below (the
+    discharge's log byte in R and G)."""
+    from . import detail as dt
+
+    h = dt.encode_height_on(np.asarray(surface, np.float32), h0, h1)
+    S = h.shape[0]
+    flat = np.full((S, S), 127, np.uint8)      # just under the shore byte: a frame is all land
+    ground = np.stack([(h >> 8).astype(np.uint8), (h & 255).astype(np.uint8), flat, np.full((S, S), 255, np.uint8)], axis=-1)
+    qb = dt.log_byte(np.asarray(discharge, np.float32), q_lo, q_hi)
+    water = np.stack([qb, qb, np.zeros_like(qb), np.full_like(qb, 255)], axis=-1)
+    return np.ascontiguousarray(np.concatenate([ground, water], axis=1).transpose(1, 0, 2))
+
+
+def write_frames(viewer: Path, name: str, zdir: Path, R: int, N: int, cell_m: float | None = None,
+                 geometry: dict | None = None, force: bool = False, log=None) -> dict | None:
+    """Write a level's time-lapse (``globe.zoom.bake``: its product's surface
+    and streams every few iterations, block-averaged) as one texture per frame
+    and a sidecar the viewer plays them from.  All the frames share one height
+    and one river scale, so nothing jumps between them.  None when the level
+    kept no frames."""
+    from ..zoom.bake import Geometry, frames_path
+
+    npz = frames_path(Path(zdir), int(R))
+    if not npz.exists():
+        return None
+    side = frames_record(viewer, name, R)
+    if not force and _fresh(side, npz):
+        try:
+            rec = json.loads(side.read_text())
+            if rec.get("version") == TEX_VERSION:
+                return rec
+        except (OSError, ValueError):
+            pass
+    t0 = time.time()
+    stats_path = Path(zdir) / f"L{int(R)}.json"
+    stats = json.loads(stats_path.read_text()) if stats_path.exists() else {}
+    geo = stats.get("geometry") or geometry
+    if geo is None:
+        raise ValueError(f"no geometry for {npz}")
+    gm = Geometry(**geo)
+    with np.load(npz) as z:
+        surf = np.asarray(z["surface"], np.float32)
+        disch = np.asarray(z["discharge"], np.float32)
+        its = [int(v) for v in z["iterations"]]
+        factor = int(z["factor"][0])
+    from . import detail as dt
+
+    h0, h1 = dt.height_grid(float(surf.min()), float(surf.max()))
+    last = disch[-1]
+    scale = river_scale(surf[-1], np.zeros(surf[-1].shape, bool), last)
+    q_lo, q_hi = scale["lo"], scale["hi"]
+    byte = lambda v: int(round(255.0 * math.log(max(v, q_lo) / q_lo) / math.log(q_hi / q_lo)))
+    fi0, fj0 = gm.product_origin
+    files = []
+    Path(viewer, "zoomtex").mkdir(parents=True, exist_ok=True)
+    for k in range(surf.shape[0]):
+        img = frames_image(surf[k], disch[k], h0, h1, q_lo, q_hi)
+        js = frame_paths(viewer, name, R, k)
+        _replace(js, 'GLOBE_VIEWER.zoomTex("%s", %d, "%s", %d);\n' % (name, gm.R, dt.webp_rgba_b64(img), k))
+        files.append(f"zoomtex/{js.name}")
+    S = int(surf.shape[1])
+    rec = {"version": TEX_VERSION, "count": len(files), "files": files, "iterations": its, "factor": factor,
+           "face": gm.face, "res": (int(N) * gm.R) / factor, "oi": fi0 / factor, "oj": fj0 / factor,
+           "p0": 0, "n": S, "NE": S, "h0": h0, "h1": h1,
+           "river_min_byte": int(np.clip(byte(scale["river_min"]), 1, 254)),
+           "river_span_byte": max(byte(scale["river_full"]) - byte(scale["river_min"]), 8),
+           "cell_m": None if cell_m is None else float(cell_m) * factor}
+    _replace(side, json.dumps(rec, indent=1))
+    if log is not None:
+        log(f"[zoomtex] {name} L{gm.R}: {len(files)} time-lapse frames, {S}x{S} ({time.time() - t0:.1f}s)")
+    return rec
+
+
 def _replace(path: Path, text: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text)
@@ -253,4 +338,5 @@ def write_level(viewer: Path, name: str, zdir: Path, R: int, N: int, cell_m: flo
     return rec
 
 
-__all__ = ["LAKE_RANGE", "CROP", "MAX_TEX", "TEX_VERSION", "RIVER_MIN_PCT", "RIVER_FULL_PCT", "paths", "record", "river_scale", "crop_window", "level_image", "write_level"]
+__all__ = ["LAKE_RANGE", "CROP", "MAX_TEX", "TEX_VERSION", "RIVER_MIN_PCT", "RIVER_FULL_PCT", "paths", "record", "river_scale", "crop_window",
+           "level_image", "write_level", "frame_paths", "frames_record", "frames_image", "write_frames"]

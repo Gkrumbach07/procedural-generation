@@ -83,11 +83,12 @@ class ZoomLevel:
     hold_scale: float = 4.0  # the drift correction's Gaussian sigma, in parent cells: below it a level may reshape its parent
     size: int = 0  # > 0: the product side in fine cells, placed in fine cells with a guard of fine_pad(margin) fine cells (`cells` unused); 0: `cells` coarse cells
     inflow_cap: float = 0.0  # > 0: a tile's inflow spawns at most this multiple of its rain (see erode_tile); 0: all of it
+    snapshots: int = 24  # frames of the level's erosion kept for the viewer's time lapse (0 = none); only a level eroded as one tile has them
 
 
 #: ZoomLevel fields added after zooms were baked, left out of a level's
 #: resume key at their defaults (so existing zooms still resume)
-_LEVEL_KEY_DEFAULTS = {"size": 0, "inflow_cap": 0.0}
+_LEVEL_KEY_DEFAULTS = {"size": 0, "inflow_cap": 0.0, "snapshots": 24}
 
 
 def level_key(level: ZoomLevel) -> dict:
@@ -300,6 +301,7 @@ class LevelResult:
     geo: Geometry
     arrays: dict  # work arrays: height, sediment, discharge, momentum (NE, NE, 2), water_surface, flux, plain, ocean, done
     stats: dict = field(default_factory=dict)
+    frames: list = field(default_factory=list)  # the time lapse of its erosion (ZoomLevel.snapshots), product only, block-averaged
 
     def surface(self) -> np.ndarray:
         return self.arrays["height"] + self.arrays["sediment"]
@@ -446,6 +448,26 @@ def _ocean(surface: np.ndarray, seed: np.ndarray) -> np.ndarray:
     keep[np.unique(lab[below & seed])] = True
     keep[0] = False
     return keep[lab]
+
+
+#: the widest a time-lapse frame is stored at (cells a side); a level is block-averaged
+#: down to it, so a 2048-cell level's frames are its 512-cell picture
+SNAP_MAX = 512
+
+
+def _snap_factor(side: int) -> int:
+    f = 1
+    while side // f > SNAP_MAX:
+        f *= 2
+    return f
+
+
+def _block_mean(a: np.ndarray, f: int) -> np.ndarray:
+    if f <= 1:
+        return np.asarray(a, np.float32)
+    n0 = (a.shape[0] // f) * f
+    n1 = (a.shape[1] // f) * f
+    return np.asarray(a[:n0, :n1], np.float32).reshape(n0 // f, f, n1 // f, f).mean(axis=(1, 3)).astype(np.float32)
 
 
 #: sub-key of a tile's vegetation stream (after its particles' key)
@@ -708,6 +730,14 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
     deaths = {k: 0 for k in pk.DEATH_NAMES}
     particles = 0
     plain_t = arr["plain"]
+    # the time lapse: the tile's surface and its streams every so many iterations, block-
+    # averaged down (SNAP_MAX).  Only a level eroded as one tile keeps them -- tiles run in
+    # passes, so two of them are never at the same iteration
+    snaps = int(job.get("snapshots", 0))
+    # spread over the whole run (the first iteration, then evenly to the last)
+    snap_at = {0} | {int(round((k + 1) * int(level.iterations) / snaps)) - 1 for k in range(snaps)} if snaps > 0 else set()
+    frames: list = []
+    prod = job.get("prod")
     hold = int(level.hold_every)
     sigma = max(1, int(round(job["f"] * level.hold_scale)))
     off_prev = np.zeros(active.shape)
@@ -730,6 +760,12 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
             particles += int(st.get("particles", 0))
             for k, v in (st.get("deaths") or {}).items():
                 deaths[k] += int(v)
+            if it in snap_at:
+                fsl = prod if prod is not None else (slice(None), slice(None))
+                fsurf = (state.height[0] + state.sediment[0])[fsl] * unit
+                fq = state.discharge[0][fsl]
+                fac = _snap_factor(fsurf.shape[0])
+                frames.append({"it": it + 1, "surface": _block_mean(fsurf, fac), "discharge": _block_mean(fq, fac), "factor": fac})
             if hold > 0 and (it + 1) % hold == 0:
                 # hold the tile to its parent while it erodes, as an uplift rate:
                 # the offset now, and how fast it grew over the last `hold`
@@ -746,6 +782,8 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
              "deaths_pct": {k: round(100.0 * v / tot, 1) for k, v in deaths.items() if v}}
     out = {"height": state.height_m()[0], "sediment": state.sediment_m()[0], "discharge": state.discharge[0].copy(),
            "momentum": state.momentum[0].copy(), "stats": stats}
+    if frames:
+        out["frames"] = frames
     if grows:
         out["vegetation"] = cover
         land = active
@@ -887,6 +925,7 @@ def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level
     windows = tile_windows(starts, c, level.margin)
     passes = tile_passes(windows, c, level.margin)
     tiles = []
+    level_frames: list = []
     weight = inp["precip"] + inp["inflow"]
     widest = max(len(ps) for ps in passes)
     n_workers, threads = pool_size(widest, workers)
@@ -905,12 +944,19 @@ def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level
             jobs = [(w, jb) for w, jb in jobs if jb is not None]
             for _, jb in jobs:
                 jb["veg"] = vp
+                if len(windows) == 1 and int(level.snapshots) > 0:
+                    # the product, in the tile's own array: only a level of one tile is a time lapse
+                    off = jb["sl"][0].start
+                    jb["snapshots"] = int(level.snapshots)
+                    jb["prod"] = (slice(geo.p0 - off, geo.p0 + geo.n - off), slice(geo.p0 - off, geo.p0 + geo.n - off))
             args = [(lp, level, geo.R, jb, (ZOOM_KEY, face, ci, cj, level.R, w[0], w[1])) for w, jb in jobs]
             outs = list(pool.map(_erode_job, args)) if pool is not None and len(args) > 1 else [_erode_job(x) for x in args]
             for (w, jb), out in zip(jobs, outs):
+                frames = out.get("frames") or []
                 st = out["stats"]
                 st["blended_cells"] = write_tile(level, cur, done, jb, out)
                 tiles.append(st)
+                level_frames = frames or level_frames
                 if log is not None:
                     log(f"  R={geo.R} tile {len(tiles)}/{len(windows)}: {st['active_cells']:,} cells, inflow {st['inflow']:.1f} "
                         f"of rain {st['rain']:.1f}, {st['seconds']:.0f}s, deaths {st['deaths_pct']}")
@@ -963,7 +1009,7 @@ def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level
         "rain_cell": float(inp["precip"][~inp["ocean"]].mean()) if (~inp["ocean"]).any() else 0.0,
         "relief_m": [float(surface[prod].min()), float(surface[prod].max())],
     }
-    return LevelResult(geo, arrays, stats)
+    return LevelResult(geo, arrays, stats, level_frames)
 
 
 # --------------------------------------------------------------------------
@@ -1099,7 +1145,18 @@ def save_level(res: LevelResult, out: Path) -> Path:
     path = Path(out) / f"L{res.geo.R}.npz"
     np.savez_compressed(path, **{k: (v.astype(np.uint8) if v.dtype == bool else v) for k, v in res.arrays.items()})
     (Path(out) / f"L{res.geo.R}.json").write_text(json.dumps(res.stats, indent=1))
+    if res.frames:
+        # the time lapse: the product's surface and streams every few iterations
+        np.savez_compressed(Path(out) / f"L{res.geo.R}.frames.npz",
+                            surface=np.stack([f["surface"] for f in res.frames]),
+                            discharge=np.stack([f["discharge"] for f in res.frames]),
+                            iterations=np.array([f["it"] for f in res.frames], np.int32),
+                            factor=np.array([f["factor"] for f in res.frames], np.int32))
     return path
+
+
+def frames_path(out: Path, R: int) -> Path:
+    return Path(out) / f"L{int(R)}.frames.npz"
 
 
 def load_level(out: Path, R: int) -> LevelResult:
