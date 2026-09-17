@@ -102,7 +102,6 @@
     <span class="chk" id="scoutchk"><input type="checkbox" id="scout" checked>scout</span>
     <span class="chk" title="Contour lines (C): interval · major"><input type="checkbox" id="contours">contours <span id="ctv" style="color:var(--dim);font-size:11px"></span></span>
     <span class="chk" title="Tree symbols on baked zoom levels, satellite layer"><input type="checkbox" id="trees" checked>trees</span>
-    <span class="chk" title="Ripples drifting over lakes and sea"><input type="checkbox" id="anim" checked>water</span>
   </div>
   <div class="row"><label>Speed</label><input type="range" id="fps" min="1" max="30" step="1" value="10"><span id="fpsv" style="width:28px;text-align:right">10</span></div>
   <div class="row"><button class="plain" id="shot">Save PNG</button><button class="plain" id="copylink">Copy view link</button></div>
@@ -237,7 +236,6 @@ uniform int uOCh, uHasOrder;
 uniform sampler2D uST;         // shoreline texture (final frame only): G signed lake depth, B smoothed ocean mask
 uniform vec3 uSGeo;
 uniform int uHasShore;
-uniform float uTime;           // seconds, for the water's ripples (0 = still)
 uniform float uLakeRange;      // metres at byte 255 of the signed lake depth (byte 127.5 = the shore)
 uniform int uRivers;           // 1 when frame a carries discharge in B
 uniform float uRiverMin;       // byte at which a river starts to fade in
@@ -829,11 +827,11 @@ bool canopyMarch(vec3 rd, float tHit, vec3 p, vec3 e, vec3 n, float forest, floa
   return false;
 }
 // Lakes and sea: the water's own colour by how deep it is (a bathymetric ramp from a pale
-// shallow shelf to deep blue), wet sand and a foam line at the shore, and two travelling
-// waves for the light to catch.  The textures carry a lake's water as its surface height
-// (viz.detail, viz.zoomtex), so the water is flat and this shades the water, not the bed;
-// depth is what stands over the bed (< 0 on land).  The waves' slopes are analytic: value
-// noise here is far more shader than a ray-marched frame can carry
+// shallow shelf to deep blue), with wet sand and a bright line where it meets the shore.  The
+// textures carry a lake's water as its surface height (viz.detail, viz.zoomtex), so the water
+// is flat and this shades the water, not the bed; depth is what stands over the bed (< 0 on
+// land).  Nothing moves and nothing is tiled over the surface: waves drawn from a repeating
+// function glinted in rows of dashes across every lake
 vec3 satWater(float h, float w, float depth, vec3 p){
   bool lake = w > 0.5 && w < 1.5;
   float d = lake ? max(depth, 0.0) : max(uSea - h, 0.0);
@@ -842,22 +840,11 @@ vec3 satWater(float h, float w, float depth, vec3 p){
            vec3(0.60, 0.65, 0.56), vec3(0.42, 0.62, 0.60), vec3(0.24, 0.50, 0.56), vec3(0.13, 0.36, 0.48), vec3(0.07, 0.24, 0.38))
     : ramp(pow(clamp(d / max(uSea - uOceanBottom, 1.0), 0.0, 1.0), 0.45),
            vec3(0.42, 0.68, 0.70), vec3(0.20, 0.50, 0.62), vec3(0.08, 0.30, 0.50), vec3(0.03, 0.14, 0.34), vec3(0.02, 0.07, 0.22));
-  int f = faceOf(p); float dd = dot(p, BN[f]);
-  vec2 uv = vec2(atan(dot(p, BR[f]) / dd), atan(dot(p, BU[f]) / dd)) * TWO_OVER_PI + 0.5;
-  vec2 q = mod(uv * (0.5 * PI * uRplanet / 9.0), 2048.0);
-  vec2 k1 = vec2(1.0, 0.55), k2 = vec2(-1.05, 1.95);
-  float a1 = dot(q, k1) - 1.7 * uTime, a2 = dot(q, k2) + 1.3 * uTime;
-  float on = uTime > 0.0 ? 1.0 : 0.0;
-  float amp = 0.30 * on * smoothstep(0.2, 2.0, d);
-  vec3 nr = normalize(vec3(-amp * (cos(a1) * k1 + 0.6 * cos(a2) * k2), 1.0));
-  float crest = 0.35 * sin(a1) + 0.15 * sin(a2);
   float shoreM = lake ? 0.9 : 3.0;
   float sh = 1.0 - smoothstep(0.0, shoreM, d);
-  c = mix(c, vec3(0.66, 0.63, 0.50), 0.55 * sh * sh);                  // wet sand in the shallows
-  c = mix(c, vec3(0.92, 0.95, 0.95), 0.5 * smoothstep(0.45 + 0.25 * crest * on, 0.10, d / shoreM));   // the foam line
-  vec3 L = normalize(vec3(-0.6, 0.6, 0.75));
-  float glint = pow(max(dot(reflect(-L, nr), vec3(0.0, 0.0, 1.0)), 0.0), 24.0);
-  return mix(c, vec3(0.62, 0.74, 0.86), 0.12 + 0.10 * nr.x) + vec3(0.32) * glint * smoothstep(0.3, 1.5, d);
+  c = mix(c, vec3(0.66, 0.63, 0.50), 0.55 * sh * sh);                       // wet sand in the shallows
+  c = mix(c, vec3(0.92, 0.95, 0.95), 0.5 * smoothstep(0.45, 0.10, d / shoreM));   // the bright line at the edge
+  return mix(c, vec3(0.62, 0.74, 0.86), 0.12);                             // the sky off the surface
 }
 vec3 orderColor(float o){       // Strahler 1 (pale) .. 6+ (deep blue)
   float t = clamp((o - 1.0) / 5.0, 0.0, 1.0);
@@ -1304,7 +1291,7 @@ const state = {
   playing: false, fps: 10,
   heading: 0, tilt: 55 * PI / 180, exag3: 1.5,   // the 3-D view: compass heading, tilt from straight down, vertical exaggeration
   zoff: new Set(),                               // zoom levels switched off ("name_L<R>")
-  contours: false, trees: true, anim: true,
+  contours: false, trees: true,
 };
 // zoom 1 shows the whole planet in either view
 function baseScale() {
@@ -1325,7 +1312,6 @@ function readHash() {
   if (h.has("layer")) state.layer = h.get("layer");
   for (const k of ["rivers", "grid", "coast", "fade", "scout"]) if (h.has(k)) state[k] = h.get(k) === "1";
   if (h.has("ct")) state.contours = h.get("ct") === "1";
-  if (h.has("wa")) state.anim = h.get("wa") === "1";
   if (h.has("tr")) state.trees = h.get("tr") === "1";
   if (h.get("ui") === "0") document.body.classList.add("noui");
 }
@@ -1337,7 +1323,7 @@ function writeHash() {
     const h = `f=${state.frame}&v=${state.view}&lat=${d(state.lat0)}&lon=${d(state.lon0)}&z=${state.zoom.toFixed(4)}`
       + `&layer=${state.layer}&x=${state.exag}&rivers=${+state.rivers}&grid=${+state.grid}&coast=${+state.coast}&fade=${+state.fade}`
       + (state.view === "tilt" ? `&hd=${(state.heading * 180 / PI).toFixed(1)}&tl=${(state.tilt * 180 / PI).toFixed(1)}&x3=${state.exag3}` : "")
-      + (state.zoff.size ? `&zoff=${[...state.zoff].join(",")}` : "") + (state.contours ? "&ct=1" : "") + (state.trees ? "" : "&tr=0") + (state.anim ? "" : "&wa=0");
+      + (state.zoff.size ? `&zoff=${[...state.zoff].join(",")}` : "") + (state.contours ? "&ct=1" : "") + (state.trees ? "" : "&tr=0");
     history.replaceState(null, "", "#" + h);
   }, 200);
 }
@@ -1429,7 +1415,6 @@ function requestDraw() { if (!drawQueued) { drawQueued = true; requestAnimationF
 // heavy); a quarter second after the last move it is drawn sharp again
 const cssPx = () => canvas.width / Math.max(canvas.clientWidth, 1);
 let moving = false, movingTimer = 0;
-const t0Anim = performance.now();
 const TREE_MAX_M = 16;
 function bumpMoving() {
   if (state.view !== "tilt") return;
@@ -1749,11 +1734,6 @@ function draw() {
   // colour alone
   const tsp = 4 * Math.pow(2, Math.max(0, Math.ceil(Math.log2(6 * metresPerPx() / 4))));
   gl.uniform1f(U.uTreeSpacing, tsp <= TREE_MAX_M ? tsp : 0);
-  // the water's ripples drift while the view is still, each frame asking for the next; a
-  // moving 3-D camera is busy enough already
-  const anim = state.anim && (state.layer === "satellite" || state.layer === "elevation") && !moving;
-  gl.uniform1f(U.uTime, anim ? (performance.now() - t0Anim) / 1000 : 0);
-  if (anim) requestDraw();
   gl.uniform1i(U.uMoving, state.view === "tilt" && moving ? 1 : 0);
   const tch = CHANNELS.temperature || {}, pch = CHANNELS.precip || {};
   gl.uniform2f(U.uTempRange, tch.lo ?? -45, tch.hi ?? 35); gl.uniform2f(U.uPrecipRange, pch.lo ?? 0.02, pch.hi ?? 5);
@@ -2100,7 +2080,7 @@ function updateLabels(a) {
   $("tiltrow").classList.toggle("hidden", !tiltView); $("exag3row").classList.toggle("hidden", !tiltView);
   $("tilt").value = Math.round(state.tilt * 180 / PI); $("tiltv").textContent = Math.round(state.tilt * 180 / PI) + "°";
   $("exag3").value = state.exag3; $("exag3v").textContent = state.exag3 + "×";
-  $("contours").checked = state.contours; $("trees").checked = state.trees; $("anim").checked = state.anim;
+  $("contours").checked = state.contours; $("trees").checked = state.trees;
   $("rivers").checked = state.rivers; $("grid").checked = state.grid; $("coast").checked = state.coast; $("fade").checked = state.fade; $("scout").checked = state.scout;
   $("fps").value = state.fps; $("fpsv").textContent = state.fps;
 }
@@ -2345,7 +2325,7 @@ $("reset").onclick = resetView;
 sel.onchange = () => { state.layer = sel.value; legendKey = ""; writeHash(); requestDraw(); };
 $("exag").oninput = e => { state.exag = +e.target.value; writeHash(); requestDraw(); };
 $("fps").oninput = e => { state.fps = +e.target.value; $("fpsv").textContent = state.fps; };
-for (const k of ["rivers", "grid", "coast", "fade", "scout", "contours", "trees", "anim"]) $(k).onchange = e => { state[k] = e.target.checked; writeHash(); requestDraw(); };
+for (const k of ["rivers", "grid", "coast", "fade", "scout", "contours", "trees"]) $(k).onchange = e => { state[k] = e.target.checked; writeHash(); requestDraw(); };
 $("play").onclick = togglePlay;
 $("prev").onclick = () => { state.playing = false; setFrame(state.frame - 1); };
 $("next").onclick = () => { state.playing = false; setFrame(state.frame + 1); };
