@@ -182,8 +182,17 @@ def make_handler(root: Path, jobs: Jobs):
             self.wfile.write(body)
 
         def end_headers(self):
-            if self.path.split("?")[0].endswith("zooms.js"):
+            # The page and its lists change whenever a bake or an export runs, and a browser
+            # holding yesterday's copy looks like the work never happened (a phone kept
+            # showing the viewer's old layout for a day).  "no-cache" is not "no-store": the
+            # big textures and tiles stay in the cache, but every request revalidates, so a
+            # file that has not changed comes back as a 304 (SimpleHTTPRequestHandler answers
+            # If-Modified-Since itself)
+            path = self.path.split("?")[0]
+            if path.endswith("zooms.js"):
                 self.send_header("Cache-Control", "no-store")
+            elif path.endswith((".html", ".js", ".json")) or path.endswith("/"):
+                self.send_header("Cache-Control", "no-cache")
             super().end_headers()
 
         def do_GET(self):
