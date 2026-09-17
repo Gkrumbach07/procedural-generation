@@ -33,62 +33,75 @@
     cursor:pointer; font:inherit; appearance:none; -webkit-appearance:none; }
   button.plain:hover, .seg button:hover { background:#1d2635; }
   button.plain:disabled { opacity:.5; cursor:default; }
-  /* One sidebar holds every control, in sections behind a tab strip, each scrolling on its
-     own.  Nothing else floats over the map but the menu button, the zoom buttons and the
-     loading chip: pop-ups over the map were unusable on a phone, so what a tap finds is a
-     section too ("Here") */
-  #side { position:fixed; top:0; left:0; bottom:0; width:330px; max-width:100vw; z-index:6;
-    display:flex; flex-direction:column; background:var(--panel); border-right:1px solid var(--line);
-    backdrop-filter:blur(8px); transition:transform .18s ease; touch-action:pan-y; }
-  body:not(.ui) #side { transform:translateX(-101%); }
-  #side header { display:flex; align-items:flex-start; gap:8px; padding:10px 12px 6px; }
-  #side header .grow { flex:1; min-width:0; }
-  #side h1 { font-size:14px; margin:0; font-weight:600; }
-  #side .sub { color:var(--dim); font-size:11px; margin-top:2px; }
-  #tabs { display:flex; flex-wrap:wrap; gap:4px; padding:0 10px 8px; border-bottom:1px solid var(--line); }
-  #tabs button { flex:1 0 auto; padding:5px 7px; font-size:12px; background:#141a24; color:var(--text);
-    border:1px solid var(--line); border-radius:5px; cursor:pointer; font-family:inherit; appearance:none; -webkit-appearance:none; }
-  #tabs button:hover { background:#1d2635; }
-  #tabs button.on { background:#24344d; color:#fff; border-color:#3c5a86; }
-  #tabs button b { color:var(--accent); font-weight:700; }
-  #sbody { flex:1; overflow:auto; overscroll-behavior:contain; padding:10px 12px 18px; }
+  /* The chrome, after Google Earth: the map is the page, and everything floats over it in
+     glass.  A rail of icons opens one panel at a time (a sheet from the bottom on a phone);
+     the map's own controls sit bottom right; a status strip carries the scale and where the
+     pointer is.  Nothing is a pop-up: a tap fills the Place panel */
+  .glass { background:var(--panel); border:1px solid var(--line); border-radius:10px; backdrop-filter:blur(8px);
+    box-shadow:0 6px 24px rgba(0,0,0,.35); }
+  /* search */
+  #omni { position:fixed; top:12px; left:74px; width:min(420px, calc(100vw - 96px)); z-index:8; display:flex; align-items:center;
+    gap:6px; padding:6px 10px; }
+  #omni input { flex:1; min-width:0; background:transparent; border:0; color:var(--text); font:inherit; outline:none; }
+  #omni .ic { color:var(--dim); }
+  #omni button { background:transparent; border:0; color:var(--dim); cursor:pointer; font:inherit; padding:2px 4px; }
+  #hits { position:absolute; top:calc(100% + 6px); left:0; right:0; max-height:50vh; overflow:auto; padding:4px; }
+  #hits div { padding:7px 8px; border-radius:6px; cursor:pointer; }
+  #hits div:hover, #hits div.on { background:#1d2635; }
+  #hits .s { color:var(--dim); font-size:11px; }
+  /* the rail of sections */
+  #rail { position:fixed; top:12px; left:12px; z-index:7; display:flex; flex-direction:column; gap:6px; padding:6px; }
+  #rail button { width:44px; height:44px; background:transparent; border:0; border-radius:8px; color:var(--text);
+    cursor:pointer; font:inherit; font-size:11px; line-height:1.1; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:2px; appearance:none; -webkit-appearance:none; }
+  #rail button i { font-style:normal; font-size:17px; }
+  #rail button:hover { background:#1d2635; }
+  #rail button.on { background:#24344d; color:#fff; }
+  #rail button .dot { position:absolute; margin:-16px 0 0 18px; width:7px; height:7px; border-radius:50%; background:var(--accent); }
+  /* the panel a rail icon opens */
+  /* under the search box, which is the first thing on the screen */
+  #panel { position:fixed; top:62px; left:74px; width:340px; max-height:calc(100vh - 110px); z-index:6;
+    display:none; flex-direction:column; overflow:hidden; }
+  #panel.on { display:flex; }
+  #phead { display:flex; align-items:center; gap:8px; padding:10px 12px 8px; border-bottom:1px solid var(--line); }
+  #phead h2 { font-size:13px; margin:0; font-weight:600; flex:1; }
+  #pbody { overflow:auto; overscroll-behavior:contain; padding:10px 12px 16px; }
   section.tab { display:none; }
   section.tab.on { display:block; }
-  section h2 { font-size:12px; color:var(--dim); font-weight:600; margin:14px 0 4px; text-transform:uppercase; letter-spacing:.04em; }
-  section h2:first-child { margin-top:0; }
+  section h3 { font-size:11px; color:var(--dim); font-weight:600; margin:14px 0 4px; text-transform:uppercase; letter-spacing:.04em; }
+  section h3:first-child { margin-top:0; }
   .note { color:var(--dim); font-size:11px; }
   .note b { color:var(--text); font-weight:500; }
-  #menubtn { position:fixed; top:10px; left:10px; z-index:7; font-size:16px; line-height:20px; padding:7px 11px; }
-  body.ui #menubtn { display:none; }
-  /* a touch screen has no wheel: these appear only there */
-  #touchbtns { position:fixed; right:10px; bottom:14px; display:none; flex-direction:column; gap:6px; z-index:5; }
-  #touchbtns button { width:40px; height:40px; font-size:18px; padding:0; }
-  #legend { margin-top:8px; }
+  /* the map's own controls */
+  #mapctl { position:fixed; right:12px; bottom:40px; z-index:6; display:flex; flex-direction:column; gap:6px; }
+  #mapctl button { width:42px; height:42px; padding:0; font-size:16px; }
+  #compass { position:relative; }
+  #compass svg { width:22px; height:22px; }
+  #status { position:fixed; left:12px; right:12px; bottom:8px; z-index:5; display:flex; align-items:center; gap:14px;
+    color:var(--dim); font-size:11px; font-variant-numeric:tabular-nums; pointer-events:none; text-shadow:0 1px 3px rgba(0,0,0,.8); }
+  #scalebar { display:flex; align-items:center; gap:6px; }
+  #scalebar i { display:block; height:7px; border-left:2px solid var(--text); border-right:2px solid var(--text);
+    border-bottom:2px solid var(--text); }
+  #status .grow { flex:1; }
   #legend canvas { width:100%; height:12px; border-radius:3px; display:block; }
   #legend .ticks { display:flex; justify-content:space-between; color:var(--dim); font-size:11px; }
-  #readout { position:fixed; right:10px; bottom:64px; min-width:190px; font-variant-numeric:tabular-nums;
-    background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 10px; z-index:4; }
-  #readout div { display:flex; justify-content:space-between; gap:12px; }
-  #readout span:first-child { color:var(--dim); }
+  #here .rows div { display:flex; justify-content:space-between; gap:12px; padding:1px 0; }
+  #here .rows span:first-child { color:var(--dim); }
+  #here img { width:100%; border-radius:6px; margin:6px 0; display:block; }
+  #here code { display:block; background:#0e131b; border:1px solid var(--line); border-radius:4px; padding:4px 6px;
+    margin:4px 0; font-size:10px; word-break:break-all; }
+  #here a, #bakesbody a { color:var(--accent); }
   #tl-label { font-size:12px; margin:6px 0 2px; }
   #tl-stats { font-size:11px; color:var(--dim); line-height:1.25; }
   #tl-canvas { width:100%; height:96px; cursor:pointer; border-radius:4px; display:block; margin-top:6px; }
   #play { width:38px; font-size:14px; }
-  #loading { position:fixed; top:10px; left:50%; transform:translateX(-50%); z-index:7;
-    background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px 12px; }
+  #loading { position:fixed; top:12px; left:50%; transform:translateX(-50%); z-index:8; padding:6px 12px; }
   #loading .bar { height:3px; background:var(--line); border-radius:2px; margin-top:5px; }
   #loading .bar i { display:block; height:100%; width:0; background:var(--accent); border-radius:2px; }
-  #zoomlist .zt { color:var(--dim); font-size:11px; margin-bottom:3px; }
   #zoomlist .zr { display:flex; align-items:center; gap:6px; margin:5px 0; flex-wrap:wrap; }
   #zoomlist .zr button.tl { padding:1px 6px; font-size:11px; line-height:16px; }
   #zoomlist .zn { color:var(--accent); cursor:pointer; min-width:84px; }
   #zoomlist .ld { color:var(--dim); font-size:10px; }
-  #here .row { gap:8px; margin:8px 0; }
-  #here .row button, #here .row a { flex:none; }
-  #here img { width:100%; border-radius:4px; margin:6px 0; display:block; }
-  #here code { display:block; background:#0e131b; border:1px solid var(--line); border-radius:4px; padding:4px 6px;
-    margin:4px 0; font-size:10px; word-break:break-all; }
-  #here a, #bakesbody a { color:var(--accent); }
   .job { border-top:1px solid var(--line); padding:8px 0; }
   .job .jn { display:flex; justify-content:space-between; gap:6px; align-items:baseline; }
   .st { font-size:10px; padding:1px 5px; border-radius:3px; background:#24344d; }
@@ -101,22 +114,28 @@
     padding:4px; font-size:10px; white-space:pre-wrap; margin:4px 0 0; }
   .job button { margin-right:4px; }
   .hidden { display:none !important; }
-  /* phones: the sidebar is the page when it is open, and every target has room for a finger */
+  /* A phone: the rail is a bar along the bottom and the panel a sheet above it, at a height
+     you can drag between a peek and most of the screen -- the map stays in view either way */
   @media (max-width: 760px), (pointer: coarse) {
-    /* from the bottom, like a map app's sheet: the map keeps the top of the screen */
-    #side { top:auto; left:0; right:0; bottom:0; width:auto; max-width:none; height:min(62vh, 620px);
-      border-right:0; border-top:1px solid var(--line); border-radius:12px 12px 0 0; }
-    body:not(.ui) #side { transform:translateY(101%); }
-    #menubtn { top:auto; bottom:14px; left:10px; }
-    body.ui #touchbtns { bottom:calc(min(62vh, 620px) + 12px); }
-    #readout { display:none; }
-    button.plain, .seg button { padding:8px 12px; }
-    #tabs button { padding:7px 10px; }
+    #rail { top:auto; bottom:0; left:0; right:0; flex-direction:row; justify-content:space-around; gap:0;
+      border-radius:0; border-left:0; border-right:0; border-bottom:0; padding:4px 2px calc(4px + env(safe-area-inset-bottom)); }
+    #rail button { width:auto; flex:1; height:50px; }
+    #omni { left:12px; top:12px; width:calc(100vw - 24px); }
+    #hits { max-height:40vh; }
+    #panel { left:0; right:0; top:auto; bottom:60px; width:auto; max-height:var(--sheet, 55vh); border-radius:14px 14px 0 0;
+      border-left:0; border-right:0; border-bottom:0; }
+    body.searching #panel { top:auto; }
+    #phead { padding-top:14px; }
+    #phead::before { content:""; position:absolute; top:6px; left:50%; transform:translateX(-50%); width:36px; height:4px;
+      border-radius:2px; background:var(--line); }
+    #mapctl { bottom:calc(66px + env(safe-area-inset-bottom)); }
+    body.panelopen #mapctl { display:none; }      /* the sheet is where the hands are */
+    #status { bottom:calc(60px + env(safe-area-inset-bottom)); }
+    body.panelopen #status { display:none; }
+    button.plain { padding:8px 12px; }
     .chk { margin-right:10px; padding:4px 0; }
     .chk input { width:17px; height:17px; }
     input[type=range] { height:28px; }
-    #touchbtns { display:flex; }
-    #touchbtns button { width:44px; height:44px; }
   }
 </style>
 </head>
@@ -124,57 +143,43 @@
 <canvas id="gl"></canvas>
 <canvas id="ovl"></canvas>
 
-<button class="plain" id="menubtn" title="Controls (Tab)">&#9776;</button>
-<div id="touchbtns">
-  <button class="plain" id="zin" title="Zoom in">+</button>
-  <button class="plain" id="zout" title="Zoom out">&minus;</button>
-  <button class="plain" id="full" title="Full screen">&#9974;</button>
+<nav id="rail" class="glass">
+  <button data-tab="layers" title="Layers (map style and overlays)"><i>&#9776;</i>Layers</button>
+  <button data-tab="zooms" title="Zoom windows"><i>&#9635;</i>Zooms</button>
+  <button data-tab="time" title="The world's history"><i>&#9201;</i>Time</button>
+  <button data-tab="bakes" class="hidden" title="Zoom bakes"><i>&#9881;</i>Bakes</button>
+  <button data-tab="here" title="This place"><i>&#9678;</i>Place</button>
+  <button data-tab="help" title="How it works"><i>?</i>Help</button>
+</nav>
+
+<div id="omni" class="glass">
+  <span class="ic">&#9906;</span>
+  <input id="search" placeholder="Go to 12.3, -45.6 &middot; a zoom window &middot; scout 3" autocomplete="off" spellcheck="false">
+  <button id="searchx" title="Clear">&times;</button>
+  <div id="hits" class="glass hidden"></div>
 </div>
-<div id="readout" class="hidden"></div>
-<div id="loading">Loading&hellip;<div class="bar"><i id="loadbar"></i></div></div>
 
-<aside id="side">
-  <header>
-    <div class="grow"><h1 id="title">Globe</h1><div class="sub" id="subtitle"></div></div>
-    <button class="plain" id="helpbtn" title="How it works">?</button>
-    <button class="plain" id="sideclose" title="Hide the controls (Tab)">&times;</button>
-  </header>
-  <div id="tabs">
-    <button data-tab="map" class="on">Map</button>
-    <button data-tab="layers">Layers</button>
-    <button data-tab="zooms">Zooms</button>
-    <button data-tab="here">Here</button>
-    <button data-tab="time">Time</button>
-    <button data-tab="bakes" class="hidden">Bakes</button>
-  </div>
-  <div id="sbody">
-
-    <section class="tab on" data-tab="map">
-      <h2>View</h2>
-      <div class="row">
-        <span class="seg" id="viewseg"><button data-v="globe" class="on">Globe</button><button data-v="flat">Flat</button><button data-v="tilt" title="3-D: tilt and turn (T)">3D</button></span>
-        <button class="plain" id="reset" title="Reset view (Home)">&#8634;</button>
-      </div>
-      <div class="row"><label>Relief</label><input type="range" id="exag" min="0" max="60" step="0.5" value="12"><span id="exagv" style="width:30px;text-align:right">12&times;</span></div>
-      <div class="row hidden" id="tiltrow"><label>Turn</label>
-        <button class="plain" id="rotl" title="Turn left (Q)">&#8634;</button><button class="plain" id="rotr" title="Turn right (E)">&#8635;</button>
-        <button class="plain" id="north" title="North up, straight down">N</button>
-        <input type="range" id="tilt" min="0" max="80" step="1" value="55" title="Tilt"><span id="tiltv" style="width:30px;text-align:right">55&deg;</span></div>
-      <div class="row hidden" id="exag3row"><label>Height</label><input type="range" id="exag3" min="0.5" max="6" step="0.1" value="1.5"><span id="exag3v" style="width:30px;text-align:right">1.5&times;</span></div>
-      <h2>Share</h2>
-      <div class="row"><button class="plain" id="shot">Save PNG</button><button class="plain" id="copylink">Copy view link</button></div>
-      <div class="note">The link keeps this frame, layer and camera.</div>
-    </section>
+<aside id="panel" class="glass">
+  <div id="phead"><h2 id="ptitle">Layers</h2><button class="plain" id="pclose" title="Close (Esc)">&times;</button></div>
+  <div id="pbody">
 
     <section class="tab" data-tab="layers">
-      <h2>Layer</h2>
-      <div class="row"><select id="layer"></select></div>
+      <h3>Map</h3>
+      <div class="row">
+        <span class="seg" id="viewseg"><button data-v="globe" class="on">Globe</button><button data-v="flat">Flat</button><button data-v="tilt" title="3-D: tilt and turn (T)">3D</button></span>
+      </div>
+      <div class="row"><label>Style</label><select id="layer"></select></div>
       <div id="legend"><canvas id="legendc" width="256" height="12"></canvas><div class="ticks"><span id="lg0"></span><span id="lgmid"></span><span id="lg1"></span></div></div>
-      <h2>Overlays</h2>
+      <h3>Relief</h3>
+      <div class="row"><label>Height</label><input type="range" id="exag" min="0" max="60" step="0.5" value="12"><span id="exagv" style="width:30px;text-align:right">12&times;</span></div>
+      <div class="row hidden" id="tiltrow"><label>Tilt</label>
+        <input type="range" id="tilt" min="0" max="80" step="1" value="55" title="Tilt"><span id="tiltv" style="width:30px;text-align:right">55&deg;</span></div>
+      <div class="row hidden" id="exag3row"><label>3-D height</label><input type="range" id="exag3" min="0.5" max="6" step="0.1" value="1.5"><span id="exag3v" style="width:30px;text-align:right">1.5&times;</span></div>
+      <h3>Overlays</h3>
       <div class="row">
         <span class="chk"><input type="checkbox" id="rivers" checked>rivers</span>
-        <span class="chk" title="Contour lines (C): interval &middot; major"><input type="checkbox" id="contours">contours <span id="ctv" class="d"></span></span>
-        <span class="chk" title="Tree symbols on baked zoom levels, satellite layer"><input type="checkbox" id="trees" checked>trees</span>
+        <span class="chk" title="Contour lines (C)"><input type="checkbox" id="contours">contours <span id="ctv" class="d"></span></span>
+        <span class="chk" title="Tree symbols on baked zoom levels"><input type="checkbox" id="trees" checked>trees</span>
       </div>
       <div class="row">
         <span class="chk"><input type="checkbox" id="grid">grid</span>
@@ -182,48 +187,71 @@
         <span class="chk"><input type="checkbox" id="fade" checked>blend</span>
         <span class="chk" id="scoutchk"><input type="checkbox" id="scout" checked>scout marks</span>
       </div>
+      <h3>Share</h3>
+      <div class="row"><button class="plain" id="shot">Save PNG</button><button class="plain" id="copylink">Copy view link</button></div>
+      <div class="note">The link keeps this place, style and camera.</div>
+      <!-- kept for the keyboard shortcuts and the 3-D buttons the help mentions -->
+      <div class="hidden"><button id="rotl"></button><button id="rotr"></button><button id="north"></button><button id="reset"></button></div>
     </section>
 
     <section class="tab" data-tab="zooms">
-      <h2>Zoom windows</h2>
+      <h3>Windows</h3>
       <div id="zoomlist"></div>
-      <div class="note" id="zoomnote">Zoom in and a window&rsquo;s fine levels draw in place. Tick a level off to compare it with the planet, or play a level&rsquo;s erosion.</div>
+      <div class="note" id="zoomnote">A window&rsquo;s fine levels draw in place as you zoom in. Tick a level off to compare it with the planet, or play a level&rsquo;s erosion.</div>
     </section>
 
     <section class="tab" data-tab="here">
-      <h2>Here</h2>
-      <div id="here"><div class="note">Tap the map: what is there, the zoom window over it, or a bake you can start.</div></div>
+      <div id="here"><div class="note">Tap the map for what is there: its height, climate and biome, the zoom window over it, or a bake you can start.</div></div>
     </section>
 
     <section class="tab" data-tab="time">
-      <h2>Frames</h2>
+      <h3>The world&rsquo;s history</h3>
       <div class="row"><button class="plain" id="play" title="Play (Space)">&#9654;</button>
         <button class="plain" id="prev" title="Previous frame">&lsaquo;</button><button class="plain" id="next" title="Next frame">&rsaquo;</button>
-        <label style="min-width:44px">Speed</label><input type="range" id="fps" min="1" max="30" step="1" value="10"><span id="fpsv" style="width:24px;text-align:right">10</span></div>
+        <label style="min-width:40px">Speed</label><input type="range" id="fps" min="1" max="30" step="1" value="10"><span id="fpsv" style="width:24px;text-align:right">10</span></div>
       <div id="tl-label">&mdash;</div>
       <div id="tl-stats"></div>
       <canvas id="tl-canvas"></canvas>
     </section>
 
     <section class="tab" data-tab="bakes">
-      <h2>Zoom bakes</h2>
       <div id="bakesbody"></div>
     </section>
 
     <section class="tab" data-tab="help">
-      <h2>Touch</h2>
-      <div class="note"><b>Drag</b> pan &middot; <b>Pinch</b> zoom &middot; <b>Two fingers</b> turn and tilt in 3D &middot; <b>Double tap</b> zoom in &middot; <b>Two-finger tap</b> zoom out</div>
-      <h2>Mouse and keys</h2>
+      <h3>Touch</h3>
+      <div class="note"><b>Drag</b> pan &middot; <b>Pinch</b> zoom &middot; <b>Two fingers</b> turn and tilt in 3D &middot; <b>Double tap</b> zoom in &middot; <b>Two-finger tap</b> zoom out &middot; <b>Tap</b> a place for its panel</div>
+      <h3>Mouse and keys</h3>
       <div class="note"><b>Drag</b> pan / rotate &middot; <b>Wheel</b> zoom at the cursor &middot; <b>Double-click</b> zoom in<br>
         <b>Space</b> play/pause &middot; <b>&larr; &rarr;</b> step frame &middot; <b>Shift+&larr; &rarr;</b> jump stage<br>
-        <b>G</b> globe/flat &middot; <b>T</b> 3D &middot; <b>Home</b> reset &middot; <b>1&ndash;9</b> layers &middot; <b>R</b> rivers &middot; <b>L</b> grid &middot; <b>C</b> contours &middot; <b>Tab</b> controls<br>
+        <b>G</b> globe/flat &middot; <b>T</b> 3D &middot; <b>Home</b> reset &middot; <b>1&ndash;9</b> styles &middot; <b>R</b> rivers &middot; <b>L</b> grid &middot; <b>C</b> contours<br>
+        <b>/</b> search &middot; <b>Esc</b> close the panel &middot; <b>Tab</b> show or hide it<br>
         <b>3D:</b> drag pan &middot; <b>right-drag</b> or <b>Ctrl/Shift-drag</b> turn &amp; tilt &middot; <b>Q E</b> turn &middot; <b>PgUp PgDn</b> tilt</div>
-      <h2>Zoom windows</h2>
-      <div class="note">A window&rsquo;s levels draw in place as you zoom in (Zooms). Tap the map for what is under it, or to bake a window there (Here).</div>
+      <h3>Search</h3>
+      <div class="note">Type coordinates (<b>12.3, -45.6</b>), the name of a zoom window, or <b>scout 3</b>.</div>
+      <h3>Zoom windows</h3>
+      <div class="note">A window&rsquo;s levels draw in place as you zoom in (Zooms). Tap the map to bake one where you are looking (Place).</div>
     </section>
 
   </div>
 </aside>
+
+<div id="mapctl">
+  <button class="plain" id="view3d" title="3-D view (T)">3D</button>
+  <button class="plain" id="compass" title="North up (Home)"><svg viewBox="-12 -12 24 24"><polygon points="0,-9 4,7 0,3.5 -4,7" fill="#e35d4f"></polygon><polygon points="0,9 4,-7 0,-3.5 -4,-7" fill="#cfd8e6" opacity=".55"></polygon></svg></button>
+  <button class="plain" id="zin" title="Zoom in">+</button>
+  <button class="plain" id="zout" title="Zoom out">&minus;</button>
+  <button class="plain" id="full" title="Full screen">&#9974;</button>
+</div>
+
+<div id="status">
+  <span id="scalebar"><i id="scalebari"></i><b id="scaletext">&mdash;</b></span>
+  <span class="grow"></span>
+  <span id="coords">&mdash;</span>
+  <span id="camalt"></span>
+</div>
+
+<div id="loading" class="glass">Loading&hellip;<div class="bar"><i id="loadbar"></i></div></div>
 
 <script>
 "use strict";
@@ -1947,6 +1975,7 @@ function draw() {
     play.last = now;
     requestDraw();
   }
+  drawScale();
   const zslots = mix === 0 ? updateZoomTex(FA) : [];
   bindZoomSlots(zslots, tex[a][0]);
   if (state.view === "tilt") {
@@ -2044,19 +2073,34 @@ function draw() {
 const ovl = $("ovl"), ovx = ovl.getContext("2d");
 // The sidebar's sections.  What a tap on the map finds goes to "Here" instead of a pop-up
 // over it: a phone has no room for a floating panel, and one place to look beats three
-let tab = "map";
-function openTab(name, show) {
+// The rail opens one panel at a time, as Google Earth's does; nothing is a pop-up, so a tap
+// on the map fills the Place panel.  The last panel is remembered, and closing it leaves the
+// map alone with its own controls
+const TAB_TITLES = { layers: "Layers", zooms: "Zoom windows", here: "This place", time: "The world's history", bakes: "Zoom bakes", help: "How it works" };
+let tab = null;
+function openTab(name) {
+  if (!name) return closePanel();
   tab = name;
-  for (const b of $("tabs").children) b.classList.toggle("on", b.dataset.tab === name);
+  $("ptitle").textContent = TAB_TITLES[name] || name;
+  for (const b of $("rail").children) b.classList.toggle("on", b.dataset.tab === name);
   for (const sec of document.querySelectorAll("section.tab")) sec.classList.toggle("on", sec.dataset.tab === name);
-  if (show !== false) showSide(true);
+  $("panel").classList.add("on");
+  document.body.classList.add("panelopen");
+  lastTab = name;
+  try { localStorage.setItem("globe.tab", name); } catch (e) { /* private mode */ }
   if (name === "time") { wantFrames(state.frame); drawTimeline(); }
-}
-function showSide(on) {
-  document.body.classList.toggle("ui", on);
-  try { localStorage.setItem("globe.ui", on ? "1" : "0"); } catch (e) { /* private mode */ }
+  if (name === "bakes") renderBakes();
   requestDraw();
 }
+function closePanel() {
+  tab = null;
+  for (const b of $("rail").children) b.classList.remove("on");
+  $("panel").classList.remove("on");
+  document.body.classList.remove("panelopen");
+  try { localStorage.setItem("globe.tab", ""); } catch (e) { /* private mode */ }
+  requestDraw();
+}
+const togglePanel = name => (tab === name ? closePanel() : openTab(name));
 let zooms = GV.zooms || [], zoomHits = [];
 GV.onZooms = z => { zooms = z || []; buildZoomList(); requestDraw(); };
 const fmtCell = m => m >= 1000 ? (m / 1000).toFixed(1) + " km" : Math.round(m) + " m";
@@ -2162,6 +2206,26 @@ function hereHTML(html, fill) {
   if (fill) fill();
   openTab("here");
 }
+// the values under a point, as the status strip and the Place panel show them
+function placeRows(p) {
+  const a = loadedAtOrBefore(state.frame);
+  if (!p || a < 0 || !bitmaps[a]) return [];
+  const f = frames[a], pix = pixelsOf(a);
+  const rows = [];
+  const [x0, y0] = texel(f, 0, p), o0 = 4 * (y0 * pix[0].w + x0), d0 = pix[0].d;
+  const hq = d0[o0] * 256 + d0[o0 + 1];
+  rows.push(["elevation", fmtM(f.h0 + hq / 65535 * (f.h1 - f.h0))]);
+  for (const [name, [k, c]] of Object.entries(f.layers || {})) {
+    const ch = CHANNELS[name]; if (!ch || ch.hidden || name === "satellite") continue;
+    const [x, y] = texel(f, k, p), b = pix[k].d[4 * (y * pix[k].w + x) + c];
+    let v = decodeByte(ch, b);
+    if (ch.kind === "category") v = ch.names ? (ch.names[b] ?? b) : (b === 0 ? "—" : b - (ch.offset ?? 0));
+    else v = fmtVal(ch, v) + (ch.unit ? " " + ch.unit : "");
+    if ((name === "discharge" || name === "flow") && b === 0) v = "—";
+    rows.push([ch.label.toLowerCase(), v]);
+  }
+  return rows;
+}
 function showScout(h, px, py) {
   const c = h.c, m = c.measures, pct = x => (100 * x).toFixed(1) + " %";
   const [f, i, j] = c.spot;
@@ -2231,11 +2295,11 @@ const fmtDur = s => s == null ? "—" : s >= 3600 ? `${Math.floor(s / 3600)} h $
 const cellOfR = R => fmtCell((META.cell_size_m || 9773) / R);
 // the bakes panel: every queued / running job and the last few finished, newest first
 function renderBakes() {
-  const btn = [...$("tabs").children].find(b => b.dataset.tab === "bakes"), el = $("bakesbody");
+  const btn = [...$("rail").children].find(b => b.dataset.tab === "bakes"), el = $("bakesbody");
   btn.classList.toggle("hidden", !apiOK);
   if (!apiOK) return;
   const active = jobs.filter(j => j.state === "running" || j.state === "queued");
-  btn.innerHTML = active.length ? `Bakes <b>${active.length}</b>` : "Bakes";
+  btn.innerHTML = `<i>&#9881;</i>Bakes${active.length ? `<span class="dot"></span>` : ""}`;
   if (tab !== "bakes") return;
   const finished = jobs.filter(j => !(j.state === "running" || j.state === "queued")).slice(-6);
   const shown = [...active, ...finished.reverse()];
@@ -2296,8 +2360,10 @@ function showSpot(px, py) {
   const mine = jobs.filter(jb => jb.spot && jb.spot[0] === f && Math.abs(jb.spot[1] - i) <= 3 && Math.abs(jb.spot[2] - j) <= 3);
   const job = mine[mine.length - 1];
   here = { kind: "spot", px, py };
-  let html = `<div><b>${(lat * 180 / PI).toFixed(2)}°, ${(lon * 180 / PI).toFixed(2)}°</b></div>` +
-    `<div class="d">cell ${f} ${i} ${j} · no zoom window here yet</div>`;
+  const rows = placeRows(p);
+  let html = `<div><b>${(lat * 180 / PI).toFixed(3)}°, ${(lon * 180 / PI).toFixed(3)}°</b></div>` +
+    `<div class="d">cell ${f} ${i} ${j} · no zoom window here yet</div>` +
+    `<div class="rows" style="margin:8px 0">${rows.map(([k, v]) => `<div><span>${k}</span><span>${v}</span></div>`).join("")}</div>`;
   if (job) html += `<div>zoom ${job.name}: <b>${job.state}</b>${job.message ? " — " + job.message : ""}</div>`;
   if (apiOK && (!job || job.state === "failed")) html += `<div class="row"><button class="plain" id="bakezoom">Bake a zoom here</button></div>` +
     `<label class="chk"><input type="checkbox" id="bakegame">game levels too (19 m, 5 m)</label>` +
@@ -2325,10 +2391,8 @@ pollJobs();
 // ---------------------------------------------------------------------------
 // UI: labels, legend, readout
 // ---------------------------------------------------------------------------
-$("title").textContent = META.world || "Globe";
-$("subtitle").textContent = [META.preset && `preset ${META.preset}`, META.N_c && `${META.N_c}² per face`,
-  META.cell_size_m && `${(META.cell_size_m / 1000).toFixed(META.cell_size_m < 1000 ? 2 : 1)} km cells`, META.seed != null && `seed ${META.seed}`]
-  .filter(Boolean).join(" · ");
+document.title = `${META.world || "Globe"} · globe viewer`;
+$("search").placeholder = `Search ${META.world || "the world"}: 12.3, -45.6 · a zoom window · scout 3`;
 const fmtM = v => Math.abs(v) >= 1000 ? (v / 1000).toFixed(2) + " km" : v.toFixed(0) + " m";
 function updateLabels(a) {
   const f = frames[a];
@@ -2401,27 +2465,27 @@ function texel(f, k, p) {
   const y = Math.min(g.res - 1, Math.floor(v * g.res)) + g.pad + Math.floor(fc / 3) * T;
   return [x, y];
 }
+// the status strip: where the pointer is (or the view's centre), and how high the ground is
+// there -- Google Earth's line along the bottom
 function readout(px, py) {
-  const el = $("readout");
-  const p = screenToDir(px, py), a = loadedAtOrBefore(state.frame);
-  if (!p || a < 0 || !bitmaps[a]) { el.classList.add("hidden"); return; }
-  const f = frames[a], pix = pixelsOf(a);
+  const p = px == null ? dirOf(state.lat0, state.lon0) : screenToDir(px, py);
+  if (!p) return;
   const [lat, lon] = latLonOf(p);
-  const rows = [["lat", `${(lat * 180 / PI).toFixed(2)}°`], ["lon", `${(lon * 180 / PI).toFixed(2)}°`]];
-  const [x0, y0] = texel(f, 0, p), o0 = 4 * (y0 * pix[0].w + x0), d0 = pix[0].d;
-  const hq = d0[o0] * 256 + d0[o0 + 1];
-  rows.push(["elevation", fmtM(f.h0 + hq / 65535 * (f.h1 - f.h0))]);
-  for (const [name, [k, c]] of Object.entries(f.layers || {})) {
-    const ch = CHANNELS[name]; if (!ch || ch.hidden || name === "satellite") continue;
-    const [x, y] = texel(f, k, p), b = pix[k].d[4 * (y * pix[k].w + x) + c];
-    let v = decodeByte(ch, b);
-    if (ch.kind === "category") v = ch.names ? (ch.names[b] ?? b) : (b === 0 ? "—" : b - (ch.offset ?? 0));
-    else v = fmtVal(ch, v) + (ch.unit ? " " + ch.unit : "");
-    if ((name === "discharge" || name === "flow") && b === 0) v = "—";
-    rows.push([ch.label.toLowerCase(), v]);
-  }
-  el.innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><span>${v}</span></div>`).join("");
-  el.classList.remove("hidden");
+  const rows = placeRows(p);
+  const elev = (rows.find(r => r[0] === "elevation") || [])[1];
+  $("coords").textContent = `${(lat * 180 / PI).toFixed(3)}°, ${(lon * 180 / PI).toFixed(3)}°` + (elev ? ` · ${elev}` : "");
+}
+// the scale bar: a 1-2-5 length that comes out near 90 px, and the camera's height in 3-D
+function drawScale() {
+  const mpp = metresPerPx() / (window.devicePixelRatio || 1) * cssPx();
+  let m = mpp * 90, p = Math.pow(10, Math.floor(Math.log10(m))), n = m / p;
+  n = n >= 5 ? 5 : n >= 2 ? 2 : 1;
+  const len = n * p;
+  $("scalebari").style.width = `${Math.round(len / mpp)}px`;
+  $("scaletext").textContent = len >= 1000 ? `${Math.round(len / 1000).toLocaleString()} km` : `${Math.round(len)} m`;
+  $("camalt").textContent = state.view === "tilt" ? `camera ${fmtM(cam3().D)}` : "";
+  const c = $("compass");
+  if (c) c.style.transform = `rotate(${(-state.heading * 180 / PI).toFixed(1)}deg)`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2621,7 +2685,7 @@ function endTouch(ev) {
 }
 canvas.addEventListener("pointerup", endTouch);
 canvas.addEventListener("pointercancel", endTouch);
-canvas.addEventListener("pointerleave", () => $("readout").classList.add("hidden"));
+canvas.addEventListener("pointerleave", () => readout());   // the strip falls back to the view's centre
 canvas.addEventListener("wheel", ev => { ev.preventDefault(); const dpr = cssPx();
   zoomAt(ev.offsetX * dpr, ev.offsetY * dpr, Math.exp(-ev.deltaY * (ev.deltaMode ? 0.05 : 0.0015))); }, { passive: false });
 canvas.addEventListener("dblclick", ev => { const dpr = cssPx(); zoomAt(ev.offsetX * dpr, ev.offsetY * dpr, 2); });
@@ -2653,10 +2717,81 @@ for (const k of ["rivers", "grid", "coast", "fade", "scout", "contours", "trees"
 $("play").onclick = togglePlay;
 $("prev").onclick = () => { state.playing = false; setFrame(state.frame - 1); };
 $("next").onclick = () => { state.playing = false; setFrame(state.frame + 1); };
-for (const b of $("tabs").children) b.onclick = () => openTab(b.dataset.tab);
-$("helpbtn").onclick = () => openTab(tab === "help" ? "map" : "help");
-$("sideclose").onclick = () => showSide(false);
-$("menubtn").onclick = () => showSide(true);
+for (const b of $("rail").children) b.onclick = () => togglePanel(b.dataset.tab);
+$("pclose").onclick = closePanel;
+// the sheet's handle: drag it up or down to choose how much of the map to keep (a phone
+// only; on a desktop the panel is a fixed column beside the rail)
+(() => {
+  const head = $("phead"), panel = $("panel");
+  let from = null;
+  const sheet = () => parseFloat(getComputedStyle(document.body).getPropertyValue("--sheet")) || (0.55 * innerHeight);
+  head.addEventListener("pointerdown", ev => {
+    if (ev.target.id === "pclose" || !matchMedia("(max-width: 760px), (pointer: coarse)").matches) return;
+    from = { y: ev.clientY, h: panel.getBoundingClientRect().height };
+    head.setPointerCapture(ev.pointerId);
+  });
+  head.addEventListener("pointermove", ev => {
+    if (!from) return;
+    const h = Math.max(140, Math.min(innerHeight * 0.88, from.h + (from.y - ev.clientY)));
+    document.body.style.setProperty("--sheet", `${Math.round(h)}px`);
+  });
+  const end = () => {
+    if (!from) return;
+    from = null;
+    // settle on a peek, a half or most of the screen, as a sheet does
+    const h = panel.getBoundingClientRect().height, snaps = [0.28, 0.55, 0.88].map(f => f * innerHeight);
+    const to = snaps.reduce((a, b) => Math.abs(b - h) < Math.abs(a - h) ? b : a);
+    document.body.style.setProperty("--sheet", `${Math.round(to)}px`);
+    try { localStorage.setItem("globe.sheet", String(Math.round(to))); } catch (e) { /* private mode */ }
+  };
+  head.addEventListener("pointerup", end);
+  head.addEventListener("pointercancel", end);
+  try { const v = localStorage.getItem("globe.sheet"); if (v) document.body.style.setProperty("--sheet", `${v}px`); } catch (e) { /* private mode */ }
+})();
+$("view3d").onclick = () => { state.view = state.view === "tilt" ? "globe" : "tilt"; writeHash(); requestDraw(); updateLabels(state.frame); };
+$("compass").onclick = () => { state.heading = 0; state.tilt = 0; writeHash(); requestDraw(); updateLabels(state.frame); };
+// Search: coordinates, a zoom window by name, or a scout candidate by rank.  Google Earth's
+// box is the first thing on the screen; ours goes where the world already is
+const searchBox = $("search"), hits = $("hits");
+function searchHits(q) {
+  q = q.trim().toLowerCase();
+  if (!q) return [];
+  const out = [];
+  const m = q.match(/^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)/);
+  if (m && Math.abs(+m[1]) <= 90) out.push({ t: `${(+m[1]).toFixed(3)}°, ${(+m[2]).toFixed(3)}°`, s: "go to these coordinates", go: () => flyTo(+m[1], +m[2]) });
+  for (const z of zooms) if (z.name.toLowerCase().includes(q))
+    out.push({ t: z.name, s: `zoom window · ${fmtCell((z.levels[z.levels.length - 1] || {}).cell_m || 0)} cells`, go: () => flyToZoom(z) });
+  const sm = q.match(/^scout\s*#?\s*(\d+)$/);
+  for (const c of scoutCands) {
+    if (sm ? +sm[1] === c.rank : `scout ${c.rank}`.includes(q))
+      out.push({ t: `Scout #${c.rank}`, s: `score ${c.score.toFixed(2)} · ${c.lat.toFixed(2)}°, ${c.lon.toFixed(2)}°`, go: () => flyTo(c.lat, c.lon, 400) });
+  }
+  return out.slice(0, 8);
+}
+function flyTo(lat, lon, zoom) {
+  state.lat0 = Math.max(-HALF_PI + 1e-3, Math.min(HALF_PI - 1e-3, lat * PI / 180));
+  state.lon0 = wrapLon(lon * PI / 180);
+  if (zoom) state.zoom = Math.min(maxZoom(), zoom);
+  writeHash(); requestDraw();
+}
+function showHits() {
+  const list = searchHits(searchBox.value);
+  hits.innerHTML = list.map((h, i) => `<div data-i="${i}"><div>${h.t}</div><div class="s">${h.s}</div></div>`).join("")
+    || `<div class="s" style="padding:6px 8px">Nothing found. Try coordinates, a window's name, or "scout 1".</div>`;
+  hits.classList.toggle("hidden", !searchBox.value.trim());
+  document.body.classList.toggle("searching", !!searchBox.value.trim());
+  hits.querySelectorAll("[data-i]").forEach(el => el.onclick = () => {
+    list[+el.dataset.i].go();
+    searchBox.value = ""; showHits(); searchBox.blur();
+  });
+}
+searchBox.oninput = showHits;
+searchBox.onkeydown = ev => {
+  ev.stopPropagation();
+  if (ev.key === "Enter") { const l = searchHits(searchBox.value); if (l.length) { l[0].go(); searchBox.value = ""; showHits(); searchBox.blur(); } }
+  if (ev.key === "Escape") { searchBox.value = ""; showHits(); searchBox.blur(); }
+};
+$("searchx").onclick = () => { searchBox.value = ""; showHits(); };
 $("shot").onclick = () => { draw(); canvas.toBlob(b => { const a = document.createElement("a"); a.href = URL.createObjectURL(b);
   a.download = `${META.world || "globe"}_${frames[state.frame].label.replace(/\W+/g, "_")}.png`; a.click(); }); };
 // share where the browser has it (a phone's share sheet), the clipboard otherwise
@@ -2676,7 +2811,9 @@ $("full").onclick = () => {
   else document.documentElement.requestFullscreen && document.documentElement.requestFullscreen();
 };
 window.addEventListener("keydown", ev => {
-  if (ev.key === "Tab" && !ev.metaKey && !ev.ctrlKey) { ev.preventDefault(); showSide(!document.body.classList.contains("ui")); return; }
+  if (ev.key === "Tab" && !ev.metaKey && !ev.ctrlKey) { ev.preventDefault(); tab ? closePanel() : openTab(lastTab); return; }
+  if (ev.key === "Escape") { closePanel(); return; }
+  if (ev.key === "/" && ev.target !== $("search")) { ev.preventDefault(); $("search").focus(); return; }
   if (ev.target.tagName === "SELECT" || ev.target.tagName === "INPUT" && ev.target.type !== "checkbox" && ev.target.type !== "range") return;
   const k = ev.key;
   if (k === " ") { ev.preventDefault(); togglePlay(); }
@@ -2704,13 +2841,14 @@ canvas.addEventListener("webglcontextlost", ev => {
 });
 window.addEventListener("resize", () => { requestDraw(); drawTimeline(); });
 window.addEventListener("hashchange", () => { readHash(); requestDraw(); drawTimeline(); });
-if (document.body.classList.contains("noui")) for (const id of ["side", "menubtn", "touchbtns", "loading"]) $(id).classList.add("hidden");
-// the sidebar starts open on a desktop and closed on a phone, unless the last visit said
-// otherwise (the map is the point; the controls are one tap away)
-const uiSmall = matchMedia("(max-width: 760px), (pointer: coarse)");
-let uiWas = null;
-try { uiWas = localStorage.getItem("globe.ui"); } catch (e) { /* private mode */ }
-if (uiWas === "1" || (uiWas === null && !uiSmall.matches)) document.body.classList.add("ui");
+if (document.body.classList.contains("noui")) for (const id of ["rail", "panel", "omni", "mapctl", "status", "loading"]) $(id).classList.add("hidden");
+// the panel the last visit left open (none on a phone, where the map is all there is room for)
+let lastTab = "layers";
+try {
+  const t = localStorage.getItem("globe.tab");
+  if (t) { lastTab = t; openTab(t); }
+  else if (t === null && !matchMedia("(max-width: 760px), (pointer: coarse)").matches) openTab("layers");
+} catch (e) { /* private mode */ }
 GV.state = state; GV.setFrame = setFrame; GV.draw = draw;
 buildZoomList();
 requestDraw(); drawTimeline();
