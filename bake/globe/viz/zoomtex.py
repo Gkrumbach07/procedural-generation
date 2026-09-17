@@ -33,7 +33,10 @@ over ``sed_lo`` .. ``sed_hi`` metres (version 3); ``A`` the canopy cover the
 level grew (:mod:`globe.erosion.vegetation`), 0..255, where the record says
 ``veg`` (version 4; 255 on a level without one).  A third band below (version 5):
 ``R`` the level's own biome code (:mod:`globe.zoom.biomes`; classified from the
-saved level when the bake did not), where the record says ``biome``.
+saved level when the bake did not), where the record says ``biome``; ``G``, ``B``
+and ``A`` a lake's plants and its age (:mod:`globe.zoom.lakes`): reeds at the
+margin, how far through its life it is, and the weed on its bed, where the record
+says ``lake_life``.
 """
 from __future__ import annotations
 
@@ -171,8 +174,10 @@ def level_image(a: dict, geo: dict, lake_range: float = LAKE_RANGE, crop: int = 
     wimg = np.stack([qb, fb, sb, vb], axis=-1)
     has_bio = "biome" in a
     bio = np.asarray(a["biome"][ex, ex], np.uint8)[k, k] if has_bio else np.zeros_like(qb)
-    z8 = np.zeros_like(bio)
-    bimg = np.stack([bio, z8, z8, np.full_like(bio, 255)], axis=-1)
+    has_life = all(n in a for n in ("lake_age", "lake_emergent", "lake_submerged"))
+    cov = lambda n: (np.clip(np.round(255.0 * np.asarray(a[n][ex, ex], np.float32)[k, k]), 0, 255).astype(np.uint8)
+                     if has_life else np.zeros_like(bio))
+    bimg = np.stack([bio, cov("lake_emergent"), cov("lake_age"), cov("lake_submerged") if has_life else np.full_like(bio, 255)], axis=-1)
     # cell (x0 + x, x0 + y): ground at (x, y), water at (x, NE + y), biome at (x, 2 NE + y)
     img = np.ascontiguousarray(np.concatenate([ground, wimg, bimg], axis=1).transpose(1, 0, 2))
 
@@ -181,7 +186,7 @@ def level_image(a: dict, geo: dict, lake_range: float = LAKE_RANGE, crop: int = 
               "river_min_byte": int(np.clip(byte(scale["river_min"]), 1, 254)),
               "river_span_byte": max(byte(scale["river_full"]) - byte(scale["river_min"]), 8),
               "q_lo": float(q_lo), "q_hi": float(q_hi), "sed_lo": dt.SED_LO_M, "sed_hi": dt.SED_HI_M,
-              "x0": int(x0), "NE": int(NE), "p0": int(p0), "n": int(n), "veg": bool(has_veg), "biome": bool(has_bio)}
+              "x0": int(x0), "NE": int(NE), "p0": int(p0), "n": int(n), "veg": bool(has_veg), "biome": bool(has_bio), "lake_life": bool(has_life)}
     return img, scales
 
 
@@ -304,7 +309,7 @@ def write_level(viewer: Path, name: str, zdir: Path, R: int, N: int, cell_m: flo
     cell_m = stats.get("cell_m", cell_m)
     from ..zoom.bake import Geometry
 
-    keys = ("height", "sediment", "water_surface", "flux", "ocean", "vegetation", "biome")
+    keys = ("height", "sediment", "water_surface", "flux", "ocean", "vegetation", "biome", "lake_age", "lake_emergent", "lake_submerged")
     with np.load(npz) as z:
         a = {k: z[k] for k in keys if k in z.files}
     if "biome" not in a:
@@ -316,6 +321,16 @@ def write_level(viewer: Path, name: str, zdir: Path, R: int, N: int, cell_m: flo
         except (OSError, ValueError, KeyError) as e:
             if log is not None:
                 log(f"[zoomtex] {name} L{R}: no biomes ({e})")
+    if "lake_age" not in a:
+        try:
+            from ..zoom.lakes import level_lake_life
+
+            life = level_lake_life(Path(zdir), int(R))
+            for n in ("age", "emergent", "submerged"):
+                a["lake_" + n] = life[n]
+        except (OSError, ValueError, KeyError) as e:
+            if log is not None:
+                log(f"[zoomtex] {name} L{R}: no lake life ({e})")
     img, scales = level_image(a, geo)
     del a
     t1 = time.time()

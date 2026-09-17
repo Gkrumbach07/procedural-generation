@@ -251,7 +251,7 @@ uniform int uFineLayer;
 uniform vec2 uLayerRange;
 uniform int uDGB;              // 1: the detail tiles' water half carries flow (G) and sediment (B)
 uniform vec2 uDQ, uDSed;       // their flow and sediment byte scales
-uniform vec4 uZGB, uZQlo, uZQhi, uZSlo, uZShi, uZVeg, uZBio;
+uniform vec4 uZGB, uZQlo, uZQhi, uZSlo, uZShi, uZVeg, uZBio, uZLife;
 uniform int uMoving;           // 1 while the tilt camera moves (half resolution, flat trees)   // the same per zoom slot
 uniform int uLines;            // 1 when the river-line pass drew into uRL this frame
 uniform sampler2D uRL;         // river lines, canvas-sized: R coverage x fade, G width (for the colour)
@@ -833,19 +833,26 @@ bool canopyMarch(vec3 rd, float tHit, vec3 p, vec3 e, vec3 n, float forest, floa
 // is flat and this shades the water, not the bed; depth is what stands over the bed (< 0 on
 // land).  Nothing moves and nothing is tiled over the surface: waves drawn from a repeating
 // function glinted in rows of dashes across every lake
-vec3 satWater(float h, float w, float depth, vec3 p){
+vec3 satWater(float h, float w, float depth, vec3 p, vec4 life){
   bool lake = w > 0.5 && w < 1.5;
   float d = lake ? max(depth, 0.0) : max(uSea - h, 0.0);
+  // the lake's life (globe.zoom.lakes): reeds at its margin, how far through its life it is,
+  // and the weed on its bed.  An old lake is shallow, green and grown over; a young one deep
+  // and clear
+  float reeds = lake ? life.y : 0.0, age = lake ? life.z : 0.0, weed = lake ? life.w : 0.0;
   vec3 c = lake
     ? ramp(clamp(log(1.0 + d) / log(26.0), 0.0, 1.0),
            vec3(0.60, 0.65, 0.56), vec3(0.42, 0.62, 0.60), vec3(0.24, 0.50, 0.56), vec3(0.13, 0.36, 0.48), vec3(0.07, 0.24, 0.38))
     : ramp(pow(clamp(d / max(uSea - uOceanBottom, 1.0), 0.0, 1.0), 0.45),
            vec3(0.42, 0.68, 0.70), vec3(0.20, 0.50, 0.62), vec3(0.08, 0.30, 0.50), vec3(0.03, 0.14, 0.34), vec3(0.02, 0.07, 0.22));
+  c = mix(c, vec3(0.20, 0.38, 0.30), 0.55 * age);                          // an old lake's water is green
+  c = mix(c, vec3(0.11, 0.26, 0.19), 0.65 * weed);                         // weed beds on the bed
   float shoreM = lake ? 0.9 : 3.0;
   float sh = 1.0 - smoothstep(0.0, shoreM, d);
-  c = mix(c, vec3(0.66, 0.63, 0.50), 0.55 * sh * sh);                       // wet sand in the shallows
-  c = mix(c, vec3(0.92, 0.95, 0.95), 0.5 * smoothstep(0.45, 0.10, d / shoreM));   // the bright line at the edge
-  return mix(c, vec3(0.62, 0.74, 0.86), 0.12);                             // the sky off the surface
+  c = mix(c, vec3(0.66, 0.63, 0.50), 0.55 * sh * sh * (1.0 - reeds));       // wet sand in the shallows
+  c = mix(c, mix(vec3(0.40, 0.46, 0.24), vec3(0.32, 0.42, 0.22), age), 0.85 * reeds);   // reeds standing at the margin
+  c = mix(c, vec3(0.92, 0.95, 0.95), 0.5 * smoothstep(0.45, 0.10, d / shoreM) * (1.0 - reeds));  // the bright line at the edge
+  return mix(c, vec3(0.62, 0.74, 0.86), 0.12 * (1.0 - 0.6 * reeds));       // the sky off the surface
 }
 vec3 orderColor(float o){       // Strahler 1 (pale) .. 6+ (deep blue)
   float t = clamp((o - 1.0) / 5.0, 0.0, 1.0);
@@ -977,7 +984,10 @@ void main(){
     if (b < 0.0) b = uLKind == 1 ? byteNearest(uLT, uLGeo, uLCh, p) : byteLinear(uLT, uLGeo, uLCh, p);
     if (uLKind == 1) {
       if (uCmap == 6) {
-        if (wet) col = satWater(h, wcode, lakeD, p);
+        if (wet) {
+          vec4 life = zk >= 0 && zw > 0.5 && uZLife[zk] > 0.5 ? zLinear(zk, za + vec2(0.0, 2.0 * uZNE[zk])) : vec4(0.0);
+          col = satWater(h, wcode, lakeD, p, life);
+        }
         else {
           float sim = zk >= 0 && zw > 0.5 && uZVeg[zk] > 0.5 ? zLinear(zk, za + vec2(0.0, uZNE[zk])).a : -1.0;
           gPxM = uMode == 2 ? tHit * uPixAng : uRplanet / uScale;
@@ -1682,7 +1692,7 @@ function updateZoomTex(FA) {
 function bindZoomSlots(slots, fallback) {
   const f = [0, 0, 0, 0], v = n => new Float32Array(4).fill(n);
   const res = v(1), oi = v(0), oj = v(0), p0 = v(0), core = v(0), ne = v(1), h0 = v(0), h1 = v(1), rmin = v(255), rspan = v(1);
-  const gb = v(0), qlo = v(1), qhi = v(10), slo = v(0.5), shi = v(2000), zveg = v(0), zbio = v(0);
+  const gb = v(0), qlo = v(1), qhi = v(10), slo = v(0.5), shi = v(2000), zveg = v(0), zbio = v(0), zlife = v(0);
   for (let k = 0; k < 4; k++) {
     const sl = slots[k];
     bindTex(9 + k, sl ? sl.tex : fallback, `uZT${k}`);
@@ -1695,8 +1705,9 @@ function bindZoomSlots(slots, fallback) {
     if ((t.version ?? 0) >= 3) { gb[k] = 1; qlo[k] = t.q_lo; qhi[k] = t.q_hi; slo[k] = t.sed_lo; shi[k] = t.sed_hi; }
     if (t.veg) zveg[k] = 1;
     if (t.biome) zbio[k] = 1;
+    if (t.lake_life) zlife[k] = 1;
   }
-  gl.uniform4fv(U.uZGB, gb); gl.uniform4fv(U.uZQlo, qlo); gl.uniform4fv(U.uZQhi, qhi); gl.uniform4fv(U.uZSlo, slo); gl.uniform4fv(U.uZShi, shi); gl.uniform4fv(U.uZVeg, zveg); gl.uniform4fv(U.uZBio, zbio);
+  gl.uniform4fv(U.uZGB, gb); gl.uniform4fv(U.uZQlo, qlo); gl.uniform4fv(U.uZQhi, qhi); gl.uniform4fv(U.uZSlo, slo); gl.uniform4fv(U.uZShi, shi); gl.uniform4fv(U.uZVeg, zveg); gl.uniform4fv(U.uZBio, zbio); gl.uniform4fv(U.uZLife, zlife);
   gl.uniform1i(U.uZN, slots.length);
   gl.uniform4iv(U.uZFace, new Int32Array(f));
   gl.uniform4fv(U.uZRes, res); gl.uniform4fv(U.uZOi, oi); gl.uniform4fv(U.uZOj, oj); gl.uniform4fv(U.uZP0, p0);

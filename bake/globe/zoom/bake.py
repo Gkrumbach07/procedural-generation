@@ -1132,13 +1132,21 @@ def level_from_planet(root: Path, params: WorldParams, spot: tuple[int, int, int
 
 
 def _classify(root: Path, params: WorldParams, geo: Geometry, arrays: dict, cell_m: float, rain_cell: float) -> None:
-    """A level's own biomes (globe.zoom.biomes) into ``arrays["biome"]``, unless
-    the world has no climate to classify with."""
+    """A level's own biomes (globe.zoom.biomes) and the life of its lakes
+    (globe.zoom.lakes) into ``arrays``, unless the world has no climate."""
     from .biomes import level_biomes
+    from .lakes import lake_life
 
-    if rain_cell <= 0.0 or climate_inputs(root, params, geo.win, params.coarse_grid()) is None:
+    clim = climate_inputs(root, params, geo.win, params.coarse_grid())
+    if rain_cell <= 0.0 or clim is None:
         return
     arrays["biome"] = level_biomes(root, params, geo, arrays, cell_m, rain_cell)
+    surf = np.asarray(arrays["height"], np.float32) + np.asarray(arrays["sediment"], np.float32)
+    life = lake_life(surf, arrays["water_surface"], arrays["ocean"], arrays["sediment"], arrays["flux"],
+                     temperature_at(params, clim["temp0"], surf), cell_m, rain_cell, float(params.hydro.lake_min_depth))
+    arrays["lake_age"] = life["age"]
+    arrays["lake_emergent"] = life["emergent"]
+    arrays["lake_submerged"] = life["submerged"]
 
 
 def save_level(res: LevelResult, out: Path) -> Path:
