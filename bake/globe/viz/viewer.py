@@ -504,6 +504,15 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
     if fine is not None:
         surf, sed, ws, water = fine["surf"], fine["sed"], fine["ws"], fine["water"]
         discharge, biome, basin = fine["discharge"], fine["biome"], fine["basin"]
+        if biome is None and h is not None:
+            # a planet level carries no classes: derive's, on the refined grid
+            # where its resolution divides the frame's, else the coarse grid's
+            fb = _load_faces(root, "biome", "fine")
+            if fb is not None and Nsrc % fb.shape[1] == 0:
+                k = Nsrc // fb.shape[1]
+                biome = np.repeat(np.repeat(fb, k, axis=1), k, axis=2) if k > 1 else fb
+            else:
+                biome = up(_load_faces(root, "biome"))
     else:
         ws = _load_faces(root, "water_surface")
         water = water_code(surf, _load_faces(root, "flow_dir"), ws,
@@ -886,6 +895,7 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
         "channels": specs,
         "biome_palette": _biome_palette() if "biome" in specs else [],
         "satellite_palette": SATELLITE_PALETTE if "satellite" in specs else [],
+        "biome_vegetation": _biome_vegetation() if "satellite" in specs else [],
         "stage_seconds": {s: round(v.get("seconds", 0.0), 1) for s, v in manifest.get("stages", {}).items()},
         "exported": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "final_index": len(frames) - 1,
@@ -929,6 +939,14 @@ def manifest_of(root: Path) -> dict:
 
 def _render_param(manifest: dict, key: str, default):
     return (manifest.get("params", {}).get("render", {}) or {}).get(key, default)
+
+
+def _biome_vegetation() -> list:
+    """derive.biomes' vegetation factor per class: how much of the ground the
+    satellite layer covers with forest, and how dense its trees stand."""
+    from ..derive.biomes import VEG_FACTOR
+
+    return [round(float(v), 3) for v in VEG_FACTOR]
 
 
 def _biome_palette() -> list:

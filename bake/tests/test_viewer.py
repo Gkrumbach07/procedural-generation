@@ -1,5 +1,6 @@
 """The HTML viewer's data: frame capture, cube-face atlases, the export."""
 import json
+import re
 
 import numpy as np
 import pytest
@@ -250,6 +251,12 @@ def test_shader_sources_are_not_cut_short_by_a_stray_backtick():
         assert body.startswith("#version 300 es"), name
         assert tail in body, f"{name} shader is cut short: {body[-120:]!r}"
         assert body.rstrip().endswith("}"), f"{name} shader does not end at a closing brace"
+        # GLSL ES 3.00 reserves these names; one used as a variable (``float patch``)
+        # fails the compile, and the page never gets past loading
+        code = re.sub(r"//[^\n]*", "", body)
+        for word in ("patch", "sample", "input", "output", "filter", "common", "partition", "active",
+                     "noise", "cast", "namespace", "using", "sizeof", "union", "enum", "extern", "external"):
+            assert not re.search(rf"\b{word}\b", code), f"{name} shader uses the reserved word {word!r}"
 
 
 
