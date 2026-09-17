@@ -948,6 +948,8 @@ def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level
     }
     if "vegetation" in cur:
         arrays["vegetation"] = np.where(inp["ocean"], 0.0, cur["vegetation"]).astype(np.float32)
+    rain_cell = float(inp["precip"][~inp["ocean"]].mean()) if (~inp["ocean"]).any() else 0.0
+    _classify(root, lp, geo, arrays, params.coarse_grid().cell_size_m / geo.R, rain_cell)
     prod = geo.product()
     lake = (ws - surface > float(params.hydro.lake_min_depth)) & ~inp["ocean"]
     stats = {
@@ -1053,6 +1055,7 @@ def level_from_planet(root: Path, params: WorldParams, spot: tuple[int, int, int
               "plain": inp["plain"].astype(np.float32), "ocean": ocean, "done": np.ones((NE, NE), bool)}
     if inp.get("forest") is not None:
         arrays["vegetation"] = initial_cover(params, {**inp, "height": arr["height"], "sediment": arr["sediment"]}, None, geo)
+    _classify(root, lp, geo, arrays, params.coarse_grid().cell_size_m / R, float(inp["precip"][~ocean].mean()) if (~ocean).any() else 0.0)
     stats = {"R": R, "cell_m": params.coarse_grid().cell_size_m / R, "geometry": geo.to_dict(), "level": level_key(level), "tiles": [],
              "source": "planet", "planet": pdir.name, "planet_iterations": int(info["level"]["iterations"]),
              "seconds": round(time.time() - t0, 1), "inflow_total": float(inp["inflow"].sum()),
@@ -1060,6 +1063,16 @@ def level_from_planet(root: Path, params: WorldParams, spot: tuple[int, int, int
              "rain_cell": float(inp["precip"][~ocean].mean()) if (~ocean).any() else 0.0,
              "relief_m": [float(surface[prod].min()), float(surface[prod].max())]}
     return LevelResult(geo, arrays, stats)
+
+
+def _classify(root: Path, params: WorldParams, geo: Geometry, arrays: dict, cell_m: float, rain_cell: float) -> None:
+    """A level's own biomes (globe.zoom.biomes) into ``arrays["biome"]``, unless
+    the world has no climate to classify with."""
+    from .biomes import level_biomes
+
+    if rain_cell <= 0.0 or climate_inputs(root, params, geo.win, params.coarse_grid()) is None:
+        return
+    arrays["biome"] = level_biomes(root, params, geo, arrays, cell_m, rain_cell)
 
 
 def save_level(res: LevelResult, out: Path) -> Path:

@@ -70,7 +70,9 @@ def scan(root: str | Path) -> list[dict]:
                 rec["tex"] = tex
             levels.append(rec)
         out.append({"name": name, "spot": info.get("spot"), "lat": info.get("lat"), "lon": info.get("lon"),
-                    "href": f"../zoom/{d.name}/view.html", "levels": levels, "seconds": info.get("seconds")})
+                    "href": f"../zoom/{d.name}/view.html", "levels": levels, "seconds": info.get("seconds"),
+                    # when it was baked: where two zooms overlap, the viewer draws the newer
+                    "baked": round((d / "zoom.json").stat().st_mtime) if (d / "zoom.json").exists() else 0})
     return out
 
 

@@ -354,7 +354,7 @@ def test_fine_cell_geometry_and_level_specs():
         zb._child_coords(gc, gp)                                  # inside the parent's work array
     for gc in chain:
         x0, side = zoomtex.crop_window(gc.NE, gc.p0, gc.n)
-        assert 2 * side <= zoomtex.MAX_TEX and side == gc.n + 2 * zoomtex.CROP
+        assert 3 * side <= zoomtex.MAX_TEX and side == gc.n + 2 * zoomtex.CROP
 
 
 def test_child_coordinates_follow_the_face_across_fine_and_coarse_levels():
@@ -489,7 +489,12 @@ def test_fine_cell_level_texture_maps_its_core_onto_the_face(fine_zoom):
         assert tex["cj0"] * tex["R"] - tex["p0"] == g.fine_origin[1] + tex["x0"]
         assert (tex["fi0"], tex["fj0"]) == g.product_origin
         img = _decode_tex(fine_zoom["base"] / "viewer" / tex["file"], "tf", g.R)
-        assert img.shape == (2 * tex["NE"], tex["NE"], 4)
+        assert img.shape == (3 * tex["NE"], tex["NE"], 4)
+        if tex["biome"]:                                   # the level's own biomes, where the world has a climate
+            from globe.derive.biomes import N_BIOMES
+            assert np.asarray(res.arrays["biome"]).max() < N_BIOMES
+            bio = img[2 * tex["NE"]:, :, 0]
+            assert np.array_equal(bio, np.asarray(res.arrays["biome"])[tex["x0"]:tex["x0"] + tex["NE"], tex["x0"]:tex["x0"] + tex["NE"]].T)
         surf = res.surface()
         step = (tex["h1"] - tex["h0"]) / 65535.0
         for x, y in ((tex["p0"], tex["p0"]), (tex["p0"] + g.n - 1, tex["p0"] + 3), (0, tex["NE"] - 1)):
@@ -1108,8 +1113,8 @@ def test_zoom_level_texture_encodes_ground_lakes_ocean_and_rivers(tmp_path):
     assert listed[0]["levels"][0]["tex"] == tex and "corners" in listed[0]["levels"][0]
 
     img = _decode_tex(js, "syn", 8)
-    assert img.shape == (2 * NE, NE, 4) and img.dtype == np.uint8
-    ground, water = img[:NE], img[NE:]                       # (y, x) = (j, i)
+    assert img.shape == (3 * NE, NE, 4) and img.dtype == np.uint8
+    ground, water = img[:NE], img[NE:2 * NE]                       # (y, x) = (j, i)
     step = (tex["h1"] - tex["h0"]) / 65535.0
     for ci, cj in ((5, 5), (19, 30), (20, 30), (p0 + 3, p0 + 7), (NE - 1, NE - 1), (37, 25)):
         code = int(ground[cj, ci, 0]) * 256 + int(ground[cj, ci, 1])
@@ -1123,7 +1128,8 @@ def test_zoom_level_texture_encodes_ground_lakes_ocean_and_rivers(tmp_path):
     assert water[40, p0 + n - 1, 1] > tex["river_min_byte"] and water[39, p0 + n - 1, 1] == 0 < water[39, p0 + n - 1, 0]
     # B: sediment on its log byte (all under SED_LO_M here but the odd cell; decodes within a byte)
     from globe.viz import detail as dt
-    assert tex["q_hi"] > tex["q_lo"] > 0 and (tex["sed_lo"], tex["sed_hi"], tex["version"]) == (dt.SED_LO_M, dt.SED_HI_M, 4)
+    assert tex["q_hi"] > tex["q_lo"] > 0 and (tex["sed_lo"], tex["sed_hi"], tex["version"]) == (dt.SED_LO_M, dt.SED_HI_M, 5)
+    assert tex["biome"] is False and (img[2 * NE:, :, 0] == 0).all()   # a world without a climate: no biomes
     assert tex["veg"] is False                                # no cover grown: A stays 255
     assert (water[:, :, 2] == dt.log_byte(sediment[:NE, :NE], dt.SED_LO_M, dt.SED_HI_M).T).all()
     assert 1 <= tex["river_min_byte"] <= 254 and tex["river_span_byte"] >= 8
@@ -1138,7 +1144,7 @@ def test_zoom_level_texture_encodes_ground_lakes_ocean_and_rivers(tmp_path):
     zb.save_level(zb.LevelResult(geo, arrays, {"geometry": {"face": 2, "ci0": 10, "cj0": 12, "cells": 4, "guard": 1, "R": 8}, "cell_m": 1000.0}), zdir)
     rec = ztex.write_level(root / "viewer", "syn", zdir, 8, 64, force=True)
     assert rec["veg"] is True
-    water = _decode_tex(js, "syn", 8)[NE:]
+    water = _decode_tex(js, "syn", 8)[NE:2 * NE]
     for ci, cj in ((30, 0), (30, NE - 1), (45, 20), (5, 20)):
         assert abs(int(water[cj, ci, 3]) - round(255.0 * float(arrays["vegetation"][ci, cj]))) <= 1, (ci, cj)
 
@@ -1149,7 +1155,7 @@ def test_zoom_texture_is_cropped_to_the_core_and_a_margin(tmp_path):
     many as the array has), every byte the whole-array image has there but
     the height codes (their range is the crop's), and the record's offset
     and core still place each pixel on its face cell.  ``crop_window`` keeps
-    ``2 NE`` within ``MAX_TEX`` and refuses a core that cannot fit."""
+    ``3 NE`` within ``MAX_TEX`` and refuses a core that cannot fit."""
     from globe.viz import zoomtex
 
     rng = np.random.default_rng(5)
@@ -1173,10 +1179,10 @@ def test_zoom_texture_is_cropped_to_the_core_and_a_margin(tmp_path):
         img, sc = zoomtex.level_image(a, geo.to_dict())
         m = min(zoomtex.CROP, p0)
         assert (sc_full["x0"], sc_full["NE"], sc_full["p0"]) == (0, NE, p0)
-        assert (sc["x0"], sc["NE"], sc["p0"], sc["n"]) == (p0 - m, n + 2 * m, m, n) and img.shape == (2 * (n + 2 * m), n + 2 * m, 4)
+        assert (sc["x0"], sc["NE"], sc["p0"], sc["n"]) == (p0 - m, n + 2 * m, m, n) and img.shape == (3 * (n + 2 * m), n + 2 * m, 4)
         x0, side = sc["x0"], sc["NE"]
-        top, bottom = img[:side], img[side:]
-        ftop, fbottom = full[:NE], full[NE:]
+        top, bottom = img[:side], img[side:2 * side]
+        ftop, fbottom = full[:NE], full[NE:2 * NE]
         assert np.array_equal(top[:, :, 2:], ftop[x0:x0 + side, x0:x0 + side, 2:])        # lakes, ocean mask
         assert np.array_equal(bottom, fbottom[x0:x0 + side, x0:x0 + side])                # rivers
         assert (bottom[:, :, 0] > sc["river_min_byte"]).any()
@@ -1187,11 +1193,11 @@ def test_zoom_texture_is_cropped_to_the_core_and_a_margin(tmp_path):
         fi0 = geo.product_origin[0]
         ci0 = zoomtex._coarse(fi0, geo.R)
         assert ci0 * geo.R - sc["p0"] == geo.fine_origin[0] + x0 and isinstance(ci0, int) == (not geo.fine)
-    assert zoomtex.crop_window(10000, 3000, 4000) == (2968, 4064)
-    assert zoomtex.crop_window(10000, 3000, 4090) == (2997, 4096)
+    assert zoomtex.crop_window(10000, 3000, 2600) == (2968, 2664)
+    assert zoomtex.crop_window(10000, 3000, 2700) == (2985, 2730)
     assert zoomtex.crop_window(100, 10, 80) == (0, 100)
     with pytest.raises(ValueError):
-        zoomtex.crop_window(10000, 3000, 4097)
+        zoomtex.crop_window(10000, 3000, 2731)
 
 
 def test_zoom_textures_for_every_baked_level(world, zoom):
@@ -1203,7 +1209,7 @@ def test_zoom_textures_for_every_baked_level(world, zoom):
         assert (tex["face"], tex["R"], tex["ci0"], tex["cj0"], tex["cells"], tex["guard"]) == (geo.face, geo.R, geo.ci0, geo.cj0, geo.cells, geo.guard)
         assert (tex["NE"], tex["p0"], tex["n"]) == (geo.NE, geo.p0, geo.n)
         img = _decode_tex(world["root"] / "viewer" / tex["file"], "t", geo.R)
-        assert img.shape == (2 * geo.NE, geo.NE, 4)
+        assert img.shape == (3 * geo.NE, geo.NE, 4)
         surf = res.surface()
         step = (tex["h1"] - tex["h0"]) / 65535.0
         c = geo.p0 + geo.n // 2

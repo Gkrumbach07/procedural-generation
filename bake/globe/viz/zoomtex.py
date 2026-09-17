@@ -9,7 +9,7 @@ level's ``tex`` record, so listing the zooms never opens an npz.
 
 The image is the level's product (its eroded core) and :data:`CROP` cells
 of the work array around it (fewer where the array has fewer), ``NE``
-pixels wide and ``2 NE`` tall; pixel ``(x, y)`` is work-array cell ``(x0 +
+pixels wide and ``3 NE`` tall; pixel ``(x, y)`` is work-array cell ``(x0 +
 x, x0 + y)`` (row along the face's u axis), its fine face cell ``(ci0 R -
 p0 + x, cj0 R - p0 + y)``, the core pixels ``[p0, p0 + n)``.  ``ci0`` /
 ``cj0`` are the product's origin in coarse cells -- an integer for a level
@@ -18,7 +18,7 @@ placed in fine cells -- and ``fi0`` / ``fj0`` the same in fine cells.
 Until the crop the image was the whole work array (``x0`` 0, ``NE`` and
 ``p0`` the array's): at 5 m that is ~10,000 cells a side for a 2,048-cell
 core.  WebGL textures stop at ``MAX_TEXTURE_SIZE`` (8192 here): a core over
-:data:`MAX_TEX` / 2 is not written.
+:data:`MAX_TEX` / 3 is not written.
 
 The top half is the ground as the detail tiles carry it
 (:func:`detail.tile_image`): ``R, G`` the 16-bit code of the surface
@@ -31,7 +31,9 @@ level's product (byte 1 at its median, 255 at its maximum; a river from
 that scale (``q_lo``, ``q_hi``: the flow layer); ``B`` the sediment log byte
 over ``sed_lo`` .. ``sed_hi`` metres (version 3); ``A`` the canopy cover the
 level grew (:mod:`globe.erosion.vegetation`), 0..255, where the record says
-``veg`` (version 4; 255 on a level without one).
+``veg`` (version 4; 255 on a level without one).  A third band below (version 5):
+``R`` the level's own biome code (:mod:`globe.zoom.biomes`; classified from the
+saved level when the bake did not), where the record says ``biome``.
 """
 from __future__ import annotations
 
@@ -47,12 +49,13 @@ LAKE_RANGE = 200.0
 #: cells of the work array kept around the product (the viewer blends a level
 #: in over its core's last 16 cells and reads a cell's neighbours)
 CROP = 32
-#: the tallest texture the viewer takes (2 NE <= MAX_TEX)
+#: the tallest texture the viewer takes (3 NE <= MAX_TEX)
 MAX_TEX = 8192
 #: the record's format: 2 = cropped (``x0``, ``fi0``, ``array_NE``), 3 = the water half
-#: also carries the flow (G) and sediment (B), 4 = and the canopy cover (A); a
+#: also carries the flow (G) and sediment (B), 4 = and the canopy cover (A), 5 = a third
+#: band of the level's biome codes; a
 #: sidecar of another version is stale, so the next ``index.write`` crops it
-TEX_VERSION = 4
+TEX_VERSION = 5
 #: rivers from this percentile of the product's land flux, full at the second
 RIVER_MIN_PCT, RIVER_FULL_PCT = 97.0, 99.9
 
@@ -103,16 +106,16 @@ def crop_window(NE: int, p0: int, n: int, crop: int = CROP, max_tex: int = MAX_T
     """``(x0, side)``: the square of a work array (``NE`` cells, product
     ``[p0, p0 + n)``) a level's texture covers -- the product and up to
     ``crop`` cells around it, as many as the array has on its narrower side
-    and as ``2 side <= max_tex`` allows.  ValueError when the product alone
+    and as ``3 side <= max_tex`` allows.  ValueError when the product alone
     is too tall."""
-    if 2 * n > max_tex:
+    if 3 * n > max_tex:
         raise ValueError(f"a {n}-cell core makes a texture taller than {max_tex}")
-    m = max(0, min(int(crop), p0, NE - p0 - n, (max_tex // 2 - n) // 2))
+    m = max(0, min(int(crop), p0, NE - p0 - n, (max_tex // 3 - n) // 2))
     return p0 - m, n + 2 * m
 
 
 def level_image(a: dict, geo: dict, lake_range: float = LAKE_RANGE, crop: int = CROP) -> tuple[np.ndarray, dict]:
-    """The ``(2 NE, NE, 4)`` RGBA image of a level's work arrays ``a`` (as
+    """The ``(3 NE, NE, 4)`` RGBA image of a level's work arrays ``a`` (as
     :func:`bake.load_level` or the npz holds them) over :func:`crop_window`,
     and its scales ``{h0, h1, lake_range, river_min_byte, river_span_byte}``
     and window ``{x0, NE, p0, n}`` (``NE`` the image's side, ``p0`` its core's
@@ -163,14 +166,19 @@ def level_image(a: dict, geo: dict, lake_range: float = LAKE_RANGE, crop: int = 
     vb = (np.clip(np.round(255.0 * np.asarray(a["vegetation"][ex, ex], np.float32)[k, k]), 0, 255).astype(np.uint8)
           if has_veg else np.full_like(qb, 255))                                    # A: canopy cover
     wimg = np.stack([qb, fb, sb, vb], axis=-1)
-    img = np.ascontiguousarray(np.concatenate([ground, wimg], axis=1).transpose(1, 0, 2))   # cell (x0 + x, x0 + y): ground at (x, y), water at (x, NE + y)
+    has_bio = "biome" in a
+    bio = np.asarray(a["biome"][ex, ex], np.uint8)[k, k] if has_bio else np.zeros_like(qb)
+    z8 = np.zeros_like(bio)
+    bimg = np.stack([bio, z8, z8, np.full_like(bio, 255)], axis=-1)
+    # cell (x0 + x, x0 + y): ground at (x, y), water at (x, NE + y), biome at (x, 2 NE + y)
+    img = np.ascontiguousarray(np.concatenate([ground, wimg, bimg], axis=1).transpose(1, 0, 2))
 
     byte = lambda v: int(round(255.0 * math.log(max(v, q_lo) / q_lo) / math.log(q_hi / q_lo)))
     scales = {"h0": h0, "h1": h1, "lake_range": float(lake_range),
               "river_min_byte": int(np.clip(byte(scale["river_min"]), 1, 254)),
               "river_span_byte": max(byte(scale["river_full"]) - byte(scale["river_min"]), 8),
               "q_lo": float(q_lo), "q_hi": float(q_hi), "sed_lo": dt.SED_LO_M, "sed_hi": dt.SED_HI_M,
-              "x0": int(x0), "NE": int(NE), "p0": int(p0), "n": int(n), "veg": bool(has_veg)}
+              "x0": int(x0), "NE": int(NE), "p0": int(p0), "n": int(n), "veg": bool(has_veg), "biome": bool(has_bio)}
     return img, scales
 
 
@@ -208,9 +216,18 @@ def write_level(viewer: Path, name: str, zdir: Path, R: int, N: int, cell_m: flo
     cell_m = stats.get("cell_m", cell_m)
     from ..zoom.bake import Geometry
 
-    keys = ("height", "sediment", "water_surface", "flux", "ocean", "vegetation")
+    keys = ("height", "sediment", "water_surface", "flux", "ocean", "vegetation", "biome")
     with np.load(npz) as z:
         a = {k: z[k] for k in keys if k in z.files}
+    if "biome" not in a:
+        # a level baked before the bake classified its biomes
+        try:
+            from ..zoom.biomes import level_biomes_of
+
+            a["biome"] = level_biomes_of(Path(zdir), int(R))
+        except (OSError, ValueError, KeyError) as e:
+            if log is not None:
+                log(f"[zoomtex] {name} L{R}: no biomes ({e})")
     img, scales = level_image(a, geo)
     del a
     t1 = time.time()

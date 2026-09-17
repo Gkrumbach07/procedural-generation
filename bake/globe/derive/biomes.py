@@ -98,6 +98,32 @@ PALETTE = np.array([b[2] for b in BIOMES], dtype=np.uint8)
 VEG_FACTOR = np.array([b[3] for b in BIOMES], dtype=np.float32)
 assert [b[0] for b in BIOMES] == list(range(N_BIOMES))
 
+#: the plants the globe viewer draws on a class (its satellite layer's tree symbols):
+#: none, conifer (a narrow cone), broadleaf (a lumpy dome), mixed (conifer in the cold,
+#: broadleaf in the warm), tropical (a broad many-lobed crown), savanna (a flat-topped
+#: umbrella) and shrub (a small low dome)
+TREE_NONE, TREE_CONIFER, TREE_BROADLEAF, TREE_MIXED, TREE_TROPICAL, TREE_SAVANNA, TREE_SHRUB = range(7)
+TREE_KIND = np.array([
+    TREE_NONE,        # ocean
+    TREE_NONE,        # ice
+    TREE_SHRUB,       # tundra
+    TREE_CONIFER,     # boreal forest
+    TREE_SHRUB,       # temperate grassland
+    TREE_MIXED,       # temperate forest
+    TREE_CONIFER,     # temperate rainforest
+    TREE_SHRUB,       # desert
+    TREE_SHRUB,       # shrubland
+    TREE_SAVANNA,     # savanna
+    TREE_TROPICAL,    # tropical seasonal forest
+    TREE_TROPICAL,    # tropical rainforest
+    TREE_CONIFER,     # alpine
+    TREE_SHRUB,       # cliff
+    TREE_MIXED,       # riparian
+    TREE_MIXED,       # wetland
+    TREE_NONE,        # lake
+], dtype=np.uint8)
+assert TREE_KIND.size == N_BIOMES
+
 
 # --------------------------------------------------------------------------
 # precipitation units
@@ -307,7 +333,8 @@ def colorize(codes: np.ndarray) -> np.ndarray:
 
 
 __all__ = [
-    "BIOMES", "NAMES", "PALETTE", "VEG_FACTOR", "N_BIOMES",
+    "BIOMES", "NAMES", "PALETTE", "VEG_FACTOR", "N_BIOMES", "TREE_KIND",
+    "TREE_NONE", "TREE_CONIFER", "TREE_BROADLEAF", "TREE_MIXED", "TREE_TROPICAL", "TREE_SAVANNA", "TREE_SHRUB",
     "OCEAN", "ICE", "TUNDRA", "BOREAL_FOREST", "TEMPERATE_GRASSLAND", "TEMPERATE_FOREST", "TEMPERATE_RAINFOREST",
     "DESERT", "SHRUBLAND", "SAVANNA", "TROPICAL_SEASONAL_FOREST", "TROPICAL_RAINFOREST", "ALPINE", "CLIFF",
     "RIPARIAN", "WETLAND", "LAKE",

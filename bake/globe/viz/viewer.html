@@ -223,6 +223,7 @@ uniform int uLKind;            // 0 linear, 1 category
 uniform int uCmap;             // 0 thermal, 1 rain, 2 plates, 3 biome, 4 viridis, 5 sediment, 6 satellite, 7 order
 uniform vec3 uBiome[32];
 uniform vec3 uSat[32];         // satellite ground colour per biome code (ice, rock classes)
+uniform int uTreeKind[32];     // tree kind per biome code (derive.biomes TREE_KIND): the shape and colour of its plants
 uniform float uVeg[32];        // vegetation factor per biome code (derive.biomes VEG_FACTOR): forest cover and tree density
 uniform int uTrees;            // 1: tree symbols on zoom levels of 100 m cells or finer (satellite layer)
 uniform float uTreeSpacing;    // metres between tree sites at this zoom (0 = none)
@@ -248,7 +249,8 @@ uniform int uFineLayer;
 uniform vec2 uLayerRange;
 uniform int uDGB;              // 1: the detail tiles' water half carries flow (G) and sediment (B)
 uniform vec2 uDQ, uDSed;       // their flow and sediment byte scales
-uniform vec4 uZGB, uZQlo, uZQhi, uZSlo, uZShi, uZVeg;   // the same per zoom slot
+uniform vec4 uZGB, uZQlo, uZQhi, uZSlo, uZShi, uZVeg, uZBio;
+uniform int uMoving;           // 1 while the tilt camera moves (half resolution, flat trees)   // the same per zoom slot
 uniform int uLines;            // 1 when the river-line pass drew into uRL this frame
 uniform sampler2D uRL;         // river lines, canvas-sized: R coverage x fade, G width (for the colour)
 uniform float uTexelRad;       // one texel of the finest terrain drawn, radians
@@ -341,12 +343,12 @@ vec4 zTex(int k, ivec2 c){
 // the finest loaded zoom level whose core holds p: its slot, the array coordinate
 // (texel centres at integers) and a weight rising from 0 at the core's edge to 1
 // sixteen cells in, so a zoom level blends into the terrain around it
-int zoomSlot(vec3 p, out vec2 a, out float w){
+int zoomSlotFrom(vec3 p, int k0, out vec2 a, out float w){
   w = 0.0; a = vec2(0.0);
   if (uZN == 0) return -1;
   int f = faceOf(p); float d = dot(p, BN[f]);
   vec2 uv = vec2(atan(dot(p, BR[f]) / d), atan(dot(p, BU[f]) / d)) * TWO_OVER_PI + 0.5;
-  for (int k = 0; k < 4; k++) {
+  for (int k = k0; k < 4; k++) {
     if (k >= uZN) break;
     if (uZFace[k] != f) continue;
     vec2 ai = uv * uZRes[k] - vec2(uZOi[k], uZOj[k]) - 0.5;
@@ -357,6 +359,19 @@ int zoomSlot(vec3 p, out vec2 a, out float w){
     return k;
   }
   return -1;
+}
+int zoomSlot(vec3 p, out vec2 a, out float w){ return zoomSlotFrom(p, 0, a, w); }
+// the level whose layers (colour, water, cover) are drawn at p: the finest, except in the
+// outer half of its blend band, where the next coarser level that holds p takes over --
+// not the planet's atlas, which drew a strip of other ground along every level's edge
+int zoomSlotDrawn(vec3 p, out vec2 a, out float w){
+  int k = zoomSlotFrom(p, 0, a, w);
+  if (k < 0 || w > 0.5) return k;
+  vec2 a2; float w2;
+  int k2 = zoomSlotFrom(p, k + 1, a2, w2);
+  if (k2 < 0) return k;
+  a = a2; w = w2;
+  return k2;
 }
 vec4 zLinear(int k, vec2 a){
   vec2 i0 = floor(a); vec2 fr = a - i0; ivec2 c = ivec2(i0);
@@ -373,7 +388,13 @@ float heightAt(vec3 p){
   int k = zoomSlot(p, za, zw);
   if (k < 0) return baseHeight(p);
   float hz = zHeight(k, za);
-  return zw >= 1.0 ? hz : mix(baseHeight(p), hz, zw);
+  if (zw >= 1.0) return hz;
+  // blend into the next coarser level that holds p (the planet only past the last): to the
+  // planet's surface, a level's edge was a trench or a wall of the two's difference
+  vec2 zb; float wb;
+  int k2 = zoomSlotFrom(p, k + 1, zb, wb);
+  float below = k2 < 0 ? baseHeight(p) : (wb >= 1.0 ? zHeight(k2, zb) : mix(baseHeight(p), zHeight(k2, zb), wb));
+  return mix(below, hz, zw);
 }
 
 // ---- tilt: ray-marched terrain -------------------------------------------
@@ -465,6 +486,31 @@ vec3 elevColor(float h, float w){
 // 1.2 km cell's mean slope of ~9 deg holds the cliffs a 5 m cell shows at ~35.
 // cellM is the cell the slope was measured over; forest [0, 1] and the
 // temperature at this height Tloc come back for the trees.
+vec3 hash3(vec2 q);
+float vnoise(vec2 q);
+// the class corners round the pixel (codes and bilinear weights), set once per pixel in main
+// (setClasses): the satellite colours blend across them, so a class edge is soft, not the
+// class texels' squares, and each tree site picks its kind from them
+ivec4 gCls = ivec4(0);
+vec4 gClsW = vec4(1.0, 0.0, 0.0, 0.0);
+void setClasses(vec3 p, int zk, vec2 za, float zw){
+  bool zoom = zk >= 0 && zw > 0.5 && uZBio[zk] > 0.5;
+  vec2 xy = zoom ? za : atlasXY(p, uLGeo);
+  vec2 i0 = floor(xy); vec2 fr = xy - i0; ivec2 a = ivec2(i0);
+  for (int i = 0; i < 4; i++) {
+    ivec2 o = ivec2(i % 2, i / 2);
+    float v = zoom ? zTex(zk, a + o + ivec2(0, 2 * int(uZNE[zk]))).r : chan(texelFetch(uLT, a + o, 0), uLCh);
+    gCls[i] = int(floor(v * 255.0 + 0.5));
+  }
+  gClsW = vec4((1.0 - fr.x) * (1.0 - fr.y), fr.x * (1.0 - fr.y), (1.0 - fr.x) * fr.y, fr.x * fr.y);
+}
+// stands and clearings: the cover's scale at pq (40 m units), three octaves each turned off
+// the grid so the value noise's square cells do not show
+float standScale(vec2 pq){
+  const mat2 ROT = mat2(0.8, 0.6, -0.6, 0.8);
+  float s = 0.5 * vnoise(ROT * pq / 4.0) + 0.3 * vnoise(ROT * ROT * pq / 1.7 + 31.7) + 0.2 * vnoise(ROT * ROT * ROT * pq / 0.7 + 71.3);
+  return mix(0.45, 1.55, smoothstep(0.25, 0.75, s));
+}
 vec3 satColor(float b, float h, vec3 p, float slopeDeg, float cellM, float simCover, out float forest, out float Tloc){
   float tb = byteLinear(uLT, uLGeo, 0, p) / 255.0;
   float pb = byteLinear(uLT, uLGeo, 1, p) / 255.0;
@@ -473,29 +519,49 @@ vec3 satColor(float b, float h, vec3 p, float slopeDeg, float cellM, float simCo
   Tloc = T - 0.0065 * (h - heightIn(uT0a, uGeoA, uHA, p));
   float lw = log(uPrecipRange.x) + pb * (log(uPrecipRange.y) - log(uPrecipRange.x));   // ln(precip / land mean)
   float w = clamp((lw - log(0.15)) / (log(4.0) - log(0.15)), 0.0, 1.0);
-  int cls = int(b);
+  // the classes round p, blended: their colour, vegetation, bare rock and ice, and the canopy
+  // their plants make seen from afar (shrubs lighter and thinner than trees)
+  vec3 tint = vec3(0.0), canopyC = vec3(0.0); float veg = 0.0, rocky = 0.0, icy = 0.0, canopyK = 0.0;
+  for (int i = 0; i < 4; i++) {
+    int k = gCls[i] & 31; float wt = gClsW[i];
+    tint += wt * uSat[k]; veg += wt * uVeg[k];
+    rocky += wt * ((k == 12 || k == 13) ? 1.0 : 0.0); icy += wt * (k == 1 ? 1.0 : 0.0);
+    int kind = uTreeKind[k];
+    bool shrub = kind == 6, savanna = kind == 5;
+    canopyC += wt * (shrub ? vec3(0.40, 0.40, 0.26) : savanna ? vec3(0.30, 0.36, 0.16)
+                     : mix(vec3(0.11, 0.21, 0.11), vec3(0.19, 0.30, 0.13), smoothstep(-2.0, 18.0, Tloc)));
+    canopyK += wt * (shrub ? 0.35 : savanna ? 0.6 : 0.85);
+  }
   // ground: dry tan to lush green, tundra and alpine meadow in the cold, the class for character
   vec3 c = ramp(w, vec3(0.80, 0.72, 0.52), vec3(0.68, 0.64, 0.40), vec3(0.47, 0.56, 0.30), vec3(0.30, 0.47, 0.25), vec3(0.20, 0.40, 0.21));
   c = mix(c, vec3(0.56, 0.58, 0.40), smoothstep(4.0, -2.0, Tloc));                   // alpine meadow
   c = mix(c, vec3(0.60, 0.57, 0.48), smoothstep(-2.0, -8.0, Tloc));                  // tundra
-  c = mix(c, uSat[cls], 0.25);
-  // forest cover: the class's vegetation, warmth above the tree line, rain
-  float veg = uVeg[cls & 31];
+  c = mix(c, tint, 0.25);
+  // forest cover: the classes' vegetation, warmth above the tree line, rain
   // the cover the zoom level grew where it has one (erosion.vegetation), else the climate's
   forest = simCover >= 0.0 ? simCover : veg * smoothstep(-3.0, 3.0, Tloc) * smoothstep(0.12, 0.45, w);
   // rock: past the slope a cell this size can hold soil on; tan when dry, grey-brown when wet, grey in the cold
   float thr = clamp(35.0 * pow(max(cellM, 5.0) / 5.0, -0.25), 4.0, 38.0);
   float rock = smoothstep(0.8 * thr, 1.25 * thr, slopeDeg);
   if (simCover >= 0.0) rock *= 1.0 - smoothstep(0.1, 0.4, simCover);   // soil where the level grew trees
-  if (cls == 12 || cls == 13) rock = max(rock, 0.55);
+  rock = max(rock, 0.55 * rocky);
   vec3 rockC = mix(vec3(0.45, 0.43, 0.40), vec3(0.63, 0.56, 0.47), 1.0 - w);
   rockC = mix(rockC, vec3(0.62, 0.62, 0.63), smoothstep(2.0, -10.0, Tloc));
   forest *= (1.0 - rock) * (1.0 - smoothstep(0.75 * thr, 1.15 * thr, slopeDeg));
-  c = mix(c, mix(vec3(0.17, 0.28, 0.16), vec3(0.26, 0.38, 0.19), smoothstep(-2.0, 18.0, Tloc)), 0.75 * forest);   // canopy from above
+  // canopy from above, in the stands and clearings the tree symbols are placed in (treeDensity,
+  // on the same 40 m grid), so zooming in turns the patches into the trees that make them
+  float fv = 0.0;
+  if (forest > 0.02) {
+    int ff = faceOf(p); float fd = dot(p, BN[ff]);
+    vec2 fuv = vec2(atan(dot(p, BR[ff]) / fd), atan(dot(p, BU[ff]) / fd)) * TWO_OVER_PI + 0.5;
+    vec2 pq = mod(fuv * (0.5 * PI * uRplanet / 40.0), 8192.0) + vec2(float(ff) * 517.0, 0.0);
+    fv = clamp(forest * standScale(pq), 0.0, 1.0);
+  }
+  c = mix(c, canopyC, canopyK * fv);
   c = mix(c, rockC, rock);
   // snow: cold enough to last, sliding off what is steeper than ~1.4x the rock slope
   float snow = smoothstep(-8.0, -15.0, Tloc) * (1.0 - smoothstep(1.1 * thr, 1.6 * thr, slopeDeg));
-  if (cls == 1) snow = 1.0;
+  snow = max(snow, icy);
   forest *= 1.0 - snow;
   return mix(c, vec3(0.95, 0.96, 0.97), snow);
 }
@@ -512,13 +578,15 @@ vec3 hash3(vec2 q){
   return fract((p3.xxy + p3.yzz) * p3.zyx);
 }
 // tree symbols, after McDonald's: a jittered grid of uTreeSpacing metres on the face, a
-// site kept with the cover's probability (gathered into stands and clearings), each tree a
-// cone -- lit on the sun's side, dark on the other, the taller crown in front where two
-// overlap -- over the shadow it throws away from the sun, on the ground and on the crowns
-// beside it.  Seen from above (globe, map) the cones are drawn on the ground; in tilt the
-// view marches through them (canopyMarch), so they stand up and hide what is behind.
-// Lengths in the tree grid are spacings; a cone's height is ~2 radii
+// site kept with the cover's probability (gathered into stands and clearings), each plant a
+// crown of its class's kind (derive.biomes TREE_KIND: conifer cone, broadleaf dome, tropical
+// many-lobed crown, savanna umbrella, low shrub) -- lit on the sun's side, dark on the other,
+// the taller crown in front where two overlap -- over the shadow it throws away from the
+// sun, on the ground and on the crowns beside it.  Seen from above (globe, map) they are
+// drawn on the ground; in tilt the view marches through them (canopyMarch), so they stand
+// up and hide what is behind.  Lengths in the tree grid are spacings
 const float TREE_TAN_SUN = 0.87;    // the hillshade's sun, ~41 degrees up
+struct Tree { vec2 ctr; float rad; float hgt; float tone; float lobe; int prof; vec3 col; };
 vec2 treeGrid(vec3 p, out int f){
   f = faceOf(p); float dd = dot(p, BN[f]);
   vec2 uv = vec2(atan(dot(p, BR[f]) / dd), atan(dot(p, BU[f]) / dd)) * TWO_OVER_PI + 0.5;
@@ -529,64 +597,112 @@ vec2 treeGrid(vec3 p, out int f){
 float treeDensity(vec2 gm, int f, float forest){
   if (forest <= 0.02) return 0.0;
   vec2 pq = mod(gm * (uTreeSpacing / 40.0), 8192.0) + vec2(float(f) * 517.0, 0.0);
-  float stand = 0.65 * vnoise(pq / 3.0) + 0.35 * vnoise(pq);
-  return clamp(forest * mix(0.35, 1.75, smoothstep(0.3, 0.75, stand)), 0.0, 1.0);
+  return clamp(forest * standScale(pq), 0.0, 1.0);
 }
 // the cover a zoom level grew at p, or fallback where the level carries none
 float coverAt(vec3 p, float fallback){
   vec2 za; float zw;
-  int zk = zoomSlot(p, za, zw);
+  int zk = zoomSlotDrawn(p, za, zw);
   if (zk < 0 || zw <= 0.5) return 0.0;
   return uZVeg[zk] > 0.5 ? zLinear(zk, za + vec2(0.0, uZNE[zk])).a : fallback;
 }
-bool treeSite(vec2 c, int f, float dens, out vec2 ctr, out float rad, out float hgt, out float tone){
-  vec3 hs = hash3(c + vec2(float(f) * 1013.0, 0.0));
-  ctr = c + 0.15 + 0.7 * hs.xy;
-  rad = 0.40 + 0.22 * fract(hs.x * 7.31 + hs.y);
-  hgt = rad * (1.5 + 0.8 * fract(hs.y * 3.7));
-  tone = 0.85 + 0.3 * fract(hs.y * 13.7);
-  return hs.z <= dens;
+// the kind a site draws, picked from the class corners round the pixel in proportion to
+// their weights, so a class edge is a mingling of both kinds, not a line
+int kindAt(float u){
+  float acc = 0.0;
+  for (int i = 0; i < 4; i++) { acc += gClsW[i]; if (u <= acc) return uTreeKind[gCls[i] & 31]; }
+  return uTreeKind[gCls[3] & 31];
 }
-// the tallest crown over gm: its height (spacings, -1 = none), the offset from its axis,
-// its radius, height, tone and site
-float crownAt(vec2 gm, int f, float dens, out vec2 dvB, out float radB, out float hgtB, out float toneB, out vec2 cB){
+bool treeSite(vec2 c, int f, float dens, float Tloc, out Tree t){
+  vec3 hs = hash3(c + vec2(float(f) * 1013.0, 0.0));
+  vec3 h2 = hash3(c.yx * 1.37 + vec2(311.0, float(f) * 97.0));
+  t.ctr = c + 0.15 + 0.7 * hs.xy; t.rad = 0.3; t.hgt = 0.6; t.prof = 1; t.col = vec3(0.2); t.lobe = h2.z * 6.2832;
+  t.tone = 0.85 + 0.3 * fract(hs.y * 13.7);
+  int kind = kindAt(h2.x);
+  if (kind == 3) kind = h2.y < smoothstep(15.0, 5.0, Tloc) ? 1 : 2;                  // mixed: conifers in the cold
+  if (kind == 0 || hs.z > dens) return false;
+  float v = fract(hs.x * 7.31 + hs.y), u = fract(hs.y * 3.7);
+  if (kind == 1) {        // conifer: a narrow cone, blue-green
+    t.prof = 0; t.rad = 0.30 + 0.16 * v; t.hgt = t.rad * (2.4 + 0.8 * u);
+    t.col = mix(vec3(0.10, 0.21, 0.13), vec3(0.15, 0.29, 0.16), smoothstep(-5.0, 12.0, Tloc));
+  } else if (kind == 2) { // broadleaf: a lumpy dome
+    t.prof = 1; t.rad = 0.40 + 0.20 * v; t.hgt = t.rad * (1.0 + 0.4 * u);
+    t.col = vec3(0.25, 0.39, 0.16);
+  } else if (kind == 4) { // tropical: a broad crown of many lobes, bright
+    t.prof = 2; t.rad = 0.48 + 0.24 * v; t.hgt = t.rad * (0.9 + 0.4 * u);
+    t.col = mix(vec3(0.17, 0.36, 0.11), vec3(0.28, 0.44, 0.13), fract(hs.x * 5.3));
+  } else if (kind == 5) { // savanna: a flat-topped umbrella, olive
+    t.prof = 3; t.rad = 0.36 + 0.22 * v; t.hgt = t.rad * (1.4 + 0.4 * u);
+    t.col = vec3(0.33, 0.38, 0.17);
+  } else {                // shrub: small and low, grey-olive, browner in the cold
+    t.prof = 1; t.rad = 0.15 + 0.12 * v; t.hgt = t.rad * (0.7 + 0.3 * u);
+    t.col = mix(vec3(0.40, 0.37, 0.25), vec3(0.34, 0.38, 0.22), smoothstep(-5.0, 10.0, Tloc));
+  }
+  return true;
+}
+// a crown's height (spacings) at dv from its axis, -1 outside it; rr its radial fraction
+float treeZ(Tree t, vec2 dv, out float rr){
+  float r = length(dv), ang = atan(dv.y, dv.x);
+  if (t.prof == 0) { rr = r / t.rad; return rr < 1.0 ? t.hgt * (1.0 - rr) : -1.0; }
+  if (t.prof == 3) {
+    rr = r / (t.rad * (1.0 + 0.08 * sin(4.0 * ang + t.lobe)));
+    return rr < 1.0 ? t.hgt * (1.0 - 0.3 * pow(rr, 6.0)) : -1.0;
+  }
+  float lobes = t.prof == 2 ? 7.0 : 5.0, amp = t.prof == 2 ? 0.16 : 0.10;
+  rr = r / (t.rad * (1.0 + amp * sin(lobes * ang + t.lobe)));
+  return rr < 1.0 ? t.hgt * sqrt(1.0 - rr * rr) : -1.0;
+}
+// the tallest crown over gm: its height (spacings, -1 = none), the tree, the offset from its
+// axis, its radial fraction and site
+float crownAt(vec2 gm, int f, float dens, float Tloc, out Tree tB, out vec2 dvB, out float rrB, out vec2 cB){
   vec2 cell = floor(gm);
-  float best = -1.0; dvB = vec2(0.0); radB = 1.0; hgtB = 1.0; toneB = 1.0; cB = vec2(-1e9);
+  float best = -1.0; dvB = vec2(0.0); rrB = 1.0; cB = vec2(-1e9);
+  Tree t;
   for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
     vec2 c = cell + vec2(float(dx), float(dy));
-    vec2 ctr; float rad, hgt, tone;
-    if (!treeSite(c, f, dens, ctr, rad, hgt, tone)) continue;
-    vec2 dv = gm - ctr; float r = length(dv);
-    if (r >= rad) continue;
-    float z = hgt * (1.0 - r / rad);
+    if (!treeSite(c, f, dens, Tloc, t)) continue;
+    vec2 dv = gm - t.ctr; float rr;
+    float z = treeZ(t, dv, rr);
     if (z <= best) continue;
-    best = z; dvB = dv; radB = rad; hgtB = hgt; toneB = tone; cB = c;
+    best = z; tB = t; dvB = dv; rrB = rr; cB = c;
   }
   return best;
 }
-// shade [0, 1] the other cones throw on a point at height z (spacings) over gm
-float treeShadow(vec2 gm, int f, float dens, vec2 skip, float z, vec2 sun, float aa){
-  vec2 cell = floor(gm);
+// shade [0, 1] the other crowns throw on a point at height z (spacings) over gm: a cone's
+// shadow tapers to its tip, a dome's to half, an umbrella's is its disc a height away
+float treeShadow(vec2 gm, int f, float dens, float Tloc, vec2 skip, float z, vec2 sun, float aa){
+  // the sites that can shade gm stand towards the sun from it: the 3 x 3 round a point
+  // a spacing up-sun covers every crown whose shadow reaches this far
+  vec2 cell = floor(gm + sun);
   float shadow = 0.0;
-  for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++) {
+  Tree t;
+  for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
     vec2 c = cell + vec2(float(dx), float(dy));
     if (c == skip) continue;
-    vec2 ctr; float rad, hgt, tone;
-    if (!treeSite(c, f, dens, ctr, rad, hgt, tone)) continue;
-    vec2 dv = gm - ctr;
-    float len = hgt / TREE_TAN_SUN;
-    float t = clamp(dot(dv, -sun) / len, 0.0, 1.0);
-    float q = length(dv + sun * (t * len));
-    float w = rad * (1.0 - t);
-    if (z < hgt * (1.0 - t)) shadow = max(shadow, 1.0 - smoothstep(w - aa, w + aa, q));
+    if (!treeSite(c, f, dens, Tloc, t)) continue;
+    vec2 dv = gm - t.ctr;
+    float len = t.hgt / TREE_TAN_SUN;
+    float s;
+    if (t.prof == 3) {
+      float q = length(dv + sun * len);
+      s = z < t.hgt ? 1.0 - smoothstep(t.rad - aa, t.rad + aa, q) : 0.0;
+    } else {
+      float tt = clamp(dot(dv, -sun) / len, 0.0, 1.0);
+      float q = length(dv + sun * (tt * len));
+      float w = t.rad * (1.0 - (t.prof == 0 ? 1.0 : 0.5) * tt);
+      s = z < t.hgt * (1.0 - tt) ? 1.0 - smoothstep(w - aa, w + aa, q) : 0.0;
+    }
+    shadow = max(shadow, s);
   }
   return shadow;
 }
-vec3 crownColor(vec2 dv, float rad, float hgt, float tone, float Tloc, vec3 sun3, float shade){
-  vec3 nrm = normalize(vec3(dv / max(length(dv), 1e-4) * (hgt / rad), 1.0));
+vec3 crownColor(Tree t, vec2 dv, float rr, vec3 sun3, float shade){
+  // the profile's slope along the radius (lobes left out): cone, umbrella, dome
+  float k = t.hgt / t.rad;
+  float s = t.prof == 0 ? k : t.prof == 3 ? 1.8 * k * pow(rr, 5.0) : k * rr / sqrt(max(1.0 - rr * rr, 0.04));
+  vec3 nrm = normalize(vec3(dv / max(length(dv), 1e-4) * s, 1.0));
   float lit = 0.30 + 0.95 * max(dot(nrm, sun3), 0.0);
-  vec3 base = mix(vec3(0.16, 0.30, 0.15), vec3(0.27, 0.40, 0.17), smoothstep(-2.0, 16.0, Tloc));   // conifer when cold, broadleaf when warm
-  return base * tone * lit * mix(1.0, shade, 0.3);
+  return t.col * t.tone * lit * mix(1.0, shade, 0.3);
 }
 // the sun in the tree grid of face f, and up out of it
 vec2 treeSun(vec3 e, vec3 n, int f, out vec3 sun3){
@@ -605,64 +721,52 @@ vec3 drawTrees(vec3 col, vec3 p, vec3 e, vec3 n, float forest, float Tloc, float
   vec3 sun3; vec2 sun = treeSun(e, n, f, sun3);
   float dens = treeDensity(gm, f, forest);
   float aa = 1.5 / max(cellPx, 1.0);
-  vec2 dv, cB; float rad, hgt, tone;
-  float z = crowns ? crownAt(gm, f, dens, dv, rad, hgt, tone, cB) : -1.0;
-  float shadow = treeShadow(gm, f, dens, cB, max(z, 0.0), sun, aa);
-  vec3 ground = col * mix(1.0, 0.72, dens * fade);                  // the forest floor
+  Tree t; vec2 dv, cB = vec2(-1e9); float rr = 1.0;
+  float z = crowns ? crownAt(gm, f, dens, Tloc, t, dv, rr, cB) : -1.0;
+  float shadow = treeShadow(gm, f, dens, Tloc, cB, max(z, 0.0), sun, aa);
+  vec3 ground = col * mix(1.0, 0.8, dens * fade);                   // the forest floor
   ground *= 1.0 - 0.45 * shadow * fade;
   if (z < 0.0) return ground;
-  float cover = 1.0 - smoothstep(rad - aa, rad, length(dv));
-  vec3 crown = crownColor(dv, rad, hgt, tone, Tloc, sun3, shade) * (1.0 - 0.35 * shadow);
+  float cover = 1.0 - smoothstep(1.0 - aa / max(t.rad, 1e-3), 1.0, rr);
+  vec3 crown = crownColor(t, dv, rr, sun3, shade) * (1.0 - 0.35 * shadow);
   return mix(ground, crown, cover * fade);
 }
 // tilt: march the ray through the canopy over the terrain it hit at tHit, from where it
 // is a tallest tree above the ground.  Returns true with the crown's colour where it meets
-// a cone first
+// a crown first
 bool canopyMarch(vec3 rd, float tHit, vec3 p, vec3 e, vec3 n, float forest, float riverW, float Tloc, float shade, out vec3 crown){
   crown = vec3(0.0);
   float S = uTreeSpacing;
-  float hTop = 1.45 * S;                                            // the tallest cone, metres
+  const float TOP = 1.5;                                            // the tallest crown, spacings
   float sinE = max(-dot(rd, p), 0.03);
-  float t0 = max(tHit - min(hTop / sinE, 14.0 * S), 0.0);
+  float t0 = max(tHit - min(TOP * S / sinE, 14.0 * S), 0.0);
   // the cover where each step is, not where the ray lands: a crown standing in front of a
   // cliff belongs to the forest at its foot.  The drawn river is known at the landing only,
   // so it clears the crowns within a spacing of it
   float riverCut = 1.0 - smoothstep(0.03, 0.3, riverW);
   float cosE = sqrt(max(1.0 - sinE * sinE, 0.0));
-  const int STEPS = 48;
+  const int STEPS = 24;
   float dt = (tHit - t0) / float(STEPS);
   float tPrev = t0;
+  Tree t; vec2 dv, cB; float rr;
   for (int i = 1; i <= STEPS; i++) {
-    float t = t0 + dt * float(i);
-    vec3 pp; float alt = altOf(uCamPos + t * rd, pp);
+    float ts = t0 + dt * float(i);
+    vec3 pp; float alt = altOf(uCamPos + ts * rd, pp);
     float rel = (alt - groundAt(pp)) / S;
-    if (rel > 1.45) { tPrev = t; continue; }
+    if (rel > TOP) { tPrev = ts; continue; }
     int f; vec2 gm = treeGrid(pp, f);
-    float dens = treeDensity(gm, f, coverAt(pp, forest) * ((tHit - t) * cosE < S ? riverCut : 1.0));
-    if (dens <= 0.0) { tPrev = t; continue; }
-    vec2 dv, cB; float rad, hgt, tone;
-    float z = crownAt(gm, f, dens, dv, rad, hgt, tone, cB);
+    float dens = treeDensity(gm, f, coverAt(pp, forest) * ((tHit - ts) * cosE < S ? riverCut : 1.0));
+    if (dens <= 0.0) { tPrev = ts; continue; }
+    float z = crownAt(gm, f, dens, Tloc, t, dv, rr, cB);
     if (z >= 0.0 && rel <= z) {
-      // a few halvings back to the crown's surface
-      float lo = tPrev, hi = t;
-      for (int j = 0; j < 4; j++) {
-        float m = 0.5 * (lo + hi);
-        vec3 pm; float am = altOf(uCamPos + m * rd, pm);
-        int fm; vec2 gmm = treeGrid(pm, fm);
-        vec2 d2, c2; float r2, h2, t2;
-        float zm = crownAt(gmm, fm, dens, d2, r2, h2, t2, c2);
-        if (zm >= 0.0 && (am - groundAt(pm)) / S <= zm) { hi = m; dv = d2; rad = r2; hgt = h2; tone = t2; cB = c2; z = zm; gm = gmm; f = fm; }
-        else lo = m;
-      }
       vec3 sun3; vec2 sun = treeSun(e, n, f, sun3);
-      float aa = 0.5;
-      float sh = treeShadow(gm, f, dens, cB, z, sun, aa);
+      float sh = treeShadow(gm, f, dens, Tloc, cB, z, sun, 0.5);
       // the lower crown sits in its neighbours' shade: darker towards the foot
-      float foot = mix(0.55, 1.0, clamp(z / max(hgt, 1e-3) + 0.25, 0.0, 1.0));
-      crown = crownColor(dv, rad, hgt, tone, Tloc, sun3, shade) * (1.0 - 0.35 * sh) * foot;
+      float foot = mix(0.55, 1.0, clamp(z / max(t.hgt, 1e-3) + 0.25, 0.0, 1.0));
+      crown = crownColor(t, dv, rr, sun3, shade) * (1.0 - 0.35 * sh) * foot;
       return true;
     }
-    tPrev = t;
+    tPrev = ts;
   }
   return false;
 }
@@ -714,7 +818,7 @@ void main(){
   e = dot(e, e) < 1e-10 ? vec3(0.0, 1.0, 0.0) : normalize(e);
   vec3 n = cross(p, e);
   vec2 za; float zw;
-  int zk = zoomSlot(p, za, zw);
+  int zk = zoomSlotDrawn(p, za, zw);
   // relief is measured over the cells of whatever is drawn here: a zoom level's
   // own, and in tilt no finer than the pixel's footprint
   float d = zk >= 0 ? min(uTexelRad, 0.5 * PI / uZRes[zk]) : uTexelRad;
@@ -795,12 +899,15 @@ void main(){
         }
       }
     }
+    if (b < 0.0 && (uCmap == 3 || uCmap == 6) && zk >= 0 && zw > 0.5 && uZBio[zk] > 0.5)
+      b = zTex(zk, ivec2(floor(za + 0.5)) + ivec2(0, 2 * int(uZNE[zk]))).r * 255.0;   // the zoom level's own biome
     if (b < 0.0) b = uLKind == 1 ? byteNearest(uLT, uLGeo, uLCh, p) : byteLinear(uLT, uLGeo, uLCh, p);
     if (uLKind == 1) {
       if (uCmap == 6) {
         if (wet) col = satWater(h, wcode);
         else {
           float sim = zk >= 0 && zw > 0.5 && uZVeg[zk] > 0.5 ? zLinear(zk, za + vec2(0.0, uZNE[zk])).a : -1.0;
+          setClasses(p, zk, za, zw);
           col = satColor(b, h, p, degrees(atan(length(g))), d * uRplanet, sim, treeF, treeT);
           treesHere = uTrees == 1 && uTreeSpacing > 0.0 && zk >= 0 && zw > 0.5 && 0.5 * PI * uRplanet / uZRes[zk] < 100.0;
         }
@@ -853,7 +960,7 @@ void main(){
     float pxPerM = uMode == 2 ? 1.0 / max(tHit * uPixAng, 1e-6) : uScale / uRplanet;
     float tf = treeF * (1.0 - smoothstep(0.03, 0.3, riverW));
     vec3 crown;
-    if (uMode == 2 && uTreeSpacing * pxPerM > 3.0 && canopyMarch(rd, tHit, p, e, n, treeF, riverW, treeT, shade, crown))
+    if (uMode == 2 && uMoving == 0 && uTreeSpacing * pxPerM > 5.0 && canopyMarch(rd, tHit, p, e, n, treeF, riverW, treeT, shade, crown))
       col = mix(col, crown, smoothstep(3.0, 6.0, uTreeSpacing * pxPerM));
     else col = drawTrees(col, p, e, n, tf, treeT, pxPerM, shade, uMode != 2);
   }
@@ -1168,6 +1275,9 @@ const biome = new Float32Array(96), sat = new Float32Array(96);
 (META.satellite_palette || []).forEach((c, i) => { if (i < 32) { sat[3*i] = c[0]/255; sat[3*i+1] = c[1]/255; sat[3*i+2] = c[2]/255; } });
 const veg = new Float32Array(32);
 (META.biome_vegetation || []).forEach((v, i) => { if (i < 32) veg[i] = v; });
+// derive.biomes TREE_KIND; a viewer exported before it has none: mixed trees on every class with vegetation
+const treeKind = new Int32Array(32);
+(META.biome_tree_kinds || META.biome_vegetation?.map(v => v > 0 ? 3 : 0) || []).forEach((v, i) => { if (i < 32) treeKind[i] = v; });
 
 // ---------------------------------------------------------------------------
 // Rendering
@@ -1232,6 +1342,7 @@ function requestDraw() { if (!drawQueued) { drawQueued = true; requestAnimationF
 // heavy); a quarter second after the last move it is drawn sharp again
 const cssPx = () => canvas.width / Math.max(canvas.clientWidth, 1);
 let moving = false, movingTimer = 0;
+const TREE_MAX_M = 16;
 function bumpMoving() {
   if (state.view !== "tilt") return;
   moving = true; clearTimeout(movingTimer);
@@ -1431,12 +1542,25 @@ function updateZoomTex(FA) {
     const old = [...ztex.loaded.entries()].filter(([, v]) => v.seen < ztex.tick).sort((a, b) => a[1].seen - b[1].seen);
     for (const [k, v] of old.slice(0, ztex.loaded.size - ZT_KEEP)) { gl.deleteTexture(v.tex); ztex.loaded.delete(k); }
   }
-  return want.sort((a, b) => b.R - a.R).slice(0, 4);
+  // finest first; of two zooms over the same ground only the newer bake's levels, or the
+  // shader would blend one bake's level into the other's and draw the step between them
+  const baked = n => (zooms.find(z => z.name === n) || {}).baked || 0;
+  want.sort((a, b) => b.R - a.R || baked(b.name) - baked(a.name));
+  const rect = t => { const s = t.N * t.R, i = t.ci0 * t.R, j = t.cj0 * t.R; return [t.face, i / s, j / s, (i + t.n) / s, (j + t.n) / s]; };
+  const overlap = (a, b) => a[0] === b[0] && a[1] < b[3] && b[1] < a[3] && a[2] < b[4] && b[2] < a[4];
+  const picked = [];
+  for (const w of want) {
+    if (picked.length >= 4) break;
+    const r = rect(w.rec);
+    if (picked.some(q => q.name !== w.name && overlap(rect(q.rec), r) && baked(q.name) >= baked(w.name))) continue;
+    picked.push(w);
+  }
+  return picked;
 }
 function bindZoomSlots(slots, fallback) {
   const f = [0, 0, 0, 0], v = n => new Float32Array(4).fill(n);
   const res = v(1), oi = v(0), oj = v(0), p0 = v(0), core = v(0), ne = v(1), h0 = v(0), h1 = v(1), rmin = v(255), rspan = v(1);
-  const gb = v(0), qlo = v(1), qhi = v(10), slo = v(0.5), shi = v(2000), zveg = v(0);
+  const gb = v(0), qlo = v(1), qhi = v(10), slo = v(0.5), shi = v(2000), zveg = v(0), zbio = v(0);
   for (let k = 0; k < 4; k++) {
     const sl = slots[k];
     bindTex(9 + k, sl ? sl.tex : fallback, `uZT${k}`);
@@ -1447,8 +1571,9 @@ function bindZoomSlots(slots, fallback) {
     rmin[k] = t.river_min_byte; rspan[k] = t.river_span_byte;
     if ((t.version ?? 0) >= 3) { gb[k] = 1; qlo[k] = t.q_lo; qhi[k] = t.q_hi; slo[k] = t.sed_lo; shi[k] = t.sed_hi; }
     if (t.veg) zveg[k] = 1;
+    if (t.biome) zbio[k] = 1;
   }
-  gl.uniform4fv(U.uZGB, gb); gl.uniform4fv(U.uZQlo, qlo); gl.uniform4fv(U.uZQhi, qhi); gl.uniform4fv(U.uZSlo, slo); gl.uniform4fv(U.uZShi, shi); gl.uniform4fv(U.uZVeg, zveg);
+  gl.uniform4fv(U.uZGB, gb); gl.uniform4fv(U.uZQlo, qlo); gl.uniform4fv(U.uZQhi, qhi); gl.uniform4fv(U.uZSlo, slo); gl.uniform4fv(U.uZShi, shi); gl.uniform4fv(U.uZVeg, zveg); gl.uniform4fv(U.uZBio, zbio);
   gl.uniform1i(U.uZN, slots.length);
   gl.uniform4iv(U.uZFace, new Int32Array(f));
   gl.uniform4fv(U.uZRes, res); gl.uniform4fv(U.uZOi, oi); gl.uniform4fv(U.uZOj, oj); gl.uniform4fv(U.uZP0, p0);
@@ -1529,11 +1654,14 @@ function draw() {
     gl.uniform1i(U.uDGB, DET.water_gb ? 1 : 0);
     gl.uniform2f(U.uDQ, DET.q_lo ?? 1, DET.q_hi ?? 10); gl.uniform2f(U.uDSed, DET.sed_lo ?? 0.5, DET.sed_hi ?? 2000);
   }
-  gl.uniform3fv(U.uBiome, biome); gl.uniform3fv(U.uSat, sat); gl.uniform1fv(U.uVeg, veg);
+  gl.uniform3fv(U.uBiome, biome); gl.uniform3fv(U.uSat, sat); gl.uniform1fv(U.uVeg, veg); gl.uniform1iv(U.uTreeKind, treeKind);
   gl.uniform1i(U.uTrees, state.trees ? 1 : 0);
-  // tree sites ~8 device pixels apart at the view centre, in powers of two of 4 m, so they stay put while panning
+  // tree sites ~6 device pixels apart at the view centre, in powers of two of 4 m, so they stay put while
+  // panning; past TREE_MAX_M apart a tree would be a hill, so zoomed further out the forest is its canopy
+  // colour alone
   const tsp = 4 * Math.pow(2, Math.max(0, Math.ceil(Math.log2(6 * metresPerPx() / 4))));
-  gl.uniform1f(U.uTreeSpacing, tsp <= 400 ? tsp : 0);
+  gl.uniform1f(U.uTreeSpacing, tsp <= TREE_MAX_M ? tsp : 0);
+  gl.uniform1i(U.uMoving, state.view === "tilt" && moving ? 1 : 0);
   const tch = CHANNELS.temperature || {}, pch = CHANNELS.precip || {};
   gl.uniform2f(U.uTempRange, tch.lo ?? -45, tch.hi ?? 35); gl.uniform2f(U.uPrecipRange, pch.lo ?? 0.02, pch.hi ?? 5);
   const L = (FA.layers || {})[state.layer];

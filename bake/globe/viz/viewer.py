@@ -896,6 +896,7 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
         "biome_palette": _biome_palette() if "biome" in specs else [],
         "satellite_palette": SATELLITE_PALETTE if "satellite" in specs else [],
         "biome_vegetation": _biome_vegetation() if "satellite" in specs else [],
+        "biome_tree_kinds": _biome_tree_kinds() if "satellite" in specs else [],
         "stage_seconds": {s: round(v.get("seconds", 0.0), 1) for s, v in manifest.get("stages", {}).items()},
         "exported": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "final_index": len(frames) - 1,
@@ -947,6 +948,14 @@ def _biome_vegetation() -> list:
     from ..derive.biomes import VEG_FACTOR
 
     return [round(float(v), 3) for v in VEG_FACTOR]
+
+
+def _biome_tree_kinds() -> list:
+    """derive.biomes' tree kind per class (TREE_*): the shape and colour of the
+    satellite layer's tree symbols."""
+    from ..derive.biomes import TREE_KIND
+
+    return [int(v) for v in TREE_KIND]
 
 
 def _biome_palette() -> list:
