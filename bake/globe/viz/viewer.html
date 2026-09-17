@@ -620,8 +620,16 @@ vec4 bspline(float t);
 // A cubic B-spline read of one channel: the planet's shoreline texels are kilometres across,
 // and reading them bilinearly leaves a lake's edge as a staircase of squares.  The B-spline
 // is smooth in its slope as well as its value, so the shore curves
+// A shoreline drawn from cells is a staircase whatever it is filtered with: the steps are in
+// the data, not in the sampling.  Shifting where the depth is read by a fraction of a texel,
+// with a wobble a couple of texels across, bends the edge off the grid -- the coast keeps its
+// shape and its length but reads as a coast rather than as pixels
+vec2 shoreWarp(vec2 xy, float amp){
+  return amp * 2.0 * (vec2(vnoise(xy * 0.42), vnoise(xy * 0.42 + 31.7)) - 0.5);
+}
 float byteSmooth(sampler2D t, vec3 geo, int ch, vec3 p){
   vec2 xy = atlasXY(p, geo);
+  xy += shoreWarp(xy, 0.75);
   vec2 i0 = floor(xy); vec2 f = xy - i0; ivec2 a = ivec2(i0);
   vec4 wx = bspline(f.x), wy = bspline(f.y);
   float v = 0.0;
@@ -1065,14 +1073,16 @@ void main(){
   float wCov = 0.0;
   if (zk >= 0 && zw > 0.5) {
     vec4 t = zLinear(zk, za) * 255.0;
-    float ld = (t.b / 127.5 - 1.0) * uLakeRange;
-    wcode = 255.0 - t.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
-    fineW = true; fineLd = ld; fineOc = 1.0 - t.a / 255.0; lakeD = ld;
+    vec4 tw = zLinear(zk, za + shoreWarp(za, 0.75)) * 255.0;         // the shore, bent off the grid
+    float ld = (tw.b / 127.5 - 1.0) * uLakeRange;
+    wcode = 255.0 - tw.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
+    fineW = true; fineLd = ld; fineOc = 1.0 - tw.a / 255.0; lakeD = ld;
   } else if (inDetail) {
     vec4 t = detailLinear(dxy) * 255.0;
-    float ld = (t.b / 127.5 - 1.0) * uLakeRange;
-    wcode = 255.0 - t.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
-    fineW = true; fineLd = ld; fineOc = 1.0 - t.a / 255.0; lakeD = ld;
+    vec4 tw = detailLinear(dxy + shoreWarp(dxy, 0.75)) * 255.0;
+    float ld = (tw.b / 127.5 - 1.0) * uLakeRange;
+    wcode = 255.0 - tw.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
+    fineW = true; fineLd = ld; fineOc = 1.0 - tw.a / 255.0; lakeD = ld;
   } else if (uHasShore == 1) {
     float oc = byteSmooth(uST, uSGeo, 2, p);
     float ld = (byteSmooth(uST, uSGeo, 1, p) / 127.5 - 1.0) * uLakeRange;
