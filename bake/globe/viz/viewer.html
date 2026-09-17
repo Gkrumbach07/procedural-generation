@@ -101,6 +101,7 @@
   #zoomlist .zr { display:flex; align-items:center; gap:6px; margin:5px 0; flex-wrap:wrap; }
   #zoomlist .zr button.tl { padding:1px 6px; font-size:11px; line-height:16px; }
   #zoomlist .zn { color:var(--accent); cursor:pointer; min-width:84px; }
+  #zoomlist .zl { cursor:pointer; border-bottom:1px dotted var(--line); }
   #zoomlist .ld { color:var(--dim); font-size:10px; }
   .job { border-top:1px solid var(--line); padding:8px 0; }
   .job .jn { display:flex; justify-content:space-between; gap:6px; align-items:baseline; }
@@ -2115,7 +2116,7 @@ function buildZoomList() {
       const key = zkey(z, L), st = ztex.loading.has(key) ? `<span class="ld">loading</span>` : "";
       const on = play && play.name === z.name && play.R === L.R;
       const tl = L.frames ? `<button class="plain tl" data-z="${z.name}" data-r="${L.R}" title="Play this level's erosion (${L.frames.count} frames)">${on ? "\u25a0" : "\u25b6"}</button>` : "";
-      return `<label class="chk"><input type="checkbox" data-k="${key}"${state.zoff.has(key) ? "" : " checked"}>${fmtCell(L.tex.cell_m)}</label>${tl}${st}`;
+      return `<label class="chk"><input type="checkbox" data-k="${key}"${state.zoff.has(key) ? "" : " checked"}><span class="zl" data-z="${z.name}" data-r="${L.R}" title="Fly to this level">${fmtCell(L.tex.cell_m)}</span></label>${tl}${st}`;
     }).join("") + `</div>`).join("");
   el.querySelectorAll("button.tl").forEach(b => b.onclick = () => {
     const z = zooms.find(x => x.name === b.dataset.z), L = (z.levels || []).find(x => x.R === +b.dataset.r);
@@ -2124,15 +2125,26 @@ function buildZoomList() {
   el.querySelectorAll("input[data-k]").forEach(i => i.onchange = () => {
     i.checked ? state.zoff.delete(i.dataset.k) : state.zoff.add(i.dataset.k); writeHash(); requestDraw(); });
   el.querySelectorAll(".zn").forEach(n => n.onclick = () => flyToZoom(zooms.find(z => z.name === n.dataset.z)));
+  el.querySelectorAll(".zl").forEach(n => n.onclick = ev => {
+    ev.preventDefault();
+    const z = zooms.find(x => x.name === n.dataset.z);
+    flyToLevel((z.levels || []).find(L => L.R === +n.dataset.r));
+  });
 }
-function flyToZoom(z) {
-  if (!z) return;
-  const L = fineLevels(z).sort((a, b) => a.tex.cell_m - b.tex.cell_m)[0] || z.levels[z.levels.length - 1];
+// fly to a level of a zoom: its square fills the view, so the level draws in place.  The
+// standalone mesh pages are still there (a zoom's own page links them), but everything the
+// viewer offers -- satellite ground, trees, water, the time lapse -- is here
+function flyToLevel(L) {
+  if (!L || !L.corners) return;
   const c = L.corners.map(([la, lo]) => dirOf(la * PI / 180, lo * PI / 180)), mid = norm3(c.reduce((a, q) => add3(a, q), [0, 0, 0]));
   [state.lat0, state.lon0] = latLonOf(mid);
   const half = Math.max(...c.map(q => Math.acos(Math.min(1, dot3(q, mid)))));
   state.zoom = Math.max(0.35, Math.min(maxZoom(), 0.45 * Math.min(canvas.width, canvas.height) / (half * baseScale())));
   writeHash(); requestDraw();
+}
+function flyToZoom(z) {
+  if (!z) return;
+  flyToLevel(fineLevels(z).sort((a, b) => a.tex.cell_m - b.tex.cell_m)[0] || z.levels[z.levels.length - 1]);
 }
 // Scout candidates (globe/zoom/scout.py): numbered markers, a square of the
 // scored window once it is a few pixels, a popup with the measures, the
@@ -2346,9 +2358,16 @@ function showZoom(h, px, py) {
   here = { kind: "zoom", h, px, py };
   hereHTML(`<div><b>${z.name}</b></div>` +
     `<div class="d">${z.lat.toFixed(2)}°, ${z.lon.toFixed(2)}° · baked in ${Math.round((z.seconds || 0) / 60)} min</div>` +
-    `<div class="row"><button class="plain" id="herefly">Fly there</button><a href="${z.href}">Open 3-D view</a></div>` +
-    `<div class="d">levels: ` + z.levels.map(L => `<a href="${L.href}">${L.cell_m >= 1000 ? (L.cell_m / 1000).toFixed(1) + " km" : Math.round(L.cell_m) + " m"}</a>`).join(" · ") + `</div>`,
-    () => { $("herefly").onclick = () => flyToZoom(z); });
+    `<div class="row"><button class="plain" id="herefly">Fly there</button><button class="plain" id="here3d">See it in 3-D</button></div>` +
+    `<h3>Levels</h3><div class="row">` +
+    z.levels.map((L, k) => `<button class="plain" data-lv="${k}">${L.cell_m >= 1000 ? (L.cell_m / 1000).toFixed(1) + " km" : Math.round(L.cell_m) + " m"}</button>`).join("") +
+    `</div><div class="note">A level flies you to its square, where it draws in place. Its own mesh page: ` +
+    z.levels.map(L => `<a href="${L.href}">${Math.round(L.cell_m)} m</a>`).join(" · ") + `</div>`,
+    () => {
+      $("herefly").onclick = () => flyToZoom(z);
+      $("here3d").onclick = () => { flyToZoom(z); state.view = "tilt"; state.tilt = 62 * PI / 180; writeHash(); requestDraw(); updateLabels(state.frame); };
+      $("here").querySelectorAll("[data-lv]").forEach(b => b.onclick = () => flyToLevel(z.levels[+b.dataset.lv]));
+    });
 }
 function showSpot(px, py) {
   const p = screenToDir(px, py);
