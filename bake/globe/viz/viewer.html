@@ -222,6 +222,14 @@ uniform float uRiverSpan;      // bytes from there to full strength
 uniform float uRiverZoom;      // bytes the fade-in moves up per doubling of cells per screen pixel
 uniform int uGrid, uCoast;
 uniform float uContour;        // contour interval, metres (0 = off); every fifth line is a major one
+// layers drawn at the finest source's resolution where a detail tile or zoom level covers
+// the ground: 1 flow, 2 discharge (rivers), 3 water, 4 lake depth, 5 ocean, 6 sediment;
+// uLayerRange is the layer's own byte scale (log or linear lo, hi) the fine value is put on
+uniform int uFineLayer;
+uniform vec2 uLayerRange;
+uniform int uDGB;              // 1: the detail tiles' water half carries flow (G) and sediment (B)
+uniform vec2 uDQ, uDSed;       // their flow and sediment byte scales
+uniform vec4 uZGB, uZQlo, uZQhi, uZSlo, uZShi;   // the same per zoom slot
 uniform int uLines;            // 1 when the river-line pass drew into uRL this frame
 uniform sampler2D uRL;         // river lines, canvas-sized: R coverage x fade, G width (for the colour)
 uniform float uTexelRad;       // one texel of the finest terrain drawn, radians
@@ -519,14 +527,18 @@ void main(){
   // lake is wherever the interpolated signed lake depth is above 0
   float wcode;
   vec2 dxy;
+  bool fineW = false; float fineLd = 0.0, fineOc = 0.0;      // lake depth (m) and ocean mask from a tile or zoom level
+  bool inDetail = uDetail == 1 && detailXY(p, dxy);
   if (zk >= 0 && zw > 0.5) {
     vec4 t = zLinear(zk, za) * 255.0;
     float ld = (t.b / 127.5 - 1.0) * uLakeRange;
     wcode = 255.0 - t.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
-  } else if (uDetail == 1 && detailXY(p, dxy)) {
+    fineW = true; fineLd = ld; fineOc = 1.0 - t.a / 255.0;
+  } else if (inDetail) {
     vec4 t = detailLinear(dxy) * 255.0;
     float ld = (t.b / 127.5 - 1.0) * uLakeRange;
     wcode = 255.0 - t.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
+    fineW = true; fineLd = ld; fineOc = 1.0 - t.a / 255.0;
   } else if (uHasShore == 1) {
     float oc = byteLinear(uST, uSGeo, 2, p);
     float ld = (byteLinear(uST, uSGeo, 1, p) / 127.5 - 1.0) * uLakeRange;
@@ -548,7 +560,34 @@ void main(){
   if (uLayer == 0) {
     col = elevColor(h, wcode);
   } else {
-    float b = uLKind == 1 ? byteNearest(uLT, uLGeo, uLCh, p) : byteLinear(uLT, uLGeo, uLCh, p);
+    float b = -1.0;
+    if (uFineLayer >= 3 && uFineLayer <= 5 && fineW) {
+      if (uFineLayer == 3) b = wcode;
+      else if (uFineLayer == 4) b = clamp(255.0 * (fineLd - uLayerRange.x) / max(uLayerRange.y - uLayerRange.x, 1e-6), 0.0, 255.0);
+      else b = clamp(255.0 * (fineOc - uLayerRange.x) / max(uLayerRange.y - uLayerRange.x, 1e-6), 0.0, 255.0);
+    } else if (uFineLayer == 1 || uFineLayer == 2 || uFineLayer == 6) {
+      // the fine source's log byte, decoded and put on the layer's own log scale
+      vec4 t = vec4(0.0); float lo = 1.0, hi = 2.0; bool have = false;
+      if (zk >= 0 && zw > 0.5 && (uFineLayer == 2 || uZGB[zk] > 0.5)) {
+        t = zLinear(zk, za + vec2(0.0, uZNE[zk])) * 255.0; have = true;
+        lo = uFineLayer == 6 ? uZSlo[zk] : uZQlo[zk]; hi = uFineLayer == 6 ? uZShi[zk] : uZQhi[zk];
+      } else if (inDetail && (uFineLayer == 2 || uDGB == 1)) {
+        t = detailLinear(dxy + vec2(0.0, uDSlot)) * 255.0; have = true;
+        lo = uFineLayer == 6 ? uDSed.x : uDQ.x; hi = uFineLayer == 6 ? uDSed.y : uDQ.y;
+      }
+      if (have) {
+        float by = uFineLayer == 1 ? t.g : (uFineLayer == 2 ? t.r : t.b);
+        if (by < 0.5) b = 0.0;
+        else {
+          // the layer's scale, its low end taken down to the fine source's own: a 5 m level's
+          // creeks carry a sliver of a 9.8 km cell's rain and would all sit below it
+          float val = lo * pow(hi / lo, by / 255.0);
+          float lo2 = min(uLayerRange.x, lo);
+          b = val > lo2 ? clamp(255.0 * log(val / lo2) / log(uLayerRange.y / lo2), 1.0, 255.0) : 0.0;
+        }
+      }
+    }
+    if (b < 0.0) b = uLKind == 1 ? byteNearest(uLT, uLGeo, uLCh, p) : byteLinear(uLT, uLGeo, uLCh, p);
     if (uLKind == 1) {
       if (uCmap == 6)      col = wet ? satWater(h, wcode) : satColor(b, h, p);
       else if (uCmap == 7) col = wet ? vec3(0.30, 0.34, 0.40) : (b < 0.5 ? vec3(0.82, 0.80, 0.76) : orderColor(b));   // a reach across a lake is the lake
@@ -890,6 +929,8 @@ readHash();
 // ---------------------------------------------------------------------------
 const CHANNELS = Object.assign({ elevation: { label: "Elevation", unit: "m" } }, META.channels || {});
 const CMAPS = { thermal: 0, rain: 1, plates: 2, biome: 3, viridis: 4, sediment: 5, satellite: 6, order: 7 };
+// layers the detail tiles and zoom levels carry at their own resolution (the shader's uFineLayer)
+const FINE_LAYERS = { flow: 1, discharge: 2, water: 3, lake_depth: 4, ocean: 5, sediment: 6 };
 const layerNames = ["elevation", ...Object.keys(META.channels || {}).filter(k => k !== "discharge_overlay" && !META.channels[k].hidden)];
 const sel = $("layer");
 layerNames.forEach((k, idx) => { const o = document.createElement("option"); o.value = k;
@@ -1166,6 +1207,7 @@ function updateZoomTex(FA) {
 function bindZoomSlots(slots, fallback) {
   const f = [0, 0, 0, 0], v = n => new Float32Array(4).fill(n);
   const res = v(1), oi = v(0), oj = v(0), p0 = v(0), core = v(0), ne = v(1), h0 = v(0), h1 = v(1), rmin = v(255), rspan = v(1);
+  const gb = v(0), qlo = v(1), qhi = v(10), slo = v(0.5), shi = v(2000);
   for (let k = 0; k < 4; k++) {
     const sl = slots[k];
     bindTex(9 + k, sl ? sl.tex : fallback, `uZT${k}`);
@@ -1174,7 +1216,9 @@ function bindZoomSlots(slots, fallback) {
     f[k] = t.face; res[k] = t.N * t.R; oi[k] = t.ci0 * t.R - t.p0; oj[k] = t.cj0 * t.R - t.p0;
     p0[k] = t.p0; core[k] = t.n; ne[k] = t.NE; h0[k] = t.h0; h1[k] = t.h1;
     rmin[k] = t.river_min_byte; rspan[k] = t.river_span_byte;
+    if ((t.version ?? 0) >= 3) { gb[k] = 1; qlo[k] = t.q_lo; qhi[k] = t.q_hi; slo[k] = t.sed_lo; shi[k] = t.sed_hi; }
   }
+  gl.uniform4fv(U.uZGB, gb); gl.uniform4fv(U.uZQlo, qlo); gl.uniform4fv(U.uZQhi, qhi); gl.uniform4fv(U.uZSlo, slo); gl.uniform4fv(U.uZShi, shi);
   gl.uniform1i(U.uZN, slots.length);
   gl.uniform4iv(U.uZFace, new Int32Array(f));
   gl.uniform4fv(U.uZRes, res); gl.uniform4fv(U.uZOi, oi); gl.uniform4fv(U.uZOj, oj); gl.uniform4fv(U.uZP0, p0);
@@ -1252,6 +1296,8 @@ function draw() {
     gl.uniform1i(U.uDnT, dlv.nT); gl.uniform2f(U.uDH, DET.h0, DET.h1);
     gl.uniform1f(U.uDSlotH, detail.slotH);
     gl.uniform1f(U.uDRiverMin, DET.river_min_byte ?? 128); gl.uniform1f(U.uDRiverSpan, DET.river_span_byte ?? 40);
+    gl.uniform1i(U.uDGB, DET.water_gb ? 1 : 0);
+    gl.uniform2f(U.uDQ, DET.q_lo ?? 1, DET.q_hi ?? 10); gl.uniform2f(U.uDSed, DET.sed_lo ?? 0.5, DET.sed_hi ?? 2000);
   }
   gl.uniform3fv(U.uBiome, biome); gl.uniform3fv(U.uSat, sat);
   const tch = CHANNELS.temperature || {}, pch = CHANNELS.precip || {};
@@ -1265,8 +1311,11 @@ function draw() {
     gl.uniform1i(U.uLCh, L[1]);
     gl.uniform1i(U.uLKind, ch.kind === "category" ? 1 : 0);
     gl.uniform1i(U.uCmap, CMAPS[ch.cmap] ?? 4);
+    gl.uniform1i(U.uFineLayer, FINE_LAYERS[state.layer] ?? 0);
+    gl.uniform2f(U.uLayerRange, ch.lo ?? 0, ch.hi ?? 1);
   } else {
     gl.uniform1i(U.uLayer, 0);
+    gl.uniform1i(U.uFineLayer, 0);
     bindTex(2, tex[a][0], "uLT");
   }
   // water mask (final frame only; the timeline falls back to the height sign)

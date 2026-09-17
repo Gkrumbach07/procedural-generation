@@ -27,7 +27,9 @@ The top half is the ground as the detail tiles carry it
 the water: ``R`` the log byte of the level's flood-tree ``flux`` widened into
 channels (:func:`detail.widen_rivers`), on a scale from the land of the
 level's product (byte 1 at its median, 255 at its maximum; a river from
-``river_min_byte`` to full ``river_span_byte`` above).
+``river_min_byte`` to full ``river_span_byte`` above); ``G`` the flux itself on
+that scale (``q_lo``, ``q_hi``: the flow layer); ``B`` the sediment log byte
+over ``sed_lo`` .. ``sed_hi`` metres (version 3).
 """
 from __future__ import annotations
 
@@ -45,9 +47,10 @@ LAKE_RANGE = 200.0
 CROP = 32
 #: the tallest texture the viewer takes (2 NE <= MAX_TEX)
 MAX_TEX = 8192
-#: the record's format: 2 = cropped (``x0``, ``fi0``, ``array_NE``); a
+#: the record's format: 2 = cropped (``x0``, ``fi0``, ``array_NE``), 3 = the water half
+#: also carries the flow (G) and sediment (B); a
 #: sidecar of another version is stale, so the next ``index.write`` crops it
-TEX_VERSION = 2
+TEX_VERSION = 3
 #: rivers from this percentile of the product's land flux, full at the second
 RIVER_MIN_PCT, RIVER_FULL_PCT = 97.0, 99.9
 
@@ -151,18 +154,17 @@ def level_image(a: dict, geo: dict, lake_range: float = LAKE_RANGE, crop: int = 
     c = slice(p0w - e0, p0w - e0 + n)
     scale = river_scale(surf[c, c], ocean[c, c], flux[c, c])
     q_lo, q_hi = scale["lo"], scale["hi"]
-    q = np.asarray(dt.widen_rivers(flux, scale)[k, k], np.float64)
-    t = np.log(np.maximum(q, q_lo) / q_lo) / math.log(max(q_hi / q_lo, 1.0000001))
-    qb = np.where(q > q_lo, np.clip(np.round(255.0 * t), 1, 255), 0).astype(np.uint8)
-    del q, t
-    zero = np.zeros_like(qb)
-    wimg = np.stack([qb, zero, zero, np.full_like(qb, 255)], axis=-1)
+    qb = dt.log_byte(dt.widen_rivers(flux, scale)[k, k], q_lo, q_hi)
+    fb = dt.log_byte(flux[k, k], q_lo, q_hi)                                        # G: the flux itself (the flow layer)
+    sb = dt.log_byte(np.asarray(a["sediment"][ex, ex], np.float32)[k, k], dt.SED_LO_M, dt.SED_HI_M)   # B: sediment
+    wimg = np.stack([qb, fb, sb, np.full_like(qb, 255)], axis=-1)
     img = np.ascontiguousarray(np.concatenate([ground, wimg], axis=1).transpose(1, 0, 2))   # cell (x0 + x, x0 + y): ground at (x, y), water at (x, NE + y)
 
     byte = lambda v: int(round(255.0 * math.log(max(v, q_lo) / q_lo) / math.log(q_hi / q_lo)))
     scales = {"h0": h0, "h1": h1, "lake_range": float(lake_range),
               "river_min_byte": int(np.clip(byte(scale["river_min"]), 1, 254)),
               "river_span_byte": max(byte(scale["river_full"]) - byte(scale["river_min"]), 8),
+              "q_lo": float(q_lo), "q_hi": float(q_hi), "sed_lo": dt.SED_LO_M, "sed_hi": dt.SED_HI_M,
               "x0": int(x0), "NE": int(NE), "p0": int(p0), "n": int(n)}
     return img, scales
 

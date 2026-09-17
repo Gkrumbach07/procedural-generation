@@ -1089,7 +1089,13 @@ def test_zoom_level_texture_encodes_ground_lakes_ocean_and_rivers(tmp_path):
     assert ground[:, :20, 3].max() < 128 and ground[:, 20:, 3].min() >= 128
     assert ground[25, 37, 2] > 127.5 and ground[30, 45, 2] < 127.5
     assert water[40, p0 + n - 1, 0] > tex["river_min_byte"] and water[40, 30, 0] > 0
-    assert water[20, 30, 0] == 0 and water[:, :, 3].min() == 255 and water[:, :, 1:3].max() == 0
+    assert water[20, 30, 0] == 0 and water[:, :, 3].min() == 255
+    # G: the flux itself on the river scale -- the channel unwidened, a cell beside it at the floor
+    assert water[40, p0 + n - 1, 1] > tex["river_min_byte"] and water[39, p0 + n - 1, 1] == 0 < water[39, p0 + n - 1, 0]
+    # B: sediment on its log byte (all under SED_LO_M here but the odd cell; decodes within a byte)
+    from globe.viz import detail as dt
+    assert tex["q_hi"] > tex["q_lo"] > 0 and (tex["sed_lo"], tex["sed_hi"], tex["version"]) == (dt.SED_LO_M, dt.SED_HI_M, 3)
+    assert (water[:, :, 2] == dt.log_byte(sediment[:NE, :NE], dt.SED_LO_M, dt.SED_HI_M).T).all()
     assert 1 <= tex["river_min_byte"] <= 254 and tex["river_span_byte"] >= 8
 
     before = (js.stat().st_mtime_ns, side.stat().st_mtime_ns)

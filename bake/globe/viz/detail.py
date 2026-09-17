@@ -46,6 +46,16 @@ WATER_LAND, WATER_LAKE, WATER_OCEAN = 0, 1, 2
 #: a hairline web), at full strength by the second, and widened up to
 #: ``RIVER_RADIUS`` cells as it nears it (:func:`widen_rivers`)
 RIVER_MIN_PCT, RIVER_FULL_PCT, RIVER_RADIUS = 98.5, 99.97, 3
+#: the sediment byte of a tile's or zoom level's water half: log over this
+#: range in metres, 0 at or below the low end
+SED_LO_M, SED_HI_M = 0.5, 2000.0
+
+
+def log_byte(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    """0 at or below ``lo``; ``255 ln(x / lo) / ln(hi / lo)`` above, from 1."""
+    x = np.asarray(x, np.float64)
+    t = np.log(np.maximum(x, lo) / lo) / math.log(max(hi / lo, 1.0000001))
+    return np.where(x > lo, np.clip(np.round(255.0 * t), 1, 255), 0).astype(np.uint8)
 
 
 # --------------------------------------------------------------------------
@@ -101,9 +111,11 @@ class PlanetSource:
         water[lake] = WATER_LAKE
         c = slice(r0 - e0, r1 - e0)
         q = np.asarray(load(self.river), np.float32)
+        raw = q
         if self.scale is not None:
             q = widen_rivers(q, self.scale)
-        return {"surf": surf[c], "ws": ws[c], "water": water[c], "discharge": q[c]}
+        sed = np.asarray(load("sediment"), np.float32)
+        return {"surf": surf[c], "ws": ws[c], "water": water[c], "discharge": q[c], "flow_raw": raw[c], "sediment": sed[c]}
 
 
 def river_field(pdir: Path, R: int) -> str:
@@ -166,6 +178,10 @@ def reduce_face(d: dict, k: int) -> dict:
     out_q = {}
     if "discharge" in d:
         out_q["discharge"] = blk(d["discharge"]).max(axis=(1, 3)).astype(np.float32)   # a river narrower than a block still shows
+    if "flow_raw" in d:
+        out_q["flow_raw"] = blk(d["flow_raw"]).max(axis=(1, 3)).astype(np.float32)
+    if "sediment" in d:
+        out_q["sediment"] = blk(d["sediment"]).mean(axis=(1, 3), dtype=np.float64).astype(np.float32)
     water = np.zeros((a_, b_), np.uint8)
     water[frac(WATER_LAKE) > 0.5] = WATER_LAKE
     water[frac(WATER_OCEAN) > 0.5] = WATER_OCEAN
@@ -219,11 +235,12 @@ def encode_height_on(h: np.ndarray, h0: float, h1: float) -> np.ndarray:
 
 
 def tile_image(surf, ld, ocean_m, disch, ti: int, tj: int, h0: float, h1: float, lake_range: float, q_lo: float, q_hi: float,
-               res: int | None = None, row0: int = 0) -> np.ndarray | None:
+               res: int | None = None, row0: int = 0, flow=None, sediment=None) -> np.ndarray | None:
     """The ``(TILE + 2)`` x ``2 (TILE + 2)`` RGBA image of tile ``(ti, tj)`` of
     a face level ``res`` cells a side, from arrays holding its rows ``[row0,
-    row0 + len)``: the ground on top, the water below.  None when the tile has
-    no land and no lake."""
+    row0 + len)``: the ground on top, the water below -- R the widened river
+    byte, G the flow itself on the same scale (the flow layer), B the sediment
+    byte (:data:`SED_LO_M`).  None when the tile has no land and no lake."""
     n = int(res) if res is not None else surf.shape[0]
     ii = np.clip(np.arange(ti * TILE - 1, ti * TILE + TILE + 1), 0, n - 1) - row0
     jj = np.clip(np.arange(tj * TILE - 1, tj * TILE + TILE + 1), 0, n - 1)
@@ -235,11 +252,11 @@ def tile_image(surf, ld, ocean_m, disch, ti: int, tj: int, h0: float, h1: float,
     b = np.clip(np.round(255.0 * (lk + lake_range) / (2.0 * lake_range)), 0, 255).astype(np.uint8)
     a = (255 - np.clip(np.round(255.0 * oc), 0, 255)).astype(np.uint8)
     ground = np.stack([(h >> 8).astype(np.uint8), (h & 255).astype(np.uint8), b, a], axis=-1)
-    q = np.asarray(disch[np.ix_(ii, jj)], np.float64)
-    t = np.log(np.maximum(q, q_lo) / q_lo) / math.log(max(q_hi / q_lo, 1.0000001))
-    qb = np.where(q > q_lo, np.clip(np.round(255.0 * t), 1, 255), 0).astype(np.uint8)
+    qb = log_byte(disch[np.ix_(ii, jj)], q_lo, q_hi)
     zero = np.zeros_like(qb)
-    water = np.stack([qb, zero, zero, np.full_like(qb, 255)], axis=-1)
+    fb = zero if flow is None else log_byte(flow[np.ix_(ii, jj)], q_lo, q_hi)
+    sb = zero if sediment is None else log_byte(sediment[np.ix_(ii, jj)], SED_LO_M, SED_HI_M)
+    water = np.stack([qb, fb, sb, np.full_like(qb, 255)], axis=-1)
     img = np.concatenate([ground, water], axis=1)            # cell (i, j): ground at j, water at j + TILE + 2
     return np.ascontiguousarray(img.transpose(1, 0, 2))      # image (y, x)
 
@@ -296,6 +313,7 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
     q_lo, q_hi = scale["lo"], scale["hi"]
     byte = lambda q: int(round(255.0 * math.log(max(q, q_lo) / q_lo) / math.log(q_hi / q_lo)))
     meta = {"tile": TILE, "pad": 1, "h0": h0, "h1": h1, "lake_range": float(lake_range), "q_lo": q_lo, "q_hi": q_hi,
+            "water_gb": True, "sed_lo": SED_LO_M, "sed_hi": SED_HI_M,
             "river_min_byte": int(np.clip(byte(scale["river_min"]), 1, 254)),
             "river_span_byte": max(byte(scale["river_full"]) - byte(scale["river_min"]), 8),
             "levels": []}
@@ -319,7 +337,8 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
                 om = face_smooth_mask(d["water"] == WATER_OCEAN)
                 q = d.get("discharge", np.zeros_like(d["surf"]))
                 for tj in range(nT):
-                    img = tile_image(d["surf"], ld, om, q, ti, tj, h0, h1, lake_range, meta["q_lo"], meta["q_hi"], res=res, row0=lr0)
+                    img = tile_image(d["surf"], ld, om, q, ti, tj, h0, h1, lake_range, meta["q_lo"], meta["q_hi"], res=res, row0=lr0,
+                                     flow=d.get("flow_raw"), sediment=d.get("sediment"))
                     if img is None:
                         continue
                     key = f"{L}_{f}_{ti}_{tj}"
@@ -335,6 +354,6 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
     return meta
 
 
-__all__ = ["TILE", "RIVER_MIN_PCT", "RIVER_FULL_PCT", "RIVER_RADIUS", "RefinedSource", "PlanetSource", "river_field", "river_scale",
+__all__ = ["TILE", "RIVER_MIN_PCT", "RIVER_FULL_PCT", "RIVER_RADIUS", "SED_LO_M", "SED_HI_M", "log_byte", "RefinedSource", "PlanetSource", "river_field", "river_scale",
            "widen_rivers", "reduce_face", "face_lake_depth", "face_smooth_mask", "height_grid",
            "encode_height_on", "tile_image", "levels_for", "export_tiles"]
