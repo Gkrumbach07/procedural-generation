@@ -17,159 +17,211 @@
   #gl.dragging { cursor:grabbing; }
   .panel { position:fixed; background:var(--panel); border:1px solid var(--line); border-radius:8px;
     backdrop-filter:blur(6px); padding:10px 12px; touch-action:pan-y; }
-  #uibtn { position:fixed; top:10px; left:10px; display:none; z-index:5; font-size:16px; line-height:20px; padding:6px 10px; }
-  #touchbtns { position:fixed; right:10px; bottom:96px; display:none; flex-direction:column; gap:6px; z-index:5; }
-  #touchbtns button { width:42px; height:42px; font-size:18px; padding:0; }
-  #top { top:10px; left:10px; width:260px; }
-  #top h1 { font-size:14px; margin:0 0 2px; font-weight:600; }
-  #top .sub { color:var(--dim); font-size:11px; margin-bottom:8px; }
   .row { display:flex; align-items:center; gap:6px; margin:6px 0; flex-wrap:wrap; }
-  .row label { color:var(--dim); min-width:62px; }
+  .row label { color:var(--dim); min-width:52px; }
   .seg { display:inline-flex; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
-  .seg button { background:transparent; color:var(--text); border:0; padding:4px 9px; cursor:pointer; font:inherit; }
+  .seg button { background:transparent; color:var(--text); border:0; padding:4px 9px; cursor:pointer; font:inherit;
+    appearance:none; -webkit-appearance:none; }
   .seg button + button { border-left:1px solid var(--line); }
   .seg button.on { background:#24344d; color:#fff; }
   select, input[type=range] { flex:1; min-width:0; }
-  select { background:#141a24; color:var(--text); border:1px solid var(--line); border-radius:5px; padding:3px 4px; font:inherit; }
-  .chk { display:inline-flex; align-items:center; gap:4px; margin-right:8px; color:var(--text); cursor:pointer; }
-  button.plain { background:#141a24; color:var(--text); border:1px solid var(--line); border-radius:5px; padding:3px 8px; cursor:pointer; font:inherit; }
+  select { background:#141a24; color:var(--text); border:1px solid var(--line); border-radius:5px; padding:4px 6px; font:inherit; }
+  .chk { display:inline-flex; align-items:center; gap:5px; margin-right:8px; color:var(--text); cursor:pointer; }
+  button.plain { background:#141a24; color:var(--text); border:1px solid var(--line); border-radius:5px; padding:4px 9px;
+    cursor:pointer; font:inherit; appearance:none; -webkit-appearance:none; }
   button.plain:hover, .seg button:hover { background:#1d2635; }
+  button.plain:disabled { opacity:.5; cursor:default; }
+  /* One sidebar holds every control, in sections behind a tab strip, each scrolling on its
+     own.  Nothing else floats over the map but the menu button, the zoom buttons and the
+     loading chip: pop-ups over the map were unusable on a phone, so what a tap finds is a
+     section too ("Here") */
+  #side { position:fixed; top:0; left:0; bottom:0; width:330px; max-width:100vw; z-index:6;
+    display:flex; flex-direction:column; background:var(--panel); border-right:1px solid var(--line);
+    backdrop-filter:blur(8px); transition:transform .18s ease; touch-action:pan-y; }
+  body:not(.ui) #side { transform:translateX(-101%); }
+  #side header { display:flex; align-items:flex-start; gap:8px; padding:10px 12px 6px; }
+  #side header .grow { flex:1; min-width:0; }
+  #side h1 { font-size:14px; margin:0; font-weight:600; }
+  #side .sub { color:var(--dim); font-size:11px; margin-top:2px; }
+  #tabs { display:flex; flex-wrap:wrap; gap:4px; padding:0 10px 8px; border-bottom:1px solid var(--line); }
+  #tabs button { flex:1 0 auto; padding:5px 7px; font-size:12px; background:#141a24; color:var(--text);
+    border:1px solid var(--line); border-radius:5px; cursor:pointer; font-family:inherit; appearance:none; -webkit-appearance:none; }
+  #tabs button:hover { background:#1d2635; }
+  #tabs button.on { background:#24344d; color:#fff; border-color:#3c5a86; }
+  #tabs button b { color:var(--accent); font-weight:700; }
+  #sbody { flex:1; overflow:auto; overscroll-behavior:contain; padding:10px 12px 18px; }
+  section.tab { display:none; }
+  section.tab.on { display:block; }
+  section h2 { font-size:12px; color:var(--dim); font-weight:600; margin:14px 0 4px; text-transform:uppercase; letter-spacing:.04em; }
+  section h2:first-child { margin-top:0; }
+  .note { color:var(--dim); font-size:11px; }
+  .note b { color:var(--text); font-weight:500; }
+  #menubtn { position:fixed; top:10px; left:10px; z-index:7; font-size:16px; line-height:20px; padding:7px 11px; }
+  body.ui #menubtn { display:none; }
+  /* a touch screen has no wheel: these appear only there */
+  #touchbtns { position:fixed; right:10px; bottom:14px; display:none; flex-direction:column; gap:6px; z-index:5; }
+  #touchbtns button { width:40px; height:40px; font-size:18px; padding:0; }
   #legend { margin-top:8px; }
   #legend canvas { width:100%; height:12px; border-radius:3px; display:block; }
   #legend .ticks { display:flex; justify-content:space-between; color:var(--dim); font-size:11px; }
-  #readout { bottom:106px; right:10px; min-width:190px; font-variant-numeric:tabular-nums; }
+  #readout { position:fixed; right:10px; bottom:64px; min-width:190px; font-variant-numeric:tabular-nums;
+    background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 10px; z-index:4; }
   #readout div { display:flex; justify-content:space-between; gap:12px; }
   #readout span:first-child { color:var(--dim); }
-  #timeline { left:10px; right:10px; bottom:10px; height:88px; padding:8px 10px; display:flex; gap:10px; align-items:stretch; }
-  #tl-controls { display:flex; flex-direction:column; justify-content:flex-start; gap:3px; width:220px; flex:none; overflow:hidden; }
-  #tl-label { font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  #tl-stats { font-size:11px; color:var(--dim); line-height:1.2; }
-  #tl-canvas { flex:1; min-width:0; height:100%; cursor:pointer; border-radius:4px; }
-  #play { width:34px; font-size:14px; }
-  #loading { position:fixed; top:10px; left:50%; transform:translateX(-50%); padding:6px 12px; }
+  #tl-label { font-size:12px; margin:6px 0 2px; }
+  #tl-stats { font-size:11px; color:var(--dim); line-height:1.25; }
+  #tl-canvas { width:100%; height:96px; cursor:pointer; border-radius:4px; display:block; margin-top:6px; }
+  #play { width:38px; font-size:14px; }
+  #loading { position:fixed; top:10px; left:50%; transform:translateX(-50%); z-index:7;
+    background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px 12px; }
   #loading .bar { height:3px; background:var(--line); border-radius:2px; margin-top:5px; }
   #loading .bar i { display:block; height:100%; width:0; background:var(--accent); border-radius:2px; }
-  #help { top:10px; right:10px; width:230px; color:var(--dim); font-size:11px; display:none; }
-  #help b { color:var(--text); font-weight:500; }
-  #helpbtn { position:fixed; top:10px; right:10px; }
-  .hidden { display:none !important; }
-  /* phones and tablets: the map fills the screen and the controls fold away behind a button;
-     taps need room, so the rows and buttons are bigger than on a desktop */
-  @media (max-width: 760px), (pointer: coarse) {
-    #uibtn { display:block; }
-    #top { top:52px; left:10px; width:min(94vw, 320px); max-height:58vh; overflow:auto; }
-    body:not(.ui) #top, body:not(.ui) #legend { display:none; }
-    #helpbtn, #bakesbtn { top:10px; }
-    #help, #bakes { top:52px; width:min(94vw, 360px); max-height:60vh; overflow:auto; }
-    #readout { display:none; }
-    #timeline { height:74px; padding:6px 8px; gap:6px; }
-    #tl-controls { width:130px; }
-    #tl-stats { display:none; }
-    button.plain, .seg button { padding:7px 11px; }
-    #play { width:42px; }
-    .chk { margin-right:10px; padding:3px 0; }
-    .chk input { width:17px; height:17px; }
-    input[type=range] { height:26px; }
-    #zoomlist { max-height:26vh; }
-    #zoomlist .zn { min-width:70px; }
-    #touchbtns { display:flex; }
-  }
-  #ovl { position:fixed; inset:0; width:100%; height:100%; pointer-events:none; }
-  #zoompop { min-width:230px; max-width:340px; font-size:12px; }
-  #zoompop .t { font-weight:600; margin-bottom:4px; }
-  #zoompop .d { color:var(--dim); margin-bottom:6px; }
-  #zoompop code { display:block; background:#0e131b; border:1px solid var(--line); border-radius:4px; padding:4px 6px; margin:4px 0;
-    font-size:11px; white-space:pre-wrap; word-break:break-all; user-select:all; }
-  #zoompop a { color:var(--accent); }
-  #zoompop .x { position:absolute; top:4px; right:8px; cursor:pointer; color:var(--dim); }
-  #zoomlist { margin-top:8px; border-top:1px solid var(--line); padding-top:6px; max-height:34vh; overflow:auto; }
   #zoomlist .zt { color:var(--dim); font-size:11px; margin-bottom:3px; }
-  #zoomlist .zr { display:flex; align-items:center; gap:6px; margin:3px 0; flex-wrap:wrap; }
-  #zoomlist .zr button.tl { padding:0 5px; font-size:11px; line-height:16px; }
+  #zoomlist .zr { display:flex; align-items:center; gap:6px; margin:5px 0; flex-wrap:wrap; }
+  #zoomlist .zr button.tl { padding:1px 6px; font-size:11px; line-height:16px; }
   #zoomlist .zn { color:var(--accent); cursor:pointer; min-width:84px; }
-  #zoomlist .zn:hover { text-decoration:underline; }
   #zoomlist .ld { color:var(--dim); font-size:10px; }
-  #bakes { top:48px; right:10px; width:320px; max-height:60vh; overflow:auto; font-size:12px; }
-  #bakes .bt { font-weight:600; margin-bottom:4px; display:flex; justify-content:space-between; }
-  #bakes .job { border-top:1px solid var(--line); padding:6px 0; }
-  #bakes .jn { display:flex; justify-content:space-between; gap:6px; align-items:baseline; }
-  #bakes .st { font-size:10px; padding:1px 5px; border-radius:3px; background:#24344d; }
-  #bakes .st.running { background:#1f5f3f; } #bakes .st.failed, #bakes .st.interrupted { background:#6a2a2a; } #bakes .st.queued { background:#4a4a2a; }
-  #bakes .bar { height:6px; background:var(--line); border-radius:3px; margin:4px 0; overflow:hidden; }
-  #bakes .bar i { display:block; height:100%; background:var(--accent); }
-  #bakes .d { color:var(--dim); font-size:11px; }
-  #bakes .chips span { font-size:10px; margin-right:4px; color:var(--dim); } #bakes .chips span.done { color:#7bc96f; } #bakes .chips span.run { color:#fff; font-weight:600; }
-  #bakes pre { max-height:180px; overflow:auto; background:#0e131b; border:1px solid var(--line); border-radius:4px; padding:4px; font-size:10px; white-space:pre-wrap; margin:4px 0 0; }
-  #bakes button { margin-right:4px; }
-  #bakesbtn { position:fixed; top:10px; right:44px; }
+  #here .row { gap:8px; margin:8px 0; }
+  #here .row button, #here .row a { flex:none; }
+  #here img { width:100%; border-radius:4px; margin:6px 0; display:block; }
+  #here code { display:block; background:#0e131b; border:1px solid var(--line); border-radius:4px; padding:4px 6px;
+    margin:4px 0; font-size:10px; word-break:break-all; }
+  #here a, #bakesbody a { color:var(--accent); }
+  .job { border-top:1px solid var(--line); padding:8px 0; }
+  .job .jn { display:flex; justify-content:space-between; gap:6px; align-items:baseline; }
+  .st { font-size:10px; padding:1px 5px; border-radius:3px; background:#24344d; }
+  .st.running { background:#1f5f3f; } .st.failed, .st.interrupted { background:#6a2a2a; } .st.queued { background:#4a4a2a; }
+  .bar { height:6px; background:var(--line); border-radius:3px; margin:4px 0; overflow:hidden; }
+  .bar i { display:block; height:100%; background:var(--accent); }
+  .d { color:var(--dim); font-size:11px; }
+  .chips span { font-size:10px; margin-right:4px; color:var(--dim); } .chips span.done { color:#7bc96f; } .chips span.run { color:#fff; font-weight:600; }
+  #bakesbody pre { max-height:180px; overflow:auto; background:#0e131b; border:1px solid var(--line); border-radius:4px;
+    padding:4px; font-size:10px; white-space:pre-wrap; margin:4px 0 0; }
+  .job button { margin-right:4px; }
+  .hidden { display:none !important; }
+  /* phones: the sidebar is the page when it is open, and every target has room for a finger */
+  @media (max-width: 760px), (pointer: coarse) {
+    /* from the bottom, like a map app's sheet: the map keeps the top of the screen */
+    #side { top:auto; left:0; right:0; bottom:0; width:auto; max-width:none; height:min(62vh, 620px);
+      border-right:0; border-top:1px solid var(--line); border-radius:12px 12px 0 0; }
+    body:not(.ui) #side { transform:translateY(101%); }
+    #menubtn { top:auto; bottom:14px; left:10px; }
+    body.ui #touchbtns { bottom:calc(min(62vh, 620px) + 12px); }
+    #readout { display:none; }
+    button.plain, .seg button { padding:8px 12px; }
+    #tabs button { padding:7px 10px; }
+    .chk { margin-right:10px; padding:4px 0; }
+    .chk input { width:17px; height:17px; }
+    input[type=range] { height:28px; }
+    #touchbtns { display:flex; }
+    #touchbtns button { width:44px; height:44px; }
+  }
 </style>
 </head>
 <body>
 <canvas id="gl"></canvas>
 <canvas id="ovl"></canvas>
-<div id="zoompop" class="panel hidden"></div>
 
-<div id="top" class="panel">
-  <h1 id="title">Globe</h1>
-  <div class="sub" id="subtitle"></div>
-  <div class="row"><label>View</label>
-    <span class="seg" id="viewseg"><button data-v="globe" class="on">Globe</button><button data-v="flat">Flat</button><button data-v="tilt" title="3-D: tilt and turn (T)">3D</button></span>
-    <button class="plain" id="reset" title="Reset view (Home)">⟲</button>
-  </div>
-  <div class="row"><label>Layer</label><select id="layer"></select></div>
-  <div class="row"><label>Relief</label><input type="range" id="exag" min="0" max="60" step="0.5" value="12"><span id="exagv" style="width:28px;text-align:right">12×</span></div>
-  <div class="row hidden" id="tiltrow"><label>3D</label>
-    <button class="plain" id="rotl" title="Turn left (Q)">⟲</button><button class="plain" id="rotr" title="Turn right (E)">⟳</button>
-    <button class="plain" id="north" title="North up, straight down">N</button>
-    <input type="range" id="tilt" min="0" max="80" step="1" value="55" title="Tilt"><span id="tiltv" style="width:28px;text-align:right">55°</span></div>
-  <div class="row hidden" id="exag3row"><label>Height</label><input type="range" id="exag3" min="0.5" max="6" step="0.1" value="1.5"><span id="exag3v" style="width:28px;text-align:right">1.5×</span></div>
-  <div class="row">
-    <span class="chk"><input type="checkbox" id="rivers" checked>rivers</span>
-    <span class="chk"><input type="checkbox" id="grid">grid</span>
-    <span class="chk"><input type="checkbox" id="fade" checked>blend</span>
-    <span class="chk"><input type="checkbox" id="coast">coast</span>
-    <span class="chk" id="scoutchk"><input type="checkbox" id="scout" checked>scout</span>
-    <span class="chk" title="Contour lines (C): interval · major"><input type="checkbox" id="contours">contours <span id="ctv" style="color:var(--dim);font-size:11px"></span></span>
-    <span class="chk" title="Tree symbols on baked zoom levels, satellite layer"><input type="checkbox" id="trees" checked>trees</span>
-  </div>
-  <div class="row"><label>Speed</label><input type="range" id="fps" min="1" max="30" step="1" value="10"><span id="fpsv" style="width:28px;text-align:right">10</span></div>
-  <div class="row"><button class="plain" id="shot">Save PNG</button><button class="plain" id="copylink">Copy view link</button></div>
-  <div id="legend"><canvas id="legendc" width="256" height="12"></canvas><div class="ticks"><span id="lg0"></span><span id="lgmid"></span><span id="lg1"></span></div></div>
-  <div id="zoomlist" class="hidden"></div>
-</div>
-
-<button class="plain" id="helpbtn">?</button>
-<button class="plain" id="uibtn" title="Controls">&#9776;</button>
+<button class="plain" id="menubtn" title="Controls (Tab)">&#9776;</button>
 <div id="touchbtns">
   <button class="plain" id="zin" title="Zoom in">+</button>
   <button class="plain" id="zout" title="Zoom out">&minus;</button>
   <button class="plain" id="full" title="Full screen">&#9974;</button>
 </div>
-<button class="plain hidden" id="bakesbtn" title="Zoom bakes: progress, logs">Bakes</button>
-<div id="bakes" class="panel hidden"></div>
-<div id="help" class="panel">
-  <b>Drag</b> pan / rotate · <b>Wheel</b> zoom at cursor · <b>Double-click</b> zoom in<br>
-  <b>Space</b> play/pause · <b>← →</b> step frame · <b>Shift+← →</b> jump stage<br>
-  <b>G</b> globe/flat · <b>T</b> 3D · <b>Home</b> reset · <b>1–9</b> layers · <b>R</b> rivers · <b>L</b> grid · <b>C</b> contours<br>
-  <b>3D:</b> drag pan · <b>right-drag</b> or <b>Ctrl/Shift-drag</b> turn &amp; tilt · <b>Q E</b> turn · <b>PgUp PgDn</b> tilt<br>
-  <b>Zoom windows</b> (list, top left): their fine levels draw in place when you zoom in; tick a level off to compare<br>
-  <b>Click</b> a spot: open its zoom (outlined squares), or bake one there<br><br>
-  The URL keeps the view, so a link reopens exactly this frame and camera.
-</div>
+<div id="readout" class="hidden"></div>
+<div id="loading">Loading&hellip;<div class="bar"><i id="loadbar"></i></div></div>
 
-<div id="readout" class="panel hidden"></div>
-
-<div id="timeline" class="panel">
-  <div id="tl-controls">
-    <div class="row" style="margin:0"><button class="plain" id="play" title="Play (Space)">▶</button>
-      <button class="plain" id="prev" title="Previous frame">‹</button><button class="plain" id="next" title="Next frame">›</button></div>
-    <div id="tl-label">—</div>
-    <div id="tl-stats"></div>
+<aside id="side">
+  <header>
+    <div class="grow"><h1 id="title">Globe</h1><div class="sub" id="subtitle"></div></div>
+    <button class="plain" id="helpbtn" title="How it works">?</button>
+    <button class="plain" id="sideclose" title="Hide the controls (Tab)">&times;</button>
+  </header>
+  <div id="tabs">
+    <button data-tab="map" class="on">Map</button>
+    <button data-tab="layers">Layers</button>
+    <button data-tab="zooms">Zooms</button>
+    <button data-tab="here">Here</button>
+    <button data-tab="time">Time</button>
+    <button data-tab="bakes" class="hidden">Bakes</button>
   </div>
-  <canvas id="tl-canvas"></canvas>
-</div>
+  <div id="sbody">
 
-<div id="loading" class="panel">Loading…<div class="bar"><i id="loadbar"></i></div></div>
+    <section class="tab on" data-tab="map">
+      <h2>View</h2>
+      <div class="row">
+        <span class="seg" id="viewseg"><button data-v="globe" class="on">Globe</button><button data-v="flat">Flat</button><button data-v="tilt" title="3-D: tilt and turn (T)">3D</button></span>
+        <button class="plain" id="reset" title="Reset view (Home)">&#8634;</button>
+      </div>
+      <div class="row"><label>Relief</label><input type="range" id="exag" min="0" max="60" step="0.5" value="12"><span id="exagv" style="width:30px;text-align:right">12&times;</span></div>
+      <div class="row hidden" id="tiltrow"><label>Turn</label>
+        <button class="plain" id="rotl" title="Turn left (Q)">&#8634;</button><button class="plain" id="rotr" title="Turn right (E)">&#8635;</button>
+        <button class="plain" id="north" title="North up, straight down">N</button>
+        <input type="range" id="tilt" min="0" max="80" step="1" value="55" title="Tilt"><span id="tiltv" style="width:30px;text-align:right">55&deg;</span></div>
+      <div class="row hidden" id="exag3row"><label>Height</label><input type="range" id="exag3" min="0.5" max="6" step="0.1" value="1.5"><span id="exag3v" style="width:30px;text-align:right">1.5&times;</span></div>
+      <h2>Share</h2>
+      <div class="row"><button class="plain" id="shot">Save PNG</button><button class="plain" id="copylink">Copy view link</button></div>
+      <div class="note">The link keeps this frame, layer and camera.</div>
+    </section>
+
+    <section class="tab" data-tab="layers">
+      <h2>Layer</h2>
+      <div class="row"><select id="layer"></select></div>
+      <div id="legend"><canvas id="legendc" width="256" height="12"></canvas><div class="ticks"><span id="lg0"></span><span id="lgmid"></span><span id="lg1"></span></div></div>
+      <h2>Overlays</h2>
+      <div class="row">
+        <span class="chk"><input type="checkbox" id="rivers" checked>rivers</span>
+        <span class="chk" title="Contour lines (C): interval &middot; major"><input type="checkbox" id="contours">contours <span id="ctv" class="d"></span></span>
+        <span class="chk" title="Tree symbols on baked zoom levels, satellite layer"><input type="checkbox" id="trees" checked>trees</span>
+      </div>
+      <div class="row">
+        <span class="chk"><input type="checkbox" id="grid">grid</span>
+        <span class="chk"><input type="checkbox" id="coast">coast</span>
+        <span class="chk"><input type="checkbox" id="fade" checked>blend</span>
+        <span class="chk" id="scoutchk"><input type="checkbox" id="scout" checked>scout marks</span>
+      </div>
+    </section>
+
+    <section class="tab" data-tab="zooms">
+      <h2>Zoom windows</h2>
+      <div id="zoomlist"></div>
+      <div class="note" id="zoomnote">Zoom in and a window&rsquo;s fine levels draw in place. Tick a level off to compare it with the planet, or play a level&rsquo;s erosion.</div>
+    </section>
+
+    <section class="tab" data-tab="here">
+      <h2>Here</h2>
+      <div id="here"><div class="note">Tap the map: what is there, the zoom window over it, or a bake you can start.</div></div>
+    </section>
+
+    <section class="tab" data-tab="time">
+      <h2>Frames</h2>
+      <div class="row"><button class="plain" id="play" title="Play (Space)">&#9654;</button>
+        <button class="plain" id="prev" title="Previous frame">&lsaquo;</button><button class="plain" id="next" title="Next frame">&rsaquo;</button>
+        <label style="min-width:44px">Speed</label><input type="range" id="fps" min="1" max="30" step="1" value="10"><span id="fpsv" style="width:24px;text-align:right">10</span></div>
+      <div id="tl-label">&mdash;</div>
+      <div id="tl-stats"></div>
+      <canvas id="tl-canvas"></canvas>
+    </section>
+
+    <section class="tab" data-tab="bakes">
+      <h2>Zoom bakes</h2>
+      <div id="bakesbody"></div>
+    </section>
+
+    <section class="tab" data-tab="help">
+      <h2>Touch</h2>
+      <div class="note"><b>Drag</b> pan &middot; <b>Pinch</b> zoom &middot; <b>Two fingers</b> turn and tilt in 3D &middot; <b>Double tap</b> zoom in &middot; <b>Two-finger tap</b> zoom out</div>
+      <h2>Mouse and keys</h2>
+      <div class="note"><b>Drag</b> pan / rotate &middot; <b>Wheel</b> zoom at the cursor &middot; <b>Double-click</b> zoom in<br>
+        <b>Space</b> play/pause &middot; <b>&larr; &rarr;</b> step frame &middot; <b>Shift+&larr; &rarr;</b> jump stage<br>
+        <b>G</b> globe/flat &middot; <b>T</b> 3D &middot; <b>Home</b> reset &middot; <b>1&ndash;9</b> layers &middot; <b>R</b> rivers &middot; <b>L</b> grid &middot; <b>C</b> contours &middot; <b>Tab</b> controls<br>
+        <b>3D:</b> drag pan &middot; <b>right-drag</b> or <b>Ctrl/Shift-drag</b> turn &amp; tilt &middot; <b>Q E</b> turn &middot; <b>PgUp PgDn</b> tilt</div>
+      <h2>Zoom windows</h2>
+      <div class="note">A window&rsquo;s levels draw in place as you zoom in (Zooms). Tap the map for what is under it, or to bake a window there (Here).</div>
+    </section>
+
+  </div>
+</aside>
 
 <script>
 "use strict";
@@ -1900,7 +1952,22 @@ function draw() {
 // anywhere else for the command that bakes one there -- or, when the page
 // is served by scripts/serve_world.py, a button that does it.
 // ---------------------------------------------------------------------------
-const ovl = $("ovl"), ovx = ovl.getContext("2d"), pop = $("zoompop");
+const ovl = $("ovl"), ovx = ovl.getContext("2d");
+// The sidebar's sections.  What a tap on the map finds goes to "Here" instead of a pop-up
+// over it: a phone has no room for a floating panel, and one place to look beats three
+let tab = "map";
+function openTab(name, show) {
+  tab = name;
+  for (const b of $("tabs").children) b.classList.toggle("on", b.dataset.tab === name);
+  for (const sec of document.querySelectorAll("section.tab")) sec.classList.toggle("on", sec.dataset.tab === name);
+  if (show !== false) showSide(true);
+  if (name === "time") drawTimeline();
+}
+function showSide(on) {
+  document.body.classList.toggle("ui", on);
+  try { localStorage.setItem("globe.ui", on ? "1" : "0"); } catch (e) { /* private mode */ }
+  requestDraw();
+}
 let zooms = GV.zooms || [], zoomHits = [];
 GV.onZooms = z => { zooms = z || []; buildZoomList(); requestDraw(); };
 const fmtCell = m => m >= 1000 ? (m / 1000).toFixed(1) + " km" : Math.round(m) + " m";
@@ -1908,9 +1975,9 @@ const fineLevels = z => (z.levels || []).filter(L => L.tex && L.tex.cell_m < 100
 // the zoom windows with fine levels: the name flies there, a box per level turns it on or off
 function buildZoomList() {
   const el = $("zoomlist"), rows = zooms.filter(z => fineLevels(z).length);
-  if (!rows.length) { el.classList.add("hidden"); return; }
-  el.classList.remove("hidden");
-  el.innerHTML = `<div class="zt">Zoom windows · fine levels drawn in place</div>` + rows.map(z =>
+  $("zoomnote").classList.toggle("hidden", !rows.length);
+  if (!rows.length) { el.innerHTML = `<div class="note">No zoom windows yet. Tap a spot on the map and bake one (Here).</div>`; return; }
+  el.innerHTML = rows.map(z =>
     `<div class="zr"><span class="zn" data-z="${z.name}" title="Fly there">${z.name}</span>` + fineLevels(z).map(L => {
       const key = zkey(z, L), st = ztex.loading.has(key) ? `<span class="ld">loading</span>` : "";
       const on = play && play.name === z.name && play.R === L.R;
@@ -2001,31 +2068,28 @@ function drawZooms() {
     }
   }
 }
+function hereHTML(html, fill) {
+  $("here").innerHTML = html;
+  if (fill) fill();
+  openTab("here");
+}
 function showScout(h, px, py) {
   const c = h.c, m = c.measures, pct = x => (100 * x).toFixed(1) + " %";
   const [f, i, j] = c.spot;
-  pop.dataset.kind = "scout";
+  here = { kind: "scout", h, px, py };
   const mine = jobs.filter(jb => jb.spot && jb.spot[0] === f && Math.abs(jb.spot[1] - i) <= 3 && Math.abs(jb.spot[2] - j) <= 3);
   const job = mine[mine.length - 1];
-  let html = `<span class="x" onclick="this.parentNode.classList.add('hidden')">×</span>` +
-    `<div class="t">Scout #${c.rank} · score ${c.score.toFixed(2)}</div>` +
+  let html = `<div><b>Scout #${c.rank}</b> · score ${c.score.toFixed(2)}</div>` +
     `<div class="d">${c.lat.toFixed(2)}°, ${c.lon.toFixed(2)}° · cell ${f} ${i} ${j} · ${c.window_km} km window</div>` +
     `<img src="${c.thumbnail}" style="width:100%;border-radius:4px;margin:4px 0" alt="">` +
     `<div class="d">relief ${Math.round(m.relief_m)} m · walkable ${pct(m.walkable)} · creeks ${pct(m.creek_share)} · lakes ${pct(m.lake_share)}<br>` +
     `riffle ${pct(m.riffle_share)} · pocket water ${pct(m.pocket_share)} · ${m.temperature_c.toFixed(1)} °C · rain ×${m.wetness.toFixed(2)} · forest ${pct(m.forest_share)}</div>`;
   if (job) html += `<div>zoom ${job.name}: <b>${job.state}</b>${job.message ? " — " + job.message : ""}</div>`;
-  if (apiOK && (!job || job.state === "failed")) html += `<div class="row"><button class="plain" id="bakezoom">Bake a zoom here</button><span class="d" id="bakeeta">~10–20 min</span></div>` +
-    `<div class="row"><label class="chk"><input type="checkbox" id="bakegame">game levels too (19 m, 5 m) · ~+35 min</label></div>`;
+  if (apiOK && (!job || job.state === "failed")) html += `<div class="row"><button class="plain" id="bakezoom">Bake a zoom here</button></div>` +
+    `<label class="chk"><input type="checkbox" id="bakegame">game levels too (19 m, 5 m)</label>` +
+    `<div class="note">~10–20 min for the planet, 305 m and 76 m levels; ~+35 min with the game levels.</div>`;
   else if (!apiOK) html += `<code>python scripts/zoom_bake.py --world worlds/${META.world} --cell ${f} ${i} ${j}</code>`;
-  pop.innerHTML = html;
-  const btn = $("bakezoom");
-  if (btn) btn.onclick = async () => {
-    btn.disabled = true;
-    try { const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ face: f, i, j, game: !!($("bakegame") && $("bakegame").checked) }) });
-      if (!r.ok) throw new Error(await r.text()); } catch (e) { btn.textContent = "failed: " + e.message; return; }
-    bakesOpen = true; pollJobs();
-  };
-  placePop(px, py);
+  hereHTML(html, () => bakeButton(f, i, j));
 }
 function inPoly(x, y, pts) {
   let c = false;
@@ -2035,10 +2099,24 @@ function inPoly(x, y, pts) {
   }
   return c;
 }
+// the button both "Here" pages offer: start a zoom bake on this cell
+function bakeButton(f, i, j) {
+  const btn = $("bakezoom");
+  if (!btn) return;
+  btn.onclick = async () => {
+    btn.disabled = true;
+    try {
+      const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" },
+                                   body: JSON.stringify({ face: f, i, j, game: !!($("bakegame") && $("bakegame").checked) }) });
+      if (!r.ok) throw new Error(await r.text());
+    } catch (e) { btn.textContent = "failed: " + e.message; return; }
+    openTab("bakes"); pollJobs();
+  };
+}
 const API = location.protocol.startsWith("http") ? "../api/zoom" : null;
 let apiOK = false, jobs = [];
 function reloadZooms() { const s = document.createElement("script"); s.src = `zooms.js?t=${Date.now()}`; document.body.appendChild(s); }
-let pollTimer = 0, bakesOpen = false;
+let pollTimer = 0, here = null;
 const logOpen = new Map();                        // job name -> last log text, while its log is shown
 async function pollJobs() {
   if (!API) return;
@@ -2055,7 +2133,7 @@ async function pollJobs() {
       const lr = await fetch(`${API}/log?name=${encodeURIComponent(name)}`);
       if (lr.ok) logOpen.set(name, (await lr.json()).log);
     }
-    if (pop.dataset.kind === "spot") showSpot(+pop.dataset.px, +pop.dataset.py);
+    if (here && here.kind === "spot" && tab === "here") showSpot(here.px, here.py);
   } catch (e) { apiOK = false; }
   renderBakes();
   pollTimer = setTimeout(pollJobs, active ? 3000 : 20000);
@@ -2064,17 +2142,16 @@ const fmtDur = s => s == null ? "—" : s >= 3600 ? `${Math.floor(s / 3600)} h $
 const cellOfR = R => fmtCell((META.cell_size_m || 9773) / R);
 // the bakes panel: every queued / running job and the last few finished, newest first
 function renderBakes() {
-  const btn = $("bakesbtn"), el = $("bakes");
-  if (!apiOK) { btn.classList.add("hidden"); el.classList.add("hidden"); return; }
-  btn.classList.remove("hidden");
+  const btn = [...$("tabs").children].find(b => b.dataset.tab === "bakes"), el = $("bakesbody");
+  btn.classList.toggle("hidden", !apiOK);
+  if (!apiOK) return;
   const active = jobs.filter(j => j.state === "running" || j.state === "queued");
-  btn.textContent = active.length ? `Bakes (${active.length})` : "Bakes";
-  el.classList.toggle("hidden", !bakesOpen);
-  if (!bakesOpen) return;
+  btn.innerHTML = active.length ? `Bakes <b>${active.length}</b>` : "Bakes";
+  if (tab !== "bakes") return;
   const finished = jobs.filter(j => !(j.state === "running" || j.state === "queued")).slice(-6);
   const shown = [...active, ...finished.reverse()];
-  let html = `<div class="bt"><span>Zoom bakes</span><span class="x" style="cursor:pointer;color:var(--dim)" id="bakesclose">×</span></div>`;
-  if (!shown.length) html += `<div class="d">No bakes yet. Click a spot on the globe, then "Bake a zoom here".</div>`;
+  let html = "";
+  if (!shown.length) html += `<div class="note">No bakes yet. Tap a spot on the map, then <b>Bake a zoom here</b> under Here.</div>`;
   for (const j of shown) {
     const pr = j.progress, frac = pr ? pr.fraction : (j.state === "done" ? 1 : 0);
     const levels = pr ? pr.levels : (j.game ? [8, 32, 128, 512, 2048] : [8, 32, 128]);
@@ -2098,7 +2175,6 @@ function renderBakes() {
     html += `</div>`;
   }
   el.innerHTML = html;
-  $("bakesclose").onclick = () => { bakesOpen = false; renderBakes(); };
   el.querySelectorAll("[data-cancel]").forEach(b => b.onclick = async () => {
     if (!confirm(`Stop the bake ${b.dataset.cancel}? Levels it finished are kept.`)) return;
     await fetch(`${API}/cancel`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: b.dataset.cancel }) });
@@ -2112,46 +2188,33 @@ function renderBakes() {
     logOpen.has(b.dataset.log) ? logOpen.delete(b.dataset.log) : logOpen.set(b.dataset.log, ""); renderBakes(); pollJobs(); });
   el.querySelectorAll("pre").forEach(pre => pre.scrollTop = pre.scrollHeight);
 }
-$("bakesbtn").onclick = () => { bakesOpen = !bakesOpen; renderBakes(); if (bakesOpen) pollJobs(); };
-function placePop(px, py) {
-  const dpr = cssPx();
-  pop.style.left = `${Math.min(px / dpr + 12, innerWidth - 350)}px`; pop.style.top = `${Math.min(py / dpr + 12, innerHeight - 220)}px`;
-  pop.classList.remove("hidden");
-}
 function showZoom(h, px, py) {
   const z = h.z;
-  pop.dataset.kind = "zoom";
-  pop.innerHTML = `<span class="x" onclick="this.parentNode.classList.add('hidden')">×</span><div class="t">${z.name}</div>` +
+  here = { kind: "zoom", h, px, py };
+  hereHTML(`<div><b>${z.name}</b></div>` +
     `<div class="d">${z.lat.toFixed(2)}°, ${z.lon.toFixed(2)}° · baked in ${Math.round((z.seconds || 0) / 60)} min</div>` +
-    `<div><a href="${z.href}"><b>Open 3-D view</b></a> (${Math.round(z.levels[z.levels.length - 1].cell_m)} m)</div>` +
-    `<div class="d" style="margin-top:4px">levels: ` + z.levels.map(L => `<a href="${L.href}">${L.cell_m >= 1000 ? (L.cell_m / 1000).toFixed(1) + " km" : Math.round(L.cell_m) + " m"}</a>`).join(" · ") + `</div>`;
-  placePop(px, py);
+    `<div class="row"><button class="plain" id="herefly">Fly there</button><a href="${z.href}">Open 3-D view</a></div>` +
+    `<div class="d">levels: ` + z.levels.map(L => `<a href="${L.href}">${L.cell_m >= 1000 ? (L.cell_m / 1000).toFixed(1) + " km" : Math.round(L.cell_m) + " m"}</a>`).join(" · ") + `</div>`,
+    () => { $("herefly").onclick = () => flyToZoom(z); });
 }
 function showSpot(px, py) {
   const p = screenToDir(px, py);
-  if (!p) { pop.classList.add("hidden"); return; }
+  if (!p) return;
   const [f, u, v] = fromSphere(p), Nc = META.N_c || 1024;
   const i = Math.min(Nc - 1, Math.floor(u * Nc)), j = Math.min(Nc - 1, Math.floor(v * Nc));
   const [lat, lon] = latLonOf(p);
   const cmd = `python scripts/zoom_bake.py --world worlds/${META.world} --cell ${f} ${i} ${j}`;
   const mine = jobs.filter(jb => jb.spot && jb.spot[0] === f && Math.abs(jb.spot[1] - i) <= 3 && Math.abs(jb.spot[2] - j) <= 3);
   const job = mine[mine.length - 1];
-  pop.dataset.kind = "spot"; pop.dataset.px = px; pop.dataset.py = py;
-  let html = `<span class="x" onclick="this.parentNode.classList.add('hidden')">×</span><div class="t">${(lat * 180 / PI).toFixed(2)}°, ${(lon * 180 / PI).toFixed(2)}°</div>` +
-    `<div class="d">cell ${f} ${i} ${j} · no zoom here yet</div>`;
+  here = { kind: "spot", px, py };
+  let html = `<div><b>${(lat * 180 / PI).toFixed(2)}°, ${(lon * 180 / PI).toFixed(2)}°</b></div>` +
+    `<div class="d">cell ${f} ${i} ${j} · no zoom window here yet</div>`;
   if (job) html += `<div>zoom ${job.name}: <b>${job.state}</b>${job.message ? " — " + job.message : ""}</div>`;
-  if (apiOK && (!job || job.state === "failed")) html += `<div class="row"><button class="plain" id="bakezoom">Bake a zoom here</button><span class="d" id="bakeeta">~10–20 min</span></div>` +
-    `<div class="row"><label class="chk"><input type="checkbox" id="bakegame">game levels too (19 m, 5 m) · ~+35 min</label></div>`;
+  if (apiOK && (!job || job.state === "failed")) html += `<div class="row"><button class="plain" id="bakezoom">Bake a zoom here</button></div>` +
+    `<label class="chk"><input type="checkbox" id="bakegame">game levels too (19 m, 5 m)</label>` +
+    `<div class="note">~10–20 min for the planet, 305 m and 76 m levels; ~+35 min with the game levels.</div>`;
   else if (!apiOK) html += `<div class="d">Bake one (then reload this page):</div><code>${cmd}</code>`;
-  pop.innerHTML = html;
-  const btn = $("bakezoom");
-  if (btn) btn.onclick = async () => {
-    btn.disabled = true;
-    try { const r = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ face: f, i, j, game: !!($("bakegame") && $("bakegame").checked) }) });
-      if (!r.ok) throw new Error(await r.text()); } catch (e) { btn.textContent = "failed: " + e.message; return; }
-    bakesOpen = true; pollJobs();
-  };
-  placePop(px, py);
+  hereHTML(html, () => bakeButton(f, i, j));
 }
 let clickTimer = null, down = null;
 canvas.addEventListener("pointerdown", ev => { down = { x: ev.clientX, y: ev.clientY, touch: ev.pointerType === "touch" }; });
@@ -2499,7 +2562,10 @@ for (const k of ["rivers", "grid", "coast", "fade", "scout", "contours", "trees"
 $("play").onclick = togglePlay;
 $("prev").onclick = () => { state.playing = false; setFrame(state.frame - 1); };
 $("next").onclick = () => { state.playing = false; setFrame(state.frame + 1); };
-$("helpbtn").onclick = () => $("help").style.display = $("help").style.display === "block" ? "none" : "block";
+for (const b of $("tabs").children) b.onclick = () => openTab(b.dataset.tab);
+$("helpbtn").onclick = () => openTab(tab === "help" ? "map" : "help");
+$("sideclose").onclick = () => showSide(false);
+$("menubtn").onclick = () => showSide(true);
 $("shot").onclick = () => { draw(); canvas.toBlob(b => { const a = document.createElement("a"); a.href = URL.createObjectURL(b);
   a.download = `${META.world || "globe"}_${frames[state.frame].label.replace(/\W+/g, "_")}.png`; a.click(); }); };
 // share where the browser has it (a phone's share sheet), the clipboard otherwise
@@ -2519,6 +2585,7 @@ $("full").onclick = () => {
   else document.documentElement.requestFullscreen && document.documentElement.requestFullscreen();
 };
 window.addEventListener("keydown", ev => {
+  if (ev.key === "Tab" && !ev.metaKey && !ev.ctrlKey) { ev.preventDefault(); showSide(!document.body.classList.contains("ui")); return; }
   if (ev.target.tagName === "SELECT" || ev.target.tagName === "INPUT" && ev.target.type !== "checkbox" && ev.target.type !== "range") return;
   const k = ev.key;
   if (k === " ") { ev.preventDefault(); togglePlay(); }
@@ -2538,15 +2605,13 @@ window.addEventListener("keydown", ev => {
 });
 window.addEventListener("resize", () => { requestDraw(); drawTimeline(); });
 window.addEventListener("hashchange", () => { readHash(); requestDraw(); drawTimeline(); });
-if (document.body.classList.contains("noui")) for (const id of ["top", "timeline", "helpbtn", "loading", "uibtn"]) $(id).classList.add("hidden");
-// the controls fold away on a small screen (the CSS above); the button brings them back, and
-// the choice is kept for the next visit
+if (document.body.classList.contains("noui")) for (const id of ["side", "menubtn", "touchbtns", "loading"]) $(id).classList.add("hidden");
+// the sidebar starts open on a desktop and closed on a phone, unless the last visit said
+// otherwise (the map is the point; the controls are one tap away)
 const uiSmall = matchMedia("(max-width: 760px), (pointer: coarse)");
-if (!uiSmall.matches || localStorage.getItem("globe.ui") === "1") document.body.classList.add("ui");
-$("uibtn").onclick = () => {
-  const on = document.body.classList.toggle("ui");
-  try { localStorage.setItem("globe.ui", on ? "1" : "0"); } catch (e) { /* private mode */ }
-};
+let uiWas = null;
+try { uiWas = localStorage.getItem("globe.ui"); } catch (e) { /* private mode */ }
+if (uiWas === "1" || (uiWas === null && !uiSmall.matches)) document.body.classList.add("ui");
 GV.state = state; GV.setFrame = setFrame; GV.draw = draw;
 buildZoomList();
 requestDraw(); drawTimeline();
