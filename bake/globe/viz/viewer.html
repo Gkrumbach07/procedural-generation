@@ -9,16 +9,17 @@
   * { box-sizing:border-box; }
   html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
     font:13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; overflow:hidden;
-    /* a touch drag is the map's, never the page's: no pull-to-refresh, no rubber band, no
-       text selected by a long press, no grey flash on a tap */
-    overscroll-behavior:none; touch-action:none; -webkit-user-select:none; user-select:none;
+    /* no pull-to-refresh and no rubber band, no text selected by a long press, no grey flash
+       on a tap -- but the page may not refuse touch outright: touch-action is intersected down
+       the tree, so `none` here would leave every panel unscrollable on a phone.  The map's own
+       canvases refuse it instead */
+    overscroll-behavior:none; -webkit-user-select:none; user-select:none;
     -webkit-tap-highlight-color:transparent; -webkit-touch-callout:none; }
   #gl { position:fixed; inset:0; width:100%; height:100%; display:block; cursor:grab; touch-action:none; }
   /* the zoom outlines and the scout marks are drawn on this, over the map */
-  #ovl { position:fixed; inset:0; width:100%; height:100%; display:block; pointer-events:none; z-index:2; }
+  #ovl { position:fixed; inset:0; width:100%; height:100%; display:block; pointer-events:none; z-index:2; touch-action:none; }
   #gl.dragging { cursor:grabbing; }
-  .panel { position:fixed; background:var(--panel); border:1px solid var(--line); border-radius:8px;
-    backdrop-filter:blur(6px); padding:10px 12px; touch-action:pan-y; }
+
   .row { display:flex; align-items:center; gap:6px; margin:6px 0; flex-wrap:wrap; }
   .row label { color:var(--dim); min-width:52px; }
   .seg { display:inline-flex; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
@@ -40,7 +41,7 @@
   .glass { background:var(--panel); border:1px solid var(--line); border-radius:10px; backdrop-filter:blur(8px);
     box-shadow:0 6px 24px rgba(0,0,0,.35); }
   /* search */
-  #omni { position:fixed; top:12px; left:74px; width:min(420px, calc(100vw - 96px)); z-index:8; display:flex; align-items:center;
+  #omni { position:fixed; top:calc(12px + env(safe-area-inset-top)); left:74px; width:min(420px, calc(100vw - 96px)); z-index:8; display:flex; align-items:center;
     gap:6px; padding:6px 10px; }
   #omni input { flex:1; min-width:0; background:transparent; border:0; color:var(--text); font:inherit; outline:none; }
   #omni .ic { color:var(--dim); }
@@ -50,7 +51,7 @@
   #hits div:hover, #hits div.on { background:#1d2635; }
   #hits .s { color:var(--dim); font-size:11px; }
   /* the rail of sections */
-  #rail { position:fixed; top:12px; left:12px; z-index:7; display:flex; flex-direction:column; gap:6px; padding:6px; }
+  #rail { position:fixed; top:calc(12px + env(safe-area-inset-top)); left:12px; z-index:7; display:flex; flex-direction:column; gap:6px; padding:6px; }
   #rail button { width:44px; height:44px; background:transparent; border:0; border-radius:8px; color:var(--text);
     cursor:pointer; font:inherit; font-size:11px; line-height:1.1; display:flex; flex-direction:column; align-items:center;
     justify-content:center; gap:2px; appearance:none; -webkit-appearance:none; }
@@ -60,7 +61,7 @@
   #rail button .dot { position:absolute; margin:-16px 0 0 18px; width:7px; height:7px; border-radius:50%; background:var(--accent); }
   /* the panel a rail icon opens */
   /* under the search box, which is the first thing on the screen */
-  #panel { position:fixed; top:62px; left:74px; width:340px; max-height:calc(100vh - 110px); z-index:6;
+  #panel { position:fixed; top:calc(62px + env(safe-area-inset-top)); left:74px; width:340px; max-height:calc(100vh - 110px); z-index:6;
     display:none; flex-direction:column; overflow:hidden; }
   #panel.on { display:flex; }
   #phead { display:flex; align-items:center; gap:8px; padding:10px 12px 8px; border-bottom:1px solid var(--line); }
@@ -95,13 +96,13 @@
   #tl-stats { font-size:11px; color:var(--dim); line-height:1.25; }
   #tl-canvas { width:100%; height:96px; cursor:pointer; border-radius:4px; display:block; margin-top:6px; }
   #play { width:38px; font-size:14px; }
-  #loading { position:fixed; top:12px; left:50%; transform:translateX(-50%); z-index:8; padding:6px 12px; }
+  #loading { position:fixed; top:calc(62px + env(safe-area-inset-top)); left:50%; transform:translateX(-50%); z-index:7; padding:6px 12px; }
   #loading .bar { height:3px; background:var(--line); border-radius:2px; margin-top:5px; }
   #loading .bar i { display:block; height:100%; width:0; background:var(--accent); border-radius:2px; }
   #zoomlist .zr { display:flex; align-items:center; gap:6px; margin:5px 0; flex-wrap:wrap; }
   #zoomlist .zr button.tl { padding:1px 6px; font-size:11px; line-height:16px; }
   #zoomlist .zn { color:var(--accent); cursor:pointer; min-width:84px; }
-  #zoomlist .zl { cursor:pointer; border-bottom:1px dotted var(--line); }
+  #zoomlist .zl { padding:1px 6px; font-size:11px; line-height:16px; }
   #zoomlist .ld { color:var(--dim); font-size:10px; }
   .job { border-top:1px solid var(--line); padding:8px 0; }
   .job .jn { display:flex; justify-content:space-between; gap:6px; align-items:baseline; }
@@ -123,20 +124,22 @@
     #rail button { width:auto; flex:1; height:50px; }
     #omni { left:12px; top:12px; width:calc(100vw - 24px); }
     #hits { max-height:40vh; }
-    #panel { left:0; right:0; top:auto; bottom:60px; width:auto; max-height:var(--sheet, 55vh); border-radius:14px 14px 0 0;
-      border-left:0; border-right:0; border-bottom:0; }
-    body.searching #panel { top:auto; }
+    #panel { left:0; right:0; top:auto; bottom:calc(60px + env(safe-area-inset-bottom)); width:auto;
+      max-height:var(--sheet, 55vh); border-radius:14px 14px 0 0; border-left:0; border-right:0; border-bottom:0; }
     #phead { padding-top:14px; }
     #phead::before { content:""; position:absolute; top:6px; left:50%; transform:translateX(-50%); width:36px; height:4px;
       border-radius:2px; background:var(--line); }
     #mapctl { bottom:calc(66px + env(safe-area-inset-bottom)); }
-    body.panelopen #mapctl { display:none; }      /* the sheet is where the hands are */
+    body.panelopen #mapctl { bottom:calc(var(--sheet, 55vh) + 72px + env(safe-area-inset-bottom)); }
     #status { bottom:calc(60px + env(safe-area-inset-bottom)); }
-    body.panelopen #status { display:none; }
+    body.panelopen #status { bottom:calc(var(--sheet, 55vh) + 66px + env(safe-area-inset-bottom)); }
     button.plain { padding:8px 12px; }
     .chk { margin-right:10px; padding:4px 0; }
     .chk input { width:17px; height:17px; }
     input[type=range] { height:28px; }
+    #omni button { padding:10px 12px; }
+    #zoomlist .zr button.tl { padding:8px 12px; font-size:13px; line-height:18px; }
+    .chk input { width:20px; height:20px; }
   }
 </style>
 </head>
@@ -2095,6 +2098,7 @@ function openTab(name) {
 }
 function closePanel() {
   tab = null;
+  if (here) { here = null; drawZooms(); }        // the pin goes with the panel
   for (const b of $("rail").children) b.classList.remove("on");
   $("panel").classList.remove("on");
   document.body.classList.remove("panelopen");
@@ -2116,7 +2120,8 @@ function buildZoomList() {
       const key = zkey(z, L), st = ztex.loading.has(key) ? `<span class="ld">loading</span>` : "";
       const on = play && play.name === z.name && play.R === L.R;
       const tl = L.frames ? `<button class="plain tl" data-z="${z.name}" data-r="${L.R}" title="Play this level's erosion (${L.frames.count} frames)">${on ? "\u25a0" : "\u25b6"}</button>` : "";
-      return `<label class="chk"><input type="checkbox" data-k="${key}"${state.zoff.has(key) ? "" : " checked"}><span class="zl" data-z="${z.name}" data-r="${L.R}" title="Fly to this level">${fmtCell(L.tex.cell_m)}</span></label>${tl}${st}`;
+      return `<label class="chk"><input type="checkbox" data-k="${key}"${state.zoff.has(key) ? "" : " checked"}>${fmtCell(L.tex.cell_m)}</label>` +
+        `<button class="plain zl" data-z="${z.name}" data-r="${L.R}" title="Fly to this level">&#10132;</button>${tl}${st}`;
     }).join("") + `</div>`).join("");
   el.querySelectorAll("button.tl").forEach(b => b.onclick = () => {
     const z = zooms.find(x => x.name === b.dataset.z), L = (z.levels || []).find(x => x.R === +b.dataset.r);
@@ -2192,6 +2197,18 @@ function drawZooms() {
       }
     });
     ovx.setLineDash([]);
+  }
+  // the place the Place panel is showing
+  if (here && here.p) {
+    const q = dirToScreen(here.p);
+    if (q) {
+      const r = 7 * dpr;
+      ovx.beginPath(); ovx.arc(q[0], q[1] - r, r, PI * 0.15, PI * 0.85, true);
+      ovx.lineTo(q[0], q[1]); ovx.closePath();
+      ovx.fillStyle = "rgba(226,93,79,.92)"; ovx.fill();
+      ovx.strokeStyle = "rgba(255,255,255,.85)"; ovx.lineWidth = 1.3 * dpr; ovx.stroke();
+      ovx.beginPath(); ovx.arc(q[0], q[1] - r, 2.4 * dpr, 0, 2 * PI); ovx.fillStyle = "#fff"; ovx.fill();
+    }
   }
   scoutHits = [];
   if (state.scout) {
@@ -2280,7 +2297,12 @@ function bakeButton(f, i, j) {
 }
 const API = location.protocol.startsWith("http") ? "../api/zoom" : null;
 let apiOK = false, jobs = [];
-function reloadZooms() { const s = document.createElement("script"); s.src = `zooms.js?t=${Date.now()}`; document.body.appendChild(s); }
+function reloadZooms() {
+  const s = document.createElement("script");
+  s.src = `zooms.js?t=${Date.now()}`;
+  s.onload = s.onerror = () => s.remove();
+  document.body.appendChild(s);
+}
 let pollTimer = 0, here = null;
 const logOpen = new Map();                        // job name -> last log text, while its log is shown
 async function pollJobs() {
@@ -2298,10 +2320,11 @@ async function pollJobs() {
       const lr = await fetch(`${API}/log?name=${encodeURIComponent(name)}`);
       if (lr.ok) logOpen.set(name, (await lr.json()).log);
     }
-    if (here && here.kind === "spot" && tab === "here") showSpot(here.px, here.py);
+    if (here && here.kind === "spot" && tab === "here") showSpot(here.px, here.py, here.p);
   } catch (e) { apiOK = false; }
   renderBakes();
-  pollTimer = setTimeout(pollJobs, active ? 3000 : 20000);
+  // nothing to watch while the tab is in the background
+  pollTimer = setTimeout(pollJobs, document.visibilityState === "hidden" ? 60000 : (active ? 3000 : 20000));
 }
 const fmtDur = s => s == null ? "—" : s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.round(s % 3600 / 60)} min` : s >= 60 ? `${Math.round(s / 60)} min` : `${Math.round(s)} s`;
 const cellOfR = R => fmtCell((META.cell_size_m || 9773) / R);
@@ -2369,8 +2392,10 @@ function showZoom(h, px, py) {
       $("here").querySelectorAll("[data-lv]").forEach(b => b.onclick = () => flyToLevel(z.levels[+b.dataset.lv]));
     });
 }
-function showSpot(px, py) {
-  const p = screenToDir(px, py);
+// px, py are where the tap was; dir keeps the place itself, so a refresh while the camera
+// has moved on does not quietly repoint the panel at whatever is under that pixel now
+function showSpot(px, py, dir) {
+  const p = dir || screenToDir(px, py);
   if (!p) return;
   const [f, u, v] = fromSphere(p), Nc = META.N_c || 1024;
   const i = Math.min(Nc - 1, Math.floor(u * Nc)), j = Math.min(Nc - 1, Math.floor(v * Nc));
@@ -2378,7 +2403,7 @@ function showSpot(px, py) {
   const cmd = `python scripts/zoom_bake.py --world worlds/${META.world} --cell ${f} ${i} ${j}`;
   const mine = jobs.filter(jb => jb.spot && jb.spot[0] === f && Math.abs(jb.spot[1] - i) <= 3 && Math.abs(jb.spot[2] - j) <= 3);
   const job = mine[mine.length - 1];
-  here = { kind: "spot", px, py };
+  here = { kind: "spot", px, py, p };
   const rows = placeRows(p);
   let html = `<div><b>${(lat * 180 / PI).toFixed(3)}°, ${(lon * 180 / PI).toFixed(3)}°</b></div>` +
     `<div class="d">cell ${f} ${i} ${j} · no zoom window here yet</div>` +
@@ -2503,8 +2528,8 @@ function drawScale() {
   $("scalebari").style.width = `${Math.round(len / mpp)}px`;
   $("scaletext").textContent = len >= 1000 ? `${Math.round(len / 1000).toLocaleString()} km` : `${Math.round(len)} m`;
   $("camalt").textContent = state.view === "tilt" ? `camera ${fmtM(cam3().D)}` : "";
-  const c = $("compass");
-  if (c) c.style.transform = `rotate(${(-state.heading * 180 / PI).toFixed(1)}deg)`;
+  const needle = $("compass") && $("compass").querySelector("svg");
+  if (needle) needle.style.transform = `rotate(${state.view === "tilt" ? (-state.heading * 180 / PI).toFixed(1) : 0}deg)`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2707,7 +2732,10 @@ canvas.addEventListener("pointercancel", endTouch);
 canvas.addEventListener("pointerleave", () => readout());   // the strip falls back to the view's centre
 canvas.addEventListener("wheel", ev => { ev.preventDefault(); const dpr = cssPx();
   zoomAt(ev.offsetX * dpr, ev.offsetY * dpr, Math.exp(-ev.deltaY * (ev.deltaMode ? 0.05 : 0.0015))); }, { passive: false });
-canvas.addEventListener("dblclick", ev => { const dpr = cssPx(); zoomAt(ev.offsetX * dpr, ev.offsetY * dpr, 2); });
+canvas.addEventListener("dblclick", ev => {
+  if (ev.sourceCapabilities && ev.sourceCapabilities.firesTouchEvents) return;   // the double tap below has it
+  const dpr = cssPx(); zoomAt(ev.offsetX * dpr, ev.offsetY * dpr, 2);
+});
 // double tap zooms in, as double click does (a tap pair inside 300 ms and 30 px)
 let lastTap = { t: 0, x: 0, y: 0 };
 canvas.addEventListener("pointerup", ev => {
@@ -2767,8 +2795,17 @@ $("pclose").onclick = closePanel;
   head.addEventListener("pointercancel", end);
   try { const v = localStorage.getItem("globe.sheet"); if (v) document.body.style.setProperty("--sheet", `${v}px`); } catch (e) { /* private mode */ }
 })();
-$("view3d").onclick = () => { state.view = state.view === "tilt" ? "globe" : "tilt"; writeHash(); requestDraw(); updateLabels(state.frame); };
-$("compass").onclick = () => { state.heading = 0; state.tilt = 0; writeHash(); requestDraw(); updateLabels(state.frame); };
+$("view3d").onclick = () => {
+  state.view = state.view === "tilt" ? "globe" : "tilt";
+  if (state.view === "tilt" && state.tilt < 0.05) state.tilt = 55 * PI / 180;   // as the T key does
+  writeHash(); requestDraw(); updateLabels(state.frame);
+};
+// north up, keeping the tilt (Google Earth's compass does the same); from north it puts the
+// camera straight down
+$("compass").onclick = () => {
+  if (Math.abs(state.heading) < 1e-3) state.tilt = 0; else state.heading = 0;
+  writeHash(); requestDraw(); updateLabels(state.frame);
+};
 // Search: coordinates, a zoom window by name, or a scout candidate by rank.  Google Earth's
 // box is the first thing on the screen; ours goes where the world already is
 const searchBox = $("search"), hits = $("hits");
@@ -2798,7 +2835,6 @@ function showHits() {
   hits.innerHTML = list.map((h, i) => `<div data-i="${i}"><div>${h.t}</div><div class="s">${h.s}</div></div>`).join("")
     || `<div class="s" style="padding:6px 8px">Nothing found. Try coordinates, a window's name, or "scout 1".</div>`;
   hits.classList.toggle("hidden", !searchBox.value.trim());
-  document.body.classList.toggle("searching", !!searchBox.value.trim());
   hits.querySelectorAll("[data-i]").forEach(el => el.onclick = () => {
     list[+el.dataset.i].go();
     searchBox.value = ""; showHits(); searchBox.blur();
@@ -2810,30 +2846,62 @@ searchBox.onkeydown = ev => {
   if (ev.key === "Enter") { const l = searchHits(searchBox.value); if (l.length) { l[0].go(); searchBox.value = ""; showHits(); searchBox.blur(); } }
   if (ev.key === "Escape") { searchBox.value = ""; showHits(); searchBox.blur(); }
 };
-$("searchx").onclick = () => { searchBox.value = ""; showHits(); };
-$("shot").onclick = () => { draw(); canvas.toBlob(b => { const a = document.createElement("a"); a.href = URL.createObjectURL(b);
-  a.download = `${META.world || "globe"}_${frames[state.frame].label.replace(/\W+/g, "_")}.png`; a.click(); }); };
-// share where the browser has it (a phone's share sheet), the clipboard otherwise
+$("searchx").onclick = () => { searchBox.value = ""; showHits(); searchBox.focus(); };
+searchBox.onblur = () => setTimeout(() => hits.classList.add("hidden"), 150);   // after a click on a hit
+searchBox.onfocus = showHits;
+canvas.addEventListener("pointerdown", () => hits.classList.add("hidden"));
+// the picture as it is on screen: the map with its outlines and marks over it
+$("shot").onclick = () => {
+  const btn = $("shot"), was = btn.textContent;
+  draw();
+  const out = document.createElement("canvas");
+  out.width = canvas.width; out.height = canvas.height;
+  const cx = out.getContext("2d");
+  cx.drawImage(canvas, 0, 0);
+  if (ovl.width) cx.drawImage(ovl, 0, 0);
+  out.toBlob(b => {
+    const url = URL.createObjectURL(b), a = document.createElement("a");
+    a.href = url;
+    a.download = `${META.world || "globe"}_${frames[state.frame].label.replace(/\W+/g, "_")}.png`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    btn.textContent = "Saved"; setTimeout(() => { btn.textContent = was; }, 1500);
+  });
+};
+// clipboard and share are secure-context only, and this is usually served over plain http,
+// so fall back to the old copy and always say what happened
 $("copylink").onclick = async () => {
-  const url = location.href;
+  const url = location.href, btn = $("copylink"), was = btn.textContent;
+  const say = t => { btn.textContent = t; setTimeout(() => { btn.textContent = was; }, 1500); };
   try {
-    if (navigator.share && matchMedia("(pointer: coarse)").matches) await navigator.share({ title: document.title, url });
-    else if (navigator.clipboard) await navigator.clipboard.writeText(url);
-  } catch (e) { /* dismissed */ }
+    if (navigator.share && matchMedia("(pointer: coarse)").matches) { await navigator.share({ title: document.title, url }); return; }
+    if (navigator.clipboard) { await navigator.clipboard.writeText(url); return say("Copied"); }
+  } catch (e) { /* dismissed, or refused off a secure page */ }
+  const ta = document.createElement("textarea");
+  ta.value = url; ta.style.cssText = "position:fixed;opacity:0"; document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+  ta.remove();
+  say(ok ? "Copied" : "The link is in the address bar");
 };
 // the buttons a touch screen needs, having no wheel and no keys
 const zoomCentre = f => zoomAt(canvas.width / 2, canvas.height / 2, f);
 $("zin").onclick = () => zoomCentre(1.8);
 $("zout").onclick = () => zoomCentre(1 / 1.8);
+if (!document.documentElement.requestFullscreen) $("full").classList.add("hidden");   // iPhone Safari has none
 $("full").onclick = () => {
   if (document.fullscreenElement) document.exitFullscreen();
-  else document.documentElement.requestFullscreen && document.documentElement.requestFullscreen();
+  else document.documentElement.requestFullscreen();
 };
+document.addEventListener("fullscreenchange", () => { $("full").title = document.fullscreenElement ? "Leave full screen" : "Full screen"; });
 window.addEventListener("keydown", ev => {
-  if (ev.key === "Tab" && !ev.metaKey && !ev.ctrlKey) { ev.preventDefault(); tab ? closePanel() : openTab(lastTab); return; }
   if (ev.key === "Escape") { closePanel(); return; }
+  // Tab is the browser's: it moves focus between the controls.  The panel toggles on B
+  if ((ev.key === "b" || ev.key === "B") && ev.target === document.body) { tab ? closePanel() : openTab(lastTab); return; }
   if (ev.key === "/" && ev.target !== $("search")) { ev.preventDefault(); $("search").focus(); return; }
-  if (ev.target.tagName === "SELECT" || ev.target.tagName === "INPUT" && ev.target.type !== "checkbox" && ev.target.type !== "range") return;
+  // a focused control keeps its own keys (space ticks a box, the arrows move a slider)
+  if (ev.target !== document.body && ev.target !== canvas) return;
   const k = ev.key;
   if (k === " ") { ev.preventDefault(); togglePlay(); }
   else if (k === "ArrowRight") { ev.preventDefault(); state.playing = false; ev.shiftKey ? jumpStage(1) : setFrame(state.frame + 1); }
