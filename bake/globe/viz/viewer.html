@@ -227,6 +227,7 @@ uniform int uTreeKind[32];     // tree kind per biome code (derive.biomes TREE_K
 uniform float uVeg[32];        // vegetation factor per biome code (derive.biomes VEG_FACTOR): forest cover and tree density
 uniform int uTrees;            // 1: tree symbols on zoom levels of 100 m cells or finer (satellite layer)
 uniform float uTreeSpacing;    // metres between tree sites at this zoom (0 = none)
+uniform float uClimCell;       // atlas texels per coarse cell: the temperature and rain blocks
 uniform vec2 uTempRange;       // temperature byte -> degC (lo, hi), for the satellite layer
 uniform vec2 uPrecipRange;     // precip byte -> x land mean (log lo, hi)
 uniform sampler2D uOT;         // Strahler order (final frame only): colours the river overlay
@@ -488,32 +489,101 @@ vec3 elevColor(float h, float w){
 // temperature at this height Tloc come back for the trees.
 vec3 hash3(vec2 q);
 float vnoise(vec2 q);
-// the class corners round the pixel (codes and bilinear weights), set once per pixel in main
-// (setClasses): the satellite colours blend across them, so a class edge is soft, not the
-// class texels' squares, and each tree site picks its kind from them
+// the classes round the pixel, set once per pixel in main (setClasses).  The class texels are
+// big -- a planet texel is kilometres, a zoom level's up to 76 m -- and a class edge along
+// them is a staircase, so the satellite's class properties (colour, vegetation, bare rock,
+// ice, and the shares of trees, savanna and shrubs) are a cubic B-spline over a lattice of
+// class samples: every texel while a texel is a few pixels, every second or fourth (each the
+// mean of the block round it) as texels grow on screen, so a band of riparian texels is a
+// smooth ribbon however far in the view is.  gCls / gClsW are the four corners round the
+// pixel itself, which the tree sites pick their kinds from
 ivec4 gCls = ivec4(0);
 vec4 gClsW = vec4(1.0, 0.0, 0.0, 0.0);
+vec3 gTint = vec3(0.0);
+float gVeg = 0.0, gRocky = 0.0, gIcy = 0.0, gTreeW = 0.0, gSavW = 0.0, gShrubW = 0.0;
+float gPxM = 1.0;                  // metres per screen pixel here (main)
+int classCode(bool zoom, int zk, ivec2 c){
+  float v = zoom ? zTex(zk, c + ivec2(0, 2 * int(uZNE[zk]))).r : chan(texelFetch(uLT, c, 0), uLCh);
+  return int(floor(v * 255.0 + 0.5)) & 31;
+}
+void addClass(int k, float w){
+  gTint += w * uSat[k]; gVeg += w * uVeg[k];
+  gRocky += w * ((k == 12 || k == 13) ? 1.0 : 0.0); gIcy += w * (k == 1 ? 1.0 : 0.0);
+  int kind = uTreeKind[k];
+  if (kind == 6) gShrubW += w; else if (kind == 5) gSavW += w; else if (kind != 0) gTreeW += w;
+}
+vec4 bspline(float t){
+  float t2 = t * t, t3 = t2 * t, it = 1.0 - t;
+  return vec4(it * it * it, 3.0 * t3 - 6.0 * t2 + 4.0, -3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0, t3) / 6.0;
+}
 void setClasses(vec3 p, int zk, vec2 za, float zw){
   bool zoom = zk >= 0 && zw > 0.5 && uZBio[zk] > 0.5;
   vec2 xy = zoom ? za : atlasXY(p, uLGeo);
   vec2 i0 = floor(xy); vec2 fr = xy - i0; ivec2 a = ivec2(i0);
-  for (int i = 0; i < 4; i++) {
-    ivec2 o = ivec2(i % 2, i / 2);
-    float v = zoom ? zTex(zk, a + o + ivec2(0, 2 * int(uZNE[zk]))).r : chan(texelFetch(uLT, a + o, 0), uLCh);
-    gCls[i] = int(floor(v * 255.0 + 0.5));
-  }
+  for (int i = 0; i < 4; i++) gCls[i] = classCode(zoom, zk, a + ivec2(i % 2, i / 2));
   gClsW = vec4((1.0 - fr.x) * (1.0 - fr.y), fr.x * (1.0 - fr.y), (1.0 - fr.x) * fr.y, fr.x * fr.y);
+  gTint = vec3(0.0); gVeg = 0.0; gRocky = 0.0; gIcy = 0.0; gTreeW = 0.0; gSavW = 0.0; gShrubW = 0.0;
+  // a class texel's size on screen picks the lattice.  A zoom level classifies every cell, so
+  // its steps are a texel; the planet's riparian and wetland bands are grown in coarse cells
+  // (derive: riparian_cells, wetland_cells) and step every few texels, so its lattice widens
+  // as soon as those steps would show
+  float texRad = zoom ? 0.5 * PI / uZRes[zk] : 0.5 * PI / uLGeo.x;
+  float texelPx = texRad * uRplanet / max(gPxM, 1e-6);
+  int sp = zoom ? (texelPx > 24.0 ? 4 : (texelPx > 8.0 ? 2 : 1))
+                : (texelPx > 1.0 ? 8 : (texelPx > 0.5 ? 4 : (texelPx > 0.25 ? 2 : 1)));
+  float spf = float(sp);
+  vec2 g = xy / spf; vec2 g0 = floor(g); vec2 f = g - g0;
+  vec4 wx = bspline(f.x), wy = bspline(f.y);
+  ivec2 base = ivec2(g0) * sp;
+  for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++) {
+    float w = wx[i] * wy[j];
+    ivec2 node = base + ivec2(i - 1, j - 1) * sp;
+    if (sp == 1) addClass(classCode(zoom, zk, node), w);
+    else {
+      // the block's mean, from four texels spread over it
+      int h = max(sp / 4, 1);
+      ivec2 m = node + ivec2(sp / 2);
+      for (int q = 0; q < 4; q++) addClass(classCode(zoom, zk, m + ivec2(q % 2 == 0 ? -h : h - 1, q / 2 == 0 ? -h : h - 1)), 0.25 * w);
+    }
+  }
 }
 // stands and clearings: the cover's scale at pq (40 m units), three octaves each turned off
-// the grid so the value noise's square cells do not show
+// the grid so the value noise's square cells do not show.  An octave fades to its mean as its
+// cells shrink under a few pixels (gPxM), and the whole pattern fades out zoomed out past the
+// trees: a stipple finer than the pixels only glitters, and from afar a forest is its colour
 float standScale(vec2 pq){
+  float fadeAll = smoothstep(12.0, 4.0, gPxM);
+  if (fadeAll <= 0.0) return 1.0;
   const mat2 ROT = mat2(0.8, 0.6, -0.6, 0.8);
-  float s = 0.5 * vnoise(ROT * pq / 4.0) + 0.3 * vnoise(ROT * ROT * pq / 1.7 + 31.7) + 0.2 * vnoise(ROT * ROT * ROT * pq / 0.7 + 71.3);
-  return mix(0.45, 1.55, smoothstep(0.25, 0.75, s));
+  float px = gPxM / 40.0;                                           // a pixel, in 40 m units
+  float s = 0.5
+    + 0.5 * (vnoise(ROT * pq / 4.0) - 0.5) * smoothstep(1.5, 4.0, 4.0 / px)
+    + 0.3 * (vnoise(ROT * ROT * pq / 1.7 + 31.7) - 0.5) * smoothstep(1.5, 4.0, 1.7 / px)
+    + 0.2 * (vnoise(ROT * ROT * ROT * pq / 0.7 + 71.3) - 0.5) * smoothstep(1.5, 4.0, 0.7 / px);
+  return mix(1.0, mix(0.45, 1.55, smoothstep(0.25, 0.75, s)), fadeAll);
+}
+// temperature and rain bytes (0..1) of the satellite layer at p.  They are the coarse grid's,
+// a block of uClimCell texels per coarse cell, and bilinear over those blocks leaves every
+// coarse cell's edge in the tree and snow lines; a cubic B-spline over the blocks' means is smooth
+vec2 climateAt(vec3 p){
+  vec2 xy = atlasXY(p, uLGeo);
+  float cell = max(uClimCell, 1.0);
+  vec2 g = (xy - 0.5 * (cell - 1.0)) / cell;
+  vec2 g0 = floor(g); vec2 f = g - g0;
+  vec4 wx = bspline(f.x), wy = bspline(f.y);
+  vec2 acc = vec2(0.0);
+  for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++) {
+    vec2 c = (g0 + vec2(float(i - 1), float(j - 1))) * cell + 0.5 * (cell - 1.0);   // the block's centre
+    vec2 c0 = floor(c); vec2 fr = c - c0; ivec2 a = ivec2(c0);
+    vec4 t = mix(mix(texelFetch(uLT, a, 0), texelFetch(uLT, a + ivec2(1, 0), 0), fr.x),
+                 mix(texelFetch(uLT, a + ivec2(0, 1), 0), texelFetch(uLT, a + ivec2(1, 1), 0), fr.x), fr.y);
+    acc += wx[i] * wy[j] * t.rg;
+  }
+  return acc;
 }
 vec3 satColor(float b, float h, vec3 p, float slopeDeg, float cellM, float simCover, out float forest, out float Tloc){
-  float tb = byteLinear(uLT, uLGeo, 0, p) / 255.0;
-  float pb = byteLinear(uLT, uLGeo, 1, p) / 255.0;
+  vec2 clim = climateAt(p);
+  float tb = clim.x, pb = clim.y;
   float T = uTempRange.x + tb * (uTempRange.y - uTempRange.x);
   // the climate is the coarse grid's, at its height: 6.5 C per km of the ground here above it
   Tloc = T - 0.0065 * (h - heightIn(uT0a, uGeoA, uHA, p));
@@ -521,17 +591,11 @@ vec3 satColor(float b, float h, vec3 p, float slopeDeg, float cellM, float simCo
   float w = clamp((lw - log(0.15)) / (log(4.0) - log(0.15)), 0.0, 1.0);
   // the classes round p, blended: their colour, vegetation, bare rock and ice, and the canopy
   // their plants make seen from afar (shrubs lighter and thinner than trees)
-  vec3 tint = vec3(0.0), canopyC = vec3(0.0); float veg = 0.0, rocky = 0.0, icy = 0.0, canopyK = 0.0;
-  for (int i = 0; i < 4; i++) {
-    int k = gCls[i] & 31; float wt = gClsW[i];
-    tint += wt * uSat[k]; veg += wt * uVeg[k];
-    rocky += wt * ((k == 12 || k == 13) ? 1.0 : 0.0); icy += wt * (k == 1 ? 1.0 : 0.0);
-    int kind = uTreeKind[k];
-    bool shrub = kind == 6, savanna = kind == 5;
-    canopyC += wt * (shrub ? vec3(0.40, 0.40, 0.26) : savanna ? vec3(0.30, 0.36, 0.16)
-                     : mix(vec3(0.11, 0.21, 0.11), vec3(0.19, 0.30, 0.13), smoothstep(-2.0, 18.0, Tloc)));
-    canopyK += wt * (shrub ? 0.35 : savanna ? 0.6 : 0.85);
-  }
+  vec3 tint = gTint; float veg = gVeg, rocky = gRocky, icy = gIcy;
+  float plants = max(gTreeW + gSavW + gShrubW, 1e-4);
+  vec3 canopyC = (gShrubW * vec3(0.40, 0.40, 0.26) + gSavW * vec3(0.30, 0.36, 0.16)
+                  + gTreeW * mix(vec3(0.11, 0.21, 0.11), vec3(0.19, 0.30, 0.13), smoothstep(-2.0, 18.0, Tloc))) / plants;
+  float canopyK = (gShrubW * 0.35 + gSavW * 0.6 + gTreeW * 0.85) / plants;
   // ground: dry tan to lush green, tundra and alpine meadow in the cold, the class for character
   vec3 c = ramp(w, vec3(0.80, 0.72, 0.52), vec3(0.68, 0.64, 0.40), vec3(0.47, 0.56, 0.30), vec3(0.30, 0.47, 0.25), vec3(0.20, 0.40, 0.21));
   c = mix(c, vec3(0.56, 0.58, 0.40), smoothstep(4.0, -2.0, Tloc));                   // alpine meadow
@@ -548,16 +612,8 @@ vec3 satColor(float b, float h, vec3 p, float slopeDeg, float cellM, float simCo
   vec3 rockC = mix(vec3(0.45, 0.43, 0.40), vec3(0.63, 0.56, 0.47), 1.0 - w);
   rockC = mix(rockC, vec3(0.62, 0.62, 0.63), smoothstep(2.0, -10.0, Tloc));
   forest *= (1.0 - rock) * (1.0 - smoothstep(0.75 * thr, 1.15 * thr, slopeDeg));
-  // canopy from above, in the stands and clearings the tree symbols are placed in (treeDensity,
-  // on the same 40 m grid), so zooming in turns the patches into the trees that make them
-  float fv = 0.0;
-  if (forest > 0.02) {
-    int ff = faceOf(p); float fd = dot(p, BN[ff]);
-    vec2 fuv = vec2(atan(dot(p, BR[ff]) / fd), atan(dot(p, BU[ff]) / fd)) * TWO_OVER_PI + 0.5;
-    vec2 pq = mod(fuv * (0.5 * PI * uRplanet / 40.0), 8192.0) + vec2(float(ff) * 517.0, 0.0);
-    fv = clamp(forest * standScale(pq), 0.0, 1.0);
-  }
-  c = mix(c, canopyC, canopyK * fv);
+  // canopy from above: the cover's colour, blended with the classes, no texture
+  c = mix(c, canopyC, canopyK * clamp(forest, 0.0, 1.0));
   c = mix(c, rockC, rock);
   // snow: cold enough to last, sliding off what is steeper than ~1.4x the rock slope
   float snow = smoothstep(-8.0, -15.0, Tloc) * (1.0 - smoothstep(1.1 * thr, 1.6 * thr, slopeDeg));
@@ -907,6 +963,7 @@ void main(){
         if (wet) col = satWater(h, wcode);
         else {
           float sim = zk >= 0 && zw > 0.5 && uZVeg[zk] > 0.5 ? zLinear(zk, za + vec2(0.0, uZNE[zk])).a : -1.0;
+          gPxM = uMode == 2 ? tHit * uPixAng : uRplanet / uScale;
           setClasses(p, zk, za, zw);
           col = satColor(b, h, p, degrees(atan(length(g))), d * uRplanet, sim, treeF, treeT);
           treesHere = uTrees == 1 && uTreeSpacing > 0.0 && zk >= 0 && zw > 0.5 && 0.5 * PI * uRplanet / uZRes[zk] < 100.0;
@@ -1670,6 +1727,7 @@ function draw() {
     gl.uniform1i(U.uLayer, 1);
     bindTex(2, tex[a][L[0]], "uLT");
     gl.uniform3fv(U.uLGeo, geoOf(FA, L[0]));
+    gl.uniform1f(U.uClimCell, META.N_c ? Math.max(1, Math.round(geoOf(FA, L[0])[0] / META.N_c)) : 1);
     gl.uniform1i(U.uLCh, L[1]);
     gl.uniform1i(U.uLKind, ch.kind === "category" ? 1 : 0);
     gl.uniform1i(U.uCmap, CMAPS[ch.cmap] ?? 4);
