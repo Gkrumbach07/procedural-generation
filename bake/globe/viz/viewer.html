@@ -2,17 +2,24 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Globe viewer</title>
 <style>
   :root { --bg:#0b0e14; --panel:rgba(18,22,30,.88); --line:#2a3140; --text:#d6dde8; --dim:#8a96a8; --accent:#6cb4ff; }
   * { box-sizing:border-box; }
   html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
-    font:13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; overflow:hidden; }
+    font:13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; overflow:hidden;
+    /* a touch drag is the map's, never the page's: no pull-to-refresh, no rubber band, no
+       text selected by a long press, no grey flash on a tap */
+    overscroll-behavior:none; touch-action:none; -webkit-user-select:none; user-select:none;
+    -webkit-tap-highlight-color:transparent; -webkit-touch-callout:none; }
   #gl { position:fixed; inset:0; width:100%; height:100%; display:block; cursor:grab; touch-action:none; }
   #gl.dragging { cursor:grabbing; }
   .panel { position:fixed; background:var(--panel); border:1px solid var(--line); border-radius:8px;
-    backdrop-filter:blur(6px); padding:10px 12px; }
+    backdrop-filter:blur(6px); padding:10px 12px; touch-action:pan-y; }
+  #uibtn { position:fixed; top:10px; left:10px; display:none; z-index:5; font-size:16px; line-height:20px; padding:6px 10px; }
+  #touchbtns { position:fixed; right:10px; bottom:96px; display:none; flex-direction:column; gap:6px; z-index:5; }
+  #touchbtns button { width:42px; height:42px; font-size:18px; padding:0; }
   #top { top:10px; left:10px; width:260px; }
   #top h1 { font-size:14px; margin:0 0 2px; font-weight:600; }
   #top .sub { color:var(--dim); font-size:11px; margin-bottom:8px; }
@@ -46,6 +53,27 @@
   #help b { color:var(--text); font-weight:500; }
   #helpbtn { position:fixed; top:10px; right:10px; }
   .hidden { display:none !important; }
+  /* phones and tablets: the map fills the screen and the controls fold away behind a button;
+     taps need room, so the rows and buttons are bigger than on a desktop */
+  @media (max-width: 760px), (pointer: coarse) {
+    #uibtn { display:block; }
+    #top { top:52px; left:10px; width:min(94vw, 320px); max-height:58vh; overflow:auto; }
+    body:not(.ui) #top, body:not(.ui) #legend { display:none; }
+    #helpbtn, #bakesbtn { top:10px; }
+    #help, #bakes { top:52px; width:min(94vw, 360px); max-height:60vh; overflow:auto; }
+    #readout { display:none; }
+    #timeline { height:74px; padding:6px 8px; gap:6px; }
+    #tl-controls { width:130px; }
+    #tl-stats { display:none; }
+    button.plain, .seg button { padding:7px 11px; }
+    #play { width:42px; }
+    .chk { margin-right:10px; padding:3px 0; }
+    .chk input { width:17px; height:17px; }
+    input[type=range] { height:26px; }
+    #zoomlist { max-height:26vh; }
+    #zoomlist .zn { min-width:70px; }
+    #touchbtns { display:flex; }
+  }
   #ovl { position:fixed; inset:0; width:100%; height:100%; pointer-events:none; }
   #zoompop { min-width:230px; max-width:340px; font-size:12px; }
   #zoompop .t { font-weight:600; margin-bottom:4px; }
@@ -111,6 +139,12 @@
 </div>
 
 <button class="plain" id="helpbtn">?</button>
+<button class="plain" id="uibtn" title="Controls">&#9776;</button>
+<div id="touchbtns">
+  <button class="plain" id="zin" title="Zoom in">+</button>
+  <button class="plain" id="zout" title="Zoom out">&minus;</button>
+  <button class="plain" id="full" title="Full screen">&#9974;</button>
+</div>
 <button class="plain hidden" id="bakesbtn" title="Zoom bakes: progress, logs">Bakes</button>
 <div id="bakes" class="panel hidden"></div>
 <div id="help" class="panel">
@@ -1425,6 +1459,10 @@ function requestDraw() { if (!drawQueued) { drawQueued = true; requestAnimationF
 // drawn at half resolution during a drag / wheel / key turn (the ray march is
 // heavy); a quarter second after the last move it is drawn sharp again
 const cssPx = () => canvas.width / Math.max(canvas.clientWidth, 1);
+// a phone's screen is often three device pixels to the CSS pixel, which is three times the
+// shading for a picture no one can tell apart: the ray-marched view especially
+const DPR_MAX = matchMedia("(pointer: coarse)").matches ? 1.5 : 2;
+const screenPx = () => Math.min(window.devicePixelRatio || 1, DPR_MAX);
 let moving = false, movingTimer = 0;
 const TREE_MAX_M = 16;
 function bumpMoving() {
@@ -1473,7 +1511,7 @@ function setPage(lv, f, ti, tj, slot) {
 // the level for this view: the coarsest whose cells are at most ~1.3 px, none while the atlas' are
 function detailLevel(FA) {
   if (!detail.tex || FA.stage !== "final") return null;
-  const cellsPerPx = 1 / (scalePx() * (window.devicePixelRatio || 1) / cssPx() * HALF_PI / FA.res);
+  const cellsPerPx = 1 / (scalePx() * screenPx() / cssPx() * HALF_PI / FA.res);
   const want = Math.ceil(Math.log2(1 / cellsPerPx) - 0.4);
   if (want < 1) return null;
   return detail.levels[Math.min(want, detail.levels.length) - 1];
@@ -1632,7 +1670,7 @@ function contourInterval() {
 // metres of ground per canvas pixel at the view centre
 function metresPerPx() {
   // in device pixels at full resolution, so a half-resolution frame while moving does not change what loads
-  const full = canvas.clientHeight * (window.devicePixelRatio || 1);
+  const full = canvas.clientHeight * screenPx();
   return state.view === "tilt" ? 2 * cam3().D * TAN3 / full : META.R_planet_m / (scalePx() * full / Math.max(canvas.height, 1));
 }
 function zoomLevelInView(L) {
@@ -1725,7 +1763,7 @@ function loadedAtOrBefore(i) { for (let k = i; k >= 0; k--) if (tex[k]) return k
 
 function draw() {
   drawQueued = false;
-  const dpr = (window.devicePixelRatio || 1) * (state.view === "tilt" && moving ? 0.5 : 1);
+  const dpr = screenPx() * (state.view === "tilt" && moving ? 0.5 : 1);
   const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   gl.viewport(0, 0, w, h);
@@ -2116,9 +2154,10 @@ function showSpot(px, py) {
   placePop(px, py);
 }
 let clickTimer = null, down = null;
-canvas.addEventListener("pointerdown", ev => { down = { x: ev.clientX, y: ev.clientY }; });
+canvas.addEventListener("pointerdown", ev => { down = { x: ev.clientX, y: ev.clientY, touch: ev.pointerType === "touch" }; });
 canvas.addEventListener("click", ev => {
-  if (!down || Math.hypot(ev.clientX - down.x, ev.clientY - down.y) > 4) return;
+  // a finger never lands quite as still as a mouse
+  if (!down || Math.hypot(ev.clientX - down.x, ev.clientY - down.y) > (down.touch ? 12 : 4)) return;
   const dpr = cssPx(), px = ev.offsetX * dpr, py = ev.offsetY * dpr;
   clearTimeout(clickTimer);
   clickTimer = setTimeout(() => {
@@ -2352,12 +2391,43 @@ function zoomAt(px, py, factor) {
 }
 let drag = null;
 canvas.addEventListener("contextmenu", ev => { if (state.view === "tilt") ev.preventDefault(); });
+// Touch: one finger drags (pan), two pinch to zoom and, in the 3-D view, turn and tilt --
+// the same gestures as a map app.  Pointer events carry mouse and touch alike, so the
+// fingers are tracked in a map and a second one takes over from the drag
+const touches = new Map();
+let pinch = null;
+const pinchOf = () => {
+  const [a, b] = [...touches.values()];
+  return { d: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2,
+           ang: Math.atan2(b.y - a.y, b.x - a.x) };
+};
 canvas.addEventListener("pointerdown", ev => {
+  if (ev.pointerType === "touch") {
+    touches.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    if (touches.size === 2) {
+      pinch = pinchOf(); pinch.t0 = performance.now(); pinch.d0 = pinch.d;
+      drag = null; canvas.classList.remove("dragging"); return;
+    }
+    if (touches.size > 2) return;
+  }
   drag = { x: ev.clientX, y: ev.clientY, rot: state.view === "tilt" && (ev.button === 2 || ev.ctrlKey || ev.shiftKey || ev.altKey || ev.metaKey) };
   canvas.setPointerCapture(ev.pointerId); canvas.classList.add("dragging");
 });
 canvas.addEventListener("pointermove", ev => {
   const dpr = cssPx();
+  if (ev.pointerType === "touch" && touches.has(ev.pointerId)) touches.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+  if (pinch && touches.size >= 2) {
+    const now = pinchOf();
+    if (now.d > 0 && pinch.d > 0) zoomAt(now.x * dpr, now.y * dpr, now.d / pinch.d);
+    if (state.view === "tilt") {
+      // the fingers turning is the compass; both sliding up or down is the tilt
+      state.heading = wrapLon(state.heading - (now.ang - pinch.ang) * 1.2);
+      state.tilt = Math.max(0, Math.min(80 * PI / 180, state.tilt - (now.y - pinch.y) * 0.004));
+      bumpMoving(); updateLabels(state.frame);
+    }
+    pinch = { ...now, t0: pinch.t0, d0: pinch.d0 }; writeHash(); requestDraw();
+    return;
+  }
   if (drag && state.view === "tilt") {
     const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
     drag.x = ev.clientX; drag.y = ev.clientY;
@@ -2382,11 +2452,37 @@ canvas.addEventListener("pointermove", ev => {
   }
   readout(ev.offsetX * dpr, ev.offsetY * dpr);
 });
-canvas.addEventListener("pointerup", () => { drag = null; canvas.classList.remove("dragging"); });
+function endTouch(ev) {
+  if (ev.pointerType === "touch") {
+    // two fingers put down and lifted without a pinch: zoom out, as a two-finger tap does on a map
+    if (pinch && touches.size === 2 && performance.now() - (pinch.t0 || 0) < 300 && Math.abs(pinchOf().d - pinch.d0) < 20)
+      zoomAt(pinch.x * cssPx(), pinch.y * cssPx(), 1 / 1.8);
+    touches.delete(ev.pointerId);
+  }
+  if (touches.size < 2) pinch = null;
+  if (touches.size === 1 && ev.pointerType === "touch") {                 // one finger left: pan again
+    const [t] = [...touches.values()];
+    drag = { x: t.x, y: t.y, rot: false };
+  } else { drag = null; canvas.classList.remove("dragging"); }
+}
+canvas.addEventListener("pointerup", endTouch);
+canvas.addEventListener("pointercancel", endTouch);
 canvas.addEventListener("pointerleave", () => $("readout").classList.add("hidden"));
 canvas.addEventListener("wheel", ev => { ev.preventDefault(); const dpr = cssPx();
   zoomAt(ev.offsetX * dpr, ev.offsetY * dpr, Math.exp(-ev.deltaY * (ev.deltaMode ? 0.05 : 0.0015))); }, { passive: false });
 canvas.addEventListener("dblclick", ev => { const dpr = cssPx(); zoomAt(ev.offsetX * dpr, ev.offsetY * dpr, 2); });
+// double tap zooms in, as double click does (a tap pair inside 300 ms and 30 px)
+let lastTap = { t: 0, x: 0, y: 0 };
+canvas.addEventListener("pointerup", ev => {
+  if (ev.pointerType !== "touch" || touches.size) return;
+  const now = performance.now(), dpr = cssPx();
+  if (now - lastTap.t < 300 && Math.hypot(ev.clientX - lastTap.x, ev.clientY - lastTap.y) < 30) {
+    const r = canvas.getBoundingClientRect();
+    zoomAt((ev.clientX - r.left) * dpr, (ev.clientY - r.top) * dpr, 2);
+    clearTimeout(clickTimer);                     // a double tap zooms, it does not open the spot
+    lastTap = { t: 0, x: 0, y: 0 };
+  } else lastTap = { t: now, x: ev.clientX, y: ev.clientY };
+});
 
 function resetView() { state.lat0 = 0.35; state.lon0 = 0; state.zoom = 1; writeHash(); requestDraw(); }
 for (const btn of $("viewseg").children) btn.onclick = () => { state.view = btn.dataset.v; writeHash(); requestDraw(); updateLabels(state.frame); };
@@ -2406,7 +2502,22 @@ $("next").onclick = () => { state.playing = false; setFrame(state.frame + 1); };
 $("helpbtn").onclick = () => $("help").style.display = $("help").style.display === "block" ? "none" : "block";
 $("shot").onclick = () => { draw(); canvas.toBlob(b => { const a = document.createElement("a"); a.href = URL.createObjectURL(b);
   a.download = `${META.world || "globe"}_${frames[state.frame].label.replace(/\W+/g, "_")}.png`; a.click(); }); };
-$("copylink").onclick = () => navigator.clipboard && navigator.clipboard.writeText(location.href);
+// share where the browser has it (a phone's share sheet), the clipboard otherwise
+$("copylink").onclick = async () => {
+  const url = location.href;
+  try {
+    if (navigator.share && matchMedia("(pointer: coarse)").matches) await navigator.share({ title: document.title, url });
+    else if (navigator.clipboard) await navigator.clipboard.writeText(url);
+  } catch (e) { /* dismissed */ }
+};
+// the buttons a touch screen needs, having no wheel and no keys
+const zoomCentre = f => zoomAt(canvas.width / 2, canvas.height / 2, f);
+$("zin").onclick = () => zoomCentre(1.8);
+$("zout").onclick = () => zoomCentre(1 / 1.8);
+$("full").onclick = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen && document.documentElement.requestFullscreen();
+};
 window.addEventListener("keydown", ev => {
   if (ev.target.tagName === "SELECT" || ev.target.tagName === "INPUT" && ev.target.type !== "checkbox" && ev.target.type !== "range") return;
   const k = ev.key;
@@ -2427,7 +2538,15 @@ window.addEventListener("keydown", ev => {
 });
 window.addEventListener("resize", () => { requestDraw(); drawTimeline(); });
 window.addEventListener("hashchange", () => { readHash(); requestDraw(); drawTimeline(); });
-if (document.body.classList.contains("noui")) for (const id of ["top", "timeline", "helpbtn", "loading"]) $(id).classList.add("hidden");
+if (document.body.classList.contains("noui")) for (const id of ["top", "timeline", "helpbtn", "loading", "uibtn"]) $(id).classList.add("hidden");
+// the controls fold away on a small screen (the CSS above); the button brings them back, and
+// the choice is kept for the next visit
+const uiSmall = matchMedia("(max-width: 760px), (pointer: coarse)");
+if (!uiSmall.matches || localStorage.getItem("globe.ui") === "1") document.body.classList.add("ui");
+$("uibtn").onclick = () => {
+  const on = document.body.classList.toggle("ui");
+  try { localStorage.setItem("globe.ui", on ? "1" : "0"); } catch (e) { /* private mode */ }
+};
 GV.state = state; GV.setFrame = setFrame; GV.draw = draw;
 buildZoomList();
 requestDraw(); drawTimeline();
