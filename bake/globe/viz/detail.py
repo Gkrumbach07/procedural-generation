@@ -334,6 +334,9 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
                 lr0, lr1 = max(ti * TILE - MARGIN, 0), min((ti + 1) * TILE + MARGIN, res)
                 d = reduce_face(src.rows(f, lr0 * k, lr1 * k), k)
                 ld = face_lake_depth(d["surf"], d["ws"], d["water"], lake_range)
+                # a lake is drawn at its water, not its bed: encoding the bed hillshaded the
+                # bottom like dry ground and left a hole with a painted floor in the 3-D view
+                d["surf"] = np.where(d["water"] == WATER_LAKE, np.maximum(d["ws"], d["surf"]), d["surf"])
                 om = face_smooth_mask(d["water"] == WATER_OCEAN)
                 q = d.get("discharge", np.zeros_like(d["surf"]))
                 for tj in range(nT):

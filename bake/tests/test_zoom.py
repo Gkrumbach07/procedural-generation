@@ -275,8 +275,11 @@ def test_zoom_pages_and_viewer_list(world, zoom):
     out = zoom["out"]
     for lv in LEVELS:
         assert (out / f"L{lv.R}.html").stat().st_size > 1000
+    # view.html opens the globe viewer's 3-D view over the zoom (its satellite ground, trees
+    # and water), and links the self-contained meshes
     html = (out / "view.html").read_text()
-    assert "../../viewer/index.html#lat=" in html
+    assert "../../viewer/index.html#v=tilt&lat=" in html and "layer=satellite" in html
+    assert all(f'href="L{lv.R}.html"' in html for lv in LEVELS)
     zooms = zindex.write(world["root"])
     assert [z["name"] for z in zooms] == ["t"]
     z = zooms[0]
@@ -1116,10 +1119,11 @@ def test_zoom_level_texture_encodes_ground_lakes_ocean_and_rivers(tmp_path):
     assert img.shape == (3 * NE, NE, 4) and img.dtype == np.uint8
     ground, water = img[:NE], img[NE:2 * NE]                       # (y, x) = (j, i)
     step = (tex["h1"] - tex["h0"]) / 65535.0
+    drawn = np.where(lake, ws, surf)                         # a lake's height is its water, not its bed
     for ci, cj in ((5, 5), (19, 30), (20, 30), (p0 + 3, p0 + 7), (NE - 1, NE - 1), (37, 25)):
         code = int(ground[cj, ci, 0]) * 256 + int(ground[cj, ci, 1])
-        assert abs(tex["h0"] + code * step - float(surf[ci, cj])) <= step * 1.01, (ci, cj)
-        assert (code < round(-tex["h0"] / step)) == (surf[ci, cj] < 0)     # sea level on a code
+        assert abs(tex["h0"] + code * step - float(drawn[ci, cj])) <= step * 1.01, (ci, cj)
+        assert (code < round(-tex["h0"] / step)) == (drawn[ci, cj] < 0)     # sea level on a code
     assert ground[:, :20, 3].max() < 128 and ground[:, 20:, 3].min() >= 128
     assert ground[25, 37, 2] > 127.5 and ground[30, 45, 2] < 127.5
     assert water[40, p0 + n - 1, 0] > tex["river_min_byte"] and water[40, 30, 0] > 0
@@ -1188,7 +1192,8 @@ def test_zoom_texture_is_cropped_to_the_core_and_a_margin(tmp_path):
         assert (bottom[:, :, 0] > sc["river_min_byte"]).any()
         code = top[:, :, 0].astype(np.int64) * 256 + top[:, :, 1]
         step = (sc["h1"] - sc["h0"]) / 65535.0
-        assert np.abs(sc["h0"] + code * step - surf[x0:x0 + side, x0:x0 + side].T).max() <= step * 1.01
+        drawn = np.where((ws - surf > 0.5) & ~ocean, ws, surf)   # lakes are drawn at their water level, the sea at its bed
+        assert np.abs(sc["h0"] + code * step - drawn[x0:x0 + side, x0:x0 + side].T).max() <= step * 1.01
         # the viewer's mapping: face fine cell of pixel x is ci0 R - p0 + x
         fi0 = geo.product_origin[0]
         ci0 = zoomtex._coarse(fi0, geo.R)

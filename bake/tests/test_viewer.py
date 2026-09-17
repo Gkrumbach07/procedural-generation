@@ -384,7 +384,8 @@ def test_detail_tiles_round_trip_heights_shores_and_the_sea(tmp_path):
     cell = ground[1:-1, 1:-1]
     q = cell[..., 0].astype(np.int64) * 256 + cell[..., 1]
     h = info["h0"] + q / 65535.0 * (info["h1"] - info["h0"])
-    s = surf[2, :dt.TILE, :dt.TILE]
+    # a lake's height is its water, not its bed (the bed is the lake depth below it)
+    s = np.where(water[2, :dt.TILE, :dt.TILE] == dt.WATER_LAKE, ws[2, :dt.TILE, :dt.TILE], surf[2, :dt.TILE, :dt.TILE])
     assert np.abs(h - s).max() <= (info["h1"] - info["h0"]) / 65535.0
     assert np.all((h >= 0.0) == (s >= 0.0))
     land = water[2, :dt.TILE, :dt.TILE] == dt.WATER_LAND

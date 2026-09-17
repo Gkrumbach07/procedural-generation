@@ -991,13 +991,27 @@ def lonlat_of_spot(params: WorldParams, spot: tuple[int, int, int]) -> tuple[flo
     return float(np.degrees(np.arcsin(np.clip(p[2], -1.0, 1.0)))), float(np.degrees(np.arctan2(p[1], p[0])))
 
 
+#: how far in the globe viewer's 3-D view a zoom opens (`view.html`)
+VIEW_ZOOM = 12000
+#: its tilt from straight down, degrees
+VIEW_TILT = 62
+
+
+def view_link(lat: float, lon: float) -> str:
+    """The globe viewer's 3-D view over a zoom: its satellite ground, trees and
+    water, the zoom's own levels drawn where they cover."""
+    return (f"../../viewer/index.html#v=tilt&lat={lat:.4f}&lon={lon:.4f}&z={VIEW_ZOOM}"
+            f"&tl={VIEW_TILT}&hd=0&x3=1&layer=satellite")
+
+
 def write_views(out: Path, levels, lat: float, lon: float, name: str, max_res: int = 1024) -> None:
-    """``L{R}.html`` per level (its product square) and ``view.html`` (the
-    finest), each linking back to the globe viewer at the spot."""
+    """``L{R}.html`` per level (its own square as a lit mesh, self-contained)
+    and ``view.html``, which opens the globe viewer's 3-D view over the zoom --
+    the same satellite ground, trees and water as everywhere else, drawn from
+    the levels' own textures, rather than a second renderer of its own."""
     from .view import build_html
 
     back = f"../../viewer/index.html#lat={lat:.3f}&lon={lon:.3f}&z=24"
-    html = None
     for level in levels:
         res = load_level(out, level.R)
         a = res.arrays
@@ -1006,8 +1020,14 @@ def write_views(out: Path, levels, lat: float, lon: float, name: str, max_res: i
                              res.stats["cell_m"], title=f"{name} · level R={level.R}", max_res=max_res, ocean=a["ocean"][sl],
                              rain_cell=res.stats.get("rain_cell") or None, back=back, crop=False)
         (Path(out) / f"L{level.R}.html").write_text(html)
-    if html is not None:
-        (Path(out) / "view.html").write_text(html)
+    link = view_link(lat, lon)
+    levels_html = " · ".join(f'<a href="L{level.R}.html">R={level.R}</a>' for level in levels)
+    (Path(out) / "view.html").write_text(
+        "<!doctype html><meta charset=utf-8><title>%s</title>"
+        "<meta http-equiv=refresh content='0; url=%s'>"
+        "<body style='background:#0b0e16;color:#dfe6f2;font:14px system-ui;margin:2rem'>"
+        "<p>Opening <a href='%s'>%s in the globe viewer's 3-D view</a>.</p>"
+        "<p>This zoom's levels as self-contained meshes: %s</p>" % (name, link, link, name, levels_html))
 
 
 def planet_dir(root: str | Path, R: int) -> Path | None:

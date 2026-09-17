@@ -143,8 +143,11 @@ def level_image(a: dict, geo: dict, lake_range: float = LAKE_RANGE, crop: int = 
     water[(ws - surf > 0.5) & ~ocean] = dt.WATER_LAKE
     water[ocean] = dt.WATER_OCEAN
 
-    # the ground: as detail.tile_image
-    sk = surf[k, k]
+    # the ground: as detail.tile_image -- a lake's water, not its bed (a lake is a level
+    # surface; the bed under it is the lake depth away)
+    lake_here = water == dt.WATER_LAKE
+    draw = np.where(lake_here, np.maximum(ws, surf), surf)
+    sk = draw[k, k]
     h0, h1 = dt.height_grid(float(sk.min()), float(sk.max()))
     h = dt.encode_height_on(sk, h0, h1)
     ld = dt.face_lake_depth(surf, ws, water, lake_range)[k, k]
