@@ -1613,10 +1613,24 @@ function screenToDir(px, py) {
     const c = cam3(), h2 = canvas.height / 2;
     const nx = (px - canvas.width / 2) / h2, ny = (h2 - py) / h2;
     const rd = norm3(add3(c.F, add3(mul3(c.right, nx * TAN3), mul3(c.U, ny * TAN3))));
-    const A0 = add3(mul3(c.T, c.rT), c.pos), Rs = c.rT;          // the sphere through the target's height
-    const b = dot3(rd, A0), cc = dot3(A0, A0) - Rs * Rs, disc = b * b - cc;
-    if (b >= 0 || disc <= 0) return null;
-    return norm3(add3(A0, mul3(rd, -b - Math.sqrt(disc))));
+    const A0 = add3(mul3(c.T, c.rT), c.pos);
+    // The ray meets the ground, not a sphere through the camera's target: on a hillside the
+    // two are far apart, which is what made a click in the 3-D view land off the spot.  Start
+    // at the target's height and walk the sphere up or down to the terrain under the hit, the
+    // exaggeration included, as the shader's march has it
+    const a = loadedAtOrBefore(state.frame);
+    let Rs = c.rT, hit = null;
+    for (let it = 0; it < 4; it++) {
+      const b = dot3(rd, A0), cc = dot3(A0, A0) - Rs * Rs, disc = b * b - cc;
+      if (b >= 0 || disc <= 0) return hit;
+      hit = norm3(add3(A0, mul3(rd, -b - Math.sqrt(disc))));
+      if (a < 0) break;
+      const gh = Math.max(heightOfFrame(a, hit), META.sea_level_m || 0) * state.exag3;
+      const next = META.R_planet_m + gh;
+      if (Math.abs(next - Rs) < 1.0) { Rs = next; break; }
+      Rs = next;
+    }
+    return hit;
   }
   const s = scalePx();
   const qx = (px - canvas.width / 2) / s, qy = (canvas.height / 2 - py) / s;
@@ -2209,10 +2223,12 @@ function drawZooms() {
       if (pts.some(q => !q)) return;
       const fine = k === lv.length - 1;
       ovx.beginPath(); pts.forEach(([x, y], n) => n ? ovx.lineTo(x, y) : ovx.moveTo(x, y)); ovx.closePath();
-      ovx.strokeStyle = fine ? "rgba(255,214,102,.95)" : `rgba(255,214,102,${0.25 + 0.2 * k})`;
-      ovx.lineWidth = (fine ? 2 : 1) * dpr; ovx.setLineDash(fine ? [] : [4 * dpr, 3 * dpr]); ovx.stroke();
+      // dotted outlines only: a wash over the finest level hid the ground it is there to show
+      ovx.strokeStyle = fine ? "rgba(255,214,102,.95)" : `rgba(255,214,102,${0.3 + 0.2 * k})`;
+      ovx.lineWidth = (fine ? 1.6 : 1) * dpr;
+      ovx.setLineDash(fine ? [7 * dpr, 4 * dpr] : [4 * dpr, 3 * dpr]);
+      ovx.stroke();
       if (fine) {
-        ovx.fillStyle = "rgba(255,214,102,.12)"; ovx.fill();
         const cx = pts.reduce((a, q) => a + q[0], 0) / 4, cy = pts.reduce((a, q) => a + q[1], 0) / 4;
         ovx.setLineDash([]); ovx.beginPath(); ovx.arc(cx, cy, 4 * dpr, 0, 2 * PI); ovx.fillStyle = "#ffd666"; ovx.fill();
         ovx.font = `${11 * dpr}px system-ui`; ovx.fillStyle = "#ffe8a8";
@@ -2296,6 +2312,16 @@ function showScout(h, px, py) {
     `<div class="note">~10–20 min for the planet, 305 m and 76 m levels; ~+35 min with the game levels.</div>`;
   else if (!apiOK) html += `<code>python scripts/zoom_bake.py --world worlds/${META.world} --cell ${f} ${i} ${j}</code>`;
   hereHTML(html, () => bakeButton(f, i, j));
+}
+// within `r` of the polygon's edge
+function nearEdge(x, y, pts, r) {
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [x1, y1] = pts[j], [x2, y2] = pts[i];
+    const dx = x2 - x1, dy = y2 - y1, len2 = dx * dx + dy * dy;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, ((x - x1) * dx + (y - y1) * dy) / len2)) : 0;
+    if (Math.hypot(x - (x1 + t * dx), y - (y1 + t * dy)) <= r) return true;
+  }
+  return false;
 }
 function inPoly(x, y, pts) {
   let c = false;
@@ -2429,15 +2455,20 @@ function showSpot(px, py, dir) {
   const job = mine[mine.length - 1];
   here = { kind: "spot", px, py, p };
   const rows = placeRows(p);
+  const inZoom = zoomHits.find(hh => inPoly(px, py, hh.pts));
   let html = `<div><b>${(lat * 180 / PI).toFixed(3)}°, ${(lon * 180 / PI).toFixed(3)}°</b></div>` +
-    `<div class="d">cell ${f} ${i} ${j} · no zoom window here yet</div>` +
+    `<div class="d">cell ${f} ${i} ${j}${inZoom ? ` · in <b>${inZoom.z.name}</b>` : " · no zoom window here yet"}</div>` +
     `<div class="rows" style="margin:8px 0">${rows.map(([k, v]) => `<div><span>${k}</span><span>${v}</span></div>`).join("")}</div>`;
   if (job) html += `<div>zoom ${job.name}: <b>${job.state}</b>${job.message ? " — " + job.message : ""}</div>`;
   if (apiOK && (!job || job.state === "failed")) html += `<div class="row"><button class="plain" id="bakezoom">Bake a zoom here</button></div>` +
     `<label class="chk"><input type="checkbox" id="bakegame">game levels too (19 m, 5 m)</label>` +
     `<div class="note">~10–20 min for the planet, 305 m and 76 m levels; ~+35 min with the game levels.</div>`;
   else if (!apiOK) html += `<div class="d">Bake one (then reload this page):</div><code>${cmd}</code>`;
-  hereHTML(html, () => bakeButton(f, i, j));
+  if (inZoom) html += `<div class="row"><button class="plain" id="herezoom">This window</button></div>`;
+  hereHTML(html, () => {
+    bakeButton(f, i, j);
+    if ($("herezoom")) $("herezoom").onclick = () => showZoom(inZoom, px, py);
+  });
 }
 let clickTimer = null, down = null;
 canvas.addEventListener("pointerdown", ev => { down = { x: ev.clientX, y: ev.clientY, touch: ev.pointerType === "touch" }; });
@@ -2449,7 +2480,9 @@ canvas.addEventListener("click", ev => {
   clickTimer = setTimeout(() => {
     const sc = scoutHits.find(hh => Math.hypot(px - hh.x, py - hh.y) < 11 * dpr);
     if (sc) return showScout(sc, px, py);
-    const h = zoomHits.find(hh => inPoly(px, py, hh.pts) || Math.hypot(px - hh.cx, py - hh.cy) < 10 * dpr);
+    // a window's outline or its dot opens the window; inside it, the ground is what you asked
+    // for (its card was covering every tap within a square kilometres across)
+    const h = zoomHits.find(hh => Math.hypot(px - hh.cx, py - hh.cy) < 12 * dpr || nearEdge(px, py, hh.pts, 12 * dpr));
     h ? showZoom(h, px, py) : showSpot(px, py);
   }, 260);
 });
