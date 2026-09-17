@@ -372,7 +372,8 @@ uniform vec2 uLayerRange;
 uniform int uDGB;              // 1: the detail tiles' water half carries flow (G) and sediment (B)
 uniform vec2 uDQ, uDSed;       // their flow and sediment byte scales
 uniform vec4 uZGB, uZQlo, uZQhi, uZSlo, uZShi, uZVeg, uZBio, uZLife;
-uniform int uMoving;           // 1 while the tilt camera moves (half resolution, flat trees)   // the same per zoom slot
+uniform int uMoving;           // 1 while the tilt camera moves (half resolution, flat trees)
+uniform int uLight;            // 1: the 3-D pass a phone can carry -- fewer march steps, flat trees
 uniform int uLines;            // 1 when the river-line pass drew into uRL this frame
 uniform sampler2D uRL;         // river lines, canvas-sized: R coverage x fade, G width (for the colour)
 uniform float uTexelRad;       // one texel of the finest terrain drawn, radians
@@ -543,7 +544,9 @@ bool marchTerrain(vec3 ro, vec3 rd, out float t, out vec3 p){
     t = c / (-b + sqrt(disc));
   }
   float tPrev = t;
+  int steps = uLight == 1 ? 80 : 220;
   for (int i = 0; i < 220; i++) {
+    if (i >= steps) return false;
     float alt = altOf(ro + t * rd, p);
     float dz = alt - groundAt(p);
     if (dz <= 0.0) {
@@ -1056,13 +1059,12 @@ void main(){
   // its edge; the depth read across the shore is a smooth field, so the shore is where it
   // crosses zero and the pixel takes its share of both.  The fade is a texel or a pixel
   // wide, whichever is coarser here
-  float wCov = 0.0, texelM = uTexelRad * uRplanet;
+  float wCov = 0.0;
   if (zk >= 0 && zw > 0.5) {
     vec4 t = zLinear(zk, za) * 255.0;
     float ld = (t.b / 127.5 - 1.0) * uLakeRange;
     wcode = 255.0 - t.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
     fineW = true; fineLd = ld; fineOc = 1.0 - t.a / 255.0; lakeD = ld;
-    texelM = 0.5 * PI * uRplanet / uZRes[zk];
   } else if (inDetail) {
     vec4 t = detailLinear(dxy) * 255.0;
     float ld = (t.b / 127.5 - 1.0) * uLakeRange;
@@ -1074,18 +1076,19 @@ void main(){
     wcode = oc > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
     lakeD = ld;
     fineOc = oc / 255.0;
-    texelM = 0.5 * PI * uRplanet / uSGeo.x;
   } else {
     wcode = uHasWater == 1 ? byteNearest(uWT, uWGeo, uWCh, p) : (h < uSea ? 2.0 : 0.0);
   }
   bool wet = wcode > 0.5;
   {
-    float px = uMode == 2 ? tHit * uPixAng : uRplanet / uScale;      // metres a pixel covers
-    float soft = max(0.6 * max(texelM, px), 0.5);
-    wCov = lakeD > -1e5 ? smoothstep(-soft, soft, lakeD) : (wet ? 1.0 : 0.0);
-    if (wcode > 1.5) wCov = max(wCov, smoothstep(0.35, 0.65, fineOc));  // the sea, by its own smoothed mask
-    if (!wet) wCov = min(wCov, 0.5);
-    if (wet && wcode < 1.5 && lakeD <= -1e5) wCov = 1.0;
+    // The fade is in metres of water, not metres of ground: the depth is interpolated across
+    // the shore, so a couple of metres either side of zero is the width of the edge whatever
+    // the texels are.  (Sizing it by a texel's width in metres put most of the land within
+    // half a fade of the shore: a blue wash over the whole map, and no trees on any of it.)
+    const float SOFT_M = 2.0;
+    wCov = lakeD > -1e5 ? smoothstep(-SOFT_M, SOFT_M, lakeD) : (wet ? 1.0 : 0.0);
+    if (wcode > 1.5) wCov = max(wCov, smoothstep(0.35, 0.65, fineOc));   // the sea, by its own smoothed mask
+    if (!wet && wcode < 0.5) wCov = min(wCov, 0.85);                     // dry ground keeps a little of itself
   }
   // the slider's exaggeration is set for the atlas' cells; finer cells show real
   // relief with less of it.  In tilt the shading follows the geometry's
@@ -1196,7 +1199,7 @@ void main(){
     float pxPerM = uMode == 2 ? 1.0 / max(tHit * uPixAng, 1e-6) : uScale / uRplanet;
     float tf = treeF * (1.0 - smoothstep(0.03, 0.3, riverW));
     vec3 crown;
-    if (uMode == 2 && uMoving == 0 && uTreeSpacing * pxPerM > 5.0 && canopyMarch(rd, tHit, p, e, n, treeF, riverW, treeT, shade, crown))
+    if (uMode == 2 && uMoving == 0 && uLight == 0 && uTreeSpacing * pxPerM > 5.0 && canopyMarch(rd, tHit, p, e, n, treeF, riverW, treeT, shade, crown))
       col = mix(col, crown, smoothstep(3.0, 6.0, uTreeSpacing * pxPerM));
     else col = drawTrees(col, p, e, n, tf, treeT, pxPerM, shade, uMode != 2);
   }
@@ -1407,8 +1410,14 @@ const FINAL = META.final_index ?? NF - 1;
 // zoomed.  On a small device the timeline's frames load only when asked for, few stay
 // resident, the tile cache is a quarter of the side, and the zoom levels run to a budget
 const LOWMEM = matchMedia("(pointer: coarse)").matches || (navigator.deviceMemory || 8) <= 4;
-const FRAME_KEEP = LOWMEM ? 8 : NF;          // frames whose atlas stays on the GPU
-const ZT_BYTES = LOWMEM ? 120e6 : 500e6;     // zoom level textures
+// a phone's GPU cannot carry the full ray march: iOS killed the tab over and over in the 3-D
+// view.  LIGHT cuts the march short, draws the trees flat and shades fewer pixels.  A crash
+// leaves ?lowfx=1 behind, which forces it on even where the device looks capable
+let LIGHT = LOWMEM;
+try { if (localStorage.getItem("globe.lowfx") === "1") LIGHT = true; } catch (e) { /* private mode */ }
+if (location.hash.includes("lowfx=1")) LIGHT = true;
+const FRAME_KEEP = LOWMEM ? 6 : NF;          // frames whose atlas stays on the GPU
+const ZT_BYTES = LOWMEM ? 80e6 : 500e6;     // zoom level textures
 const tex = new Array(NF).fill(null);        // [WebGLTexture per atlas]
 const bitmaps = new Array(NF).fill(null);    // ImageBitmaps (kept for the readout)
 const frameSeen = new Array(NF).fill(-1);
@@ -1641,7 +1650,7 @@ if (DET && DET.levels && DET.levels.length) {
   detail.slotH = 2 * detail.slotPx;                        // and twice that tall: ground, then water
   // 8192² RGBA is 268 MB, which a phone will not give a tab: a quarter of that side holds
   // the tiles of a screenful anyway
-  const size = detailSide = Math.min(LOWMEM ? 2048 : 8192, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+  const size = detailSide = Math.min(LOWMEM ? 1024 : 8192, gl.getParameter(gl.MAX_TEXTURE_SIZE));
   detail.per = Math.floor(size / detail.slotPx);
   detail.rows = Math.floor(size / detail.slotH);
   detail.tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, detail.tex);
@@ -1873,9 +1882,11 @@ function updateZoomTex(FA) {
   want.sort((a, b) => b.R - a.R || baked(b.name) - baked(a.name));
   const rect = t => { const s = t.res ?? t.N * t.R, i = t.oi ?? t.ci0 * t.R, j = t.oj ?? t.cj0 * t.R; return [t.face, i / s, j / s, (i + t.n) / s, (j + t.n) / s]; };
   const overlap = (a, b) => a[0] === b[0] && a[1] < b[3] && b[1] < a[3] && a[2] < b[4] && b[2] < a[4];
+  // four levels at once on a desktop; two on a phone, where the finest alone is 54 MB
+  const MAX_SLOTS = LOWMEM ? 2 : 4;
   const picked = [];
   for (const w of want) {
-    if (picked.length >= 4) break;
+    if (picked.length >= MAX_SLOTS) break;
     const r = rect(w.rec);
     if (picked.some(q => q.name !== w.name && overlap(rect(q.rec), r) && baked(q.name) >= baked(w.name))) continue;
     picked.push(w);
@@ -1935,7 +1946,8 @@ function loadedAtOrBefore(i) { for (let k = i; k >= 0; k--) if (tex[k]) return k
 
 function draw() {
   drawQueued = false;
-  const dpr = screenPx() * (state.view === "tilt" && moving ? 0.5 : 1);
+  const tiltPx = state.view === "tilt" ? (LIGHT ? 0.7 : 1) * (moving ? 0.5 : 1) : 1;
+  const dpr = screenPx() * tiltPx;
   const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   gl.viewport(0, 0, w, h);
@@ -2015,6 +2027,7 @@ function draw() {
   const tsp = 4 * Math.pow(2, Math.max(0, Math.ceil(Math.log2(6 * metresPerPx() / 4))));
   gl.uniform1f(U.uTreeSpacing, tsp <= TREE_MAX_M ? tsp : 0);
   gl.uniform1i(U.uMoving, state.view === "tilt" && moving ? 1 : 0);
+  gl.uniform1i(U.uLight, LIGHT ? 1 : 0);
   const tch = CHANNELS.temperature || {}, pch = CHANNELS.precip || {};
   gl.uniform2f(U.uTempRange, tch.lo ?? -45, tch.hi ?? 35); gl.uniform2f(U.uPrecipRange, pch.lo ?? 0.02, pch.hi ?? 5);
   const L = (FA.layers || {})[state.layer];
@@ -2919,11 +2932,12 @@ window.addEventListener("keydown", ev => {
   else if (/^[1-9]$/.test(k) && layerNames[+k - 1]) { state.layer = layerNames[+k - 1]; legendKey = ""; writeHash(); requestDraw(); }
 });
 canvas.addEventListener("webglcontextlost", ev => {
-  // the browser took the GPU back (it does that when memory runs short); without this the
-  // page just freezes
+  // the browser took the GPU back (it does that when the work or the memory runs over);
+  // remember that, so the reload comes up in the light pass and does not do it again
   ev.preventDefault();
+  try { localStorage.setItem("globe.lowfx", "1"); } catch (e) { /* private mode */ }
   $("loading").classList.remove("hidden");
-  $("loading").firstChild.nodeValue = "The browser dropped the graphics context. Reloading…";
+  $("loading").firstChild.nodeValue = "The browser dropped the graphics; reloading in the lighter mode…";
   setTimeout(() => location.reload(), 1200);
 });
 window.addEventListener("resize", () => { requestDraw(); drawTimeline(); });
