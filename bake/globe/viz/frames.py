@@ -90,17 +90,27 @@ def clear_all(root) -> None:
 # capture helpers called from the stages
 # --------------------------------------------------------------------------
 def tectonics_frame(sim, rec: FrameRecorder, index: int, total: int) -> None:
-    """Sea-levelled bed (bedrock units) and raw plate id + 1 on the tect grid."""
+    """Sea-levelled bed (bedrock units), raw plate id + 1, and the crust's age
+    and kind on the tect grid -- so the timeline can run the sea floor being
+    made at the ridges and eaten at the trenches, not only what is left of it
+    at the end.  Age and kind take the nearest segment's, as the plate id
+    does: a frame is a segment's worth of detail, and the smooth blend is for
+    the finished map (``tectonics.run.finalise``)."""
     from ..tectonics.collision import build_tree, label_map_fast, splat
-    from ..tectonics.run import frame_bed
+    from ..tectonics.run import frame_bed, inherited_age
+    from ..tectonics.segments import OCEANIC
 
     tree = build_tree(sim.seg)
     bed = frame_bed(sim, tree)
     idx, _ = label_map_fast(sim.seg, sim.grid, sim.r_cap, tree)
     pid = splat(sim.seg.plate_id, idx).astype(np.int32) + 1
+    age = splat(sim.seg.age + inherited_age(sim), idx)
+    kind = splat((sim.seg.kind != OCEANIC).astype(np.int32), idx)
     alive = np.nonzero(sim.plates.alive)[0].tolist()
     rec.write(index, {"height": downsample(bed, rec.res).astype(np.float16),
-                      "plate": downsample(pid, rec.res, "nearest").astype(np.int16)},
+                      "plate": downsample(pid, rec.res, "nearest").astype(np.int16),
+                      "crust_age": downsample(age, rec.res).astype(np.float16),
+                      "crust_kind": downsample(kind, rec.res, "nearest").astype(np.uint8)},
               step=int(index), of=int(total), units="bedrock", alive=alive)
 
 

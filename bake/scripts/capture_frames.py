@@ -40,27 +40,29 @@ def main() -> int:
     params = store.params()
     res = int(args.res or params.render.frame_res)
 
-    if args.tectonics:
-        from globe.tectonics.run import initialise
+    if args.tectonics or args.diagnostics:
+        # one simulation for both: it is the long part, and the frames and the diagnostics are
+        # two things to take from the same run
+        from globe.tectonics.run import finalise, initialise
 
         tp = params.tectonics
-        n = int(args.frames or params.render.tectonics_frames or 60)
-        rec = vf.FrameRecorder(store.root, "tectonics", min(res, int(tp.N_tect)))
-        rec.clear()
+        rec = on_frame = None
+        if args.tectonics:
+            rec = vf.FrameRecorder(store.root, "tectonics", min(res, int(tp.N_tect)))
+            rec.clear()
+            on_frame = lambda s, i: vf.tectonics_frame(s, rec, i, int(tp.steps))   # noqa: E731
         sim = initialise(params, print)
-        sim.run(int(tp.steps), log=print, on_frame=lambda s, i: vf.tectonics_frame(s, rec, i, int(tp.steps)), frames=n)
-        print(f"tectonics: {len(vf.list_frames(store.root, 'tectonics'))} frames -> {rec.dir}")
-
-    if args.diagnostics:
-        from globe.tectonics.run import finalise, simulate
-
-        sim = simulate(params, print)
-        out = finalise(sim)
-        d = store.root / "diagnostics"
-        d.mkdir(parents=True, exist_ok=True)
-        for name in ("crust_age", "crust_kind", "heat", "collision_zone"):
-            out[name].save(d)
-            print(f"  {name} -> {d}")
+        sim.run(int(tp.steps), log=print, on_frame=on_frame,
+                frames=int(args.frames or params.render.tectonics_frames or 60) if args.tectonics else 0)
+        if args.tectonics:
+            print(f"tectonics: {len(vf.list_frames(store.root, 'tectonics'))} frames -> {rec.dir}")
+        if args.diagnostics:
+            out = finalise(sim)
+            d = store.root / "diagnostics"
+            d.mkdir(parents=True, exist_ok=True)
+            for name in ("crust_age", "crust_kind", "heat", "collision_zone"):
+                out[name].save(d)
+                print(f"  {name} -> {d}")
 
     if args.checkpoints:
         n_iter = int(params.erosion.iterations)

@@ -206,6 +206,15 @@ def test_bake_captures_frames_and_exports_a_viewer(tmp_path):
     for f in meta["frames"]:
         assert (tmp_path / "on" / "viewer" / f["file"]).exists()
     assert "plate" in meta["frames"][0]["layers"]
+    # the crust's age runs through the tectonic animation too, in a texture of its own: the
+    # sea floor being made at the ridges and eaten at the trenches is the whole point of it
+    with np.load(tect[len(tect) // 2][1]) as z:
+        assert "crust_age" in z.files and "crust_kind" in z.files
+        assert z["crust_age"].shape == z["height"].shape and float(z["crust_age"].max()) > 0
+    for f in meta["frames"]:
+        if f["stage"] != "tectonics":
+            continue
+        assert f["layers"]["crust_age"] == f["layers"]["crust"] and f["layers"]["crust"][0] > 0
     assert "discharge" in meta["frames"][-1]["layers"]
     assert "water" in meta["frames"][-1]["layers"]  # what the elevation view colours as water
     # rivers on the final frame are the particles' discharge in texture 0's B,

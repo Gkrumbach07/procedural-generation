@@ -468,8 +468,12 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
     if tect and scale:
         for key, p, meta in tect:
             with np.load(p) as z:
+                # the crust's age and kind where the run captured them (frames before this
+                # existed have neither, and the frame is what it was)
+                crust = {"crust": lo(z["crust_kind"], "nearest"), "crust_age": lo(z["crust_age"].astype(np.float32))} \
+                    if "crust_age" in z.files and "crust_kind" in z.files else {}
                 frames.append(_Frame("tectonics", key, f"tectonics · step {key} / {meta.get('of', '?')}",
-                                     lo(z["height"].astype(np.float32) * float(scale)), plate=lo(z["plate"], "nearest")))
+                                     lo(z["height"].astype(np.float32) * float(scale)), plate=lo(z["plate"], "nearest"), **crust))
     for key, p, meta in ero:
         with np.load(p) as z:
             frames.append(_Frame("erosion", key, f"erosion · iteration {key} / {meta.get('of', '?')}",
@@ -713,6 +717,14 @@ def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
             for c, n in enumerate(names):
                 if n in present:
                     layers[n] = [k, c]
+    elif "crust" in fr.ch and "crust" in specs:
+        # a timeline frame carries the crust in a texture of its own: the sea floor's age is
+        # the one thing about a tectonic step that its height does not show
+        images.append(atlas([pad_faces(_byte("crust", fr.ch["crust"], specs, fr.ch)), zero, zero]))
+        layers["crust"] = [len(images) - 1, 0]
+        if "crust_age" in specs:
+            layers["crust_age"] = layers["crust"]
+    if fr.stage == "final":
         if "biome" in layers and "satellite" in specs:
             layers["satellite"] = layers["biome"]   # same texture, coloured for terrain rather than for classes
         if "crust" in layers and "crust_age" in specs:

@@ -497,12 +497,15 @@ def inherited_age(sim) -> np.ndarray:
     the ocean floor and for anything born during the run (an island arc is as
     young as it looks), and :data:`PREHISTORY_RUNS` runs' worth for a craton."""
     seg = sim.seg
-    steps = max(float(sim.step_index), 1.0)
-    at_start = seg.age >= steps - 0.5                      # there before the first step ran
+    at_start = seg.age >= float(sim.step_index) - 0.5      # there before the first step ran
+    # the run's whole length, not how much of it has gone: a craton's past is a number it
+    # carries, and scaling it with the step would have the continents ageing as the animation
+    # plays while the map's scale stayed still, which reads as one flat colour early on
+    span = PREHISTORY_RUNS * max(float(sim.params.tectonics.steps), 1.0)
     rng = np.random.default_rng(int(sim.params.world.seed) + PREHISTORY_KEY)
     f = np.clip(0.5 + 0.5 * fbm_at(seg.pos, rng, octaves=3, base_freq=2.0), 0.0, 1.0)
     old = np.where(seg.craton > 0, 0.70 + 0.30 * f, 0.12 + 0.48 * f)
-    return np.where((seg.kind != OCEANIC) & at_start, PREHISTORY_RUNS * steps * old, 0.0)
+    return np.where((seg.kind != OCEANIC) & at_start, span * old, 0.0)
 
 
 def ridge_buoyancy(seg, tp) -> np.ndarray:
