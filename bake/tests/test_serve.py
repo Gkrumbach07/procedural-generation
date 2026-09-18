@@ -200,19 +200,6 @@ def test_the_api_refuses_what_it_cannot_run(server):
     assert _get(server["url"] + "/api/worlds")["jobs"] == []
 
 
-def test_the_planet_level_brings_a_viewer_with_the_close_up_layer_behind_it(server):
-    """A level on its own changes nothing a browser sees: the viewer draws the
-    close-up ground from its tiles, so an export follows it in the queue."""
-    _post(server["url"] + "/api/worlds", {"name": "p1", "preset": "tiny"})
-    out = _post(server["url"] + "/api/planet", {"world": "p1", "R": 4})
-    assert out["job"]["kind"] == "planet" and out["viewer"]["kind"] == "viewer"
-    cmds = {j["title"]: j["cmd"] for j in server["queue"].jobs}
-    assert cmds["planet R=4"][-2:] == ["--R", "4"]
-    assert cmds["export viewer with detail"][-3:] == ["--planet", "zoom/planet_R4", "--detail"]
-    for j in server["queue"].jobs:
-        server["queue"].cancel(j["id"])
-
-
 def test_a_bake_runs_with_the_worlds_own_parameters(tmp_path):
     root = wd.create(tmp_path, "w", "tiny", {})
     cmd = hub.bake_cmd("python3", root, "erosion", "hydro", force=True)
@@ -220,6 +207,56 @@ def test_a_bake_runs_with_the_worlds_own_parameters(tmp_path):
     assert cmd[cmd.index("--world") + 1] == str(root)
     assert cmd[cmd.index("--params") + 1] == str(wd.params_path(root))
     assert cmd[cmd.index("--from") + 1] == "erosion" and cmd[cmd.index("--to") + 1] == "hydro" and "--force" in cmd
+
+
+def test_every_job_calls_its_script_the_way_the_script_reads_it(server):
+    """The flags a job passes are flags its script declares -- export_viewer
+    takes its world positionally, and a job that says ``--world`` dies on
+    argparse a second after it starts, with the page only saying "failed"."""
+    import re as _re
+
+    from globe.pipeline import bake
+
+    _post(server["url"] + "/api/worlds", {"name": "p1", "preset": "tiny"})
+    root = server["dir"] / "p1"
+    bake(root, wd.params_of(root), logger=lambda m: None)                  # every stage, so nothing is refused
+    _post(server["url"] + "/api/viewer", {"world": "p1"})
+    out = _post(server["url"] + "/api/planet", {"world": "p1", "R": 4})
+    _post(server["url"] + "/p1/api/zoom", {"face": 0, "i": 4, "j": 4})
+    # a level on its own changes nothing a browser sees: the viewer draws the close-up
+    # ground from its tiles, so an export of them follows it in the queue
+    assert out["job"]["kind"] == "planet" and out["viewer"]["kind"] == "viewer"
+    cmds = {j["title"]: j["cmd"] for j in server["queue"].jobs}
+    assert cmds["planet R=4"][-2:] == ["--R", "4"]
+    assert cmds["export viewer with detail"][-3:] == ["--planet", "zoom/planet_R4", "--detail"]
+    for job in server["queue"].jobs:
+        server["queue"].cancel(job["id"])
+        cmd = job["cmd"]
+        script = Path(cmd[1])
+        assert script.exists(), cmd
+        text = script.read_text()
+        for flag in [c for c in cmd if c.startswith("--")]:
+            assert _re.search(rf'"{flag}"', text), (job["title"], flag)
+        assert str(root) in cmd, job["title"]
+
+
+def test_the_planet_level_is_refused_until_there_is_a_planet_to_erode(server):
+    _post(server["url"] + "/api/worlds", {"name": "p2", "preset": "tiny"})
+    out = _post(server["url"] + "/api/planet", {"world": "p2", "R": 4})
+    assert "error" in out and "tectonics" in out["error"]
+    assert server["queue"].jobs == []
+    # unless the stages are already queued: then the level waits behind them
+    _post(server["url"] + "/api/bake", {"world": "p2"})
+    assert "job" in _post(server["url"] + "/api/planet", {"world": "p2", "R": 4})
+    for job in server["queue"].jobs:
+        server["queue"].cancel(job["id"])
+    server["queue"].jobs.clear()
+    made = _post(server["url"] + "/api/worlds", {"name": "p3", "preset": "tiny", "to": "tiles", "planet": True, "R": 4})
+    kinds = [j["kind"] for j in server["queue"].jobs]
+    assert kinds == ["world", "planet", "viewer"], kinds       # the level waits behind the stages
+    assert made["planet"]["state"] == "queued"
+    for job in server["queue"].jobs:
+        server["queue"].cancel(job["id"])
 
 
 def test_progress_comes_from_the_line_a_stage_last_logged(tmp_path):

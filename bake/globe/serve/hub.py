@@ -195,8 +195,13 @@ def make_handler(worlds_dir: Path, queue: jb.JobQueue, python: str = "", extra: 
             if d.get("to"):
                 out["job"] = queue.submit("world", root.name, bake_cmd(python, root, to_stage=str(d["to"])) + extra,
                                           title=f"bake to {d['to']}", to=str(d["to"]))
-            if d.get("planet"):
-                out["planet"] = self._planet({"world": root.name, "R": d.get("R") or 8})["job"]
+            if d.get("planet") and out.get("job"):
+                # behind the stages, in the queue: nothing is baked yet, so _planet's own
+                # guard would refuse it
+                R = int(d.get("R") or 8)
+                cmd = [python, str(SCRIPTS / "planet_bake.py"), "--world", str(root), "--R", str(R)]
+                out["planet"] = queue.submit("planet", root.name, cmd, title=f"planet R={R}", R=R)
+                out["viewer"] = self._viewer({"world": root.name, "planet": f"zoom/planet_R{R}"})["job"]
             return out
 
         def _bake(self, d: dict) -> dict:
@@ -216,6 +221,13 @@ def make_handler(worlds_dir: Path, queue: jb.JobQueue, python: str = "", extra: 
 
         def _planet(self, d: dict) -> dict:
             root = self._world(str(d.get("world", "")))
+            # the level erodes the planet the stages left: without them there is nothing to
+            # erode, and the job fails a minute later with a missing file.  A stage bake of
+            # this world already in the queue counts -- the level waits behind it
+            need = [s for s in ("tectonics", "climate", "erosion", "hydro", "watersheds") if not wd.describe(root)["stages"][s]["done"]]
+            coming = any(j["kind"] == "world" and j["state"] in jb.LIVE for j in self._snapshot(root.name))
+            if need and not coming:
+                raise ValueError(f"{root.name} has not baked {', '.join(need)} yet: the level erodes what those leave")
             R = int(d.get("R") or 8)
             cmd = [python, str(SCRIPTS / "planet_bake.py"), "--world", str(root), "--R", str(R)]
             if d.get("iterations"):
@@ -228,7 +240,7 @@ def make_handler(worlds_dir: Path, queue: jb.JobQueue, python: str = "", extra: 
 
         def _viewer(self, d: dict) -> dict:
             root = self._world(str(d.get("world", "")))
-            cmd = [python, str(SCRIPTS / "export_viewer.py"), "--world", str(root)]
+            cmd = [python, str(SCRIPTS / "export_viewer.py"), str(root)]        # it takes the world positionally
             want = str(d.get("planet") or "")
             if not want:                                   # the finest level it has finished
                 have = [p for p in sorted((root / "zoom").glob("planet_R*")) if (p / "planet.json").exists()] if (root / "zoom").is_dir() else []
