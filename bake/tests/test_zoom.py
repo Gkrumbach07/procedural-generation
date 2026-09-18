@@ -1235,6 +1235,38 @@ def test_time_lapse_frames_are_written_and_share_one_scale(tmp_path):
         assert (water[20, :, 0] > rec["river_min_byte"]).all() and water[10, 10, 0] < rec["river_min_byte"]
 
 
+def test_restream_frames_takes_a_saved_time_lapse_back_to_the_flood_tree(tmp_path):
+    """:func:`zoom.bake.restream_frames` rewrites a saved lapse's streams as the
+    flood tree of each frame's own surface, weighted by the rain of the cells a
+    frame cell stands for (the level's ``rain_cell`` times its block factor
+    squared) -- for the levels baked while a snapshot kept the particles' own
+    discharge, which faded with them."""
+    zdir = tmp_path / "w" / "zoom" / "syn"
+    zdir.mkdir(parents=True)
+    T, S, fac, rain = 3, 40, 2, 0.002
+    i, j = np.meshgrid(np.arange(S), np.arange(S), indexing="ij")
+    surf = np.stack([(2.0 * i + 0.4 * np.sin(j * 0.7) + 5.0 * k).astype(np.float32) for k in range(T)])
+    pulse = np.stack([np.full((S, S), 1.0 / (k + 1), np.float32) for k in range(T)])       # the old field, fading
+    np.savez(zdir / "L8.frames.npz", surface=surf, discharge=pulse,
+             iterations=np.array([1, 5, 9], np.int32), factor=np.array([fac] * T, np.int32))
+    (zdir / "L8.json").write_text(json.dumps({"geometry": zb.Geometry(face=1, ci0=10, cj0=12, cells=4, guard=1, R=8).to_dict(),
+                                              "cell_m": 1000.0, "rain_cell": rain}))
+
+    assert zb.restream_frames(zdir, 8) == T
+    with np.load(zdir / "L8.frames.npz") as z:
+        out, kept = z["discharge"], z["surface"]
+    assert kept == pytest.approx(surf) and out.shape == (T, S, S)
+    weight = np.full((S, S), rain * fac ** 2, np.float32)
+    for k in range(T):
+        acc, _pool = zb.tile_water(surf[k], surf[k] < 0.0, weight)
+        assert out[k] == pytest.approx(acc, rel=1e-5), k
+    # the streams are the land's now: a trunk of hundreds of cells' rain, and as steady from
+    # frame to frame as the land is (the surface only rises), where the particles' discharge
+    # had halved and halved again
+    mx = out.max(axis=(1, 2))
+    assert mx.min() > 100.0 * float(weight[0, 0]) and mx.max() <= 1.25 * mx.min()
+
+
 def test_zoom_texture_is_cropped_to_the_core_and_a_margin(tmp_path):
     """A level with a whole coarse cell of guard at R = 64 and one placed in
     fine cells: the texture keeps the core and ``CROP`` cells round it (as

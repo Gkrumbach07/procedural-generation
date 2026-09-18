@@ -1182,6 +1182,36 @@ def load_level(out: Path, R: int) -> LevelResult:
     return LevelResult(Geometry(**stats["geometry"]), arrays, stats)
 
 
+def restream_frames(zdir: Path, R: int, rain_cell: float | None = None) -> int:
+    """Take the streams of a saved time lapse from the frames' own surfaces
+    (their flood tree, as :func:`tile_water` takes it while a level erodes) and
+    rewrite ``L{R}.frames.npz``; returns the number of frames rewritten.
+
+    For levels baked while a snapshot kept the particles' own discharge: that
+    is an average over the iteration's passes, which swells and fades with
+    them, so their rivers grew and went out again instead of growing.  The
+    frames hold their surface block-averaged (:data:`SNAP_MAX`), so each cell
+    carries the rain of the cells it stands for.
+    """
+    zdir = Path(zdir)
+    path = zdir / f"L{int(R)}.frames.npz"
+    with np.load(path) as z:
+        data = {k: z[k] for k in z.files}
+    if rain_cell is None:
+        rain_cell = float(json.loads((zdir / f"L{int(R)}.json").read_text()).get("rain_cell") or 0.0)
+    if rain_cell <= 0.0:
+        raise ValueError(f"{zdir}/L{R}: no rain_cell to scale the frames' streams by")
+    surface, factor = data["surface"], data["factor"]
+    acc = np.empty_like(data["discharge"])
+    for k in range(len(surface)):
+        surf = np.asarray(surface[k], np.float32)
+        weight = np.full(surf.shape, rain_cell * float(factor[k]) ** 2, np.float32)
+        acc[k] = tile_water(surf, surf < 0.0, weight)[0]      # the sea drains, as do the frame's edges
+    data["discharge"] = acc
+    np.savez(path, **data)
+    return len(surface)
+
+
 def run_zoom(root: str | Path, spot: tuple[int, int, int], levels=DEFAULT_LEVELS, out: str | Path | None = None, name: str | None = None,
              log=None, erosion: dict | None = None, resume: bool = True, workers: int = 0, planet: bool | None = None) -> Path:
     """Bake a zoom of the world at ``root`` around coarse cell ``spot`` =
@@ -1263,4 +1293,4 @@ def _run_zoom_levels(root, store, params, spot, levels, out, name, log, erosion,
 
 
 __all__ = ["ZoomLevel", "DEFAULT_LEVELS", "GAME_LEVELS", "Geometry", "LevelResult", "place", "fine_pad", "level_key", "parse_level", "drainage", "planet_inflow", "level_inflow",
-           "level_inputs", "tile_starts", "tile_passes", "prepare_tile", "erode_tile", "write_tile", "pool_size", "run_level", "planet_dir", "level_from_planet", "run_zoom", "spot_of_lonlat", "lonlat_of_spot", "save_level", "load_level"]
+           "level_inputs", "tile_starts", "tile_passes", "prepare_tile", "erode_tile", "write_tile", "pool_size", "run_level", "planet_dir", "level_from_planet", "run_zoom", "spot_of_lonlat", "lonlat_of_spot", "save_level", "load_level", "restream_frames"]
