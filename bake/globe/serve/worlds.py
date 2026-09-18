@@ -181,6 +181,11 @@ def create(worlds_dir: Path, name: str, base: str = "earth", sets: dict | None =
     if not NAME_RE.match(name or ""):
         raise ValueError(f"{name!r}: a name is letters, digits, dot, dash or underscore")
     params = apply(base_params(Path(worlds_dir), base), sets or {})
+    # a world made here wants its timeline and its viewer whatever it started from: with
+    # render.viewer off no frames are captured while it bakes, and there is nothing to play
+    # afterwards (earth-v11 has it off, and a world copied from it inherited the hole).
+    # render.* is in no stage's hash, so this changes nothing a stage computes
+    params.render.viewer = True
     root = Path(worlds_dir) / name
     if root.exists():
         raise FileExistsError(f"{root} is already there")

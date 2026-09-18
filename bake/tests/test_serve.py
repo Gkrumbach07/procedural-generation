@@ -103,6 +103,12 @@ def test_a_new_world_can_start_from_another_worlds_parameters(tmp_path):
     assert json.loads((second / "created.json").read_text())["from"] == "w1"
     vals = {w["name"]: w["knobs"] for w in wd.scan(tmp_path)}
     assert vals["w1"]["tectonics.steps"] == 250 and vals["w2"]["world.seed"] == 9
+    # whatever it started from, it captures its timeline: a world with render.viewer off
+    # passes that on, and the copy has nothing to play afterwards
+    off = wd.params_of(first)
+    off.render.viewer = False
+    wd.write_params(first, off)
+    assert wd.params_of(wd.create(tmp_path, "w4", "w1", {})).render.viewer is True
     assert wd.preset_values()["tiny"]["world.N_c"] == WorldParams.tiny_world().world.N_c
     with pytest.raises(ValueError):
         wd.create(tmp_path, "w3", "not-a-world-or-preset", {})

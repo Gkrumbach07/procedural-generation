@@ -182,11 +182,11 @@ class TectonicsParams:
     detail_cells: float = 16.0  # coarse cells in the longest injected wavelength; shorter octaves follow. Wavelengths above this belong to tectonics and injecting them would fight the plate-scale relief
     detail_octaves: int = 5  # octaves below detail_cells (5 reaches half a cell)
     detail_relief_cells: int = 9  # window (coarse cells) the local relief is measured over, so plains stay flat and mountains get rough
-    ranges_amp: float = 0.0  # ranges and basins along the orogenic belts' strike (globe/tectonics/ranges.py): oriented Gabor noise, crests along the belt, amplitude this x the belt's height above ranges_base_m (so +-amp of it at 2 sigma). The segment cloud is 160 km apart and its splat blurs ~137 km, so a belt leaves tectonics as one smooth swell ("one big mountain") that erosion can only carve, not divide into ranges. 0 = off
+    ranges_amp: float = 0.8  # ranges and basins along the orogenic belts' strike (globe/tectonics/ranges.py): oriented Gabor noise, crests along the belt, amplitude this x the belt's height above ranges_base_m (so +-amp of it at 2 sigma). The segment cloud is 160 km apart and its splat blurs ~137 km, so a belt leaves tectonics as one smooth swell ("one big mountain") that erosion can only carve, not divide into ranges. 0 = off; 0.8 is what earth-v11 was baked with and what its ranges come from
     ranges_wavelength_km: float = 80.0  # range-to-range spacing across the belt (the carrier wavelength; the across-belt envelope is the same)
     ranges_elongation: float = 3.0  # along-belt envelope / across-belt envelope where the strike is clear (structure-tensor coherence 1); round where it is not
     ranges_base_m: float = 400.0  # belt height is measured above this; plains and cratons below it get no ranges
-    ranges_orient_sigma: float = 2.0  # tect cells (39 km on the earth preset) the structure tensor is averaged over
+    ranges_orient_sigma: float = 6.0  # tect cells (39 km on the earth preset) the structure tensor is averaged over (earth-v11: 6 -- a belt's strike is steadier over 230 km than over 78, and the crests follow it instead of wandering)
     ranges_strength_km: float = 500.0  # wavelength of the smooth field that sets how strong the ranges are along a belt, so they come and go; 0 = uniform
     ranges_basin: float = 0.5  # a basin's depth below the belt's swell as a fraction of a crest's height above it (basins fill)
     ranges_cap_m: float = 3000.0  # the belt height the range amplitude follows is capped here, so the tallest swells do not carry the tallest crests (earth preset at ranges_amp 0.4 without a cap: peaks 10-11 km)
@@ -279,7 +279,7 @@ class ErosionParams:
     k_disc: float = 1.0
     ema: float = 0.1  # ★ map lerp
     thermal_rate: float = 0.5
-    creep_rate: float = 0.1  # hillslope creep: a second thermal pass with talus 0 at this rate (linear diffusion of the surface; submerged cells are inert); 0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion).  Without it every particle path incises its own rill (drainage density saturates at one channel per ~3 cells, parallel micro-rills instead of a trunk network); 0.3 over-smooths the divides (docs/erosion-tuning.md)
+    creep_rate: float = 0.02  # hillslope creep: a second thermal pass with talus 0 at this rate (linear diffusion of the surface; submerged cells are inert); 0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion).  Without it every particle path incises its own rill (drainage density saturates at one channel per ~3 cells, parallel micro-rills instead of a trunk network); 0.3 over-smooths the divides (docs/erosion-tuning.md).  earth-v11 was baked at 0.02 and the difference is visible: at 0.1 the divides come out rounded and the planet reads as smoother
     thermal_max: float = 50.0  # cap on the material a cell sheds per thermal pass (cell units): a tectonic cliff relaxes at a bounded rate instead of collapsing in one iteration
     talus_slope_soft: float = 0.6  # rise/run
     talus_slope_hard: float = 1.2

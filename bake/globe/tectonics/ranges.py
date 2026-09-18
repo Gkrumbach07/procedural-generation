@@ -143,6 +143,10 @@ def range_noise(pts: np.ndarray, mask: np.ndarray, n_t: np.ndarray, coh_t: np.nd
     lat_n = max(2, int(2.0 / reach))
     lat_s = 2.0 / lat_n
     count = int(density * 4.0 * math.pi / (lam * lam))
+    if count <= 0:
+        # a planet whose whole surface is smaller than one range spacing carries no ranges
+        # (a tiny test world: 80 km between crests on a 6 km circumference)
+        return np.zeros(pts.shape[0], np.float64)
     v = rng.normal(size=(count, 3))
     kx = v / np.linalg.norm(v, axis=1, keepdims=True)
     f, u, w = from_sphere_v(kx)
