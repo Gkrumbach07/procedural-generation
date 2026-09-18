@@ -1479,6 +1479,9 @@ try { if (localStorage.getItem("globe.lowfx") === "1") LIGHT = true; } catch (e)
 if (location.hash.includes("lowfx=1")) LIGHT = true;
 const FRAME_KEEP = LOWMEM ? 6 : NF;          // frames whose atlas stays on the GPU
 const ZT_BYTES = LOWMEM ? 80e6 : 500e6;     // zoom level textures
+// frames of a time lapse held past the one being drawn: a level's twenty-five are 78 MB,
+// which is a phone's whole budget, so a phone keeps a few ahead and loads the rest as it goes
+const ZT_AHEAD = LOWMEM ? 4 : 64;
 const tex = new Array(NF).fill(null);        // [WebGLTexture per atlas]
 const bitmaps = new Array(NF).fill(null);    // ImageBitmaps (kept for the readout)
 const frameSeen = new Array(NF).fill(-1);
@@ -1939,7 +1942,7 @@ function playSlot(L, name) {
   let got = ztex.loaded.get(tkey(name, L.R, want));
   if (!done) play.waiting = !got;        // the clock waits for a frame still on its way
   // load ahead of the frame being drawn, and keep loading the rest so a loop runs smoothly
-  for (let d = 0; d < (done ? 1 : count); d++) {
+  for (let d = 0; d < (done ? 1 : Math.min(count, ZT_AHEAD + 1)); d++) {
     const k = (want + d) % count, key = tkey(name, L.R, k);
     if (ztex.loaded.has(key) || ztex.loading.has(key) || ztex.failed.has(key) || ztex.loading.size >= 4) continue;
     ztex.loading.add(key);
@@ -2047,15 +2050,20 @@ function updateZoomTex(FA) {
   // only the levels actually drawn count as in use: where two zooms cover the same ground the
   // one not drawn should fall out of memory, not sit there holding 54 MB
   for (const w of picked) w.seen = ztex.tick;
-  // the level running keeps its frames; a level already played keeps only the frame it ended
-  // at, which is what the finer ones are drawn over
-  const curPre = play ? `${play.name}_L${playLevel().R}#` : null;
-  const ended = play ? new Set(play.levels.map(L => tkey(play.name, L.R, L.frames.count - 1))) : null;
-  const lapse = k => play && k.includes("#") && k.startsWith(`${play.name}_L`) && (k.startsWith(curPre) || ended.has(k));
+  // the level running keeps the frames around the one being drawn; a level already played
+  // keeps only the frame it ended at, which is what the finer ones are drawn over
+  const lapse = v => {
+    if (!play || v.frame === undefined || v.name !== play.name) return false;
+    const L = play.levels.find(x => x.R === v.R);
+    if (!L) return false;
+    if (v.R !== playLevel().R) return v.frame === L.frames.count - 1;
+    const k = Math.floor(play.k);
+    return v.frame >= k - 1 && v.frame <= k + ZT_AHEAD;
+  };
   let bytes = 0;
   for (const v of ztex.loaded.values()) bytes += texBytes(v.rec);
   if (bytes > ZT_BYTES) {
-    const old = [...ztex.loaded.entries()].filter(([k, v]) => v.seen < ztex.tick && !lapse(k))
+    const old = [...ztex.loaded.entries()].filter(([k, v]) => v.seen < ztex.tick && !lapse(v))
       .sort((a, b) => a[1].seen - b[1].seen);
     for (const [k, v] of old) {
       if (bytes <= ZT_BYTES) break;
