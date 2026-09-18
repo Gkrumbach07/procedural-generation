@@ -479,6 +479,32 @@ class TectonicSim:
 
 
 
+#: The continents come with a past the run did not simulate.  They are all there at the first
+#: step, so every one of their segments carries the same age at the end and a crust-age map
+#: shows one flat colour over every continent -- where a real one has cratons of three billion
+#: years against belts of a few hundred million.  :func:`inherited_age` gives the crust that
+#: was there from the start an age of its own -- the craton nuclei oldest, the belts welded
+#: between them younger, varying smoothly in between -- spanning this many times the run's own
+#: length.  Drawn from a stream of its own and read by nothing but the diagnostic: the
+#: simulation, and every output of this stage, is bit for bit what it was without it.
+PREHISTORY_RUNS = 8.0
+#: sub-key of the stream the inherited ages come from
+PREHISTORY_KEY = 5717
+
+
+def inherited_age(sim) -> np.ndarray:
+    """Age (steps) the continental crust brought with it, per segment: 0 for
+    the ocean floor and for anything born during the run (an island arc is as
+    young as it looks), and :data:`PREHISTORY_RUNS` runs' worth for a craton."""
+    seg = sim.seg
+    steps = max(float(sim.step_index), 1.0)
+    at_start = seg.age >= steps - 0.5                      # there before the first step ran
+    rng = np.random.default_rng(int(sim.params.world.seed) + PREHISTORY_KEY)
+    f = np.clip(0.5 + 0.5 * fbm_at(seg.pos, rng, octaves=3, base_freq=2.0), 0.0, 1.0)
+    old = np.where(seg.craton > 0, 0.70 + 0.30 * f, 0.12 + 0.48 * f)
+    return np.where((seg.kind != OCEANIC) & at_start, PREHISTORY_RUNS * steps * old, 0.0)
+
+
 def ridge_buoyancy(seg, tp) -> np.ndarray:
     """Thermal buoyancy of young oceanic crust, in bedrock units.
 
@@ -970,8 +996,23 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     # carries the whole run).  The splat's weighted mean, so a cell between
     # segments of different ages lands between them.  Diagnostic, like
     # crust_kind: not in OUTPUTS, so no stage hash and no baked world changes
-    age_t = FaceField.from_interior(grid, blend(seg.age), exchange=True)
-    crust_age = FaceField.from_interior(coarse, np.maximum(_resample(age_t, order=1), 0.0).astype(np.float32), name="crust_age")
+    # each kind's own splat, and the cell takes the one it is (cont_c, the same flag
+    # crust_kind saves).  One blend over both would carry a continent's inherited age out into
+    # the sea floor beside it and put a ring of impossibly old crust round every coast
+    ages = seg.age + inherited_age(sim)
+    ocean_m = (seg.kind == OCEANIC).astype(np.float64)
+
+    def kind_age(mask):
+        w = _resample(FaceField.from_interior(grid, blend(mask), exchange=True), order=1)
+        a = _resample(FaceField.from_interior(grid, blend(ages * mask), exchange=True), order=1)
+        return a / np.maximum(w, 1e-9), w
+
+    age_o, w_o = kind_age(ocean_m)
+    age_c, w_c = kind_age(1.0 - ocean_m)
+    take_c = cont_c & (w_c > 1e-6)                      # a continental cell with no continental
+    take_c |= ~cont_c & (w_o <= 1e-6)                   # crust near it falls back to the other
+    crust_age = FaceField.from_interior(coarse, np.maximum(np.where(take_c, age_c, age_o), 0.0).astype(np.float32),
+                                        name="crust_age")
     return {
         "bedrock": bedrock,
         "uplift": uplift,

@@ -228,19 +228,36 @@ def test_no_plateless_holes_after_gap_filling(tiny_sim):
 # --------------------------------------------------------------------------
 # outputs
 # --------------------------------------------------------------------------
-def test_crust_age_says_how_old_the_crust_under_a_cell_is(tiny_sim, tiny_out):
-    """``crust_age`` (a diagnostic, like ``crust_kind``): steps since the
-    segment under a cell formed.  The ocean floor is born at a rift and dies
-    at a trench, so it is younger than the continents, which keep whatever
-    the run gave them; nothing is older than the run itself."""
+def test_crust_age_says_how_old_the_crust_under_a_cell_is(tiny_sim, tiny_out, monkeypatch):
+    """``crust_age`` (a diagnostic, like ``crust_kind``): steps since the crust
+    under a cell formed.  The ocean floor is born at a rift and dies at a
+    trench, so it is younger than the run; the continents are all there at the
+    first step, so they carry an inherited age instead -- the cratons oldest --
+    which no output of the stage depends on."""
     age = tiny_out["crust_age"].interior
     cont = tiny_out["crust_kind"].interior.astype(bool)
     steps = int(tiny_sim.step_index)
     assert tiny_out["crust_age"].dtype == np.float32 and age.shape == cont.shape
-    assert np.isfinite(age).all() and age.min() >= 0.0 and age.max() <= steps + 1e-3
+    assert np.isfinite(age).all() and age.min() >= 0.0
     assert cont.any() and (~cont).any()
-    assert np.median(age[~cont]) < np.median(age[cont])          # the sea floor is the young crust
-    assert age.std() > 0.5                                        # and it is not one number everywhere
+    assert age[~cont].max() <= steps + 1e-3                       # the sea floor is this run's
+    assert np.median(age[cont]) > steps                           # the continents came with a past
+    assert np.median(age[~cont]) < np.median(age[cont]) and age[~cont].std() > 0.5
+
+    # the cratons are the old crust, and the belts between them are younger
+    seg = tiny_sim.seg
+    inh = tect.inherited_age(tiny_sim)
+    old = seg.craton > 0
+    assert inh[old].min() > inh[(~old) & (inh > 0)].max()
+    assert (inh[seg.kind == 0] == 0).all() if (seg.kind == 0).any() else True   # not the ocean floor
+
+    # and nothing the stage outputs depends on it: it is drawn from a stream of its own
+    flat = tect.finalise(tiny_sim)
+    monkeypatch.setattr(tect, "PREHISTORY_RUNS", 0.0)
+    plain = tect.finalise(tiny_sim)
+    for k in ("bedrock", "uplift", "hardness", "plate_id", "plate_vel"):
+        assert np.array_equal(flat[k].data, plain[k].data), k
+    assert not np.array_equal(flat["crust_age"].data, plain["crust_age"].data)
 
 
 def test_output_dtypes_and_ranges(tiny_out):

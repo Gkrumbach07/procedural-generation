@@ -151,17 +151,28 @@ def test_the_crust_byte_carries_both_its_kind_and_its_age():
     below it.  A texture of its own for the age would be another 25 MB of an
     Earth export, and the kind was spending a byte on one bit -- so both
     layers read the same slot, and the page is told which bits are theirs."""
-    kind = np.array([[[0, 1], [1, 0]]] * 6, np.uint8)
-    age = np.array([[[0.0, 1000.0], [4000.0, 250.0]]] * 6, np.float32)
-    fr = vw._Frame("final", 0, "final", np.zeros((6, 2, 2), np.float32), crust=kind, crust_age=age)
+    rng = np.random.default_rng(3)
+    kind = (rng.random((6, 16, 16)) < 0.5).astype(np.uint8)
+    # the sea floor is recycled and the continents are as old as the run: each kind needs the
+    # whole ramp over its own range, or every ocean sits in the ramp's first colours
+    age = np.where(kind > 0, rng.uniform(3000, 4000, kind.shape), rng.uniform(0, 1200, kind.shape)).astype(np.float32)
+    fr = vw._Frame("final", 0, "final", np.zeros((6, 16, 16), np.float32), crust=kind, crust_age=age)
     specs = vw.channel_specs(fr)
-    assert specs["crust"]["bits"] == [7, 1] and specs["crust_age"]["bits"] == [0, 127]
-    assert specs["crust_age"]["hi"] == pytest.approx(4000.0) and specs["crust_age"]["unit"] == "steps"
+    sa = specs["crust_age"]
+    assert specs["crust"]["bits"] == [7, 1] and sa["bits"] == [0, 127] and sa["unit"] == "steps"
+    assert sa["kind"] == "log" and sa["hi"] < 1300 and sa["cont_lo"] > 2000 and sa["cont_hi"] > 3900   # a scale each
     b = vw._byte("crust", kind, specs, fr.ch)
     assert b.dtype == np.uint8
     assert ((b >> 7) == kind).all()                                  # the kind, as the layer reads it
-    got = (b & 127) / 127.0 * specs["crust_age"]["hi"]               # and the age, as the page decodes it
-    assert np.abs(got - age).max() <= specs["crust_age"]["hi"] / 127.0
+    lo = np.where(kind > 0, sa["cont_lo"], sa["lo"])                 # and the age, as the page decodes it
+    hi = np.where(kind > 0, sa["cont_hi"], sa["hi"])
+    got = lo * np.power(hi / lo, (b & 127) / 127.0)
+    inside = (age >= lo) & (age <= hi)
+    assert (np.abs(got - age) / age)[inside].max() < 0.05
+    # both kinds use the whole ramp, so a ridge is not lost in the first few colours
+    for sel in (kind > 0, kind == 0):
+        span = (b & 127)[sel]
+        assert span.min() < 16 and span.max() > 111, (span.min(), span.max())
     images, meta = vw.encode_frame(fr, specs)
     assert meta["layers"]["crust_age"] == meta["layers"]["crust"], meta["layers"]
     assert len(images) == 1 + sum(1 for names in vw.FINAL_TEXTURES if any(n in fr.ch for n in names))

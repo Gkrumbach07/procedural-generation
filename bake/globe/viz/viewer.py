@@ -632,9 +632,23 @@ def channel_specs(final: _Frame, river_threshold: float | None = None) -> dict:
         specs["crust"] = {"label": "Crust", "kind": "category", "cmap": "plates",
                           "names": ["oceanic", "continental"], "bits": [7, 1]}
     if "crust_age" in final.ch and "crust" in final.ch:
-        hi = max(float(np.nanmax(final.ch["crust_age"])), 1.0)
-        specs["crust_age"] = {"label": "Crust age", "kind": "linear", "lo": 0.0, "hi": hi, "unit": "steps",
-                              "cmap": "age", "bits": [0, 127], "lo_label": "new", "hi_label": f"{hi:.0f} steps"}
+        # a scale for each kind of crust.  The sea floor is recycled -- half of it is younger
+        # than a fifth of the run -- while the continents are mostly as old as the run itself,
+        # so one scale for both puts every ocean in the first colours of the ramp and no ridge
+        # shows.  Each kind gets the whole ramp over its own range, tails clipped so a rare
+        # old sliver does not eat it (the byte says where along its kind's ramp a cell is)
+        # Log, because the sea floor's ages are not spread evenly over their range: half of it
+        # is younger than a fifth of the oldest, so on a linear scale a ridge and the floor a
+        # thousand steps away are the same colour and the stripes never show
+        age, cont = final.ch["crust_age"], np.asarray(final.ch["crust"]) > 0
+        o, c = age[~cont], age[cont]
+        o_lo = max(_pctl(o, 1, 1.0), 1.0) if o.size else 1.0
+        o_hi = max(_pctl(o, 99, 10.0), o_lo * 2) if o.size else 10.0
+        c_lo = max(_pctl(c, 2, 1.0), 1.0) if c.size else 1.0
+        c_hi = max(_pctl(c, 100, 10.0), c_lo * 1.2) if c.size else 10.0
+        specs["crust_age"] = {"label": "Crust age", "kind": "log", "lo": o_lo, "hi": o_hi, "unit": "steps",
+                              "cont_lo": c_lo, "cont_hi": c_hi, "cmap": "age", "bits": [0, 127],
+                              "lo_label": "new", "hi_label": f"{o_hi:.0f} / {c_hi:.0f} steps"}
     if "water" in final.ch:
         specs["water"] = {"label": "Water", "kind": "category", "cmap": "plates", "names": ["land", "lake", "ocean"]}
     # read by the shader to place shores between cells, not offered as layers
@@ -652,8 +666,12 @@ def _byte(name: str, a: np.ndarray, specs: dict, ch: dict | None = None) -> np.n
         # kind in the top bit, age in the seven below it (see channel_specs)
         sa = specs["crust_age"]
         mask = int(sa["bits"][1])
-        age = np.clip(np.asarray(ch["crust_age"], np.float32) / max(float(sa["hi"]), 1e-6), 0.0, 1.0)
-        return (((np.asarray(a, np.int64) > 0).astype(np.uint8) << 7) | np.rint(age * mask).astype(np.uint8)).astype(np.uint8)
+        cont = np.asarray(a, np.int64) > 0
+        lo = np.where(cont, sa.get("cont_lo", sa["lo"]), sa["lo"])
+        hi = np.where(cont, sa.get("cont_hi", sa["hi"]), sa["hi"])
+        v = np.maximum(np.asarray(ch["crust_age"], np.float32), lo)
+        t = np.log(v / lo) / np.log(np.maximum(hi / lo, 1.0 + 1e-6))
+        return ((cont.astype(np.uint8) << 7) | np.rint(np.clip(t, 0.0, 1.0) * mask).astype(np.uint8)).astype(np.uint8)
     if name in ("plate", "basin"):
         b = np.asarray(a, np.int64)
         return np.where(b > 0, 1 + (b - 1) % 255, 0).astype(np.uint8)

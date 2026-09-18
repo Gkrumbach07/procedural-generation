@@ -2753,8 +2753,11 @@ function fmtVal(ch, v) { if (v == null) return ""; return Math.abs(v) >= 100 ? v
 function decodeByte(ch, b) {   // byte -> physical value, per meta.channels
   const bits = ch.bits;                                   // a channel in part of a byte
   const v = bits ? (b >> bits[0]) & bits[1] : b, full = bits ? bits[1] : 255;
-  if (ch.kind === "log") return Math.exp(Math.log(ch.lo) + (v / full) * (Math.log(ch.hi) - Math.log(ch.lo)));
-  if (ch.kind === "linear") return ch.lo + (v / full) * (ch.hi - ch.lo);
+  // crust age runs on a scale for each kind of crust; the kind is the bit above it
+  const cont = ch.cont_hi != null && (b & 128) !== 0;
+  const lo = cont ? ch.cont_lo : ch.lo, hi = cont ? ch.cont_hi : ch.hi;
+  if (ch.kind === "log") return Math.exp(Math.log(lo) + (v / full) * (Math.log(hi) - Math.log(lo)));
+  if (ch.kind === "linear") return lo + (v / full) * (hi - lo);
   return v;
 }
 
