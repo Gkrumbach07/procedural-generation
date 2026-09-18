@@ -228,6 +228,21 @@ def test_no_plateless_holes_after_gap_filling(tiny_sim):
 # --------------------------------------------------------------------------
 # outputs
 # --------------------------------------------------------------------------
+def test_crust_age_says_how_old_the_crust_under_a_cell_is(tiny_sim, tiny_out):
+    """``crust_age`` (a diagnostic, like ``crust_kind``): steps since the
+    segment under a cell formed.  The ocean floor is born at a rift and dies
+    at a trench, so it is younger than the continents, which keep whatever
+    the run gave them; nothing is older than the run itself."""
+    age = tiny_out["crust_age"].interior
+    cont = tiny_out["crust_kind"].interior.astype(bool)
+    steps = int(tiny_sim.step_index)
+    assert tiny_out["crust_age"].dtype == np.float32 and age.shape == cont.shape
+    assert np.isfinite(age).all() and age.min() >= 0.0 and age.max() <= steps + 1e-3
+    assert cont.any() and (~cont).any()
+    assert np.median(age[~cont]) < np.median(age[cont])          # the sea floor is the young crust
+    assert age.std() > 0.5                                        # and it is not one number everywhere
+
+
 def test_output_dtypes_and_ranges(tiny_out):
     p = WorldParams.tiny_world()
     out = tiny_out

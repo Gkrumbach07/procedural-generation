@@ -523,6 +523,7 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
             plate = np.asarray(alive_last, np.int64)[np.maximum(plate, 0)]  # compact ids -> raw, as in the frames
         plate = plate + 1
     crust = _load_faces(root, "crust_kind", "diagnostics")
+    crust_age = _load_faces(root, "crust_age", "diagnostics")
     if fine is not None:
         surf, sed, ws, water = fine["surf"], fine["sed"], fine["ws"], fine["water"]
         discharge, biome, basin = fine["discharge"], fine["biome"], fine["basin"]
@@ -556,6 +557,7 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
         plate=ds(up(plate), "nearest"),
         sediment=ds(sed),
         crust=ds(up(crust), "nearest") if crust is not None else None,
+        crust_age=ds(up(crust_age), "nearest") if crust_age is not None and crust is not None else None,
     ))
     frames[-1].river_scale = fine.get("river_scale") if fine is not None else None
     src = (f"planet level {planet}" if planet else f"refined grid, R={R}") if fine is not None else "coarse grid"
@@ -625,7 +627,14 @@ def channel_specs(final: _Frame, river_threshold: float | None = None) -> dict:
         s = final.ch["sediment"]
         specs["sediment"] = {"label": "Sediment", "kind": "log", "lo": 1.0, "hi": max(_pctl(s, 99.9, 100.0), 10.0), "unit": "m", "cmap": "viridis"}
     if "crust" in final.ch:
-        specs["crust"] = {"label": "Crust", "kind": "category", "cmap": "plates", "names": ["oceanic", "continental"]}
+        # the kind is one bit and the age fills the rest of the same byte: a whole texture for
+        # the age would be another 25 MB of the export, and a crust byte held one bit of news
+        specs["crust"] = {"label": "Crust", "kind": "category", "cmap": "plates",
+                          "names": ["oceanic", "continental"], "bits": [7, 1]}
+    if "crust_age" in final.ch and "crust" in final.ch:
+        hi = max(float(np.nanmax(final.ch["crust_age"])), 1.0)
+        specs["crust_age"] = {"label": "Crust age", "kind": "linear", "lo": 0.0, "hi": hi, "unit": "steps",
+                              "cmap": "age", "bits": [0, 127], "lo_label": "new", "hi_label": f"{hi:.0f} steps"}
     if "water" in final.ch:
         specs["water"] = {"label": "Water", "kind": "category", "cmap": "plates", "names": ["land", "lake", "ocean"]}
     # read by the shader to place shores between cells, not offered as layers
@@ -637,8 +646,14 @@ def channel_specs(final: _Frame, river_threshold: float | None = None) -> dict:
     return specs
 
 
-def _byte(name: str, a: np.ndarray, specs: dict) -> np.ndarray:
+def _byte(name: str, a: np.ndarray, specs: dict, ch: dict | None = None) -> np.ndarray:
     s = specs[name]
+    if name == "crust" and ch is not None and "crust_age" in ch and "crust_age" in specs:
+        # kind in the top bit, age in the seven below it (see channel_specs)
+        sa = specs["crust_age"]
+        mask = int(sa["bits"][1])
+        age = np.clip(np.asarray(ch["crust_age"], np.float32) / max(float(sa["hi"]), 1e-6), 0.0, 1.0)
+        return (((np.asarray(a, np.int64) > 0).astype(np.uint8) << 7) | np.rint(age * mask).astype(np.uint8)).astype(np.uint8)
     if name in ("plate", "basin"):
         b = np.asarray(a, np.int64)
         return np.where(b > 0, 1 + (b - 1) % 255, 0).astype(np.uint8)
@@ -673,7 +688,7 @@ def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
             present = [n for n in names if n in fr.ch and n in specs]
             if not present:
                 continue
-            chans = [pad_faces(_byte(n, fr.ch[n], specs)) if n in present else zero for n in names]
+            chans = [pad_faces(_byte(n, fr.ch[n], specs, fr.ch)) if n in present else zero for n in names]
             chans += [zero] * (3 - len(chans))
             k = len(images)
             images.append(atlas(chans))
@@ -682,6 +697,8 @@ def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
                     layers[n] = [k, c]
         if "biome" in layers and "satellite" in specs:
             layers["satellite"] = layers["biome"]   # same texture, coloured for terrain rather than for classes
+        if "crust" in layers and "crust_age" in specs:
+            layers["crust_age"] = layers["crust"]   # the same byte, read from its other bits
     meta = {"stage": fr.stage, "key": int(fr.key), "label": fr.label, "res": fr.res, "pad": PAD,
             "h0": h0, "h1": h1, "layers": layers, "stats": frame_stats(fr.height)}
     if river_min_byte is not None:

@@ -351,7 +351,8 @@ uniform sampler2D uWT;         // water mask: 0 land, 1 lake, 2 ocean (final fra
 uniform vec3 uWGeo;
 uniform int uWCh, uHasWater;
 uniform int uLKind;            // 0 linear, 1 category
-uniform int uCmap;             // 0 thermal, 1 rain, 2 plates, 3 biome, 4 viridis, 5 sediment, 6 satellite, 7 order
+uniform int uCmap;             // 0 thermal, 1 rain, 2 plates, 3 biome, 4 viridis, 5 sediment, 6 satellite, 7 order, 8 crust age
+uniform ivec2 uLBits;          // (shift, mask) where a layer reads part of a byte; (0, 255) is the whole of it
 uniform vec3 uBiome[32];
 uniform vec3 uSat[32];         // satellite ground colour per biome code (ice, rock classes)
 uniform int uTreeKind[32];     // tree kind per biome code (derive.biomes TREE_KIND): the shape and colour of its plants
@@ -1060,6 +1061,13 @@ vec3 orderColor(float o){       // Strahler 1 (pale) .. 6+ (deep blue)
 vec3 thermal(float t){ return ramp(t, vec3(0.19,0.07,0.55), vec3(0.16,0.44,0.90), vec3(0.94,0.94,0.90), vec3(0.95,0.55,0.18), vec3(0.62,0.05,0.10)); }
 vec3 rain(float t){ return ramp(t, vec3(0.93,0.87,0.72), vec3(0.72,0.80,0.45), vec3(0.30,0.65,0.40), vec3(0.15,0.45,0.70), vec3(0.10,0.15,0.50)); }
 vec3 viridis(float t){ return ramp(t, vec3(0.27,0.00,0.33), vec3(0.23,0.32,0.55), vec3(0.13,0.57,0.55), vec3(0.37,0.79,0.38), vec3(0.99,0.91,0.14)); }
+// Crust age.  The sea floor reads as the age maps do -- the ridge hot, through yellow and
+// green to the cold blue of old floor -- and the continents keep a ramp of their own, pale
+// where they last grew to the dark red of a craton, so the two are never taken for each other
+vec3 crustAge(float t, bool cont){
+  return cont ? ramp(t, vec3(0.93,0.93,0.72), vec3(0.80,0.74,0.40), vec3(0.68,0.50,0.26), vec3(0.52,0.26,0.20), vec3(0.30,0.09,0.13))
+              : ramp(t, vec3(0.80,0.12,0.16), vec3(0.96,0.58,0.20), vec3(0.88,0.90,0.38), vec3(0.24,0.62,0.56), vec3(0.06,0.16,0.42));
+}
 const vec3 QUAL[12] = vec3[12](   // qualitative palette for plates / crust / other ids
   vec3(0.90,0.62,0.00), vec3(0.34,0.71,0.91), vec3(0.00,0.62,0.45), vec3(0.94,0.89,0.26),
   vec3(0.00,0.45,0.70), vec3(0.84,0.37,0.00), vec3(0.80,0.47,0.65), vec3(0.55,0.55,0.55),
@@ -1215,7 +1223,11 @@ void main(){
     }
     if (b < 0.0 && (uCmap == 3 || uCmap == 6) && zk >= 0 && zw > 0.5 && uZBio[zk] > 0.5)
       b = zTex(zk, ivec2(floor(za + 0.5)) + ivec2(0, 2 * int(uZNE[zk]))).r * 255.0;   // the zoom level's own biome
-    if (b < 0.0) b = uLKind == 1 ? byteNearest(uLT, uLGeo, uLCh, p) : byteLinear(uLT, uLGeo, uLCh, p);
+    // a byte that carries two things (the crust's kind and its age) must not be interpolated:
+    // a blend of the neighbours mixes the top bit into the age
+    if (b < 0.0) b = (uLKind == 1 || uLBits.y < 255) ? byteNearest(uLT, uLGeo, uLCh, p) : byteLinear(uLT, uLGeo, uLCh, p);
+    int braw = int(b + 0.5);
+    if (uLBits.y < 255) b = float((braw >> uLBits.x) & uLBits.y);
     if (uLKind == 1) {
       if (uCmap == 6) {
         vec4 life = zk >= 0 && zw > 0.5 && uZLife[zk] > 0.5 ? zLinear(zk, za + vec2(0.0, 2.0 * uZNE[zk])) : vec4(0.0);
@@ -1234,10 +1246,11 @@ void main(){
       else if (uCmap == 7) col = wet ? vec3(0.30, 0.34, 0.40) : (b < 0.5 ? vec3(0.82, 0.80, 0.76) : orderColor(b));   // a reach across a lake is the lake
       else col = uCmap == 3 ? uBiome[int(b) & 31] : (b < 0.5 ? vec3(0.12) : hashColor(b));
     } else {
-      float t = b / 255.0;
-      col = uCmap == 0 ? thermal(t) : uCmap == 1 ? rain(t) : viridis(t);
+      float t = b / float(max(uLBits.y, 1));
+      col = uCmap == 0 ? thermal(t) : uCmap == 1 ? rain(t)
+          : uCmap == 8 ? crustAge(t, (braw & 128) != 0) : viridis(t);
     }
-    if (wet && uCmap != 3 && uCmap != 0 && uCmap != 1 && uCmap != 6 && uCmap != 7) col *= 0.75;
+    if (wet && uCmap != 3 && uCmap != 0 && uCmap != 1 && uCmap != 6 && uCmap != 7 && uCmap != 8) col *= 0.75;
   }
   col *= mix(1.0, shade, uShadeAmt);
 
@@ -1628,7 +1641,7 @@ readHash();
 // frame.layers:  {name: [texIndex, channel]}
 // ---------------------------------------------------------------------------
 const CHANNELS = Object.assign({ elevation: { label: "Elevation", unit: "m" } }, META.channels || {});
-const CMAPS = { thermal: 0, rain: 1, plates: 2, biome: 3, viridis: 4, sediment: 5, satellite: 6, order: 7 };
+const CMAPS = { thermal: 0, rain: 1, plates: 2, biome: 3, viridis: 4, sediment: 5, satellite: 6, order: 7, age: 8 };
 // layers the detail tiles and zoom levels carry at their own resolution (the shader's uFineLayer)
 const FINE_LAYERS = { flow: 1, discharge: 2, water: 3, lake_depth: 4, ocean: 5, sediment: 6 };
 const layerNames = ["elevation", ...Object.keys(META.channels || {}).filter(k => k !== "discharge_overlay" && !META.channels[k].hidden)];
@@ -2238,11 +2251,13 @@ function draw() {
     gl.uniform1i(U.uLCh, L[1]);
     gl.uniform1i(U.uLKind, ch.kind === "category" ? 1 : 0);
     gl.uniform1i(U.uCmap, CMAPS[ch.cmap] ?? 4);
+    gl.uniform2i(U.uLBits, ...(ch.bits || [0, 255]));
     gl.uniform1i(U.uFineLayer, FINE_LAYERS[state.layer] ?? 0);
     gl.uniform2f(U.uLayerRange, ch.lo ?? 0, ch.hi ?? 1);
   } else {
     gl.uniform1i(U.uLayer, 0);
     gl.uniform1i(U.uFineLayer, 0);
+    gl.uniform2i(U.uLBits, 0, 255);
     bindTex(2, tex[a][0], "uLT");
   }
   // water mask (final frame only; the timeline falls back to the height sign)
@@ -2472,9 +2487,9 @@ function placeRows(p) {
     const ch = CHANNELS[name]; if (!ch || ch.hidden || name === "satellite") continue;
     const [x, y] = texel(f, k, p), px = samplePixel(a, k, x, y);
     if (!px) continue;
-    const b = px[c];
+    const b = px[c], bv = ch.bits ? (b >> ch.bits[0]) & ch.bits[1] : b;
     let v = decodeByte(ch, b);
-    if (ch.kind === "category") v = ch.names ? (ch.names[b] ?? b) : (b === 0 ? "—" : b - (ch.offset ?? 0));
+    if (ch.kind === "category") v = ch.names ? (ch.names[bv] ?? bv) : (bv === 0 ? "—" : bv - (ch.offset ?? 0));
     else v = fmtVal(ch, v) + (ch.unit ? " " + ch.unit : "");
     if ((name === "discharge" || name === "flow") && b === 0) v = "—";
     rows.push([ch.label.toLowerCase(), v]);
@@ -2705,7 +2720,9 @@ const lerp3 = (a, b, t) => a.map((v, k) => v + (b[k] - v) * t);
 function rampJS(t, cs) { t = Math.max(0, Math.min(1, t)) * 4; const k = Math.min(3, Math.floor(t)); return lerp3(cs[k], cs[k + 1], t - k); }
 const LAND = [[.30,.50,.28],[.58,.64,.38],[.78,.70,.48],[.58,.45,.34],[.96,.96,.97]];
 const SEA = [[.62,.80,.86],[.36,.62,.80],[.18,.42,.68],[.09,.24,.50],[.03,.09,.26]];
-const CM = { thermal: [[.19,.07,.55],[.16,.44,.90],[.94,.94,.90],[.95,.55,.18],[.62,.05,.10]],
+const CM = { age: [[.80,.12,.16],[.96,.58,.20],[.88,.90,.38],[.24,.62,.56],[.06,.16,.42]],
+             age_cont: [[.93,.93,.72],[.80,.74,.40],[.68,.50,.26],[.52,.26,.20],[.30,.09,.13]],
+             thermal: [[.19,.07,.55],[.16,.44,.90],[.94,.94,.90],[.95,.55,.18],[.62,.05,.10]],
   rain: [[.93,.87,.72],[.72,.80,.45],[.30,.65,.40],[.15,.45,.70],[.10,.15,.50]],
   viridis: [[.27,0,.33],[.23,.32,.55],[.13,.57,.55],[.37,.79,.38],[.99,.91,.14]] };
 let legendKey = "";
@@ -2721,18 +2738,24 @@ function updateLegend(f) {
     } else if (ch.kind === "category") {
       c = [x / 255, x / 255, x / 255].map((v, k) => 0.35 + 0.5 * Math.abs(Math.sin(x * 0.37 + k * 2.1)));
     } else c = rampJS(x / 255, CM[ch.cmap] || CM.viridis);
-    for (let y = 0; y < 12; y++) { const o = 4 * (y * 256 + x); img.data[o] = c[0]*255; img.data[o+1] = c[1]*255; img.data[o+2] = c[2]*255; img.data[o+3] = 255; }
+    // crust age has a ramp for each kind of crust: the sea floor above, the continents below
+    const c2 = ch.cmap === "age" ? rampJS(x / 255, CM.age_cont) : c;
+    for (let y = 0; y < 12; y++) { const o = 4 * (y * 256 + x), q = y < 6 ? c : c2; img.data[o] = q[0]*255; img.data[o+1] = q[1]*255; img.data[o+2] = q[2]*255; img.data[o+3] = 255; }
   }
   lgc.putImageData(img, 0, 0);
   if (state.layer === "elevation") { $("lg0").textContent = fmtM(META.ocean_bottom_m); $("lgmid").textContent = "0"; $("lg1").textContent = fmtM(META.land_top_m); }
   else if (ch.kind === "category") { $("lg0").textContent = ""; $("lgmid").textContent = ch.label + " (categories)"; $("lg1").textContent = ""; }
-  else { $("lg0").textContent = ch.lo_label ?? fmtVal(ch, ch.lo); $("lgmid").textContent = ch.unit || ""; $("lg1").textContent = ch.hi_label ?? fmtVal(ch, ch.hi); }
+  else { $("lg0").textContent = ch.lo_label ?? fmtVal(ch, ch.lo);
+         $("lgmid").textContent = ch.cmap === "age" ? "ocean floor / continents" : (ch.unit || "");
+         $("lg1").textContent = ch.hi_label ?? fmtVal(ch, ch.hi); }
 }
 function fmtVal(ch, v) { if (v == null) return ""; return Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 1 ? v.toFixed(1) : v.toPrecision(2); }
 function decodeByte(ch, b) {   // byte -> physical value, per meta.channels
-  if (ch.kind === "log") return Math.exp(Math.log(ch.lo) + (b / 255) * (Math.log(ch.hi) - Math.log(ch.lo)));
-  if (ch.kind === "linear") return ch.lo + (b / 255) * (ch.hi - ch.lo);
-  return b;
+  const bits = ch.bits;                                   // a channel in part of a byte
+  const v = bits ? (b >> bits[0]) & bits[1] : b, full = bits ? bits[1] : 255;
+  if (ch.kind === "log") return Math.exp(Math.log(ch.lo) + (v / full) * (Math.log(ch.hi) - Math.log(ch.lo)));
+  if (ch.kind === "linear") return ch.lo + (v / full) * (ch.hi - ch.lo);
+  return v;
 }
 
 // readout: sample the frame's bitmap on the CPU (lazy, one frame cached)

@@ -146,6 +146,27 @@ def test_equirect_has_its_pole_on_z():
     assert img[0].mean() > 0.95 and img[-1].mean() < -0.95
 
 
+def test_the_crust_byte_carries_both_its_kind_and_its_age():
+    """One byte holds both: the kind in the top bit, the age in the seven
+    below it.  A texture of its own for the age would be another 25 MB of an
+    Earth export, and the kind was spending a byte on one bit -- so both
+    layers read the same slot, and the page is told which bits are theirs."""
+    kind = np.array([[[0, 1], [1, 0]]] * 6, np.uint8)
+    age = np.array([[[0.0, 1000.0], [4000.0, 250.0]]] * 6, np.float32)
+    fr = vw._Frame("final", 0, "final", np.zeros((6, 2, 2), np.float32), crust=kind, crust_age=age)
+    specs = vw.channel_specs(fr)
+    assert specs["crust"]["bits"] == [7, 1] and specs["crust_age"]["bits"] == [0, 127]
+    assert specs["crust_age"]["hi"] == pytest.approx(4000.0) and specs["crust_age"]["unit"] == "steps"
+    b = vw._byte("crust", kind, specs, fr.ch)
+    assert b.dtype == np.uint8
+    assert ((b >> 7) == kind).all()                                  # the kind, as the layer reads it
+    got = (b & 127) / 127.0 * specs["crust_age"]["hi"]               # and the age, as the page decodes it
+    assert np.abs(got - age).max() <= specs["crust_age"]["hi"] / 127.0
+    images, meta = vw.encode_frame(fr, specs)
+    assert meta["layers"]["crust_age"] == meta["layers"]["crust"], meta["layers"]
+    assert len(images) == 1 + sum(1 for names in vw.FINAL_TEXTURES if any(n in fr.ch for n in names))
+
+
 def test_bake_captures_frames_and_exports_a_viewer(tmp_path):
     """Frames are captured for both stages, the viewer is written, and frame
     capture changes no stage hash."""

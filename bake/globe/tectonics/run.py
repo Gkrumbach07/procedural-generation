@@ -964,6 +964,14 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     # scripts/ocean_depth.py).  Diagnostic only: not in OUTPUTS, so the stage
     # hash and every world already baked are unchanged.
     crust_kind = FaceField.from_interior(coarse, cont_c.astype(np.uint8), name="crust_kind")
+    # How old the crust under a cell is, in steps since the segment formed (a
+    # segment ages one a step, collision.py; the ocean floor is born at a rift
+    # and dies at a trench, so it reads young and striped, while a craton
+    # carries the whole run).  The splat's weighted mean, so a cell between
+    # segments of different ages lands between them.  Diagnostic, like
+    # crust_kind: not in OUTPUTS, so no stage hash and no baked world changes
+    age_t = FaceField.from_interior(grid, blend(seg.age), exchange=True)
+    crust_age = FaceField.from_interior(coarse, np.maximum(_resample(age_t, order=1), 0.0).astype(np.float32), name="crust_age")
     return {
         "bedrock": bedrock,
         "uplift": uplift,
@@ -972,6 +980,7 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
         "plate_vel": plate_vel,
         "collision_zone": zone_f,
         "crust_kind": crust_kind,
+        "crust_age": crust_age,
         "heat": heat_c,
         "_land_slope": slope_info,
         "_scale_m_per_unit": scale,
@@ -1053,6 +1062,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     out["heat"].save(diag_dir)
     out["collision_zone"].save(diag_dir)
     out["crust_kind"].save(diag_dir)
+    out["crust_age"].save(diag_dir)
     last = sim.stats[-1] if sim.stats else {}
     info = {
         "segments_final": int(sim.seg.M),

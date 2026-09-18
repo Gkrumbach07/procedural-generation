@@ -2,14 +2,18 @@
 """Backfill a world's viewer timeline without re-baking it.
 
     python scripts/capture_frames.py worlds/w-base --tectonics            # re-simulate, capture frames only
+    python scripts/capture_frames.py worlds/w-base --diagnostics          # crust age and kind, same re-simulation
     python scripts/capture_frames.py worlds/w-base --checkpoints worlds/w-base/keep
 
 ``--tectonics`` re-runs the (deterministic) plate simulation with frame
 capture on and writes nothing but ``frames/tectonics/`` -- the stage's
-outputs are untouched.  ``--checkpoints DIR`` turns erosion checkpoints
-(``erosion_iterNNNN.npz``) into erosion frames; ``erosion/run.py`` keeps only
-the two newest, so a full timeline needs a directory they were copied to.
-Then run ``scripts/export_viewer.py``.
+outputs are untouched.  ``--diagnostics`` re-runs it the same way and writes
+``diagnostics/`` (crust age, crust kind, heat, collision zones) for a world
+baked before the stage wrote them; diagnostics are not hashed, so nothing
+downstream is invalidated and no stage is re-run.  ``--checkpoints DIR``
+turns erosion checkpoints (``erosion_iterNNNN.npz``) into erosion frames;
+``erosion/run.py`` keeps only the two newest, so a full timeline needs a
+directory they were copied to.  Then run ``scripts/export_viewer.py``.
 """
 import argparse
 import json
@@ -27,6 +31,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("world")
     ap.add_argument("--tectonics", action="store_true", help="re-simulate tectonics and capture its frames")
+    ap.add_argument("--diagnostics", action="store_true", help="re-simulate tectonics and write diagnostics/ (crust age and kind, heat, zones)")
     ap.add_argument("--checkpoints", default=None, help="directory of erosion checkpoints to turn into frames")
     ap.add_argument("--frames", type=int, default=None, help="tectonics frames (default: render.tectonics_frames)")
     ap.add_argument("--res", type=int, default=None, help="cells per face (default: render.frame_res)")
@@ -45,6 +50,17 @@ def main() -> int:
         sim = initialise(params, print)
         sim.run(int(tp.steps), log=print, on_frame=lambda s, i: vf.tectonics_frame(s, rec, i, int(tp.steps)), frames=n)
         print(f"tectonics: {len(vf.list_frames(store.root, 'tectonics'))} frames -> {rec.dir}")
+
+    if args.diagnostics:
+        from globe.tectonics.run import finalise, simulate
+
+        sim = simulate(params, print)
+        out = finalise(sim)
+        d = store.root / "diagnostics"
+        d.mkdir(parents=True, exist_ok=True)
+        for name in ("crust_age", "crust_kind", "heat", "collision_zone"):
+            out[name].save(d)
+            print(f"  {name} -> {d}")
 
     if args.checkpoints:
         n_iter = int(params.erosion.iterations)
