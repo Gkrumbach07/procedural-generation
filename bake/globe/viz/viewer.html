@@ -1100,7 +1100,11 @@ void main(){
   // lake is wherever the interpolated signed lake depth is above 0
   float wcode;
   vec2 dxy;
-  bool fineW = false; float fineLd = 0.0, fineOc = 0.0, lakeD = -1.0;      // lake depth (m) and ocean mask from a tile or zoom level
+  // lake depth (m) and ocean mask from a tile or zoom level; lakeD far below anything real
+  // means there is none to be had (the timeline's frames), and the water code decides alone --
+  // at -1 a frame with no lake depth read as a sixth of water everywhere, which turned the
+  // timeline's oceans the colour of land
+  bool fineW = false; float fineLd = 0.0, fineOc = 0.0, lakeD = -1e6;
   bool inDetail = uDetail == 1 && detailXY(p, dxy);
   // How much of the pixel the water covers, rather than in or out.  A cell either water or
   // not drew every lake as a cut-out pasted on the map, with the source's own squares along
@@ -1220,16 +1224,18 @@ void main(){
   if (uRivers == 1 && wCov < 0.6) {
     float b, rmin, rspan, texr = uTexelRad;
     if (zk >= 0 && zw > 0.5) {
-      b = zLinear(zk, za + vec2(0.0, uZNE[zk])).r * 255.0;     // the zoom level's river half
+      // the same smooth read as the water: a channel a cell or two wide is all edge, and
+      // bilinear leaves every one of those cells' corners in it
+      b = zSmooth(zk, za + vec2(0.0, uZNE[zk])).r * 255.0;     // the zoom level's river half
       rmin = uZRmin[zk];
       rspan = uZRspan[zk];
       texr = 0.5 * PI / uZRes[zk];
     } else if (uDetail == 1 && detailXY(p, dxy)) {
-      b = detailLinear(dxy + vec2(0.0, uDSlot)).r * 255.0;   // the tile's water half
+      b = detailSmooth(dxy + vec2(0.0, uDSlot)).r * 255.0;   // the tile's water half
       rmin = uDRiverMin;
       rspan = uDRiverSpan;
     } else {
-      b = byteLinear(uT0a, uGeoA, 2, p);
+      b = byteSmooth(uT0a, uGeoA, 2, p);
       rmin = uRiverMin;
       rspan = uRiverSpan;
     }
