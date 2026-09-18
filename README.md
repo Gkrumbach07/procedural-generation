@@ -43,6 +43,40 @@ Every bake also ends by writing `worlds/<name>/viewer/index.html`, a
 viewer for the whole run (see *Viewing a world*). The timeline behind it is
 captured while tectonics and erosion run, as `worlds/<name>/frames/`.
 
+## The planets page
+
+```sh
+cd bake && python scripts/serve_planets.py                  # http://localhost:8700/ , worlds/
+python scripts/serve_planets.py --host 100.114.208.82       # this machine's tailnet address only
+```
+
+One page for every world under `worlds/`: what each has baked and how long
+each stage took, its quicklooks, its zoom windows, and a link into its
+viewer. From it you can
+
+* **make a planet** -- a preset and the knobs worth turning (seed, grid,
+  land fraction, plate steps and plates, cratons, rift rate, equator
+  temperature, rain, lapse, erosion and refine iterations), and say where the
+  run should stop: *the plates only* leaves a world to look at before
+  spending an hour on its erosion, so seeding a few and keeping one is a
+  handful of minutes;
+* **carry on** from where a world stopped, or re-run a stage with a knob
+  changed (that re-runs the stages it feeds; the erosion re-runs from the
+  start when its count changes, because the uplift replay sets the starting
+  depth from the total);
+* **stop** a run -- the bake and its workers go, and what it finished stays
+  (a stage is marked done only when its outputs are written);
+* **bake the planet-wide 1.2 km level** (`globe/zoom/planet.py`), which keeps
+  a time lapse of its erosion for the viewer's timeline;
+* **export a viewer** for a world that is only half baked, and watch the
+  stage pictures as they are written.
+
+One job runs at a time whatever kind it is -- a bake takes every core -- and
+the queue survives a restart of the server. Each world is served whole under
+`/<name>/`, so its viewer is `/<name>/viewer/index.html` and the zoom bakes
+that page asks for run here too (`scripts/serve_world.py` still serves a
+single world on its own).
+
 Further reading: [docs/DEVELOPING.md](docs/DEVELOPING.md) is the binding
 cross-stage contract (field names, dtypes, units, JSON schemas).
 [docs/erosion-tuning.md](docs/erosion-tuning.md) is the sweep that chose the

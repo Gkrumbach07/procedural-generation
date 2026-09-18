@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Planets</title>
+<style>
+  :root { --bg:#0b0f14; --panel:#121924; --line:#233042; --text:#e8eef7; --dim:#93a3b8;
+          --accent:#4d8dd6; --good:#54b98a; --warn:#d6a24d; --bad:#d66a6a; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font:13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { display:flex; flex-direction:column; }
+  a { color:var(--accent); text-decoration:none; }
+  h1 { font-size:15px; margin:0; font-weight:600; letter-spacing:.2px; }
+  h2 { font-size:13px; margin:0 0 6px; font-weight:600; }
+  .d { color:var(--dim); font-size:11px; }
+  button { background:#18212e; color:var(--text); border:1px solid var(--line); border-radius:6px;
+    padding:6px 11px; font:inherit; cursor:pointer; }
+  button:hover:not(:disabled) { background:#223043; }
+  button:disabled { opacity:.45; cursor:default; }
+  button.go { background:var(--accent); border-color:var(--accent); color:#06101c; font-weight:600; }
+  button.sm { padding:3px 8px; font-size:11px; }
+  input, select { background:#0e131b; color:var(--text); border:1px solid var(--line); border-radius:6px;
+    padding:6px 8px; font:inherit; width:100%; }
+  input:focus, select:focus { outline:1px solid var(--accent); }
+  header { display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid var(--line);
+    background:var(--panel); position:sticky; top:0; z-index:5; }
+  header .sp { flex:1; }
+  main { flex:1; overflow:auto; padding:16px; display:grid; gap:16px;
+    grid-template-columns:repeat(auto-fill, minmax(330px, 1fr));
+    grid-auto-rows:min-content; align-content:start; align-items:start; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden;
+    display:flex; flex-direction:column; }
+  .card .top { display:flex; align-items:baseline; gap:8px; padding:10px 12px 6px; }
+  .card .top .nm { font-weight:600; }
+  .card .body { padding:0 12px 10px; display:flex; flex-direction:column; gap:8px; }
+  .shot { display:block; width:100%; height:150px; object-fit:cover; object-position:center 42%;
+    background:#0a0e14; border-top:1px solid var(--line); border-bottom:1px solid var(--line); cursor:pointer; }
+  .chips { display:flex; flex-wrap:wrap; gap:4px; }
+  .chip { font-size:10px; padding:2px 6px; border-radius:4px; background:#0e131b; border:1px solid var(--line); color:var(--dim); }
+  .chip.on { background:#12301f; border-color:#1d5c3a; color:#8fe0b4; }
+  .chip.run { background:#2b2412; border-color:#5c4a1d; color:#e5c580; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .bar { height:4px; background:#0e131b; border-radius:2px; overflow:hidden; }
+  .bar i { display:block; height:100%; background:var(--accent); }
+  pre { margin:0; background:#080c12; border:1px solid var(--line); border-radius:6px; padding:8px;
+    font-size:10px; line-height:1.4; max-height:240px; overflow:auto; white-space:pre-wrap; }
+  dialog { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:12px;
+    padding:0; width:min(560px, calc(100vw - 24px)); max-height:86vh; }
+  dialog::backdrop { background:rgba(4,8,14,.72); }
+  .dh { display:flex; align-items:center; gap:10px; padding:12px 14px; border-bottom:1px solid var(--line); }
+  .db { padding:12px 14px; overflow:auto; max-height:64vh; }
+  .df { display:flex; gap:8px; justify-content:flex-end; padding:10px 14px; border-top:1px solid var(--line); }
+  .grid { display:grid; grid-template-columns:130px 1fr; gap:8px 10px; align-items:center; }
+  .grid .hint { grid-column:2; margin-top:-4px; }
+  #jobs { border-bottom:1px solid var(--line); background:#0e141d; padding:8px 16px; display:none; }
+  #jobs.on { display:block; }
+  .job { display:flex; gap:10px; align-items:center; padding:4px 0; }
+  .job .msg { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .note { color:var(--dim); font-size:11px; }
+  @media (max-width:640px) { main { padding:10px; gap:10px; } header { padding:10px 12px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Planets</h1>
+  <span class="d" id="where"></span>
+  <span class="sp"></span>
+  <button class="go" id="new">New planet</button>
+</header>
+<div id="jobs"></div>
+<main id="list"></main>
+
+<dialog id="dlg">
+  <div class="dh"><h2 id="dtitle">New planet</h2><span class="sp" style="flex:1"></span>
+    <button class="sm" id="dclose">Close</button></div>
+  <div class="db" id="dbody"></div>
+  <div class="df" id="dfoot"></div>
+</dialog>
+
+<script>
+const $ = id => document.getElementById(id);
+const api = async (path, body) => {
+  const r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
+  const j = await r.json().catch(() => ({ error: `${r.status}` }));
+  if (j.error) throw new Error(j.error);
+  return j;
+};
+const fmtDur = s => (s == null ? "" : s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${(s / 60).toFixed(1)} min` : `${(s / 3600).toFixed(1)} h`);
+const fmtCell = m => (m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+let DATA = { worlds: [], knobs: [], stages: [], presets: [], jobs: [] };
+let openLog = null;
+
+// ---------------------------------------------------------------------------
+// the list
+// ---------------------------------------------------------------------------
+function stageChips(w) {
+  const run = DATA.jobs.find(j => j.world === w.name && j.state === "running");
+  const at = run && run.progress && run.progress.stage;
+  return DATA.stages.map(s => {
+    const st = w.stages[s] || {};
+    const cls = s === at ? "chip run" : st.done ? "chip on" : "chip";
+    const t = st.seconds ? ` ${fmtDur(st.seconds)}` : "";
+    return `<span class="${cls}" title="${st.finished || "not baked"}">${s}${t}</span>`;
+  }).join("");
+}
+
+function card(w) {
+  const shot = w.quicklooks.length ? w.quicklooks[w.quicklooks.length - 1] : null;
+  const run = DATA.jobs.find(j => j.world === w.name && (j.state === "running" || j.state === "queued"));
+  const frac = run && run.progress && (run.progress.fraction != null ? run.progress.fraction : null);
+  const cell = w.cell_size_m ? fmtCell(w.cell_size_m) : "?";
+  return `<div class="card" data-w="${esc(w.name)}">
+    <div class="top"><span class="nm">${esc(w.name)}</span><span class="d">seed ${w.seed} · ${w.N_c}² a face · ${cell}</span></div>
+    ${shot ? `<img class="shot" loading="lazy" src="${esc(w.name)}/${shot}?t=${Date.now() >> 16}" data-shot="${esc(w.name)}">`
+           : `<div class="shot" style="display:grid;place-items:center;color:var(--dim);font-size:11px">nothing baked yet</div>`}
+    <div class="body">
+      <div class="chips">${stageChips(w)}</div>
+      ${run ? `<div class="bar"><i style="width:${Math.round(100 * (frac || 0))}%"></i></div>
+               <div class="d">${esc(run.state === "queued" ? "queued" : run.title)} · ${esc(run.message || "")}</div>` : ""}
+      <div class="row">
+        ${w.viewer ? `<a href="${esc(w.name)}/viewer/index.html"><button class="go sm">Open</button></a>` : ""}
+        <button class="sm" data-act="bake" data-w="${esc(w.name)}">${w.next ? "Bake…" : "Re-bake…"}</button>
+        <button class="sm" data-act="planet" data-w="${esc(w.name)}">1.2 km level…</button>
+        <button class="sm" data-act="viewer" data-w="${esc(w.name)}">Export viewer</button>
+        <button class="sm" data-act="log" data-w="${esc(w.name)}">Log</button>
+      </div>
+      <div class="d">${w.zooms.length} zoom window${w.zooms.length === 1 ? "" : "s"}${w.planet_levels.length ? " · " + w.planet_levels.join(", ") : ""}${w.created ? " · " + w.created.replace("T", " ") : ""}</div>
+    </div></div>`;
+}
+
+function renderJobs() {
+  const live = DATA.jobs.filter(j => j.state === "running" || j.state === "queued");
+  const recent = DATA.jobs.filter(j => j.state !== "running" && j.state !== "queued").slice(-3);
+  const rows = [...live, ...recent];
+  $("jobs").classList.toggle("on", rows.length > 0);
+  $("jobs").innerHTML = rows.map(j => {
+    const pr = j.progress || {};
+    const pct = pr.fraction != null ? ` · ${Math.round(100 * pr.fraction)} %` : "";
+    const eta = pr.eta_s != null ? ` · left ~${fmtDur(pr.eta_s)}` : "";
+    return `<div class="job">
+      <span class="chip ${j.state === "running" ? "run" : j.state === "done" ? "on" : ""}">${j.state}</span>
+      <b>${esc(j.world)}</b> <span class="d">${esc(j.title)}${pct}${eta}${j.seconds ? " · " + fmtDur(j.seconds) : ""}</span>
+      <span class="msg d">${esc(j.message || "")}</span>
+      <button class="sm" data-jlog="${j.id}">Log</button>
+      ${j.state === "running" || j.state === "queued" ? `<button class="sm" data-cancel="${j.id}">Stop</button>`
+        : `<button class="sm" data-forget="${j.id}">Clear</button>`}
+    </div>`;
+  }).join("");
+}
+
+function render() {
+  $("where").textContent = `${DATA.worlds.length} worlds`;
+  $("list").innerHTML = DATA.worlds.map(card).join("");
+  renderJobs();
+}
+
+// ---------------------------------------------------------------------------
+// dialogs
+// ---------------------------------------------------------------------------
+function dialog(title, body, foot) {
+  $("dtitle").textContent = title;
+  $("dbody").innerHTML = body;
+  $("dfoot").innerHTML = foot;
+  if (!$("dlg").open) $("dlg").showModal();
+}
+$("dclose").onclick = () => { openLog = null; $("dlg").close(); };
+$("dlg").addEventListener("close", () => { openLog = null; });
+
+const knobRows = (only, values) => DATA.knobs.filter(k => !only || only.includes(k.name)).map(k => {
+  const v = values && values[k.name] != null ? values[k.name] : k.default;
+  const input = k.choices
+    ? `<select data-k="${k.name}">${k.choices.map(c => `<option value="${c}"${c == v ? " selected" : ""}>${c}</option>`).join("")}</select>`
+    : `<input data-k="${k.name}" type="number" value="${v}"${k.lo != null ? ` min="${k.lo}"` : ""}${k.hi != null ? ` max="${k.hi}"` : ""}${k.step ? ` step="${k.step}"` : ""}>`;
+  return `<label>${k.label}</label>${input}<div class="hint d">${esc(k.hint)}</div>`;
+}).join("");
+
+const readKnobs = () => {
+  const sets = {};
+  $("dbody").querySelectorAll("[data-k]").forEach(el => {
+    const k = DATA.knobs.find(x => x.name === el.dataset.k);
+    const v = k.type === "int" ? parseInt(el.value, 10) : parseFloat(el.value);
+    if (!Number.isNaN(v) && v !== k.default) sets[el.dataset.k] = v;
+  });
+  return sets;
+};
+
+function newPlanet() {
+  const stop = ["tectonics", "erosion", "derive", ""];
+  dialog("New planet", `<div class="grid">
+      <label>Name</label><input id="nm" placeholder="earth-v12" autocomplete="off">
+      <div class="hint d">a directory under the worlds folder</div>
+      <label>Preset</label><select id="preset">${DATA.presets.map(p => `<option${p === "earth" ? " selected" : ""}>${p}</option>`).join("")}</select>
+      <div class="hint d">earth is the full 9.8 km planet (hours); small is a minute, tiny is seconds</div>
+      <label>Bake</label><select id="to">
+        <option value="tectonics">the plates only — look, then carry on</option>
+        <option value="erosion">up to the erosion</option>
+        <option value="">everything</option>
+        <option value="-">nothing yet</option></select>
+      <div class="hint d">a run stops where you say; carry on from the card</div>
+    </div>
+    <h2 style="margin-top:14px">Knobs</h2>
+    <div class="grid">${knobRows()}</div>`,
+    `<button id="cancel">Cancel</button><button class="go" id="make">Make it</button>`);
+  $("cancel").onclick = () => $("dlg").close();
+  $("make").onclick = async () => {
+    const to = $("to").value;
+    try {
+      await api("/api/worlds", { name: $("nm").value.trim(), preset: $("preset").value, sets: readKnobs(),
+                                 to: to === "-" ? null : (to || DATA.stages[DATA.stages.length - 1]) });
+      $("dlg").close(); await refresh();
+    } catch (e) { alert(e.message); }
+  };
+  setTimeout(() => $("nm").focus(), 50);
+}
+
+function bakeDialog(name) {
+  const w = DATA.worlds.find(x => x.name === name);
+  const opts = DATA.stages.map(s => `<option value="${s}"${s === (w.next || "") ? " selected" : ""}>${s}${w.stages[s].done ? " ✓" : ""}</option>`).join("");
+  dialog(`Bake ${name}`, `<div class="grid">
+      <label>From</label><select id="from"><option value="">where it left off</option>${opts}</select>
+      <div class="hint d">a stage already done is skipped unless you start at it</div>
+      <label>To</label><select id="to"><option value="">the end</option>${DATA.stages.map(s => `<option value="${s}">${s}</option>`).join("")}</select>
+      <div class="hint d">stop after this one, look at it, carry on later</div>
+    </div>
+    <h2 style="margin-top:14px">Knobs</h2>
+    <div class="note">Changing one re-runs the stages it feeds. The erosion re-runs from the start when its count changes — the uplift replay sets the starting depth from the total.</div>
+    <div class="grid" style="margin-top:8px">${knobRows(null, { "world.seed": w.seed, "world.N_c": w.N_c, "world.cell_size_m": w.cell_size_m, "world.land_fraction": w.land_fraction })}</div>`,
+    `<button id="cancel">Cancel</button><button class="go" id="run">Run</button>`);
+  $("cancel").onclick = () => $("dlg").close();
+  $("run").onclick = async () => {
+    try {
+      await api("/api/bake", { world: name, from: $("from").value || null, to: $("to").value || null, sets: readKnobs() });
+      $("dlg").close(); await refresh();
+    } catch (e) { alert(e.message); }
+  };
+}
+
+function planetDialog(name) {
+  const w = DATA.worlds.find(x => x.name === name);
+  dialog(`Planet level · ${name}`, `<div class="grid">
+      <label>Cells</label><select id="R"><option value="4">4 × the coarse grid</option><option value="8" selected>8 × the coarse grid</option></select>
+      <div class="hint d">${w.cell_size_m ? `${fmtCell(w.cell_size_m / 8)} a cell at 8× — the level the viewer draws close up` : ""}</div>
+      <label>Iterations</label><input id="it" type="number" value="80" min="10" max="400" step="10">
+      <div class="hint d">it keeps a time lapse of them, which the timeline plays</div>
+    </div>
+    <div class="note" style="margin-top:10px">A whole planet at 8× took about three hours on twenty cores. It resumes tile by tile, so stopping it loses only the tile that was running. ${w.planet_levels.length ? "This world already has " + w.planet_levels.join(", ") + "; running again re-bakes the tiles it finds unfinished." : ""}</div>`,
+    `<button id="cancel">Cancel</button><button class="go" id="run">Bake it</button>`);
+  $("cancel").onclick = () => $("dlg").close();
+  $("run").onclick = async () => {
+    try {
+      await api("/api/planet", { world: name, R: parseInt($("R").value, 10), iterations: parseInt($("it").value, 10) });
+      $("dlg").close(); await refresh();
+    } catch (e) { alert(e.message); }
+  };
+}
+
+async function showLog(id, title) {
+  openLog = id;
+  const { log } = await api(`/api/log?id=${encodeURIComponent(id)}`);
+  dialog(title, `<pre id="logbox">${esc(log || "nothing yet")}</pre>`, `<button id="cancel">Close</button>`);
+  $("cancel").onclick = () => { openLog = null; $("dlg").close(); };
+  const box = $("logbox");
+  if (box) box.scrollTop = box.scrollHeight;
+}
+
+// ---------------------------------------------------------------------------
+document.addEventListener("click", async ev => {
+  const b = ev.target.closest("button, img.shot");
+  if (!b) return;
+  try {
+    if (b.id === "new") return newPlanet();
+    if (b.dataset.act === "bake") return bakeDialog(b.dataset.w);
+    if (b.dataset.act === "planet") return planetDialog(b.dataset.w);
+    if (b.dataset.act === "viewer") { await api("/api/viewer", { world: b.dataset.w }); return refresh(); }
+    if (b.dataset.act === "log") {
+      const j = [...DATA.jobs].reverse().find(x => x.world === b.dataset.w);
+      return j ? showLog(j.id, `${b.dataset.w} · ${j.title}`) : alert("nothing has run for this world yet");
+    }
+    if (b.dataset.jlog) { const j = DATA.jobs.find(x => x.id === b.dataset.jlog); return showLog(b.dataset.jlog, `${j.world} · ${j.title}`); }
+    if (b.dataset.cancel) { await api("/api/cancel", { id: b.dataset.cancel }); return refresh(); }
+    if (b.dataset.forget) { await api("/api/forget", { id: b.dataset.forget }); return refresh(); }
+    if (b.dataset.shot) window.open(`${b.dataset.shot}/${DATA.worlds.find(w => w.name === b.dataset.shot).quicklooks.slice(-1)[0]}`, "_blank");
+  } catch (e) { alert(e.message); }
+});
+
+async function refresh() {
+  try {
+    DATA = await api("/api/worlds");
+    if (!$("dlg").open) render();
+    else renderJobs();
+    if (openLog) {
+      const { log } = await api(`/api/log?id=${encodeURIComponent(openLog)}`);
+      const box = $("logbox");
+      if (box) { const at = box.scrollTop + box.clientHeight >= box.scrollHeight - 8; box.textContent = log || "nothing yet"; if (at) box.scrollTop = box.scrollHeight; }
+    }
+  } catch (e) { $("where").textContent = `offline (${e.message})`; }
+  const live = DATA.jobs.some(j => j.state === "running" || j.state === "queued");
+  clearTimeout(refresh.t);
+  refresh.t = setTimeout(refresh, document.hidden ? 30000 : live ? 3000 : 15000);
+}
+refresh();
+</script>
+</body>
+</html>
