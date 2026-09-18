@@ -10,8 +10,9 @@ The API:
 
 * ``GET  /api/worlds`` -- ``{worlds, knobs, presets, stages, jobs}``: what
   :mod:`globe.serve.worlds` reads plus the queue (:mod:`globe.serve.jobs`);
-* ``POST /api/worlds`` ``{name, preset, sets, to}`` -- make a world and, with
-  ``to``, queue its stages up to that one;
+* ``POST /api/worlds`` ``{name, from, sets, to, planet}`` -- make a world from
+  a preset *or another world's parameters* and, with ``to``, queue its stages
+  up to that one; with ``planet`` the 1.2 km level and a viewer after them;
 * ``POST /api/bake`` ``{world, from, to, sets, force}`` -- set knobs and run
   stages; ``sets`` rewrites the world's ``params.yaml`` first;
 * ``POST /api/planet`` ``{world, R, iterations}`` -- the planet-wide level at
@@ -125,8 +126,8 @@ def make_handler(worlds_dir: Path, queue: jb.JobQueue, python: str = "", extra: 
                 return self._page()
             if path == "/api/worlds":
                 return self._json(200, {"worlds": wd.scan(worlds_dir), "knobs": wd.KNOBS, "stages": list(STAGES),
-                                        "presets": ["earth", "default", "small", "tiny"], "jobs": self._snapshot(),
-                                        "busy": queue.busy()})
+                                        "presets": ["earth", "default", "small", "tiny"], "preset_values": wd.preset_values(),
+                                        "jobs": self._snapshot(), "busy": queue.busy()})
             if path == "/api/log":
                 jid = (parse_qs(query).get("id") or [""])[0]
                 return self._json(200, {"id": jid, "log": queue.log(jid)})
@@ -188,11 +189,14 @@ def make_handler(worlds_dir: Path, queue: jb.JobQueue, python: str = "", extra: 
             return self._json(404, {"error": "not found"})
 
         def _create(self, d: dict) -> dict:
-            root = wd.create(worlds_dir, str(d.get("name", "")), str(d.get("preset", "earth")), d.get("sets") or {})
-            out = {"world": root.name, "created": True}
+            base = str(d.get("from") or d.get("preset") or "earth")
+            root = wd.create(worlds_dir, str(d.get("name", "")), base, d.get("sets") or {})
+            out = {"world": root.name, "created": True, "from": base}
             if d.get("to"):
                 out["job"] = queue.submit("world", root.name, bake_cmd(python, root, to_stage=str(d["to"])) + extra,
                                           title=f"bake to {d['to']}", to=str(d["to"]))
+            if d.get("planet"):
+                out["planet"] = self._planet({"world": root.name, "R": d.get("R") or 8})["job"]
             return out
 
         def _bake(self, d: dict) -> dict:
@@ -216,16 +220,22 @@ def make_handler(worlds_dir: Path, queue: jb.JobQueue, python: str = "", extra: 
             cmd = [python, str(SCRIPTS / "planet_bake.py"), "--world", str(root), "--R", str(R)]
             if d.get("iterations"):
                 cmd += ["--iterations", str(int(d["iterations"]))]
-            return {"job": queue.submit("planet", root.name, cmd, title=f"planet R={R}", R=R)}
+            job = queue.submit("planet", root.name, cmd, title=f"planet R={R}", R=R)
+            # the level is only half of it: the viewer draws the close-up ground from its
+            # tiles, so export one behind it or the world still looks like the coarse grid
+            after = self._viewer({"world": root.name, "planet": f"zoom/planet_R{R}"})["job"]
+            return {"job": job, "viewer": after}
 
         def _viewer(self, d: dict) -> dict:
             root = self._world(str(d.get("world", "")))
             cmd = [python, str(SCRIPTS / "export_viewer.py"), "--world", str(root)]
-            planet = sorted((root / "zoom").glob("planet_R*")) if (root / "zoom").is_dir() else []
-            planet = [p for p in planet if (p / "planet.json").exists()]
-            if planet:
-                cmd += ["--planet", f"zoom/{planet[-1].name}", "--detail"]
-            return {"job": queue.submit("viewer", root.name, cmd, title="export viewer")}
+            want = str(d.get("planet") or "")
+            if not want:                                   # the finest level it has finished
+                have = [p for p in sorted((root / "zoom").glob("planet_R*")) if (p / "planet.json").exists()] if (root / "zoom").is_dir() else []
+                want = f"zoom/{have[-1].name}" if have else ""
+            if want:
+                cmd += ["--planet", want, "--detail"]
+            return {"job": queue.submit("viewer", root.name, cmd, title="export viewer" + (" with detail" if want else ""))}
 
         def _zoom_post(self, name: str, sub: str | None, d: dict) -> dict:
             from ..config import WorldParams

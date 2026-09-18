@@ -59,6 +59,8 @@
   .job { display:flex; gap:10px; align-items:center; padding:4px 0; }
   .job .msg { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .note { color:var(--dim); font-size:11px; }
+  .warn { color:#e5c580; font-size:11px; background:#231d10; border:1px solid #5c4a1d; border-radius:6px; padding:6px 8px; }
+  .diff { color:#8fe0b4; }
   @media (max-width:640px) { main { padding:10px; gap:10px; } header { padding:10px 12px; } }
 </style>
 </head>
@@ -107,6 +109,15 @@ function stageChips(w) {
   }).join("");
 }
 
+// what a world sets away from the code's defaults -- the tuning it carries, which is
+// otherwise invisible and quietly lost when the next planet starts from a preset
+function tunedLine(w) {
+  const t = w.tuned || {}, names = Object.keys(t);
+  if (!names.length) return `<div class="d">the defaults, unchanged</div>`;
+  const list = names.map(n => `${n} ${t[n][0]} (default ${t[n][1]})`).join("\n");
+  return `<div class="d diff" title="${esc(list)}">${names.length} knob${names.length === 1 ? "" : "s"} off the defaults: ${esc(names.map(n => n.split(".")[1]).join(", "))}</div>`;
+}
+
 function card(w) {
   const shot = w.quicklooks.length ? w.quicklooks[w.quicklooks.length - 1] : null;
   const run = DATA.jobs.find(j => j.world === w.name && (j.state === "running" || j.state === "queued"));
@@ -127,7 +138,9 @@ function card(w) {
         <button class="sm" data-act="viewer" data-w="${esc(w.name)}">Export viewer</button>
         <button class="sm" data-act="log" data-w="${esc(w.name)}">Log</button>
       </div>
-      <div class="d">${w.zooms.length} zoom window${w.zooms.length === 1 ? "" : "s"}${w.planet_levels.length ? " · " + w.planet_levels.join(", ") : ""}${w.created ? " · " + w.created.replace("T", " ") : ""}</div>
+      ${w.baked && !w.detail ? `<div class="warn">No close-up layer. The viewer draws the ${cell} grid until the planet-wide level is baked — that is where the fine relief, the satellite ground, the trees and the smooth water come from.</div>` : ""}
+      <div class="d">${w.zooms.length} zoom window${w.zooms.length === 1 ? "" : "s"}${w.planet_levels.length ? " · " + w.planet_levels.join(", ") : ""}${w.detail ? " · close-up layer" : ""}${w.created ? " · " + w.created.replace("T", " ") : ""}</div>
+      ${tunedLine(w)}
     </div></div>`;
 }
 
@@ -177,39 +190,66 @@ const knobRows = (only, values) => DATA.knobs.filter(k => !only || only.includes
   return `<label>${k.label}</label>${input}<div class="hint d">${esc(k.hint)}</div>`;
 }).join("");
 
-const readKnobs = () => {
+// what to send: every knob that differs from what the base already sets (the base is
+// applied first, so a knob equal to it need not be repeated)
+const readKnobs = base => {
+  const from = base ? baseValues(base) : {};
   const sets = {};
   $("dbody").querySelectorAll("[data-k]").forEach(el => {
     const k = DATA.knobs.find(x => x.name === el.dataset.k);
     const v = k.type === "int" ? parseInt(el.value, 10) : parseFloat(el.value);
-    if (!Number.isNaN(v) && v !== k.default) sets[el.dataset.k] = v;
+    const was = from[k.name] != null ? from[k.name] : k.default;
+    if (!Number.isNaN(v) && v !== was) sets[el.dataset.k] = v;
   });
   return sets;
 };
 
+// what a base (a preset or a world) sets each knob to
+const baseValues = base => (DATA.preset_values && DATA.preset_values[base])
+  || (DATA.worlds.find(w => w.name === base) || {}).knobs || {};
+
 function newPlanet() {
-  const stop = ["tectonics", "erosion", "derive", ""];
+  const baked = DATA.worlds.filter(w => w.baked && w.knobs && Object.keys(w.knobs).length);
+  const start = baked.length ? baked[0].name : "earth";
   dialog("New planet", `<div class="grid">
-      <label>Name</label><input id="nm" placeholder="earth-v12" autocomplete="off">
+      <label>Name</label><input id="nm" placeholder="earth-v13" autocomplete="off">
       <div class="hint d">a directory under the worlds folder</div>
-      <label>Preset</label><select id="preset">${DATA.presets.map(p => `<option${p === "earth" ? " selected" : ""}>${p}</option>`).join("")}</select>
-      <div class="hint d">earth is the full 9.8 km planet (hours); small is a minute, tiny is seconds</div>
+      <label>Start from</label><select id="base">
+        ${baked.map(w => `<option value="${esc(w.name)}"${w.name === start ? " selected" : ""}>${esc(w.name)} — its parameters</option>`).join("")}
+        ${DATA.presets.map(p => `<option value="${p}"${p === start ? " selected" : ""}>the ${p} preset</option>`).join("")}</select>
+      <div class="hint d" id="basehint"></div>
       <label>Bake</label><select id="to">
         <option value="tectonics">the plates only — look, then carry on</option>
         <option value="erosion">up to the erosion</option>
         <option value="">everything</option>
         <option value="-">nothing yet</option></select>
       <div class="hint d">a run stops where you say; carry on from the card</div>
+      <label>Close-up layer</label><label class="d" style="display:flex;gap:6px;align-items:center">
+        <input type="checkbox" id="planet" style="width:auto" checked> bake the 1.2 km level after it</label>
+      <div class="hint d">about three hours on twenty cores; without it the viewer draws the coarse grid only</div>
     </div>
     <h2 style="margin-top:14px">Knobs</h2>
-    <div class="grid">${knobRows()}</div>`,
+    <div class="grid" id="knobs">${knobRows(null, baseValues(start))}</div>`,
     `<button id="cancel">Cancel</button><button class="go" id="make">Make it</button>`);
+  const fill = () => {
+    const base = $("base").value, vals = { ...baseValues(base) };
+    const w = DATA.worlds.find(x => x.name === base);
+    if (w) vals["world.seed"] = Math.floor(Math.random() * 100000);     // a new planet, not the same one again
+    $("knobs").innerHTML = knobRows(null, vals);
+    const off = w ? Object.keys(w.tuned || {}) : [];
+    $("basehint").innerHTML = w
+      ? `its parameters, with a fresh seed${off.length ? ` · <span class="diff" title="${esc(off.map(n => `${n} ${w.tuned[n][0]} (default ${w.tuned[n][1]})`).join("\n"))}">carrying ${off.length} knob${off.length === 1 ? "" : "s"} it tuned away from the defaults: ${esc(off.map(n => n.split(".")[1]).join(", "))}</span>` : ""}`
+      : "earth is the full 9.8 km planet (hours); small is a minute, tiny is seconds";
+  };
+  $("base").onchange = fill;
+  fill();
   $("cancel").onclick = () => $("dlg").close();
   $("make").onclick = async () => {
     const to = $("to").value;
     try {
-      await api("/api/worlds", { name: $("nm").value.trim(), preset: $("preset").value, sets: readKnobs(),
-                                 to: to === "-" ? null : (to || DATA.stages[DATA.stages.length - 1]) });
+      await api("/api/worlds", { name: $("nm").value.trim(), from: $("base").value, sets: readKnobs($("base").value),
+                                 to: to === "-" ? null : (to || DATA.stages[DATA.stages.length - 1]),
+                                 planet: $("planet").checked && to !== "-" && to !== "tectonics" });
       $("dlg").close(); await refresh();
     } catch (e) { alert(e.message); }
   };
@@ -227,12 +267,12 @@ function bakeDialog(name) {
     </div>
     <h2 style="margin-top:14px">Knobs</h2>
     <div class="note">Changing one re-runs the stages it feeds. The erosion re-runs from the start when its count changes — the uplift replay sets the starting depth from the total.</div>
-    <div class="grid" style="margin-top:8px">${knobRows(null, { "world.seed": w.seed, "world.N_c": w.N_c, "world.cell_size_m": w.cell_size_m, "world.land_fraction": w.land_fraction })}</div>`,
+    <div class="grid" style="margin-top:8px">${knobRows(null, w.knobs)}</div>`,
     `<button id="cancel">Cancel</button><button class="go" id="run">Run</button>`);
   $("cancel").onclick = () => $("dlg").close();
   $("run").onclick = async () => {
     try {
-      await api("/api/bake", { world: name, from: $("from").value || null, to: $("to").value || null, sets: readKnobs() });
+      await api("/api/bake", { world: name, from: $("from").value || null, to: $("to").value || null, sets: readKnobs(name) });
       $("dlg").close(); await refresh();
     } catch (e) { alert(e.message); }
   };

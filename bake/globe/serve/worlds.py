@@ -56,7 +56,9 @@ KNOBS: list[dict] = [
     _knob("climate", "T_eq", "Equator", "°C at the equator at sea level", lo=-10.0, hi=45.0, step=0.5),
     _knob("climate", "precip_mean", "Rain", "mean rain over the land, 1 = Earth's", lo=0.2, hi=3.0, step=0.1),
     _knob("climate", "lapse", "Lapse", "°C lost a kilometre of height", lo=3.0, hi=10.0, step=0.1),
+    _knob("tectonics", "ranges_amp", "Ranges", "ranges and basins along the belts; 0 leaves a belt one smooth swell", lo=0.0, hi=1.5, step=0.05),
     _knob("erosion", "iterations", "Erosion", "iterations of the coarse erosion", lo=10, hi=4000, step=10),
+    _knob("erosion", "creep_rate", "Creep", "hillslope smoothing; high rounds the divides off, 0 leaves every path its own rill", lo=0.0, hi=0.5, step=0.01),
     _knob("refine", "refine_iterations", "Refine", "iterations of the fine grid's erosion", lo=10, hi=800, step=10),
 ]
 _BY_NAME = {k["name"]: k for k in KNOBS}
@@ -119,20 +121,72 @@ def apply(params: WorldParams, sets: dict) -> WorldParams:
     return out
 
 
-def create(worlds_dir: Path, name: str, preset: str = "earth", sets: dict | None = None) -> Path:
-    """Make a world directory with the parameters a page asked for.  Nothing
-    is baked: the stages are jobs of their own."""
+def knob_values(params) -> dict:
+    """What the page's knobs are set to, from a :class:`WorldParams` or the
+    raw dict a manifest holds (an old world's may not parse as parameters)."""
+    d = params.to_dict() if hasattr(params, "to_dict") else (params or {})
+    out = {}
+    for k in KNOBS:
+        v = (d.get(k["group"]) or {}).get(k["key"])
+        if v is not None:
+            out[k["name"]] = v
+    return out
+
+
+#: parameters that are about running a bake, not about the planet it makes
+_NOT_SHAPE = ("render", "watersheds")
+
+
+def tuned(params) -> dict:
+    """``{name: [value, default]}`` for every parameter a world sets away from
+    this code's defaults -- what makes it the planet it is.  A world carrying
+    tuning nobody wrote down is how a next one quietly loses it."""
+    d = params.to_dict() if hasattr(params, "to_dict") else (params or {})
+    base = WorldParams().to_dict()
+    out = {}
+    for g, keys in base.items():
+        if g in _NOT_SHAPE:
+            continue
+        for k, v in keys.items():
+            got = (d.get(g) or {}).get(k, v)
+            if got != v and k != "seed":
+                out[f"{g}.{k}"] = [got, v]
+    return out
+
+
+def preset_values() -> dict:
+    """``{preset: {knob: value}}``, for a page to fill a form with."""
+    return {name: knob_values(make()) for name, make in PRESETS.items()}
+
+
+def base_params(worlds_dir: Path, base: str):
+    """The parameters a new world starts from: a preset's, or another world's
+    -- a planet baked with knobs nobody wrote down is otherwise a dead end,
+    and its tuning is lost the moment you want a second one."""
+    if base in PRESETS:
+        return PRESETS[base]()
+    root = Path(worlds_dir) / Path(base or "").name
+    if not root.is_dir():
+        raise ValueError(f"{base!r}: neither a preset ({', '.join(sorted(PRESETS))}) nor a world here")
+    try:
+        return params_of(root)
+    except (OSError, ValueError, KeyError) as e:
+        raise ValueError(f"{base}: its parameters do not read as this code's ({type(e).__name__}: {e})") from e
+
+
+def create(worlds_dir: Path, name: str, base: str = "earth", sets: dict | None = None) -> Path:
+    """Make a world directory with the parameters a page asked for: a
+    preset's or another world's, with the knobs it set over them.  Nothing is
+    baked: the stages are jobs of their own."""
     if not NAME_RE.match(name or ""):
         raise ValueError(f"{name!r}: a name is letters, digits, dot, dash or underscore")
-    if preset not in PRESETS:
-        raise ValueError(f"{preset!r}: not a preset ({', '.join(sorted(PRESETS))})")
+    params = apply(base_params(Path(worlds_dir), base), sets or {})
     root = Path(worlds_dir) / name
     if root.exists():
         raise FileExistsError(f"{root} is already there")
-    params = apply(PRESETS[preset](), sets or {})
     root.mkdir(parents=True)
     write_params(root, params)
-    (root / "created.json").write_text(json.dumps({"preset": preset, "sets": sets or {}}, indent=1))
+    (root / "created.json").write_text(json.dumps({"from": base, "sets": sets or {}}, indent=1))
     return root
 
 
@@ -194,7 +248,10 @@ def describe(root: Path, sizes: bool = False) -> dict:
         "quicklooks": quicklooks(root),
         "zooms": zooms,
         "planet_levels": planet,
+        "detail": (root / "viewer" / "tiles").is_dir(),      # the close-up layer the planet level feeds
         "params_file": params_path(root).exists(),
+        "knobs": knob_values(params),
+        "tuned": tuned(params),
     }
     if sizes:
         rec["bytes"] = _dir_bytes(root)
@@ -216,4 +273,4 @@ def scan(worlds_dir: Path, sizes: bool = False) -> list[dict]:
 
 
 __all__ = ["PARAMS_NAME", "NAME_RE", "KNOBS", "params_path", "params_of", "write_params", "ensure_params",
-           "apply", "create", "quicklooks", "describe", "scan"]
+           "apply", "knob_values", "tuned", "preset_values", "base_params", "create", "quicklooks", "describe", "scan"]

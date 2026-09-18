@@ -89,6 +89,25 @@ def test_a_new_world_keeps_the_knobs_it_was_made_with(tmp_path):
             wd.create(tmp_path, bad, "tiny", {})
 
 
+def test_a_new_world_can_start_from_another_worlds_parameters(tmp_path):
+    """A planet baked with knobs nobody wrote down is a dead end: making the
+    next one from it carries its tuning, and the page can see which knobs it
+    tuned away from the code's defaults."""
+    from globe.pipeline import bake
+
+    first = wd.create(tmp_path, "w1", "tiny", {"tectonics.steps": 250, "climate.lapse": 5.0})
+    bake(first, wd.params_of(first), to_stage="tectonics", logger=lambda m: None)
+    second = wd.create(tmp_path, "w2", "w1", {"world.seed": 9})
+    p2 = wd.params_of(second)
+    assert p2.tectonics.steps == 250 and p2.climate.lapse == pytest.approx(5.0) and p2.world.seed == 9
+    assert json.loads((second / "created.json").read_text())["from"] == "w1"
+    vals = {w["name"]: w["knobs"] for w in wd.scan(tmp_path)}
+    assert vals["w1"]["tectonics.steps"] == 250 and vals["w2"]["world.seed"] == 9
+    assert wd.preset_values()["tiny"]["world.N_c"] == WorldParams.tiny_world().world.N_c
+    with pytest.raises(ValueError):
+        wd.create(tmp_path, "w3", "not-a-world-or-preset", {})
+
+
 def test_knobs_are_checked_against_what_they_mean(tmp_path):
     p = WorldParams.tiny_world()
     assert wd.apply(p, {"world.seed": "7"}).world.seed == 7          # a page sends strings
@@ -173,6 +192,19 @@ def test_the_api_refuses_what_it_cannot_run(server):
     _post(server["url"] + "/api/worlds", {"name": "p2", "preset": "tiny"})
     assert "error" in _post(server["url"] + "/api/bake", {"world": "p2", "to": "not-a-stage"})
     assert _get(server["url"] + "/api/worlds")["jobs"] == []
+
+
+def test_the_planet_level_brings_a_viewer_with_the_close_up_layer_behind_it(server):
+    """A level on its own changes nothing a browser sees: the viewer draws the
+    close-up ground from its tiles, so an export follows it in the queue."""
+    _post(server["url"] + "/api/worlds", {"name": "p1", "preset": "tiny"})
+    out = _post(server["url"] + "/api/planet", {"world": "p1", "R": 4})
+    assert out["job"]["kind"] == "planet" and out["viewer"]["kind"] == "viewer"
+    cmds = {j["title"]: j["cmd"] for j in server["queue"].jobs}
+    assert cmds["planet R=4"][-2:] == ["--R", "4"]
+    assert cmds["export viewer with detail"][-3:] == ["--planet", "zoom/planet_R4", "--detail"]
+    for j in server["queue"].jobs:
+        server["queue"].cancel(j["id"])
 
 
 def test_a_bake_runs_with_the_worlds_own_parameters(tmp_path):
