@@ -737,6 +737,7 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
     # spread over the whole run (the first iteration, then evenly to the last)
     snap_at = {0} | {int(round((k + 1) * int(level.iterations) / snaps)) - 1 for k in range(snaps)} if snaps > 0 else set()
     frames: list = []
+    drain = job["ocean"] | ~job["inwin"]      # where a tile's water leaves it, for the flood tree
     prod = job.get("prod")
     hold = int(level.hold_every)
     sigma = max(1, int(round(job["f"] * level.hold_scale)))
@@ -746,12 +747,15 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
         for it in range(int(level.iterations)):
             _share_threads(demand)
             st = step(state, ep, it, particles_per_cell=ppc, rng_stage="refine")
+            snap = it in snap_at
+            surf_m = (state.height[0] + state.sediment[0]) * unit if (grows or snap) else None
+            flood = None                      # this iteration's flood tree, where one was taken
             if grows:
                 # the trees after the water: the tile's streams (upstream area of its
                 # rain and inflow) and pools, every few iterations
-                surf_m = (state.height[0] + state.sediment[0]) * unit
                 if it % VEG_WATER_EVERY == 0:
-                    acc, pool = tile_water(surf_m, job["ocean"] | ~job["inwin"], weight)
+                    acc, pool = tile_water(surf_m, drain, weight)
+                    flood = acc
                     area = acc / rain_cell * cell_km2
                 cap = veg.capacity(vp, arr["forest"], temperature_at(params, arr["temp0"], surf_m), surf_m, pool, area, cell_m, active)
                 cover = veg.grow(vp, cover, cap, vrng)
@@ -760,12 +764,16 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
             particles += int(st.get("particles", 0))
             for k, v in (st.get("deaths") or {}).items():
                 deaths[k] += int(v)
-            if it in snap_at:
+            if snap:
+                # the streams of a frame are the flood tree's, as the finished level's are --
+                # the particles' own discharge is an average over the iteration's passes, which
+                # swells and fades with them, so a time lapse of it pulsed instead of growing
+                facc = flood if flood is not None else tile_water(surf_m, drain, weight)[0]
                 fsl = prod if prod is not None else (slice(None), slice(None))
-                fsurf = (state.height[0] + state.sediment[0])[fsl] * unit
-                fq = state.discharge[0][fsl]
+                fsurf = surf_m[fsl]
                 fac = _snap_factor(fsurf.shape[0])
-                frames.append({"it": it + 1, "surface": _block_mean(fsurf, fac), "discharge": _block_mean(fq, fac), "factor": fac})
+                frames.append({"it": it + 1, "surface": _block_mean(fsurf, fac),
+                               "discharge": _block_mean(facc[fsl], fac), "factor": fac})
             if hold > 0 and (it + 1) % hold == 0:
                 # hold the tile to its parent while it erodes, as an uplift rate:
                 # the offset now, and how fast it grew over the last `hold`

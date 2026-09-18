@@ -227,7 +227,10 @@ def make_handler(root: Path, jobs: Jobs):
             return self._json(200, jobs.submit(spot, bool(d.get("game", False))))
 
         def log_message(self, fmt, *args):
-            if "/api/" in (args[0] if args else ""):
+            # log_error passes an HTTPStatus first, not the request line: taking "in" of it
+            # raised inside the handler, which dropped the connection -- a browser asking for
+            # /favicon.ico (every one does) left the whole page hanging on an empty reply
+            if "/api/" in str(args[0] if args else ""):
                 return
             sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 

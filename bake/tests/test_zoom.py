@@ -420,6 +420,47 @@ def test_inflow_cap_lets_the_rain_spawn_on_the_slopes():
     assert moved[2.0] > 3 * max(moved[0.0], 1), moved
 
 
+def test_a_time_lapse_frame_keeps_the_flood_trees_streams():
+    """A snapshot's ``discharge`` is the flood tree of the frame's own surface
+    (:func:`zoom.bake.tile_water`), the field the finished level draws its
+    rivers from -- not the particles' own discharge, which is an average over
+    the iteration's passes and swelled and faded with them, so a time lapse of
+    it pulsed instead of growing."""
+    from globe.config import WorldParams
+    from globe.refine.zoom import zoom_params
+
+    params = zoom_params(WorldParams.tiny_world(), 8)
+    n = 42
+    i, j = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    height = (2.0 * i + 0.3 * np.sin(j * 0.9) + 0.2 * np.cos(i * 1.3 + j * 0.4)).astype(np.float64)
+    inwin = np.zeros((n, n), bool)
+    inwin[1:-1, 1:-1] = True
+    precip = np.full((n, n), 0.01)
+    src = np.zeros((n, n))
+    src[n - 3, 21] = 10.0 * float(precip[inwin].sum())
+    metric = np.zeros((n, n, 3), np.float32)
+    metric[..., 0] = metric[..., 2] = 1.0
+    arrays = {"height": height, "sediment": np.zeros((n, n)), "discharge": np.zeros((n, n)), "momentum": np.zeros((n, n, 2)),
+              "hardness": np.full((n, n), 0.5), "precip": precip, "evap": np.ones((n, n)), "metric": metric,
+              "metric_inv": metric.copy(), "plain": height.copy()}
+    ocean = np.zeros((n, n), bool)
+    job = {"a": 1, "b": 1, "c": n - 2, "sl": None, "land": inwin, "active": inwin, "inwin": inwin, "ocean": ocean,
+           "src": src, "arrays": arrays, "f": 1, "snapshots": 3}
+    lv = zb.ZoomLevel(8, 1, 4, tile=n - 2, margin=0, hold_every=0)
+    out = zb.erode_tile(params, lv, 8, job, (1, 2, 3))
+
+    frames = out["frames"]
+    assert [f["it"] for f in frames] == [1, 3, 4] and all(f["factor"] == 1 for f in frames)   # the first, then evenly to the last
+    weight = np.where(inwin, precip + src, 0.0).astype(np.float32)          # the tile's own rain and its inflow
+    for f in frames:
+        acc, _pool = zb.tile_water(f["surface"], ocean | ~inwin, weight)
+        assert f["discharge"] == pytest.approx(acc, rel=1e-5), f["it"]
+    # the inflow river runs to the outlet in every frame: the pulse was a river that grew and
+    # then faded out, while the flood tree carries what enters the tile all the way through it
+    for f in frames:
+        assert float(np.asarray(f["discharge"])[inwin].max()) > float(src.sum())
+
+
 @pytest.fixture(scope="module")
 def fine_zoom(world, zoom, tmp_path_factory):
     """``LEVELS`` and ``FINE`` below them, in a world-like directory of its own

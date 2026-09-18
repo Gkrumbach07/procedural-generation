@@ -101,11 +101,12 @@
   #loading .bar i { display:block; height:100%; width:0; background:var(--accent); border-radius:2px; }
   #zoomlist .zw { border-top:1px solid var(--line); padding:8px 0 6px; }
   #zoomlist .zw:first-child { border-top:0; padding-top:0; }
-  #zoomlist .zh { display:flex; align-items:baseline; gap:8px; margin-bottom:4px; }
+  #zoomlist .zh { display:flex; align-items:center; gap:8px; margin-bottom:4px; }
+  #zoomlist .zh .sp { flex:1; }
   #zoomlist .lv { display:flex; align-items:center; gap:6px; margin:4px 0; }
   #zoomlist .lv .sp { flex:1; }
   #zoomlist .lv .chk { margin:0; min-width:64px; }
-  #zoomlist .lv button.on { background:#24344d; color:#fff; }
+  #zoomlist button.on { background:#24344d; color:#fff; }
   #zoomlist .zr button.tl { padding:1px 6px; font-size:11px; line-height:16px; }
   #zoomlist .zn { color:var(--accent); cursor:pointer; min-width:84px; }
   #zoomlist .zl { padding:1px 6px; font-size:11px; line-height:16px; }
@@ -210,7 +211,7 @@
     <section class="tab" data-tab="zooms">
       <h3>Windows</h3>
       <div id="zoomlist"></div>
-      <div class="note" id="zoomnote">A window&rsquo;s fine levels draw in place as you zoom in. Tick a level off to compare it with the planet, or play a level&rsquo;s erosion.</div>
+      <div class="note" id="zoomnote">A window&rsquo;s fine levels draw in place as you zoom in. Tick a level off to compare it with the planet. Play runs the window&rsquo;s erosion the way it was baked: the coarsest level first, then each finer one over it.</div>
     </section>
 
     <section class="tab" data-tab="here">
@@ -1879,7 +1880,7 @@ const zkey = (z, L) => `${z.name}_L${L.R}`;
 // a level's time lapse (globe/viz/zoomtex.write_frames): one texture per frame of its
 // erosion, played in place of the level itself
 const tkey = (name, R, k) => `${name}_L${R}#${k}`;
-let play = null;                      // { name, R, count, k, last } while a time lapse runs
+let play = null;                      // { name, levels, li, k, last, next, hold } while one runs
 // what the page is holding, for a look from outside it (tests, and a phone that misbehaves)
 GV.pickDebug = (x, y) => {
   const rd = tiltRay(x, y);
@@ -1891,35 +1892,55 @@ GV.debug = () => ({
   zoomTextures: ztex.loaded.size, zoomBytes: [...ztex.loaded.values()].reduce((b, v) => b + texBytes(v.rec), 0),
   detailSide: detail.tex ? detailSide : 0, contextLost: gl.isContextLost(), layer: state.layer, zoom: state.zoom,
 });
-// play (or stop) a level's time lapse from outside the page, and what is playing
-GV.timeLapse = (name, R) => {
-  const z = zooms.find(x => x.name === name), L = z && (z.levels || []).find(x => x.R === R);
-  if (L && L.frames) playFrames(name, R, L.frames);
-  return play && { name: play.name, R: play.R, count: play.count, k: play.k,
+// play (or stop) a window's time lapse from outside the page, and what is playing
+GV.timeLapse = name => {
+  if (name) playFrames(name);
+  return play && { name: play.name, R: playLevel().R, count: playLevel().frames.count, k: play.k,
+                   levels: play.levels.map(L => L.R), li: play.li,
                    loaded: [...ztex.loaded.keys()], loading: [...ztex.loading], failed: [...ztex.failed] };
 };
-function playFrames(name, R, frames) {
-  const z = zooms.find(x => x.name === name), L = z && (z.levels || []).find(x => x.R === R);
-  if (play && play.name === name && play.R === R) {
-    // stopping: drop the frames' textures, the level's own is drawn again
-    const pre = tkey(name, R, "").slice(0, -1);
-    for (const [k, v] of [...ztex.loaded]) if (k.startsWith(pre)) { gl.deleteTexture(v.tex); ztex.loaded.delete(k); }
-    play = null; buildZoomList(); requestDraw(); return;
-  }
-  play = { name, R, count: frames.count, k: 0, last: performance.now() };
-  // the frames are drawn in the level's place, so the view has to be over it -- pressing play
-  // while the map is elsewhere (or too far out for the level to draw) showed nothing at all
-  if (L) flyToLevel(L);
+// A window plays as the bake ran it: the coarsest level erodes through its frames, then the
+// next finer one takes over inside it, drawn over what the coarser ones ended at, and the view
+// flies down with it.  (One button per level meant pressing four of them and watching each on
+// its own, which is not how the window was made.)
+function playFrames(name) {
+  if (play && play.name === name) return stopPlay();
+  stopPlay();
+  const z = zooms.find(x => x.name === name);
+  const levels = (z ? z.levels || [] : []).filter(L => L.tex && L.frames).sort((a, b) => a.R - b.R);
+  if (!levels.length) return;
+  play = { name, levels, li: 0, k: 0, last: performance.now(), next: false, hold: 0 };
+  flyToLevel(levels[0]);              // the frames draw in the level's place, so the view goes there
   buildZoomList(); requestDraw();
+}
+function stopPlay() {
+  if (!play) return;
+  const pre = `${play.name}_L`;       // the frames' textures go; the levels' own are drawn again
+  for (const [k, v] of [...ztex.loaded]) if (k.startsWith(pre) && k.includes("#")) { gl.deleteTexture(v.tex); ztex.loaded.delete(k); }
+  play = null; buildZoomList(); requestDraw();
+}
+const playLevel = () => (play ? play.levels[play.li] : null);
+// where the running level has got to, written into the zoom list's line for it
+function playText() {
+  const el = $("playtext");
+  if (!el || !play) return;
+  const L = playLevel(), k = Math.min(Math.floor(play.k), L.frames.count - 1);
+  el.textContent = `frame ${k + 1} of ${L.frames.count}` + (L.frames.iterations ? ` · iteration ${L.frames.iterations[k]}` : "");
 }
 // the frame a playing level draws now, loading what it has not got yet (a couple at a time)
 function playSlot(L, name) {
-  if (!play || play.name !== name || play.R !== L.R) return null;
-  const want = Math.min(Math.floor(play.k), play.count - 1);
+  if (!play || play.name !== name) return null;
+  const cur = playLevel();
+  if (L.R > cur.R) return "wait";          // a finer level: its turn in the window has not come
+  if (!L.frames) return null;
+  const count = L.frames.count;
+  // a level already played holds what it ended at, under whatever is running over it now
+  const done = L.R < cur.R, want = done ? count - 1 : Math.min(Math.floor(play.k), count - 1);
   let got = ztex.loaded.get(tkey(name, L.R, want));
+  if (!done) play.waiting = !got;        // the clock waits for a frame still on its way
   // load ahead of the frame being drawn, and keep loading the rest so a loop runs smoothly
-  for (let d = 0; d < play.count; d++) {
-    const k = (want + d) % play.count, key = tkey(name, L.R, k);
+  for (let d = 0; d < (done ? 1 : count); d++) {
+    const k = (want + d) % count, key = tkey(name, L.R, k);
     if (ztex.loaded.has(key) || ztex.loading.has(key) || ztex.failed.has(key) || ztex.loading.size >= 4) continue;
     ztex.loading.add(key);
     const sc = document.createElement("script"); sc.src = L.frames.files[k];
@@ -1944,7 +1965,8 @@ GV.zoomTex = async (name, R, b64, frame) => {
   for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
   bm.close && bm.close();
   ztex.loaded.set(key, { tex: t, rec: timeLapse ? lv.frames : lv.tex, R, name, seen: ztex.tick, frame: timeLapse ? frame : undefined });
-  requestDraw(); buildZoomList();
+  requestDraw();
+  if (!timeLapse) buildZoomList();     // a level's "loading" tag; a time lapse's frames land by the dozen
 };
 // contour interval for this view: a 1-2-5 step giving about twenty lines over the
 // height range of the land in view (5th-95th percentile of the atlas under a
@@ -1991,7 +2013,8 @@ function updateZoomTex(FA) {
     const key = zkey(z, L);
     // off, finer than a few pixels can show, as coarse as the planet level (1.2 km: nothing to add), or elsewhere
     if (state.zoff.has(key) || L.tex.cell_m < mpp / 6 || L.tex.cell_m >= 1000 || !zoomLevelInView(L)) continue;
-    const fr = L.frames ? playSlot(L, z.name) : null;
+    const fr = play && play.name === z.name ? playSlot(L, z.name) : null;
+    if (fr === "wait") continue;            // held back until the time lapse reaches this level
     if (fr) { want.push(fr); continue; }
     const got = ztex.loaded.get(key);
     if (got) { want.push(got); }
@@ -2024,11 +2047,15 @@ function updateZoomTex(FA) {
   // only the levels actually drawn count as in use: where two zooms cover the same ground the
   // one not drawn should fall out of memory, not sit there holding 54 MB
   for (const w of picked) w.seen = ztex.tick;
-  const lapse = play ? tkey(play.name, play.R, "").slice(0, -1) : null;
+  // the level running keeps its frames; a level already played keeps only the frame it ended
+  // at, which is what the finer ones are drawn over
+  const curPre = play ? `${play.name}_L${playLevel().R}#` : null;
+  const ended = play ? new Set(play.levels.map(L => tkey(play.name, L.R, L.frames.count - 1))) : null;
+  const lapse = k => play && k.includes("#") && k.startsWith(`${play.name}_L`) && (k.startsWith(curPre) || ended.has(k));
   let bytes = 0;
   for (const v of ztex.loaded.values()) bytes += texBytes(v.rec);
   if (bytes > ZT_BYTES) {
-    const old = [...ztex.loaded.entries()].filter(([k, v]) => v.seen < ztex.tick && !(lapse && k.startsWith(lapse)))
+    const old = [...ztex.loaded.entries()].filter(([k, v]) => v.seen < ztex.tick && !lapse(k))
       .sort((a, b) => a[1].seen - b[1].seen);
     for (const [k, v] of old) {
       if (bytes <= ZT_BYTES) break;
@@ -2112,12 +2139,26 @@ function draw() {
   gl.uniform1f(U.uExag, state.exag * (dlv ? Math.max(FA.res / dlv.res, 1 / 16) : 1));
   gl.uniform1f(U.uExagBase, state.exag); gl.uniform1f(U.uFARes, FA.res);
   if (play) {
-    // the time lapse runs at the Speed slider's frames a second, looping
-    const now = performance.now();
-    const was = Math.floor(play.k);
-    play.k = (play.k + (now - play.last) / 1000 * state.fps) % play.count;
+    // the level runs at the Speed slider's frames a second, rests a moment on what it ended
+    // at, then the next finer level takes over; the finest done, the window plays again
+    const now = performance.now(), cur = playLevel(), last = cur.frames.count - 1;
+    const was = play.li * 1e4 + Math.floor(play.k);
+    // a frame still loading holds the clock (up to a few seconds), and a stall -- decoding a
+    // level's textures takes a beat -- advances by at most a fifth of a second: without either
+    // the first run through skipped most of the frames and read as a jump, not an erosion
+    if (!play.waiting) play.waitFrom = 0;
+    else if (!play.waitFrom) play.waitFrom = now;
+    const waiting = play.waiting && now - play.waitFrom < 4000;
+    if (play.next) {
+      if (now >= play.hold) { play.next = false; play.li = (play.li + 1) % play.levels.length; play.k = 0; play.waiting = false; flyToLevel(playLevel()); }
+    } else if (!waiting) {
+      play.k += Math.min((now - play.last) / 1000, 0.2) * state.fps;
+      if (play.k >= last) { play.k = last; play.next = true; play.hold = now + 900; }
+    }
     play.last = now;
-    if (Math.floor(play.k) !== was && tab === "zooms") buildZoomList();
+    // the frame counter is written straight into its line: rebuilding the list ten times a
+    // second detached the buttons under the cursor, so Stop took two presses to catch
+    if (tab === "zooms") { if (play.li * 1e4 !== Math.floor(was / 1e4) * 1e4) buildZoomList(); else if (Math.floor(play.k) !== was % 1e4) playText(); }
     requestDraw();
   }
   drawScale();
@@ -2257,34 +2298,33 @@ function buildZoomList() {
   const el = $("zoomlist"), rows = zooms.filter(z => fineLevels(z).length);
   $("zoomnote").classList.toggle("hidden", !rows.length);
   if (!rows.length) { el.innerHTML = `<div class="note">No zoom windows yet. Tap a spot on the map and bake one (Place).</div>`; return; }
-  // A window at a time, one line per level: its cells, a tick to draw it or not, a button to
-  // fly to it and -- where the bake kept one -- a button to play its erosion.  The levels used
-  // to run together on one wrapped line with unlabelled arrows, which read as noise
+  // A window at a time, one line per level: its cells, a tick to draw it or not and a button
+  // to fly to it -- and, where the bake kept a time lapse, one Play for the window, which
+  // runs its levels coarse to fine.  The levels used to run together on one wrapped line with
+  // unlabelled arrows, which read as noise
   el.innerHTML = rows.map(z => {
+    const lapse = fineLevels(z).filter(L => L.frames), on = play && play.name === z.name;
     const head = `<div class="zh"><span class="zn" data-z="${z.name}" title="Fly to this window">${z.name}</span>` +
-      `<span class="d">${z.seconds ? Math.round(z.seconds / 60) + " min" : ""}</span></div>`;
+      `<span class="d">${z.seconds ? Math.round(z.seconds / 60) + " min" : ""}</span><span class="sp"></span>` +
+      (lapse.length ? `<button class="plain${on ? " on" : ""}" data-play="${z.name}"
+         title="Play this window's erosion, coarsest level to finest">${on ? "Stop" : "Play"}</button>` : "") + `</div>`;
+    const cur = on ? playLevel() : null;
     const levels = fineLevels(z).map(L => {
-      const key = zkey(z, L), on = play && play.name === z.name && play.R === L.R;
+      const key = zkey(z, L), running = cur && cur.R === L.R;
       const loading = ztex.loading.has(key) ? `<span class="ld">loading</span>` : "";
-      const playing = on ? `<div class="d">frame ${Math.min(Math.floor(play.k) + 1, play.count)} of ${play.count}` +
-        `${L.frames.iterations ? ` · iteration ${L.frames.iterations[Math.min(Math.floor(play.k), play.count - 1)]}` : ""}</div>` : "";
+      const playing = running ? `<div class="d" id="playtext"></div>` : "";
       return `<div class="lv"><label class="chk"><input type="checkbox" data-k="${key}"${state.zoff.has(key) ? "" : " checked"}>` +
-        `${fmtCell(L.tex.cell_m)}</label>${loading}<span class="sp"></span>` +
-        `<button class="plain" data-fly="${z.name}" data-r="${L.R}">Fly</button>` +
-        (L.frames ? `<button class="plain${on ? " on" : ""}" data-play="${z.name}" data-r="${L.R}"
-           title="${L.frames.count} frames of this level's erosion">${on ? "Stop" : "Play"}</button>` : "") +
-        `</div>${playing}`;
+        `${fmtCell(L.tex.cell_m)}</label>${loading}${running ? `<span class="ld">playing</span>` : ""}<span class="sp"></span>` +
+        `<button class="plain" data-fly="${z.name}" data-r="${L.R}">Fly</button></div>${playing}`;
     }).join("");
     return `<div class="zw">${head}${levels}</div>`;
   }).join("");
   const levelOf = b => {
-    const z = zooms.find(x => x.name === (b.dataset.fly || b.dataset.play));
+    const z = zooms.find(x => x.name === b.dataset.fly);
     return [z, (z.levels || []).find(L => L.R === +b.dataset.r)];
   };
-  el.querySelectorAll("[data-play]").forEach(b => b.onclick = () => {
-    const [z, L] = levelOf(b);
-    if (L && L.frames) playFrames(z.name, L.R, L.frames);
-  });
+  el.querySelectorAll("[data-play]").forEach(b => b.onclick = () => playFrames(b.dataset.play));
+  playText();
   el.querySelectorAll("[data-fly]").forEach(b => b.onclick = () => flyToLevel(levelOf(b)[1]));
   el.querySelectorAll("input[data-k]").forEach(i => i.onchange = () => {
     i.checked ? state.zoff.delete(i.dataset.k) : state.zoff.add(i.dataset.k); writeHash(); requestDraw(); });
