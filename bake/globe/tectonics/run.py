@@ -273,7 +273,7 @@ class TectonicSim:
         alive = np.ones(seg.M, dtype=bool)
         losers, survivors = collide(seg, tree, self.r_coll, plates.omega, alive, tp.overlap_fraction,
                                     float(tp.arc_accretion), float(tp.arc_birth), self.params.rng("tectonics", 7, k),
-                                    shortening=float(tp.continental_shortening))
+                                    shortening=float(tp.continental_shortening), weld_steps=int(tp.weld_steps))
         n_coll = int(losers.size)
         if n_coll:
             if tp.orogen_shaping > 0.0:

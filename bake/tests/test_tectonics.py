@@ -228,6 +228,41 @@ def test_no_plateless_holes_after_gap_filling(tiny_sim):
 # --------------------------------------------------------------------------
 # outputs
 # --------------------------------------------------------------------------
+def test_a_shortened_continent_keeps_the_plate_it_welded_onto():
+    """``continental_shortening`` leaves the losing segment alive on the
+    winner's plate, but it is still embedded in the plate it came from, so
+    ``split_disconnected`` handed it straight back and the same pair collided
+    again every step.  ``weld_steps`` keeps it where it was welded; with
+    shortening off (the default) nothing is ever welded."""
+    from globe.tectonics.segments import CONTINENTAL
+
+    off = WorldParams.tiny_world()
+    off.tectonics.steps = 120
+    sim_off = tect.simulate(off, log=None)
+    assert (sim_off.seg.weld == 0).all()                     # the default run never welds
+
+    on = WorldParams.tiny_world()
+    on.tectonics.steps = 120
+    on.tectonics.continental_shortening = 0.25
+    sim_on = tect.simulate(on, log=None)
+    seg = sim_on.seg
+    welded = seg.weld > 0
+    assert welded.any() and (seg.kind[welded] == CONTINENTAL).all()
+    assert seg.weld.max() <= on.tectonics.weld_steps
+    # a welded segment sits with the plate it welded onto, not the one around it
+    from globe.tectonics.collision import build_tree
+
+    _, nb = build_tree(seg).query(seg.pos[welded], k=min(9, seg.M), workers=-1)
+    around = np.asarray(seg.plate_id)[np.atleast_2d(nb)]
+    mine = np.asarray(seg.plate_id)[welded][:, None]
+    assert (around != mine).any(), "a weld that changes nothing is not a weld"
+
+    # and the continent survives the collisions instead of being deleted by them
+    keep = tect.simulate(WorldParams.tiny_world(), log=None)
+    share_off = float((keep.seg.kind == CONTINENTAL).mean())
+    assert float((seg.kind == CONTINENTAL).mean()) > share_off
+
+
 def test_crust_age_says_how_old_the_crust_under_a_cell_is(tiny_sim, tiny_out, monkeypatch):
     """``crust_age`` (a diagnostic, like ``crust_kind``): steps since the crust
     under a cell formed.  The ocean floor is born at a rift and dies at a

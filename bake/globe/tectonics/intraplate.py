@@ -283,6 +283,11 @@ def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rn
                 extra.append(plates.omega[p].copy())
             else:
                 orphans |= m
+    # a segment still welded from a continental collision keeps the plate it welded onto:
+    # it lies inside the plate it came from, so the rule below would hand it straight back
+    # and the same pair would collide again next step (globe/tectonics/collision.py)
+    if hasattr(seg, "weld"):
+        orphans &= seg.weld <= 0
     if orphans.any():
         # weld a fragment onto the plate around it: the commonest plate among
         # the nearest segments that are not part of the fragment itself

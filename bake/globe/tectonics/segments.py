@@ -232,9 +232,9 @@ class Segments:
     """Structure-of-arrays segment store (see module docstring).  All
     mutating methods keep the parallel arrays aligned."""
 
-    FIELDS = ("pos", "mass", "thickness", "density", "age", "plate_id", "area", "h_ref", "kind", "craton")
+    FIELDS = ("pos", "mass", "thickness", "density", "age", "plate_id", "area", "h_ref", "kind", "craton", "weld")
 
-    def __init__(self, pos, thickness, density, age, plate_id, area, h_ref=None, mass=None, kind=OCEANIC, craton=0):
+    def __init__(self, pos, thickness, density, age, plate_id, area, h_ref=None, mass=None, kind=OCEANIC, craton=0, weld=0):
         self.pos = np.ascontiguousarray(pos, dtype=np.float64).reshape(-1, 3)
         M = self.pos.shape[0]
         self.thickness = np.array(np.broadcast_to(np.asarray(thickness, dtype=np.float64), (M,)), dtype=np.float64)
@@ -246,6 +246,9 @@ class Segments:
         self.h_ref = self.height() if h_ref is None else np.array(np.broadcast_to(np.asarray(h_ref, dtype=np.float64), (M,)), dtype=np.float64)
         self.kind = np.array(np.broadcast_to(np.asarray(kind, dtype=np.int8), (M,)), dtype=np.int8)
         self.craton = np.array(np.broadcast_to(np.asarray(craton, dtype=np.int8), (M,)), dtype=np.int8)
+        #: steps left of a weld: a continental segment that has shortened onto another plate
+        #: belongs to that plate for this long, whatever the shape of the cloud says
+        self.weld = np.array(np.broadcast_to(np.asarray(weld, dtype=np.int16), (M,)), dtype=np.int16)
 
     @property
     def M(self) -> int:
@@ -276,7 +279,7 @@ class Segments:
             setattr(self, name, np.ascontiguousarray(np.concatenate([getattr(self, name), getattr(other, name)])))
 
     def copy(self) -> "Segments":
-        return Segments(self.pos.copy(), self.thickness.copy(), self.density.copy(), self.age.copy(), self.plate_id.copy(), self.area.copy(), self.h_ref.copy(), self.mass.copy(), self.kind.copy(), self.craton.copy())
+        return Segments(self.pos.copy(), self.thickness.copy(), self.density.copy(), self.age.copy(), self.plate_id.copy(), self.area.copy(), self.h_ref.copy(), self.mass.copy(), self.kind.copy(), self.craton.copy(), self.weld.copy())
 
     def renormalise(self) -> None:
         self.pos /= np.linalg.norm(self.pos, axis=1, keepdims=True)

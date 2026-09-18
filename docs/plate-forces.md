@@ -167,7 +167,49 @@ wants is a plate boundary that *moves* with the suture, which this
 model's rigid-plate-plus-splitting machinery cannot express one segment
 at a time.
 
-## 5. The field that moves: continental insulation
+## 4b. The weld, and why several cycles still do not run (2026-09-18)
+
+Asked for several supercontinent cycles, measured on `small` (N_c 128, 1500
+segments, seed 0, 4000 steps), continental share of the segments:
+
+| variant | cont @4000 | cratons | plates | collisions/step | M |
+|---|---|---|---|---|---|
+| shipped (`continental_shortening = 0`) | **0.178** | 56 | 15 | 10 | 1127 |
+| shortening 0.25, before the weld | 0.984 | 1421 | **1** | 224 | 3701 |
+| shortening 0.25, weld 60 | 0.895 | 534 | 51 | 748 | 2224 |
+| shortening 0.25, weld permanent | 0.984 | 1421 | 1 | 183 | 3701 |
+| shortening 0.25, weld 60, `arc_birth = 0` | 0.833 | 556 | 30 | 202 | 1566 |
+
+The shipped default is the failure the user saw: a continent-on-continent
+collision deletes the loser, so continental crust halves about every 1500
+steps and settles near 0.17 -- `worlds/long-plates` (6000 steps) ended with
+18 % continental crust and 13 % land, against earth-v11's 39 % at 3000.
+Cratons go the same way (405 -> 56): two cratons in contact make one of them
+the loser.
+
+`weld_steps` (new) fixes what section 4 rejected shortening for.  A welded
+loser lies inside the plate it came from, so `split_disconnected` welded it
+back every step and the pair collided again; keeping it on the winner's plate
+for 60 steps holds the plate count at 51 instead of 1 and keeps the craton
+count from running away.  It is inert with shortening off: nothing is welded,
+and no world already baked changes.
+
+It is not enough.  Even with the plates healthy and island arcs off, the
+continental share still climbs 0.60 -> 0.83, because **a segment is a fixed
+unit of area**.  A continent-on-continent collision can delete the loser (the
+area of the pair halves) or keep it (the area of the pair is unchanged while
+its crust thickens, so area is created from nothing) -- and nothing in
+between, since the area a segment covers is the segment itself, not its
+`area` field, which the splat does not read.  Real shortening reduces area as
+it thickens crust.  Making that possible means the blend weighting a segment
+by an area it can lose, and only then is a cycle that assembles, rifts and
+re-assembles worth looking for (the supercontinent index |mean position of the
+continental segments| stayed 0.1-0.5 in every run above, with no periodicity).
+
+Until then: 3000-4000 steps is the honest range, where continental crust is
+still 0.39-0.56 of the coarse cells.
+
+## 5.## 5. The field that moves: continental insulation
 
 `tectonics.heat_insulation`. The heat background that `heat_relax` pulls
 the live field towards is no longer the step-0 noise for the whole run:

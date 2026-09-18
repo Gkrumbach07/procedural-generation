@@ -329,6 +329,7 @@ def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float
     seg.density = np.clip(seg.mass / np.maximum(seg.thickness, 1e-12), 0.0, 1.0)
     seg.mass = seg.thickness * seg.density
     seg.age += 1.0
+    seg.weld = np.maximum(seg.weld - np.int16(1), np.int16(0))     # a weld wears off
 
 
 # --------------------------------------------------------------------------
@@ -534,7 +535,7 @@ CONTINENTAL_K = np.int8(CONTINENTAL)
 
 
 @njit(cache=True)
-def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, kind, craton, polarity, alive, overlap2, accretion, arc_birth, birth_draw, shortening, radius):
+def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, kind, craton, weld, polarity, alive, overlap2, accretion, arc_birth, birth_draw, shortening, radius, weld_steps):
     n = pairs.shape[0]
     losers = np.empty(n, dtype=np.int64)
     survivors = np.empty(n, dtype=np.int64)
@@ -616,6 +617,12 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
             mass[lo] *= 1.0 - f
             thickness[lo] *= 1.0 - f
             plate_id[lo] = plate_id[su]
+            # and it stays that plate's for a while.  It sits inside the plate it came from,
+            # so split_disconnected saw a sliver embedded in a foreign plate and welded it
+            # straight back -- which made the same pair a collision again the next step, and
+            # the one after (9 collisions a step became 100, and the arc births that ride on
+            # them turned the planet continental).  The weld is what says otherwise
+            weld[lo] = weld_steps
             # the crust between the two has shortened: the loser's centre
             # retreats to the edge of the collision radius, so the same pair
             # is not a collision again next step (it would be, every step,
@@ -656,7 +663,7 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
     return losers[:k], survivors[:k]
 
 
-def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, alive: np.ndarray, overlap_fraction: float = 0.5, accretion: float = 1.0, arc_birth: float = 0.0, rng: np.random.Generator | None = None, shortening: float = 0.0):
+def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, alive: np.ndarray, overlap_fraction: float = 0.5, accretion: float = 1.0, arc_birth: float = 0.0, rng: np.random.Generator | None = None, shortening: float = 0.0, weld_steps: int = 0):
     """Subduction: for every pair of segments of different plates within
     chord ``radius`` (KD-tree pair query, applied in sorted order) that are
     *approaching* — or closer than ``overlap_fraction * radius`` whatever
@@ -685,7 +692,7 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     draw = rng.random(pairs.shape[0]) if (rng is not None and arc_birth > 0.0) else np.zeros(pairs.shape[0])
     P = int(seg.plate_id.max()) + 1 if seg.M else 1
     pol = plate_pair_polarity(seg.plate_id, seg.age, seg.kind, pairs, P)
-    return _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.kind, seg.craton, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw), float(shortening), float(radius))
+    return _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.kind, seg.craton, seg.weld, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw), float(shortening), float(radius), int(weld_steps))
 
 
 @njit(cache=True)
