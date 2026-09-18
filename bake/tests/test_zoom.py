@@ -655,6 +655,23 @@ def test_the_planet_time_lapse_joins_the_viewers_timeline(world, planet):
     assert pf[0].res == pf[-1].res and "discharge" in pf[0].ch
 
 
+def test_the_planet_lapse_survives_a_viewer_export(world, planet, tmp_path):
+    """The whole way out: ``export_viewer --planet`` writes the level's frames
+    as timeline entries with textures of their own, so the page plays the 1.2
+    km erosion after the coarse one."""
+    from globe.viz import viewer as vw
+
+    out = vw.export_viewer(world["root"], out=tmp_path / "v", planet=str(planet["out"]), log=lambda m: None)
+    meta = json.loads((out.parent / "data" / "meta.js").read_text()[len("GLOBE_VIEWER.setMeta("):-3])
+    pf = [f for f in meta["frames"] if f["stage"] == "planet"]
+    assert pf, [f["stage"] for f in meta["frames"]]
+    assert [f["stage"] for f in meta["frames"][-len(pf) - 1:]] == ["planet"] * len(pf) + ["final"]
+    for f in pf:
+        assert (out.parent / f["file"]).exists() and (out.parent / f["file"]).stat().st_size > 0
+        assert f["res"] == pf[0]["res"] and "discharge" in f["layers"] and f["h1"] > f["h0"]
+        assert "iteration" in f["label"]
+
+
 def test_planet_workers_map_the_inputs_the_world_has(world, planet):
     """The inputs the bake wrote once are what a worker would load itself,
     mapped rather than copied; a changed world file makes a worker load
