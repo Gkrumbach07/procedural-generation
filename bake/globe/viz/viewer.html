@@ -377,6 +377,8 @@ uniform vec2 uDQ, uDSed;       // their flow and sediment byte scales
 uniform vec4 uZGB, uZQlo, uZQhi, uZSlo, uZShi, uZVeg, uZBio, uZLife;
 uniform int uMoving;           // 1 while the tilt camera moves (half resolution, flat trees)
 uniform int uLight;            // 1: the 3-D pass a phone can carry -- fewer march steps, flat trees
+uniform int uPick;             // 1: draw one pixel that reports where a ray meets the ground
+uniform vec3 uPickRay;         // the ray to report on (tilt view), normalised
 uniform int uLines;            // 1 when the river-line pass drew into uRL this frame
 uniform sampler2D uRL;         // river lines, canvas-sized: R coverage x fade, G width (for the colour)
 uniform float uTexelRad;       // one texel of the finest terrain drawn, radians
@@ -998,7 +1000,7 @@ bool canopyMarch(vec3 rd, float tHit, vec3 p, vec3 e, vec3 n, float forest, floa
 // is flat and this shades the water, not the bed; depth is what stands over the bed (< 0 on
 // land).  Nothing moves and nothing is tiled over the surface: waves drawn from a repeating
 // function glinted in rows of dashes across every lake
-vec3 satWater(float h, float w, float depth, vec3 p, vec4 life){
+vec3 satWater(float h, float w, float depth, float cov, vec3 p, vec4 life){
   bool lake = w > 0.5 && w < 1.5;
   float d = lake ? max(depth, 0.0) : max(uSea - h, 0.0);
   // the lake's life (globe.zoom.lakes): reeds at its margin, how far through its life it is,
@@ -1012,11 +1014,15 @@ vec3 satWater(float h, float w, float depth, vec3 p, vec4 life){
            vec3(0.42, 0.68, 0.70), vec3(0.20, 0.50, 0.62), vec3(0.08, 0.30, 0.50), vec3(0.03, 0.14, 0.34), vec3(0.02, 0.07, 0.22));
   c = mix(c, vec3(0.20, 0.38, 0.30), 0.55 * age);                          // an old lake's water is green
   c = mix(c, vec3(0.11, 0.26, 0.19), 0.65 * weed);                         // weed beds on the bed
-  float shoreM = lake ? 0.9 : 3.0;
-  float sh = 1.0 - smoothstep(0.0, shoreM, d);
-  c = mix(c, vec3(0.66, 0.63, 0.50), 0.55 * sh * sh * (1.0 - reeds));       // wet sand in the shallows
+  // The shore's band follows the water's edge, not a depth: a small lake is under a metre all
+  // over, so a band drawn wherever the water is shallow washed the whole of it pale and spilled
+  // past the bank in a halo.  cov is how much of the pixel is water, and it crosses the edge
+  // once however deep the lake is
+  float edge = smoothstep(0.30, 0.62, cov) * (1.0 - smoothstep(0.62, 0.92, cov));
+  float shallow = (1.0 - smoothstep(0.55, 1.0, cov)) * (1.0 - smoothstep(0.0, 6.0, d));
+  c = mix(c, vec3(0.66, 0.63, 0.50), 0.40 * shallow * (1.0 - reeds));       // wet sand at the edge
   c = mix(c, mix(vec3(0.40, 0.46, 0.24), vec3(0.32, 0.42, 0.22), age), 0.85 * reeds);   // reeds standing at the margin
-  c = mix(c, vec3(0.92, 0.95, 0.95), 0.5 * smoothstep(0.45, 0.10, d / shoreM) * (1.0 - reeds));  // the bright line at the edge
+  c = mix(c, vec3(0.92, 0.95, 0.95), 0.45 * edge * (1.0 - reeds));         // the bright line on it
   return mix(c, vec3(0.62, 0.74, 0.86), 0.12 * (1.0 - 0.6 * reeds));       // the sky off the surface
 }
 vec3 orderColor(float o){       // Strahler 1 (pale) .. 6+ (deep blue)
@@ -1042,8 +1048,21 @@ void main(){
   float tHit = 0.0; vec3 rd = vec3(0.0);
   if (uMode == 2) {
     vec2 nd = (gl_FragCoord.xy - 0.5 * uView) / (0.5 * uView.y);
-    rd = normalize(uCamF + nd.x * uTanHalf * uCamR + nd.y * uTanHalf * uCamU);
-    if (!marchTerrain(uCamPos, rd, tHit, p)) { outColor = vec4(pow(skyColor(rd), vec3(0.95)), 1.0); return; }
+    // The pick pass rides the same march as the picture: where a ray meets the ground, written
+    // out as a 24-bit distance, so a click in the 3-D view lands on the terrain the viewer drew
+    // rather than on a guess at its height.  Marching a second time for it would be a second
+    // copy of the heaviest loop in the shader, and the GPU drops the context over that
+    rd = uPick == 1 ? uPickRay : normalize(uCamF + nd.x * uTanHalf * uCamR + nd.y * uTanHalf * uCamU);
+    if (!marchTerrain(uCamPos, rd, tHit, p)) {
+      outColor = uPick == 1 ? vec4(0.0) : vec4(pow(skyColor(rd), vec3(0.95)), 1.0);
+      return;
+    }
+    if (uPick == 1) {
+      float f = clamp(tHit / uFar, 0.0, 1.0) * 255.0;
+      float r = floor(f), g = floor((f - r) * 255.0);
+      outColor = vec4(r / 255.0, g / 255.0, floor(((f - r) * 255.0 - g) * 255.0) / 255.0, 1.0);
+      return;
+    }
   } else if (uMode == 0) {
     float r2 = dot(q, q);
     if (r2 > 1.0) { outColor = vec4(space(q, sqrt(r2)), 1.0); return; }
@@ -1168,7 +1187,7 @@ void main(){
     if (uLKind == 1) {
       if (uCmap == 6) {
         vec4 life = zk >= 0 && zw > 0.5 && uZLife[zk] > 0.5 ? zLinear(zk, za + vec2(0.0, 2.0 * uZNE[zk])) : vec4(0.0);
-        vec3 water = wCov > 0.003 ? satWater(h, wcode < 0.5 ? 1.0 : wcode, lakeD, p, life) : vec3(0.0);
+        vec3 water = wCov > 0.003 ? satWater(h, wcode < 0.5 ? 1.0 : wcode, lakeD, wCov, p, life) : vec3(0.0);
         if (wCov >= 0.997) col = water;
         else {
           float sim = zk >= 0 && zw > 0.5 && uZVeg[zk] > 0.5 ? zLinear(zk, za + vec2(0.0, uZNE[zk])).a : -1.0;
@@ -1624,8 +1643,54 @@ function cam3() {
   return { T, hT, rT: R + hT, D, fw, right, pos, F, U: U3 };
 }
 // canvas pixel (top-left origin, device px) -> unit direction or null
+// the ray through a pixel of the 3-D view
+function tiltRay(px, py) {
+  const c = cam3(), h2 = canvas.height / 2;
+  const nx = (px - canvas.width / 2) / h2, ny = (h2 - py) / h2;
+  return norm3(add3(c.F, add3(mul3(c.right, nx * TAN3), mul3(c.U, ny * TAN3))));
+}
+// Where a ray meets the ground, asked of the renderer itself: one pixel of the same march the
+// picture uses, its distance read back.  Guessing the height in here instead (from the planet
+// atlas, whose texels are kilometres) put a click in the 3-D view well off the spot -- the
+// viewer draws the zoom levels' own terrain, tens of metres from the planet's
+let pickFB = null, pickTex = null;
+function pickAlong(rd) {
+  if (!gl || state.view !== "tilt") return null;
+  try {
+    if (!pickFB) {
+      pickTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, pickTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      pickFB = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, pickFB);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, pickTex, 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, pickFB);
+    gl.viewport(0, 0, 1, 1);
+    gl.uniform1i(U.uPick, 1);
+    gl.uniform3fv(U.uPickRay, rd);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    const px = new Uint8Array(4);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.uniform1i(U.uPick, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    requestDraw();
+    if (!px[3]) return null;                                   // the ray met nothing
+    const far = Math.min(40 * cam3().D, Math.sqrt(2 * META.R_planet_m * (cam3().D + 20000)) * 1.5);
+    const t = (px[0] / 255 + px[1] / 65025 + px[2] / 16581375) * far;
+    const c = cam3();
+    const A = add3(mul3(c.T, c.rT), add3(c.pos, mul3(rd, t)));
+    return norm3(A);
+  } catch (e) { return null; }
+}
 function screenToDir(px, py) {
   if (state.view === "tilt") {
+    const asked = pickAlong(tiltRay(px, py));
+    if (asked) return asked;
     const c = cam3(), h2 = canvas.height / 2;
     const nx = (px - canvas.width / 2) / h2, ny = (h2 - py) / h2;
     const rd = norm3(add3(c.F, add3(mul3(c.right, nx * TAN3), mul3(c.U, ny * TAN3))));
@@ -1804,6 +1869,10 @@ const zkey = (z, L) => `${z.name}_L${L.R}`;
 const tkey = (name, R, k) => `${name}_L${R}#${k}`;
 let play = null;                      // { name, R, count, k, last } while a time lapse runs
 // what the page is holding, for a look from outside it (tests, and a phone that misbehaves)
+GV.pickDebug = (x, y) => {
+  const rd = tiltRay(x, y);
+  return { rd, picked: pickAlong(rd), dir: screenToDir(x, y), view: state.view, w: canvas.width, h: canvas.height };
+};
 GV.debug = () => ({
   lowmem: LOWMEM, frames: tex.filter(Boolean).length, frameCount: NF,
   frameBytes: tex.reduce((b, t, i) => b + (t ? t.length * 3 * (frames[i].res + 2 * frames[i].pad) * 2 * (frames[i].res + 2 * frames[i].pad) * 4 / t.length : 0), 0),
@@ -2116,6 +2185,7 @@ function draw() {
   gl.uniform1f(U.uContour, ci);
   const fc = v => v >= 1000 ? `${v / 1000} km` : `${v} m`;
   $("ctv").textContent = ci ? `${fc(ci)} · ${fc(5 * ci)}` : "";
+  gl.uniform1i(U.uPick, 0);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   updateLabels(a);
   updateLegend(FA);
