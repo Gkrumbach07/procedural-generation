@@ -1057,7 +1057,7 @@ def write_views(out: Path, levels, lat: float, lon: float, name: str, max_res: i
     the levels' own textures, rather than a second renderer of its own."""
     from .view import build_html
 
-    back = f"../../viewer/index.html#lat={lat:.3f}&lon={lon:.3f}&z=24"
+    back = view_link(lat, lon)      # the viewer over this window, not the planet
     for level in levels:
         res = load_level(out, level.R)
         a = res.arrays

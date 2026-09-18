@@ -99,7 +99,13 @@
   #loading { position:fixed; top:calc(62px + env(safe-area-inset-top)); left:50%; transform:translateX(-50%); z-index:7; padding:6px 12px; }
   #loading .bar { height:3px; background:var(--line); border-radius:2px; margin-top:5px; }
   #loading .bar i { display:block; height:100%; width:0; background:var(--accent); border-radius:2px; }
-  #zoomlist .zr { display:flex; align-items:center; gap:6px; margin:5px 0; flex-wrap:wrap; }
+  #zoomlist .zw { border-top:1px solid var(--line); padding:8px 0 6px; }
+  #zoomlist .zw:first-child { border-top:0; padding-top:0; }
+  #zoomlist .zh { display:flex; align-items:baseline; gap:8px; margin-bottom:4px; }
+  #zoomlist .lv { display:flex; align-items:center; gap:6px; margin:4px 0; }
+  #zoomlist .lv .sp { flex:1; }
+  #zoomlist .lv .chk { margin:0; min-width:64px; }
+  #zoomlist .lv button.on { background:#24344d; color:#fff; }
   #zoomlist .zr button.tl { padding:1px 6px; font-size:11px; line-height:16px; }
   #zoomlist .zn { color:var(--accent); cursor:pointer; min-width:84px; }
   #zoomlist .zl { padding:1px 6px; font-size:11px; line-height:16px; }
@@ -1893,6 +1899,7 @@ GV.timeLapse = (name, R) => {
                    loaded: [...ztex.loaded.keys()], loading: [...ztex.loading], failed: [...ztex.failed] };
 };
 function playFrames(name, R, frames) {
+  const z = zooms.find(x => x.name === name), L = z && (z.levels || []).find(x => x.R === R);
   if (play && play.name === name && play.R === R) {
     // stopping: drop the frames' textures, the level's own is drawn again
     const pre = tkey(name, R, "").slice(0, -1);
@@ -1900,6 +1907,9 @@ function playFrames(name, R, frames) {
     play = null; buildZoomList(); requestDraw(); return;
   }
   play = { name, R, count: frames.count, k: 0, last: performance.now() };
+  // the frames are drawn in the level's place, so the view has to be over it -- pressing play
+  // while the map is elsewhere (or too far out for the level to draw) showed nothing at all
+  if (L) flyToLevel(L);
   buildZoomList(); requestDraw();
 }
 // the frame a playing level draws now, loading what it has not got yet (a couple at a time)
@@ -2104,8 +2114,10 @@ function draw() {
   if (play) {
     // the time lapse runs at the Speed slider's frames a second, looping
     const now = performance.now();
+    const was = Math.floor(play.k);
     play.k = (play.k + (now - play.last) / 1000 * state.fps) % play.count;
     play.last = now;
+    if (Math.floor(play.k) !== was && tab === "zooms") buildZoomList();
     requestDraw();
   }
   drawScale();
@@ -2244,28 +2256,41 @@ const fineLevels = z => (z.levels || []).filter(L => L.tex && L.tex.cell_m < 100
 function buildZoomList() {
   const el = $("zoomlist"), rows = zooms.filter(z => fineLevels(z).length);
   $("zoomnote").classList.toggle("hidden", !rows.length);
-  if (!rows.length) { el.innerHTML = `<div class="note">No zoom windows yet. Tap a spot on the map and bake one (Here).</div>`; return; }
-  el.innerHTML = rows.map(z =>
-    `<div class="zr"><span class="zn" data-z="${z.name}" title="Fly there">${z.name}</span>` + fineLevels(z).map(L => {
-      const key = zkey(z, L), st = ztex.loading.has(key) ? `<span class="ld">loading</span>` : "";
-      const on = play && play.name === z.name && play.R === L.R;
-      const tl = L.frames ? `<button class="plain tl" data-z="${z.name}" data-r="${L.R}" title="Play this level's erosion (${L.frames.count} frames)">${on ? "\u25a0" : "\u25b6"}</button>` : "";
-      return `<label class="chk"><input type="checkbox" data-k="${key}"${state.zoff.has(key) ? "" : " checked"}>${fmtCell(L.tex.cell_m)}</label>` +
-        `<button class="plain zl" data-z="${z.name}" data-r="${L.R}" title="Fly to this level">&#10132;</button>${tl}${st}`;
-    }).join("") + `</div>`).join("");
-  el.querySelectorAll("button.tl").forEach(b => b.onclick = () => {
-    const z = zooms.find(x => x.name === b.dataset.z), L = (z.levels || []).find(x => x.R === +b.dataset.r);
+  if (!rows.length) { el.innerHTML = `<div class="note">No zoom windows yet. Tap a spot on the map and bake one (Place).</div>`; return; }
+  // A window at a time, one line per level: its cells, a tick to draw it or not, a button to
+  // fly to it and -- where the bake kept one -- a button to play its erosion.  The levels used
+  // to run together on one wrapped line with unlabelled arrows, which read as noise
+  el.innerHTML = rows.map(z => {
+    const head = `<div class="zh"><span class="zn" data-z="${z.name}" title="Fly to this window">${z.name}</span>` +
+      `<span class="d">${z.seconds ? Math.round(z.seconds / 60) + " min" : ""}</span></div>`;
+    const levels = fineLevels(z).map(L => {
+      const key = zkey(z, L), on = play && play.name === z.name && play.R === L.R;
+      const loading = ztex.loading.has(key) ? `<span class="ld">loading</span>` : "";
+      const playing = on ? `<div class="d">frame ${Math.min(Math.floor(play.k) + 1, play.count)} of ${play.count}` +
+        `${L.frames.iterations ? ` · iteration ${L.frames.iterations[Math.min(Math.floor(play.k), play.count - 1)]}` : ""}</div>` : "";
+      return `<div class="lv"><label class="chk"><input type="checkbox" data-k="${key}"${state.zoff.has(key) ? "" : " checked"}>` +
+        `${fmtCell(L.tex.cell_m)}</label>${loading}<span class="sp"></span>` +
+        `<button class="plain" data-fly="${z.name}" data-r="${L.R}">Fly</button>` +
+        (L.frames ? `<button class="plain${on ? " on" : ""}" data-play="${z.name}" data-r="${L.R}"
+           title="${L.frames.count} frames of this level's erosion">${on ? "Stop" : "Play"}</button>` : "") +
+        `</div>${playing}`;
+    }).join("");
+    return `<div class="zw">${head}${levels}</div>`;
+  }).join("");
+  const levelOf = b => {
+    const z = zooms.find(x => x.name === (b.dataset.fly || b.dataset.play));
+    return [z, (z.levels || []).find(L => L.R === +b.dataset.r)];
+  };
+  el.querySelectorAll("[data-play]").forEach(b => b.onclick = () => {
+    const [z, L] = levelOf(b);
     if (L && L.frames) playFrames(z.name, L.R, L.frames);
   });
+  el.querySelectorAll("[data-fly]").forEach(b => b.onclick = () => flyToLevel(levelOf(b)[1]));
   el.querySelectorAll("input[data-k]").forEach(i => i.onchange = () => {
     i.checked ? state.zoff.delete(i.dataset.k) : state.zoff.add(i.dataset.k); writeHash(); requestDraw(); });
   el.querySelectorAll(".zn").forEach(n => n.onclick = () => flyToZoom(zooms.find(z => z.name === n.dataset.z)));
-  el.querySelectorAll(".zl").forEach(n => n.onclick = ev => {
-    ev.preventDefault();
-    const z = zooms.find(x => x.name === n.dataset.z);
-    flyToLevel((z.levels || []).find(L => L.R === +n.dataset.r));
-  });
 }
+
 // fly to a level of a zoom: its square fills the view, so the level draws in place.  The
 // standalone mesh pages are still there (a zoom's own page links them), but everything the
 // viewer offers -- satellite ground, trees, water, the time lapse -- is here

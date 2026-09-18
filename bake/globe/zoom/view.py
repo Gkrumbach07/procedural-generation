@@ -236,7 +236,7 @@ function draw(){
   gl.uniform2f(U("uLand"), META.land_lo, META.land_hi); gl.uniform1f(U("uH0"), 0); gl.uniform1f(U("uH1"), META.h1 - META.h0); gl.uniform1f(U("uBase"), META.h0);
   gl.uniform1i(U("uT0"), 0); gl.uniform1i(U("uT1"), 1); gl.uniform1i(U("uT0L"), 2); gl.uniform1f(U("uTrees"), st.trees);
   gl.drawElements(gl.TRIANGLES, idx.length, gl.UNSIGNED_INT, 0);
-  document.getElementById("hud").innerHTML = (META.back ? `<a href="${META.back}">← globe</a> · ` : "") + `${META.title} · ${(SX/1000).toFixed(1)} x ${(SY/1000).toFixed(1)} km · ${META.native_cell_m.toFixed(0)} m cells (drawn at ${META.cell_m.toFixed(0)} m) · relief ${(META.h1-META.h0).toFixed(0)} m · exaggeration ${st.exag}x · T trees`;
+  document.getElementById("hud").innerHTML = (META.back ? `<a href="${META.back}">← open in the viewer</a> (satellite, trees, water, time lapse) · ` : "") + `${META.title} · ${(SX/1000).toFixed(1)} x ${(SY/1000).toFixed(1)} km · ${META.native_cell_m.toFixed(0)} m cells (drawn at ${META.cell_m.toFixed(0)} m) · relief ${(META.h1-META.h0).toFixed(0)} m · exaggeration ${st.exag}x · T trees`;
 }
 let drag = null;
 cv.onmousedown = e => drag = {x: e.clientX, y: e.clientY, pan: e.shiftKey};
