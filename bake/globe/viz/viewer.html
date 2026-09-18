@@ -652,16 +652,27 @@ vec3 elevColor(float h, float w){
 vec3 hash3(vec2 q);
 float vnoise(vec2 q);
 vec4 bspline(float t);
+// The atlas holds the six faces as 3 x 2 tiles of (res + 2 pad) texels, each with one cell of
+// its neighbours round it.  A read wider than that halo -- a B-spline's four taps, a class
+// lattice's eight -- steps into whatever face is packed next door, which is another part of
+// the planet: it drew a hard line along the cube edges (only the satellite showed it, the
+// layer that reads the atlas this way).  Every wide read is held inside its own tile
+void tileOf(vec2 xy, vec3 geo, out ivec2 lo, out ivec2 hi){
+  float T = geo.x + 2.0 * geo.y;
+  vec2 t0 = floor(xy / T) * T;
+  lo = ivec2(t0); hi = ivec2(t0 + (T - 1.0));
+}
 // A cubic B-spline read of one channel: the planet's shoreline texels are kilometres across,
 // and reading them bilinearly leaves a lake's edge as a staircase of squares.  The B-spline
 // is smooth in its slope as well as its value, so the shore curves
 float byteSmooth(sampler2D t, vec3 geo, int ch, vec3 p){
   vec2 xy = atlasXY(p, geo);
   vec2 i0 = floor(xy); vec2 f = xy - i0; ivec2 a = ivec2(i0);
+  ivec2 lo, hi; tileOf(xy, geo, lo, hi);
   vec4 wx = bspline(f.x), wy = bspline(f.y);
   float v = 0.0;
   for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++)
-    v += wx[i] * wy[j] * chan(texelFetch(t, a + ivec2(i - 1, j - 1), 0), ch);
+    v += wx[i] * wy[j] * chan(texelFetch(t, clamp(a + ivec2(i - 1, j - 1), lo, hi), 0), ch);
   return v * 255.0;
 }
 // the classes round the pixel, set once per pixel in main (setClasses).  The class texels are
@@ -677,7 +688,9 @@ vec4 gClsW = vec4(1.0, 0.0, 0.0, 0.0);
 vec3 gTint = vec3(0.0);
 float gVeg = 0.0, gRocky = 0.0, gIcy = 0.0, gTreeW = 0.0, gSavW = 0.0, gShrubW = 0.0;
 float gPxM = 1.0;                  // metres per screen pixel here (main)
-int classCode(bool zoom, int zk, ivec2 c){
+ivec2 gClsLo = ivec2(0), gClsHi = ivec2(1 << 14);     // the tile (or the zoom level) the lattice may read
+int classCode(bool zoom, int zk, ivec2 c0){
+  ivec2 c = clamp(c0, gClsLo, gClsHi);
   float v = zoom ? zTex(zk, c + ivec2(0, 2 * int(uZNE[zk]))).r : chan(texelFetch(uLT, c, 0), uLCh);
   return int(floor(v * 255.0 + 0.5)) & 31;
 }
@@ -698,6 +711,8 @@ vec4 bspline(float t){
 void setClasses(vec3 p, int zk, vec2 za, float zw){
   bool zoom = zk >= 0 && zw > 0.5 && uZBio[zk] > 0.5;
   vec2 xy = zoom ? za : atlasXY(p, uLGeo);
+  if (zoom) { gClsLo = ivec2(0); gClsHi = ivec2(int(uZNE[zk]) - 1); }   // the level's own image
+  else tileOf(xy, uLGeo, gClsLo, gClsHi);                              // this face's tile
   vec2 i0 = floor(xy); vec2 fr = xy - i0; ivec2 a = ivec2(i0);
   for (int i = 0; i < 4; i++) gCls[i] = classCode(zoom, zk, a + ivec2(i % 2, i / 2));
   gClsW = vec4((1.0 - fr.x) * (1.0 - fr.y), fr.x * (1.0 - fr.y), (1.0 - fr.x) * fr.y, fr.x * fr.y);
@@ -747,15 +762,17 @@ float standScale(vec2 pq){
 vec2 climateAt(vec3 p){
   vec2 xy = atlasXY(p, uLGeo);
   float cell = max(uClimCell, 1.0);
+  ivec2 lo, hi; tileOf(xy, uLGeo, lo, hi);      // the blocks stay in this face (see tileOf)
   vec2 g = (xy - 0.5 * (cell - 1.0)) / cell;
   vec2 g0 = floor(g); vec2 f = g - g0;
   vec4 wx = bspline(f.x), wy = bspline(f.y);
   vec2 acc = vec2(0.0);
   for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++) {
     vec2 c = (g0 + vec2(float(i - 1), float(j - 1))) * cell + 0.5 * (cell - 1.0);   // the block's centre
-    vec2 c0 = floor(c); vec2 fr = c - c0; ivec2 a = ivec2(c0);
-    vec4 t = mix(mix(texelFetch(uLT, a, 0), texelFetch(uLT, a + ivec2(1, 0), 0), fr.x),
-                 mix(texelFetch(uLT, a + ivec2(0, 1), 0), texelFetch(uLT, a + ivec2(1, 1), 0), fr.x), fr.y);
+    vec2 c0 = floor(c); vec2 fr = c - c0;
+    ivec2 a = clamp(ivec2(c0), lo, hi), a1 = clamp(ivec2(c0 + 1.0), lo, hi);
+    vec4 t = mix(mix(texelFetch(uLT, a, 0), texelFetch(uLT, ivec2(a1.x, a.y), 0), fr.x),
+                 mix(texelFetch(uLT, ivec2(a.x, a1.y), 0), texelFetch(uLT, a1, 0), fr.x), fr.y);
     acc += wx[i] * wy[j] * t.rg;
   }
   return acc;
