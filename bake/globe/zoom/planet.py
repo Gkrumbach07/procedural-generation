@@ -69,6 +69,8 @@ class PlanetLevel:
     seam_cells: int = 16  # fine cells either side of a cube edge blended between the two faces
     parent: int = 0  # R of the finished planet level this one chains from (zoom/planet_R{parent}, globe/zoom/planet_chain.py); 0 = from the planet's upsample
     chain_detail: float = 0.5  # chained: detail noise x min(parent slope x parent cell, parent 3x3 relief)
+    snapshots: int = 24  # frames of the time lapse each tile keeps (globe/zoom/planet_frames.py stitches them)
+    frame_res: int = 512  # cells a face of a frame holds; a tile's core is block-averaged to its share of it
 
     @property
     def guard(self) -> int:
@@ -383,9 +385,28 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
            "arrays": {"height": cur["height"], "sediment": cur["sediment"], "discharge": cur["discharge"], "momentum": cur["momentum"],
                       "hardness": tr["hardness"], "precip": np.where(ocean, 0.0, np.maximum(tr["precip"], 0.0)), "evap": tr["evap"],
                       "metric": tr["metric"], "metric_inv": tr["metric_inv"], "plain": plain}}
+    if int(level.snapshots) > 0 and int(level.frame_res) > 0:
+        # the time lapse: the tile's core every few iterations, block-averaged to its share of
+        # the face's frame.  Tiles run in passes, so no two are at the same iteration at the
+        # same moment -- what a frame holds is every tile as far as it had got by that many
+        # iterations of its own, which is how the level was built
+        job["snapshots"] = int(level.snapshots)
+        job["prod"] = (slice(mc * R + 1, mc * R + 1 + cc * R), slice(mc * R + 1, mc * R + 1 + cc * R))
+        job["snap_factor"] = max(1, (N * R) // int(level.frame_res))
     zl = level.zoom_level()
     res = zb.erode_tile(lp, zl, R, job, (PLANET_KEY, face, ta0, tb0))
     stats.update(res["stats"])
+    if res.get("frames"):
+        fdir = Path(out) / "frames"
+        fdir.mkdir(parents=True, exist_ok=True)
+        fr = res["frames"]
+        tmp = fdir / f"f{face}_{ta0}_{tb0}.tmp.npz"
+        np.savez(tmp, surface=np.stack([f["surface"] for f in fr]).astype(np.float32),
+                 discharge=np.stack([f["discharge"] for f in fr]).astype(np.float32),
+                 iterations=np.array([f["it"] for f in fr], np.int32),
+                 factor=np.array([f["factor"] for f in fr], np.int32),
+                 core=np.array([(ta0 + mc) * R, (tb0 + mc) * R, cc * R], np.int64))
+        tmp.replace(fdir / f"f{face}_{ta0}_{tb0}.npz")
     sea = inwin & ocean & ~done                            # write_tile marks the window's sea done: give it the upsample
     for k, v in (("height", base["height0"]), ("sediment", base["sediment0"]), ("discharge", base["discharge"])):
         view = mm[k][sl]
@@ -518,7 +539,13 @@ def run_planet(root: str | Path, level: PlanetLevel = PlanetLevel(), out: str | 
         info = {"level": asdict(level), "world": root.name, "cell_m": grid.cell_size_m / R, "faces": fin, "flow": flow,
                 "tiles": len(prog["tiles"]), "seconds_tiles": round(sum(v["seconds"] for v in prog["passes"].values()), 1),
                 "active_cells": int(sum(t_.get("active_cells", 0) for t_ in prog["tiles"])), "quicklook": ql.name}
-        (out / "planet.json").write_text(json.dumps(info, indent=1))
+        (out / "planet.json").write_text(json.dumps(info, indent=1))       # the frames read it for R
+        from . import planet_frames as pfr
+
+        lapse = pfr.build(out, R, log=log)
+        if lapse is not None:
+            info["frames"] = lapse.name
+            (out / "planet.json").write_text(json.dumps(info, indent=1))
         if log is not None:
             log(f"finished: {sum(f_['lake_cells'] for f_ in fin):,} lake cells, seams {sum(f_['seam_cells'] for f_ in fin):,} cells; {ql}")
     return out

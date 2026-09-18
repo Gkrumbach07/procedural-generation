@@ -601,6 +601,60 @@ def test_planet_level_outputs_are_complete_and_physical(world, planet):
     assert sum(fc["seam_cells"] for fc in info["faces"]) > 0
 
 
+def test_planet_level_keeps_a_time_lapse_of_its_erosion(world, planet):
+    """Every tile keeps its core every few iterations
+    (``PlanetLevel.snapshots``) and :mod:`globe.zoom.planet_frames` stitches
+    frame k of all of them into six faces: the frames share one grid, grow
+    towards the finished level, and hold it where no tile ran (the sea)."""
+    from globe.zoom import planet as zp
+    from globe.zoom import planet_frames as pfr
+
+    out, lv = planet["out"], planet["level"]
+    info = json.loads((out / "planet.json").read_text())
+    assert info.get("frames") == pfr.FRAMES_NAME.format(R=lv.R)
+    lapse = pfr.load(out, lv.R)
+    N = world["params"].coarse_grid().N
+    n = N * lv.R
+    res = n // int(lapse["factor"][0])
+    T = len(lapse["iterations"])
+    assert 1 < T <= lv.snapshots + 1
+    assert list(lapse["iterations"]) == sorted(lapse["iterations"]) and int(lapse["iterations"][-1]) == lv.iterations
+    for k in ("surface", "discharge"):
+        assert lapse[k].shape == (T, 6, res, res), k
+        assert np.isfinite(np.asarray(lapse[k], np.float32)).all(), k
+    # the last frame is the level as the tiles left it: the same land, cell for cell where a
+    # tile ran (the finish blends seams and the coast after them, so allow a little)
+    tiles = pfr.tile_frames(out)
+    assert tiles, "no per-tile frames were kept"
+    face, ta0, tb0, _ = tiles[0]
+    surf = np.load(zp.out_path(out, lv.R, face, "height")) + np.load(zp.out_path(out, lv.R, face, "sediment"))
+    k = n // res
+    red = surf.reshape(res, k, res, k).mean(axis=(1, 3))
+    last = np.asarray(lapse["surface"][-1, face], np.float32)
+    land = red > 0.0
+    assert land.any()
+    assert np.abs(last - red)[land].mean() < max(50.0, 0.05 * float(np.abs(red[land]).mean()))
+
+
+def test_the_planet_time_lapse_joins_the_viewers_timeline(world, planet):
+    """The level's frames are timeline entries of their own (stage
+    ``planet``), after the coarse erosion's and before the final state, each
+    labelled with the level's cell and its iteration."""
+    from globe.viz import viewer as vw
+    from globe.zoom import planet_frames as pfr
+
+    out, lv = planet["out"], planet["level"]
+    frames, _final = vw.collect_frames(world["root"], None, log=lambda m: None, planet=str(out))
+    pf = [f for f in frames if f.stage == "planet"]
+    assert len(pf) == len(pfr.load(out, lv.R)["iterations"])
+    # last of the erosion frames, before the final state (this world keeps no coarse frames)
+    assert frames[-1].stage == "final" and [f.stage for f in frames[-len(pf) - 1:-1]] == ["planet"] * len(pf)
+    cell = world["params"].world.cell_size_m / lv.R
+    assert all(f"{cell:.0f} m" in f.label or f"{cell / 1000.0:.1f} km" in f.label for f in pf)
+    assert [f.key for f in pf] == sorted(f.key for f in pf) and pf[-1].key == lv.iterations
+    assert pf[0].res == pf[-1].res and "discharge" in pf[0].ch
+
+
 def test_planet_workers_map_the_inputs_the_world_has(world, planet):
     """The inputs the bake wrote once are what a worker would load itself,
     mapped rather than copied; a changed world file makes a worker load

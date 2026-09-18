@@ -451,13 +451,17 @@ vec4 detailLinear(vec2 xy){
              mix(texelFetch(uDT, a + ivec2(0,1), 0), texelFetch(uDT, a + ivec2(1,1), 0), fr.x), fr.y);
 }
 vec4 bspline4(float t);
-// the same bicubic read of a detail tile's texel (see zSmooth)
+// the same bicubic read of a detail tile's texel (see zSmooth).  The sixteen taps are held
+// inside the tile's own slot: a tile carries one cell of halo, and a tap past it lands in
+// whatever unrelated tile the cache put next door -- a hard line along every tile edge, which
+// the satellite's shading drew out (the elevation colours hid it)
 vec4 detailSmooth(vec2 xy){
   vec2 i0 = floor(xy); vec2 f = xy - i0; ivec2 a = ivec2(i0);
+  ivec2 lo = ivec2(floor(xy / uDSlot) * uDSlot), hi = lo + ivec2(int(uDSlot) - 1);
   vec4 wx = bspline4(f.x), wy = bspline4(f.y);
   vec4 v = vec4(0.0);
   for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++)
-    v += wx[i] * wy[j] * texelFetch(uDT, a + ivec2(i - 1, j - 1), 0);
+    v += wx[i] * wy[j] * texelFetch(uDT, clamp(a + ivec2(i - 1, j - 1), lo, hi), 0);
   return v;
 }
 float detailHeight(vec2 xy){

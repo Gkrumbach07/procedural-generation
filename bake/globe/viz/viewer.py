@@ -57,6 +57,7 @@ from pathlib import Path
 import numpy as np
 
 from ..cubesphere import from_sphere_v, to_sphere_v
+from ..zoom import planet_frames as pfr
 from . import frames as vf
 
 TEMPLATE = Path(__file__).with_name("viewer.html")
@@ -421,6 +422,11 @@ def _planet_final(root: Path, manifest: dict, surf_c: np.ndarray, flow_dir_c: np
     return {"surf": surf, "sed": sed, "ws": ws, "water": water, "discharge": q, "biome": None, "basin": None, "river_scale": scale}
 
 
+def _fmt_cell(m: float) -> str:
+    """A cell size as the viewer writes it: metres under a kilometre."""
+    return f"{m / 1000.0:.1f} km" if m >= 1000.0 else f"{m:.0f} m"
+
+
 class _Frame:
     """One timeline entry before encoding: metres + optional channels."""
 
@@ -468,6 +474,22 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
         with np.load(p) as z:
             frames.append(_Frame("erosion", key, f"erosion · iteration {key} / {meta.get('of', '?')}",
                                  lo(z["height"]), discharge=lo(z["discharge"], "max")))
+    # then the planet level's own erosion, if it kept a time lapse: the same planet at the
+    # level's cell (1.2 km on the earth preset) rather than the coarse grid's 9.8 km
+    if planet:
+        pdir = Path(root) / planet if not Path(planet).is_absolute() else Path(planet)
+        info = json.loads((pdir / "planet.json").read_text()) if (pdir / "planet.json").exists() else {}
+        R_lvl = int((info.get("level") or {}).get("R") or 0)
+        lapse = pfr.load(pdir, R_lvl) if R_lvl else None
+        if lapse is not None:
+            cell = float(info.get("cell_m") or 0.0)
+            at = _fmt_cell(cell) if cell else f"R = {R_lvl}"
+            its = [int(v) for v in lapse["iterations"]]
+            for k, it in enumerate(its):
+                frames.append(_Frame("planet", it, f"{at} · iteration {it} / {its[-1]}",
+                                     lapse["surface"][k].astype(np.float32),
+                                     discharge=lapse["discharge"][k].astype(np.float32)))
+            log(f"[viewer] planet time lapse: {len(its)} frames of {frames[-1].res}^2 a face at {at}")
 
     # the final state, from the coarse fields -- or the refined grid with
     # ``refined`` (render.viewer_refined) -- at (up to) full resolution

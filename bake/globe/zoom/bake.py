@@ -771,7 +771,9 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
                 facc = flood if flood is not None else tile_water(surf_m, drain, weight)[0]
                 fsl = prod if prod is not None else (slice(None), slice(None))
                 fsurf = surf_m[fsl]
-                fac = _snap_factor(fsurf.shape[0])
+                # a tile of a planet-wide level takes the factor the whole face's frame wants,
+                # so every tile's block lands on the same grid (globe/zoom/planet_frames.py)
+                fac = int(job.get("snap_factor") or 0) or _snap_factor(fsurf.shape[0])
                 frames.append({"it": it + 1, "surface": _block_mean(fsurf, fac),
                                "discharge": _block_mean(facc[fsl], fac), "factor": fac})
             if hold > 0 and (it + 1) % hold == 0:
