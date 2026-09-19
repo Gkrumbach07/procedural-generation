@@ -244,6 +244,32 @@ own verdict still reads "breaks up and stays apart" because its threshold for
 segments) a gathered crust is a looser thing than on Earth, and the number to
 watch is the trajectory, not the verdict.
 
+### The crust-age map the run makes for itself
+
+`scripts/crust_age_map.py` runs the plates (no bake) and maps the crust's age
+with a ramp per kind, `--prehistory 0` turning off the invented continental
+past so the map shows only what the run produced.  `small`, 9000 steps:
+
+| | continental crust | continental age IQR | ocean age p50 | assemblies |
+|---|---|---|---|---|
+| shipped | 5.0 % | 3951 (0.44 runs) | 110 | none |
+| `variable_extent` | 21.9 % | 3470 (0.39) | 117 | 2 |
+| + `slab_pull = 300` | **26.7 %** | 1544 (0.17) | 59 | (peak 0.57 at 4000) |
+| + `slab_pull = 1000` | 21.2 % | 324 (0.04) | 16 | 4 (peak 0.69) |
+
+With extent on, the map is the one the reference maps look like and nobody
+drew it: the oceans in bands from the ridge out, the continents with dark old
+cores and pale belts welded round them.  The shipped model has the age
+structure too -- and 5 % of a planet's crust left to show it on.  The
+trade-off along the slab_pull axis is cycles against age: the harder the
+planet is driven, the more it assembles and the younger everything gets.
+
+So `inherited_age` now fades out by how much structure the run made for
+itself (`PREHISTORY_FADE`, the interquartile spread of the continental ages as
+a share of the run): a short run that starts assembled gets the whole invented
+past, a cycling one gets none of it, measured 1064 steps on 65 % of segments
+against zero.
+
 Known cost, not yet addressed: `slab_pull = 1000` recycles the sea floor hard
 -- median floor age 21 steps against 81 without it, and 0.1 % of it fully
 subsided against 3.7 % -- so the ocean comes out uniformly young and the

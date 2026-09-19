@@ -502,6 +502,14 @@ class TectonicSim:
 #: length.  Drawn from a stream of its own and read by nothing but the diagnostic: the
 #: simulation, and every output of this stage, is bit for bit what it was without it.
 PREHISTORY_RUNS = 8.0
+#: how much age structure a run has to make for itself before the invented past fades out,
+#: as a share of the run's length (the interquartile spread of the continental ages).  A run
+#: that assembles, rifts and re-assembles welds a belt at every collision and leaves the old
+#: cores between them -- measured at 0.39 of a run on `small` over 9000 steps with
+#: tectonics.variable_extent on -- and needs no past handed to it; a run that starts with its
+#: continents assembled and never breaks them up makes none at all, and without a past every
+#: continent is one flat colour.  So the two are mixed by how much the run did itself
+PREHISTORY_FADE = 0.25
 #: sub-key of the stream the inherited ages come from
 PREHISTORY_KEY = 5717
 
@@ -512,6 +520,12 @@ def inherited_age(sim) -> np.ndarray:
     young as it looks), and :data:`PREHISTORY_RUNS` runs' worth for a craton."""
     seg = sim.seg
     at_start = seg.age >= float(sim.step_index) - 0.5      # there before the first step ran
+    # what the run made for itself, and so how much of a past it still needs
+    own = seg.age[seg.kind != OCEANIC]
+    made = float(np.percentile(own, 75) - np.percentile(own, 25)) / max(float(sim.step_index), 1.0) if own.size else 0.0
+    fade = min(max(1.0 - made / max(PREHISTORY_FADE, 1e-9), 0.0), 1.0)
+    if fade <= 0.0:
+        return np.zeros(seg.M)
     # the run's whole length, not how much of it has gone: a craton's past is a number it
     # carries, and scaling it with the step would have the continents ageing as the animation
     # plays while the map's scale stayed still, which reads as one flat colour early on
@@ -519,7 +533,7 @@ def inherited_age(sim) -> np.ndarray:
     rng = np.random.default_rng(int(sim.params.world.seed) + PREHISTORY_KEY)
     f = np.clip(0.5 + 0.5 * fbm_at(seg.pos, rng, octaves=3, base_freq=2.0), 0.0, 1.0)
     old = np.where(seg.craton > 0, 0.70 + 0.30 * f, 0.12 + 0.48 * f)
-    return np.where((seg.kind != OCEANIC) & at_start, span * old, 0.0)
+    return np.where((seg.kind != OCEANIC) & at_start, fade * span * old, 0.0)
 
 
 def ridge_buoyancy(seg, tp) -> np.ndarray:
