@@ -232,9 +232,9 @@ class Segments:
     """Structure-of-arrays segment store (see module docstring).  All
     mutating methods keep the parallel arrays aligned."""
 
-    FIELDS = ("pos", "mass", "thickness", "density", "age", "plate_id", "area", "h_ref", "kind", "craton", "weld")
+    FIELDS = ("pos", "mass", "thickness", "density", "age", "plate_id", "area", "h_ref", "kind", "craton", "weld", "ext")
 
-    def __init__(self, pos, thickness, density, age, plate_id, area, h_ref=None, mass=None, kind=OCEANIC, craton=0, weld=0):
+    def __init__(self, pos, thickness, density, age, plate_id, area, h_ref=None, mass=None, kind=OCEANIC, craton=0, weld=0, ext=None):
         self.pos = np.ascontiguousarray(pos, dtype=np.float64).reshape(-1, 3)
         M = self.pos.shape[0]
         self.thickness = np.array(np.broadcast_to(np.asarray(thickness, dtype=np.float64), (M,)), dtype=np.float64)
@@ -249,6 +249,13 @@ class Segments:
         #: steps left of a weld: a continental segment that has shortened onto another plate
         #: belongs to that plate for this long, whatever the shape of the cloud says
         self.weld = np.array(np.broadcast_to(np.asarray(weld, dtype=np.int16), (M,)), dtype=np.int16)
+        #: the ground this segment covers, in steradians -- its *extent*, as against ``area``,
+        #: which is a measurement of the Voronoi cell the cloud happens to give it
+        #: (``collision.accumulate_area`` overwrites that every few steps).  Crustal shortening
+        #: takes extent away and thickens the crust on what is left; extension gives it back.
+        #: With ``tectonics.variable_extent`` off it is 4 pi / M everywhere and nothing reads it
+        self.ext = (self.area.copy() if ext is None
+                    else np.array(np.broadcast_to(np.asarray(ext, dtype=np.float64), (M,)), dtype=np.float64))
 
     @property
     def M(self) -> int:
@@ -260,6 +267,17 @@ class Segments:
     def height(self) -> np.ndarray:
         """Buoyant bedrock height per segment: ``thickness * (1 - density)``."""
         return self.thickness * (1.0 - self.density)
+
+    def scale(self) -> np.ndarray:
+        """The segment's own length scale, radians: ``sqrt(ext)``.  Uniform extent
+        gives ``sqrt(4 pi / M)`` -- :func:`mean_spacing` -- for every segment, which is
+        the one number the stage used before extent was a thing."""
+        return np.sqrt(np.maximum(self.ext, 1e-12))
+
+    def crust_volume(self) -> float:
+        """``sum(ext * thickness)``: the crust there actually is.  Shortening moves it
+        between segments and must not change it."""
+        return float((self.ext * self.thickness).sum())
 
     def total_mass(self) -> float:
         return float(self.mass.sum())
@@ -279,7 +297,7 @@ class Segments:
             setattr(self, name, np.ascontiguousarray(np.concatenate([getattr(self, name), getattr(other, name)])))
 
     def copy(self) -> "Segments":
-        return Segments(self.pos.copy(), self.thickness.copy(), self.density.copy(), self.age.copy(), self.plate_id.copy(), self.area.copy(), self.h_ref.copy(), self.mass.copy(), self.kind.copy(), self.craton.copy(), self.weld.copy())
+        return Segments(self.pos.copy(), self.thickness.copy(), self.density.copy(), self.age.copy(), self.plate_id.copy(), self.area.copy(), self.h_ref.copy(), self.mass.copy(), self.kind.copy(), self.craton.copy(), self.weld.copy(), self.ext.copy())
 
     def renormalise(self) -> None:
         self.pos /= np.linalg.norm(self.pos, axis=1, keepdims=True)

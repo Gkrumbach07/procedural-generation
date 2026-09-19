@@ -205,7 +205,7 @@ def _wendland_chunk(tree: cKDTree, pts: np.ndarray, h: float, kk: int) -> tuple[
 
 
 def splat_weights(tree: cKDTree, pts: np.ndarray, sigma: float, knn: int = 12, kernel: str = "gaussian",
-                  support: float | None = None) -> tuple[np.ndarray, np.ndarray, float]:
+                  support: float | None = None, weight_k: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, float]:
     """Neighbour indices and normalised weights of the reconstruction
     kernel at the (n, 3) points ``pts``: ``(nb, w, covered)``, rows sorted
     by distance, ``v(p) = sum_k w_k v_k``.
@@ -263,6 +263,16 @@ def splat_weights(tree: cKDTree, pts: np.ndarray, sigma: float, knn: int = 12, k
             dk = d[:, -1:]
             t = np.clip(1.0 - (d / np.maximum(dk, 1e-300)) ** 2, 0.0, 1.0)
             w = w * t * t
+    if weight_k is not None:
+        # How much ground a segment owns, as against how smooth the reconstruction is.  A
+        # segment carrying twice the extent gets twice the weight at the same distance, so the
+        # boundary between two of them moves to where ext_1 exp(-d1^2/2s^2) = ext_2
+        # exp(-d2^2/2s^2) -- a power (Laguerre) cell whose area follows the extent -- while
+        # every kernel keeps the width the packing needs (splat_sigma_factor: a kernel
+        # narrower than the cloud's own spacing shows the Poisson disc through as worms, which
+        # is what shrinking sigma per segment would have done).  All extents equal multiplies
+        # by exactly one, so a uniform cloud is the old blend to the bit
+        w = w * np.asarray(weight_k, np.float64)[nb]
     w[:, 0] = np.maximum(w[:, 0], 1e-300)  # the nearest always counts
     return nb, w / w.sum(axis=1, keepdims=True), covered
 
@@ -277,9 +287,9 @@ class SmoothSplat:
     Query once, splat many fields."""
 
     def __init__(self, tree: cKDTree, grid: Grid, sigma: float, knn: int = 12, kernel: str = "gaussian",
-                 support: float | None = None):
+                 support: float | None = None, weight_k: np.ndarray | None = None):
         self.nb, self.w, self.support_covered = splat_weights(
-            tree, interior_centers_flat(grid), sigma, knn, kernel, support)
+            tree, interior_centers_flat(grid), sigma, knn, kernel, support, weight_k)
         self.kernel = kernel
         self.shape = (6, grid.N, grid.N)
 
@@ -335,7 +345,7 @@ def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float
 # --------------------------------------------------------------------------
 # gaps -> new crust (PLAN 6.2.4)
 # --------------------------------------------------------------------------
-def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, oceanic_density: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None, tree: cKDTree | None = None) -> tuple[Segments, np.ndarray]:
+def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, oceanic_density: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None, tree: cKDTree | None = None, ext: float | None = None) -> tuple[Segments, np.ndarray]:
     """Cells farther than ``gap_radius`` from every segment are divergent
     boundaries — provided the nearest segment is moving *away* from the
     cell (``omega`` (P, 3) rad/step given; holes left by subduction at a
@@ -404,9 +414,9 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
         th = np.where(interior_cont, seg.thickness[nb].mean(axis=1), new_thickness)
         de = np.where(interior_cont, seg.density[nb].mean(axis=1), oceanic_density)
         cr = np.where(interior_cont, seg.craton[nb][np.arange(pos.shape[0]), 0], 0).astype(np.int8)
-        new = Segments(pos, th, de, 0.0, plate, mean_area, kind=kind, craton=cr)
+        new = Segments(pos, th, de, 0.0, plate, mean_area, kind=kind, craton=cr, ext=ext if ext is not None else mean_area)
     else:
-        new = Segments(pos, new_thickness, oceanic_density, 0.0, plate, mean_area, kind=OCEANIC)
+        new = Segments(pos, new_thickness, oceanic_density, 0.0, plate, mean_area, kind=OCEANIC, ext=ext if ext is not None else mean_area)
     return new, gap
 
 

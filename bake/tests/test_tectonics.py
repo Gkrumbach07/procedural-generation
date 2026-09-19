@@ -228,6 +228,44 @@ def test_no_plateless_holes_after_gap_filling(tiny_sim):
 # --------------------------------------------------------------------------
 # outputs
 # --------------------------------------------------------------------------
+def test_extent_is_the_ground_a_segment_covers():
+    """``Segments.ext`` (steradians) is what the splat weights a segment by, so
+    the ground it owns follows it -- the thing a fixed-area segment cloud cannot
+    do, and the reason a collision could only delete a continent or keep it
+    whole.  A cloud of one extent multiplies every weight by exactly one, so
+    turning the knob on before anything has shortened changes nothing."""
+    from globe.tectonics.collision import SmoothSplat, build_tree
+
+    flat = WorldParams.tiny_world()
+    flat.tectonics.steps = 200
+    var = WorldParams.tiny_world()
+    var.tectonics.steps = 200
+    var.tectonics.variable_extent = True
+    a, b = tect.simulate(flat, log=None), tect.simulate(var, log=None)
+    fa, fb = tect.finalise(a), tect.finalise(b)
+    for k in ("bedrock", "uplift", "hardness", "plate_id", "plate_vel"):
+        assert np.array_equal(fa[k].data, fb[k].data), k          # uniform extent changes nothing
+
+    seg, sim = b.seg, b
+    assert seg.ext.shape == (seg.M,) and (seg.ext > 0).all()
+    # the ground a segment owns follows its extent, and the blend is still an average
+    sigma = sim.tp.splat_sigma_factor * sim.spacing
+    tree = build_tree(seg)
+    base = SmoothSplat(tree, sim.grid, sigma, 12, "gaussian", None)
+    own = float(base.w[base.nb == 0].sum())
+    for factor, lo, hi in ((0.25, 0.15, 0.45), (4.0, 2.0, 4.0)):
+        wk = seg.ext / sim.spacing ** 2
+        wk[0] *= factor
+        sp = SmoothSplat(tree, sim.grid, sigma, 12, "gaussian", None, wk)
+        got = float(sp.w[sp.nb == 0].sum()) / own
+        assert lo <= got <= hi, (factor, got)
+        assert np.allclose(sp.w.sum(axis=1), 1.0)
+    # and it survives the cloud changing shape
+    seg2 = seg.copy()
+    seg2.compress(np.arange(seg2.M) % 2 == 0)
+    assert seg2.ext.shape == (seg2.M,) and seg2.crust_volume() > 0
+
+
 def test_a_shortened_continent_keeps_the_plate_it_welded_onto():
     """``continental_shortening`` leaves the losing segment alive on the
     winner's plate, but it is still embedded in the plate it came from, so

@@ -371,7 +371,7 @@ class TectonicSim:
         if k % max(1, int(tp.label_every)) == 0 or self.idx is None:
             idx, dist = label_map_fast(seg, grid, self.r_cap, tree)
             accumulate_area(seg, idx, self.area_sr, tp.area_blend)
-            new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega, tree=tree)
+            new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega, tree=tree, ext=self.spacing ** 2 if tp.variable_extent else None)
             n_gap = int(gap.sum())
             n_new = new.M
             if n_new and tp.gap_cooling > 0:
@@ -574,7 +574,7 @@ def frame_bed(sim, tree=None) -> np.ndarray:
 
     tp, grid = sim.tp, sim.grid
     tree = build_tree(sim.seg) if tree is None else tree
-    blend, base_blend = splat_blends(tree, grid, tp, sim.spacing)
+    blend, base_blend = splat_blends(tree, grid, tp, sim.spacing, sim.seg)
     buoy = ridge_buoyancy(sim.seg, tp)
     raw, c, _ = margin_ramp(grid, blend, sim.seg, sim.seg.height() + buoy, tp, sim.spacing, base_blend=base_blend)
     bed = _smooth_field(grid, raw, tp, cascade=True).interior
@@ -690,7 +690,7 @@ def _smooth_field(grid: Grid, values: np.ndarray, tp, cascade: bool) -> FaceFiel
     return gaussian_smooth(f, float(tp.smooth_sigma))
 
 
-def splat_blends(tree, grid: Grid, tp, spacing: float) -> tuple[SmoothSplat, SmoothSplat | None]:
+def splat_blends(tree, grid: Grid, tp, spacing: float, seg=None) -> tuple[SmoothSplat, SmoothSplat | None]:
     """The narrow ``splat_knn`` blend that rasterises the segment cloud and,
     when ``splat_knn_base > splat_knn``, the wider blend of the same sigma
     for the base height (else ``None``).  One place, so :func:`finalise`
@@ -709,8 +709,15 @@ def splat_blends(tree, grid: Grid, tp, spacing: float) -> tuple[SmoothSplat, Smo
     def support(k):  # the Wendland radius is fixed per world, not per frame
         return wendland_support(sigma, k, spacing) if kernel == "wendland" else None
 
-    blend = SmoothSplat(tree, grid, sigma, knn, kernel, support(knn))
-    base_blend = SmoothSplat(tree, grid, sigma, kb, kernel, support(kb)) if kb > knn else None
+    # with variable extent every segment brings its own width, sqrt(ext) scaled to the design
+    # spacing, floored so the kernel never gets narrower than the cloud's own packing length
+    # each segment weighted by the ground it covers, in units of the design extent: a cloud
+    # that is one extent everywhere multiplies by one and is the old blend to the bit
+    weight_k = None
+    if seg is not None and bool(getattr(tp, "variable_extent", False)) and seg.M:
+        weight_k = seg.ext / (spacing ** 2)
+    blend = SmoothSplat(tree, grid, sigma, knn, kernel, support(knn), weight_k)
+    base_blend = SmoothSplat(tree, grid, sigma, kb, kernel, support(kb), weight_k) if kb > knn else None
     return blend, base_blend
 
 
@@ -879,7 +886,7 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     # the narrow blend rasterises everything; the wide one (splat_knn_base,
     # None when off) only the base height, see margin_ramp.  dh, age and
     # density stay on the narrow blend: uplift and hardness are untouched
-    blend, base_blend = splat_blends(tree, grid, tp, sim.spacing)
+    blend, base_blend = splat_blends(tree, grid, tp, sim.spacing, sim.seg)
     # thermal buoyancy of young crust: ridges at rifts, subsidence with age
     elapsed = float(sim.step_index - sim.ref_step)
     buoy = ridge_buoyancy(seg, tp)
