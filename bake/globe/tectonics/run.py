@@ -269,12 +269,23 @@ class TectonicSim:
         rotate_segments(seg, plates)
 
         # 2. collisions
+        ext_before = float(seg.ext.sum()) if tp.variable_extent else 0.0
+        # where the ground goes, by kind and by phase, so a drift in the continental share
+        # can be read off instead of guessed at (only with variable_extent)
+        def _ext_by_kind():
+            c = float(seg.ext[seg.kind == CONTINENTAL].sum())
+            return c, float(seg.ext.sum()) - c
+
+        if tp.variable_extent:
+            c0, o0 = _ext_by_kind()
         tree = build_tree(seg)
         alive = np.ones(seg.M, dtype=bool)
+        spent_out: list = []
         losers, survivors = collide(seg, tree, self.r_coll, plates.omega, alive, tp.overlap_fraction,
                                     float(tp.arc_accretion), float(tp.arc_birth), self.params.rng("tectonics", 7, k),
                                     shortening=float(tp.continental_shortening), weld_steps=int(tp.weld_steps),
-                                    extent_min=(float(tp.extent_min) * self.spacing ** 2) if tp.variable_extent else 0.0)
+                                    extent_min=(float(tp.extent_min) * self.spacing ** 2) if tp.variable_extent else 0.0,
+                                    spent_out=spent_out)
         n_coll = int(losers.size)
         if n_coll:
             if tp.orogen_shaping > 0.0:
@@ -366,15 +377,45 @@ class TectonicSim:
                 float(tp.orogen_floor_m), float(tp.height_scale_m),
                 float(tp.orogen_decay), CONTINENTAL)
 
+        if tp.variable_extent:
+            c1, o1 = _ext_by_kind()
+            self.ledger["ext_coll_cont"] = self.ledger.get("ext_coll_cont", 0.0) + (c1 - c0)
+            self.ledger["ext_coll_ocean"] = self.ledger.get("ext_coll_ocean", 0.0) + (o1 - o0)
         # 3. label map, areas, gaps
         n_gap = 0
         n_new = 0
+        # what the collisions destroyed is what extension has to spend: the planet's surface
+        # does not grow, so crust spreads only over ground that shortening took elsewhere
+        # what *crustal shortening* consumed, not what every collision did: the ground a
+        # trench swallows is ocean floor and comes back at a ridge as ocean (the spawn below),
+        # and spending it on continental stretch instead handed the continents a share of
+        # every subducted plate -- +6.5 steradians of a 12.6 planet over 400 Earth-scale steps
+        stretch_budget = float(sum(spent_out)) if tp.variable_extent else 0.0
         if k % max(1, int(tp.label_every)) == 0 or self.idx is None:
             idx, dist = label_map_fast(seg, grid, self.r_cap, tree)
             accumulate_area(seg, idx, self.area_sr, tp.area_blend)
-            new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega, tree=tree, ext=self.spacing ** 2, stretch=bool(tp.variable_extent))
+            new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega, tree=tree, ext=self.spacing ** 2, stretch=stretch_budget)
             n_gap = int(gap.sum())
             n_new = new.M
+            if tp.variable_extent and n_gap:
+                # The ground the cloud has left open goes to whoever is nearest, less what the
+                # new segments took.  At a ridge that is the sea floor either side of it,
+                # which is where the area a trench swallowed belongs: handing the deficit to
+                # the whole cloud in proportion instead (the closure below) gave the
+                # continents a share of every subducted plate, and at Earth scale -- where
+                # there is far more trench per continent than on `small` -- that alone drove
+                # them from 0.6 of the planet to 0.75
+                g = gap.ravel()
+                open_area = float(self.area_sr.ravel()[g].sum()) - n_new * self.spacing ** 2
+                if open_area > 0.0:
+                    share = np.bincount(idx.ravel()[g], weights=self.area_sr.ravel()[g], minlength=seg.M)
+                    tot = float(share.sum())
+                    if tot > 0.0:
+                        add = share * (open_area / tot)
+                        keep = seg.ext / np.maximum(seg.ext + add, 1e-12)
+                        seg.thickness *= keep                   # the crust on it does not change
+                        seg.mass *= keep
+                        seg.ext += add
             if n_new and tp.gap_cooling > 0:
                 self._heat_blobs(new.pos, -tp.gap_cooling)
             if n_new and tp.ridge_push > 0.0:
@@ -433,6 +474,9 @@ class TectonicSim:
         self.step_index += 1
         spd = plates.speeds()[plates.alive]
         if tp.variable_extent and seg.M:
+            c2, o2 = _ext_by_kind()
+            self.ledger["ext_spawn_cont"] = self.ledger.get("ext_spawn_cont", 0.0) + (c2 - c1)
+            self.ledger["ext_spawn_ocean"] = self.ledger.get("ext_spawn_ocean", 0.0) + (o2 - o1)
             # Close the extent budget: the sphere is covered, whatever the step did to the
             # margins.  Shortening spends ground at convergent boundaries and extension and
             # new sea floor give it back, but the two do not balance step for step, and the
