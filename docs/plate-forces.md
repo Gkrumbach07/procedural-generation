@@ -209,7 +209,50 @@ continental segments| stayed 0.1-0.5 in every run above, with no periodicity).
 Until then: 3000-4000 steps is the honest range, where continental crust is
 still 0.39-0.56 of the coarse cells.
 
-## 5.## 5. The field that moves: continental insulation
+## 4c. Extent: the cycle, measured (2026-09-19)
+
+`tectonics.variable_extent` gives every segment the ground it covers
+(`Segments.ext`, steradians) and makes the splat weight it by that, so a
+collision can spend *area* -- the overlap of the two discs, which is the
+boundary length times the convergence -- instead of choosing between deleting
+the loser and keeping it whole.  Extension is the same process backwards: a
+void inside a continent is taken by the crust around it, which thins by as
+much, rather than being filled with new crust.  `small`, 4000 steps:
+
+| | continental share | plates | largest landmass |
+|---|---|---|---|
+| shipped (a contact deletes the loser) | 0.178, still falling | 15 | 1.00 -> 0.17, no recovery |
+| `continental_shortening = 0.25` | 0.98 | 1 | never breaks up (min 0.94) |
+| `variable_extent` | 0.41-0.48, steady | 17 | 0.48 / 0.28 / 0.43 / 0.20 / 0.36 |
+
+It also unlocks `slab_pull`, which section 3 rejected at gain 1000 for
+"shredding the continent to 0.25" -- that was the deletion, not the force.
+With the ground conserved, `variable_extent` + `slab_pull = 1000` over **9000
+steps** holds the continental extent at 0.36-0.48 the whole way and cycles:
+
+```
+biggest 1.00 0.96 0.54 0.53 0.35 0.24 0.15 0.42 0.38 0.60 0.37 0.36 0.39 0.42
+        0.45 0.36 0.24 0.37 0.60 0.28 0.29 0.45 0.40 0.29 0.18 0.19 0.43 0.23
+        0.25 0.69 0.36                                   (every 300 steps)
+```
+
+Breakups (largest mass < 0.30) at 1800, 4800, 5700, 7200, 8100; assemblies
+(> 0.45) at 2700 (0.60), 4200, 5400 (0.60), 8700 (**0.69**).  Four assemblies
+and five breakups in one run, on a period of 1500-3000 steps.  The script's
+own verdict still reads "breaks up and stays apart" because its threshold for
+*together* is 0.7 and these assemblies reach 0.60-0.69; on `small` (1500
+segments) a gathered crust is a looser thing than on Earth, and the number to
+watch is the trajectory, not the verdict.
+
+Known cost, not yet addressed: `slab_pull = 1000` recycles the sea floor hard
+-- median floor age 21 steps against 81 without it, and 0.1 % of it fully
+subsided against 3.7 % -- so the ocean comes out uniformly young and the
+crust-age map loses its stripes.  Gain 300 is milder (p50 58).  Next: an Earth
+bake with the knob on, which needs every number tuned against equal-area
+segments re-measured (convection, force_scale, heat_insulation, orogen_decay,
+continental_fraction, shelf_fraction).
+
+## 5.## 5.## 5. The field that moves: continental insulation
 
 `tectonics.heat_insulation`. The heat background that `heat_relax` pulls
 the live field towards is no longer the step-0 noise for the whole run:
