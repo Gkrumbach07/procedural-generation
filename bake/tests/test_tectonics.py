@@ -230,40 +230,54 @@ def test_no_plateless_holes_after_gap_filling(tiny_sim):
 # --------------------------------------------------------------------------
 def test_extent_is_the_ground_a_segment_covers():
     """``Segments.ext`` (steradians) is what the splat weights a segment by, so
-    the ground it owns follows it -- the thing a fixed-area segment cloud cannot
-    do, and the reason a collision could only delete a continent or keep it
-    whole.  A cloud of one extent multiplies every weight by exactly one, so
-    turning the knob on before anything has shortened changes nothing."""
-    from globe.tectonics.collision import SmoothSplat, build_tree
+    the ground it owns follows it -- which is what lets a collision spend area
+    instead of deleting a segment whole.  Weighting by extent rather than
+    widening the kernel keeps every kernel as wide as the cloud's packing needs
+    (``splat_sigma_factor``), and a cloud of one extent multiplies by exactly
+    one, so the default path is the old blend to the bit."""
+    from globe.tectonics.collision import SmoothSplat, build_tree, splat_weights
+    from globe.tectonics.segments import CONTINENTAL
 
-    flat = WorldParams.tiny_world()
-    flat.tectonics.steps = 200
-    var = WorldParams.tiny_world()
-    var.tectonics.steps = 200
-    var.tectonics.variable_extent = True
-    a, b = tect.simulate(flat, log=None), tect.simulate(var, log=None)
-    fa, fb = tect.finalise(a), tect.finalise(b)
-    for k in ("bedrock", "uplift", "hardness", "plate_id", "plate_vel"):
-        assert np.array_equal(fa[k].data, fb[k].data), k          # uniform extent changes nothing
+    # with the knob off nothing writes extent, so the blend never leaves the scalar path
+    off = WorldParams.tiny_world()
+    off.tectonics.steps = 200
+    sim_off = tect.simulate(off, log=None)
+    assert np.allclose(sim_off.seg.ext, sim_off.seg.ext[0], rtol=1e-12, atol=0)
 
-    seg, sim = b.seg, b
-    assert seg.ext.shape == (seg.M,) and (seg.ext > 0).all()
+    # and a weight of exactly one everywhere is the old blend, bit for bit
+    sigma = sim_off.tp.splat_sigma_factor * sim_off.spacing
+    pts = np.ascontiguousarray(sim_off.seg.pos[:64])
+    tree = build_tree(sim_off.seg)
+    nb0, w0, _ = splat_weights(tree, pts, sigma, 12, "gaussian", None)
+    nb1, w1, _ = splat_weights(tree, pts, sigma, 12, "gaussian", None, np.ones(sim_off.seg.M))
+    assert np.array_equal(nb0, nb1) and np.array_equal(w0, w1)
+
     # the ground a segment owns follows its extent, and the blend is still an average
-    sigma = sim.tp.splat_sigma_factor * sim.spacing
-    tree = build_tree(seg)
-    base = SmoothSplat(tree, sim.grid, sigma, 12, "gaussian", None)
+    base = SmoothSplat(tree, sim_off.grid, sigma, 12, "gaussian", None)
     own = float(base.w[base.nb == 0].sum())
     for factor, lo, hi in ((0.25, 0.15, 0.45), (4.0, 2.0, 4.0)):
-        wk = seg.ext / sim.spacing ** 2
-        wk[0] *= factor
-        sp = SmoothSplat(tree, sim.grid, sigma, 12, "gaussian", None, wk)
+        wk = np.ones(sim_off.seg.M)
+        wk[0] = factor
+        sp = SmoothSplat(tree, sim_off.grid, sigma, 12, "gaussian", None, wk)
         got = float(sp.w[sp.nb == 0].sum()) / own
         assert lo <= got <= hi, (factor, got)
         assert np.allclose(sp.w.sum(axis=1), 1.0)
-    # and it survives the cloud changing shape
-    seg2 = seg.copy()
-    seg2.compress(np.arange(seg2.M) % 2 == 0)
-    assert seg2.ext.shape == (seg2.M,) and seg2.crust_volume() > 0
+
+    # with the knob on, a collision spends extent instead of deleting the loser: the sphere
+    # stays covered, the crust that was on the consumed ground is still there, and the
+    # continent does not drain away as it does when a contact costs a whole segment
+    var = WorldParams.tiny_world()
+    var.tectonics.steps = 300
+    var.tectonics.variable_extent = True
+    sim = tect.simulate(var, log=None)
+    seg = sim.seg
+    A0 = sim.spacing ** 2
+    assert abs(float(seg.ext.sum()) - 4.0 * math.pi) < 1e-9          # the budget closes
+    assert seg.ext.min() < 0.9 * A0 and seg.ext.max() > 1.1 * A0     # margins shortened, others spread
+    assert (seg.ext > 0).all() and np.isfinite(seg.ext).all()
+    assert seg.crust_volume() > 0
+    share = float(seg.ext[seg.kind == CONTINENTAL].sum() / seg.ext.sum())
+    assert share > 0.35, share      # the fixed-area model is at 0.17 by here and still falling
 
 
 def test_a_shortened_continent_keeps_the_plate_it_welded_onto():

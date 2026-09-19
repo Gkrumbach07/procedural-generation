@@ -273,7 +273,8 @@ class TectonicSim:
         alive = np.ones(seg.M, dtype=bool)
         losers, survivors = collide(seg, tree, self.r_coll, plates.omega, alive, tp.overlap_fraction,
                                     float(tp.arc_accretion), float(tp.arc_birth), self.params.rng("tectonics", 7, k),
-                                    shortening=float(tp.continental_shortening), weld_steps=int(tp.weld_steps))
+                                    shortening=float(tp.continental_shortening), weld_steps=int(tp.weld_steps),
+                                    extent_min=(float(tp.extent_min) * self.spacing ** 2) if tp.variable_extent else 0.0)
         n_coll = int(losers.size)
         if n_coll:
             if tp.orogen_shaping > 0.0:
@@ -371,7 +372,7 @@ class TectonicSim:
         if k % max(1, int(tp.label_every)) == 0 or self.idx is None:
             idx, dist = label_map_fast(seg, grid, self.r_cap, tree)
             accumulate_area(seg, idx, self.area_sr, tp.area_blend)
-            new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega, tree=tree, ext=self.spacing ** 2 if tp.variable_extent else None)
+            new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega, tree=tree, ext=self.spacing ** 2, stretch=bool(tp.variable_extent))
             n_gap = int(gap.sum())
             n_new = new.M
             if n_new and tp.gap_cooling > 0:
@@ -431,6 +432,19 @@ class TectonicSim:
 
         self.step_index += 1
         spd = plates.speeds()[plates.alive]
+        if tp.variable_extent and seg.M:
+            # Close the extent budget: the sphere is covered, whatever the step did to the
+            # margins.  Shortening spends ground at convergent boundaries and extension and
+            # new sea floor give it back, but the two do not balance step for step, and the
+            # splat only reads extents relative to each other -- so the residual is spread
+            # over the cloud in proportion and logged.  A large or one-signed `extent_close`
+            # means the local processes are not keeping up and the number is doing the work
+            tot = float(seg.ext.sum())
+            close = (4.0 * math.pi) / max(tot, 1e-12)
+            seg.ext *= close
+            seg.thickness /= close                       # the crust on it does not change
+            seg.mass /= close
+            self.ledger["extent_close"] = self.ledger.get("extent_close", 0.0) + abs(close - 1.0)
         info = {
             "step": k,
             "M": seg.M,

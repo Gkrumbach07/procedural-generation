@@ -136,12 +136,16 @@ def main() -> int:
         big, n1, ncomp = landmasses(s.seg, s.spacing, args.link)
         alt = {str(L): landmasses(s.seg, s.spacing, L)[0] for L in links}
         cont = float((s.seg.kind == CONTINENTAL).mean())
+        # with tectonics.variable_extent the segments are not equal-area any more, so the
+        # share that matters is of the ground they cover, not of the count
+        ext_tot = float(s.seg.ext.sum())
+        cont_ext = float(s.seg.ext[s.seg.kind == CONTINENTAL].sum() / ext_tot) if ext_tot > 0 else 0.0
         sf = seafloor_age(s.seg, float(params.tectonics.ridge_age))
         rows.append({"step": int(i), "biggest": big, "masses": n1, "components": ncomp,
-                     "continental_fraction": cont, "plates": int(s.plates.n_alive()),
+                     "continental_fraction": cont, "continental_extent": cont_ext, "plates": int(s.plates.n_alive()),
                      "biggest_by_link": alt, "seafloor_age": sf})
         print(f"  step {i:5d}: biggest {big:.3f}  masses>=1% {n1:2d}  components {ncomp:4d}  "
-              f"cont {cont:.3f}  plates {s.plates.n_alive()}  "
+              f"cont {cont:.3f} (extent {cont_ext:.3f})  plates {s.plates.n_alive()}  "
               f"link " + " ".join(f"{L}:{alt[str(L)]:.2f}" for L in links)
               + (f"  seafloor age p50 {sf['p50']:.0f} subsided {sf['subsided_pct']:.1f} %" if sf else ""),
               flush=True)
