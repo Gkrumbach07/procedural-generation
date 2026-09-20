@@ -486,9 +486,15 @@ class TectonicSim:
             tot = float(seg.ext.sum())
             close = (4.0 * math.pi) / max(tot, 1e-12)
             seg.ext *= close
-            seg.thickness /= close                       # the crust on it does not change
-            seg.mass /= close
+            # and the crust is not touched.  Thinning it by the same factor -- on the argument
+            # that the volume on a segment is fixed -- was wrong twice over: the closure is a
+            # change of units, not of ground (the splat reads extents only against each
+            # other), and the factor is one-signed, so it compounded.  Measured on the first
+            # Earth bake with the knob on: the sea floor came out at -1461 m against -4095,
+            # the bedrock range -2750..10949 against -5705..8704, and refine ran in a sixth
+            # of the time because there was hardly any relief left to refine
             self.ledger["extent_close"] = self.ledger.get("extent_close", 0.0) + abs(close - 1.0)
+            self.ledger["extent_close_net"] = self.ledger.get("extent_close_net", 0.0) + (close - 1.0)
         info = {
             "step": k,
             "M": seg.M,
