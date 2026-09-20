@@ -324,11 +324,48 @@ them and how sharp the crust-type boundary is -- the power-cell blend resolves
 a margin more crisply than the distance-only one, and the shelf ramp that gave
 v13 its low land goes with it.
 
-Next, and it is a sweep not a fix: `abyss_depth`, `ridge_height`,
-`shelf_fraction` and the crust-type blend re-measured against the new
-boundary, judged on land median and ocean median rather than on land fraction
-(which is already right).  Until then `variable_extent` stays off and
-`earth-v13` is the planet.
+It was not a sweep; it was three more bugs, each found by ledgering the crust
+by phase (`thin_*`, the count of continental segments each phase leaves
+thinner than half a column) and looking at the thin segments themselves:
+
+1. **Island arcs were relabelled ocean floor.** An ocean-ocean collision made
+   the survivor continental and left it its 0.2 column at oceanic density.
+   With fixed area most were deleted in the next collision; with extent they
+   survive, and at Earth scale 5.9 % of continental segments were thinner than
+   ocean floor -- crust sitting at abyssal height that filled the 27.5 %
+   submerged-shelf quantile on its own and put sea level 1.8 km too low.
+   `arc_thickness` (0.55 of a column, at the belt's density, the difference
+   from the mantle and ledgered as `arc_mantle`) births an arc as arc crust.
+   On `small` that took the thin count from 28 to zero.
+2. **The stretch budget never reached the kernel** (`spent` allocated and read
+   but not passed), so continental extension had been off since it was
+   budgeted.  Wired, with the thinning floor (`extent_thin_floor`: crust at
+   half a column stops stretching and the gap becomes a rift).
+3. **The belt code spread what it assumed, not what moved.**
+   `spread_collisions` and `orogeny.shape_belt` lay out the crust a collision
+   handed the survivor, and both computed it by the fixed-area rule (the whole
+   of a dead loser's column), then clamped the removal to leave the survivor
+   1e-3.  With extent the survivor was handed a sliver, so the belt code
+   stripped every winner it touched: 1189 of 8062 continental segments thinner
+   than half a column at Earth scale, old, at full extent, 44 % cratons.  The
+   kernel now reports per pair what it handed over and both routines use it.
+   Same run: 183 thin, and collisions remove thin segments (-255) rather than
+   make them.
+
+Earth scale, 4000 steps of plates, after all three:
+
+| | fixed area | extent as baked in v14 | extent now | Earth |
+|---|---|---|---|---|
+| land | 40.5 % | 30.6 % | 27.1 % | 29 % |
+| land median | 311 m | 2133 m | 1221 m | ~800 m |
+| land above 2 km | 6.7 % | 54.7 % | 22.6 % | 13.3 % |
+| ocean median | -4065 m | -2367 m | **-3728 m** | -3700 m |
+| bedrock range | -5705..8704 | -3876..11498 | -5332..9589 | -10900..8848 |
+
+And the cycle on `small` (9000 steps, `slab_pull = 300`, all fixes): extent
+share 0.37-0.45 throughout, three assemblies (0.60, 0.49, 0.49) and five
+breakups, ocean age median 72 steps at the end.  `earth-v14` is re-baking with
+all of it; what it shows decides whether `variable_extent` becomes the default.
 
 ## 5.## 5.## 5.## 5. The field that moves: continental insulation
 
