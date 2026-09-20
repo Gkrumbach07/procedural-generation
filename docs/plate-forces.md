@@ -278,7 +278,59 @@ bake with the knob on, which needs every number tuned against equal-area
 segments re-measured (convection, force_scale, heat_insulation, orogen_decay,
 continental_fraction, shelf_fraction).
 
-## 5.## 5.## 5. The field that moves: continental insulation
+## 4d. The Earth bake with extent on: what it costs, and what is left (2026-09-20)
+
+`worlds/earth-v14` is `earth-v13`'s parameters plus `variable_extent`, one
+variable changed, 64 minutes.  Two bugs the `small` preset structurally could
+not show turned up first (section 4b's table was measured before them):
+
+* the ground a contact consumes was the overlap of the two discs, a
+  penetration depth set by the collision radius and so by the segment size --
+  at 20000 segments a quarter of the area per unit of boundary that it is at
+  1500.  It is the margin's width times the convergence now, which is the
+  physical rate and scale-free: `small` 0.673 against `earth` 0.699 at 400
+  steps, where it had been 0.71 against 0.76 and diverging;
+* continental stretch drew on what *every* collision destroyed, so ground a
+  trench swallowed went to the continents instead of coming back at a ridge:
+  +6.5 steradians of a 12.6 planet over 400 Earth-scale steps.  Only what
+  crustal shortening itself consumed is available to stretch now (+0.08);
+* and the closure was thinning the crust by its own renormalisation factor,
+  which is one-signed and compounded: the first bake came out with its ocean
+  at -1461 m and refine finishing in a sixth of its usual time because there
+  was no relief left to refine.
+
+With all three fixed, `earth-v14` against `earth-v13`:
+
+| | v13 | v14 | Earth |
+|---|---|---|---|
+| land | 40.5 % | **30.6 %** | 29 % |
+| continental crust | 56.0 % | 41.5 % | ~40 % |
+| plates | 11 | 22 | ~15 major |
+| land median | 311 m | **2133 m** | ~800 m |
+| land above 2 km | 6.7 % | **54.7 %** | 13.3 % |
+| ocean median | -4065 m | **-2367 m** | -3700 m |
+| bedrock range | -5705..8704 | -3876..11498 | -10900..8848 |
+| continental crust age | invented (14817-32859) | **1772-32707, partly its own** | - |
+
+So the area behaviour is right and the hypsometry is not: v14 is a planet of
+plateaus over a shallow sea.  `continental_fraction` is not the lever -- swept
+at Earth scale with extent on, raising it *lowers* the final continental crust
+and shallows the ocean further (0.75 -> 41.5 % and -2367 m, 0.85 -> 34.0 % and
+-1637, 0.92 -> 26.0 % and -1539), which is the opposite of its meaning with
+fixed area.  The crust columns themselves are not the problem: at 1200 Earth
+steps the two agree (continental thickness p50 0.936 both, ocean 0.200 both,
+continental height p50 +0.178 both), so what moved is where sea level lands on
+them and how sharp the crust-type boundary is -- the power-cell blend resolves
+a margin more crisply than the distance-only one, and the shelf ramp that gave
+v13 its low land goes with it.
+
+Next, and it is a sweep not a fix: `abyss_depth`, `ridge_height`,
+`shelf_fraction` and the crust-type blend re-measured against the new
+boundary, judged on land median and ocean median rather than on land fraction
+(which is already right).  Until then `variable_extent` stays off and
+`earth-v13` is the planet.
+
+## 5.## 5.## 5.## 5. The field that moves: continental insulation
 
 `tectonics.heat_insulation`. The heat background that `heat_relax` pulls
 the live field towards is no longer the step-0 noise for the whole run:
