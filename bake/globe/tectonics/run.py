@@ -134,10 +134,15 @@ OUTPUTS = ["bedrock", "uplift", "hardness", "plate_id", "plate_vel"]
 #: has to be added here or the books stop balancing. Sinks are negative by
 #: convention -- crust that went back to the mantle -- and only `initial`,
 #: `spawned` and `crystallised` may be positive.
-MASS_KEYS = ("initial", "spawned", "crystallised", "subducted", "delaminated", "orogen_decayed")
+MASS_KEYS = ("initial", "spawned", "crystallised", "subducted", "delaminated", "orogen_decayed", "arc_mantle")
 #: Ledger keys that are *counters*: how much crust a process relocated. They
 #: are diagnostics and must be left out of any mass balance.
-COUNTER_KEYS = ("orogen_shaped", "differentiated")
+COUNTER_KEYS = ("orogen_shaped", "differentiated",
+                # the ground (steradians) moved by kind and phase, the closure's factor, and the
+                # count of thin continental segments each phase leaves -- variable_extent's
+                # own bookkeeping (docs/plate-forces.md section 4d), none of it mass
+                "ext_coll_cont", "ext_coll_ocean", "ext_spawn_cont", "ext_spawn_ocean", "extent_close", "extent_close_net",
+                "thin_move", "thin_collide", "thin_spawn", "thin_delam", "thin_heat", "thin_rest")
 SINK_KEYS = ("subducted", "delaminated", "orogen_decayed")
 
 
@@ -262,12 +267,24 @@ class TectonicSim:
             seg.h_ref = seg.height()
             self.subduction_pts = []
 
+        # how many continental segments are thinner than half a column, after each phase: the
+        # ledger that says which process thins the crust (only with variable_extent)
+        def _thin():
+            return int((seg.thickness[seg.kind == CONTINENTAL] < 0.5 * float(tp.continental_thickness)).sum()) if tp.variable_extent else 0
+
+        def _tick(name, prev):
+            now = _thin()
+            self.ledger[name] = self.ledger.get(name, 0) + (now - prev)
+            return now
+
+        t_ = _thin()
         # 1. move
         mass0 = seg.total_mass()
         tau_slab = None
         cc_pair_max = 0
         rotate_segments(seg, plates)
 
+        t_ = _tick("thin_move", t_)
         # 2. collisions
         ext_before = float(seg.ext.sum()) if tp.variable_extent else 0.0
         # where the ground goes, by kind and by phase, so a drift in the continental share
@@ -281,11 +298,16 @@ class TectonicSim:
         tree = build_tree(seg)
         alive = np.ones(seg.M, dtype=bool)
         spent_out: list = []
+        arc_out: list = []
         losers, survivors = collide(seg, tree, self.r_coll, plates.omega, alive, tp.overlap_fraction,
                                     float(tp.arc_accretion), float(tp.arc_birth), self.params.rng("tectonics", 7, k),
                                     shortening=float(tp.continental_shortening), weld_steps=int(tp.weld_steps),
                                     extent_min=(float(tp.extent_min) * self.spacing ** 2) if tp.variable_extent else 0.0,
-                                    spent_out=spent_out)
+                                    spent_out=spent_out, arc_out=arc_out,
+                                    arc_thickness=float(tp.arc_thickness) * float(tp.continental_thickness),
+                                    arc_density=float(tp.continental_density))
+        if arc_out and arc_out[0]:
+            self.ledger["arc_mantle"] = self.ledger.get("arc_mantle", 0.0) + float(arc_out[0])
         n_coll = int(losers.size)
         if n_coll:
             if tp.orogen_shaping > 0.0:
@@ -381,6 +403,7 @@ class TectonicSim:
             c1, o1 = _ext_by_kind()
             self.ledger["ext_coll_cont"] = self.ledger.get("ext_coll_cont", 0.0) + (c1 - c0)
             self.ledger["ext_coll_ocean"] = self.ledger.get("ext_coll_ocean", 0.0) + (o1 - o0)
+        t_ = _tick("thin_collide", t_)
         # 3. label map, areas, gaps
         n_gap = 0
         n_new = 0
@@ -394,7 +417,7 @@ class TectonicSim:
         if k % max(1, int(tp.label_every)) == 0 or self.idx is None:
             idx, dist = label_map_fast(seg, grid, self.r_cap, tree)
             accumulate_area(seg, idx, self.area_sr, tp.area_blend)
-            new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega, tree=tree, ext=self.spacing ** 2, stretch=stretch_budget)
+            new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega, tree=tree, ext=self.spacing ** 2, stretch=stretch_budget, thin_floor=float(tp.extent_thin_floor) * float(tp.continental_thickness) if tp.variable_extent else 0.0)
             n_gap = int(gap.sum())
             n_new = new.M
             if tp.variable_extent and n_gap:
@@ -412,6 +435,10 @@ class TectonicSim:
                     tot = float(share.sum())
                     if tot > 0.0:
                         add = share * (open_area / tot)
+                        # continental crust at the thinning floor takes no more (see spawn)
+                        floor = float(tp.extent_thin_floor) * float(tp.continental_thickness)
+                        room = np.where(seg.kind == CONTINENTAL, seg.ext * np.maximum(seg.thickness / max(floor, 1e-9) - 1.0, 0.0), np.inf)
+                        add = np.minimum(add, room)
                         keep = seg.ext / np.maximum(seg.ext + add, 1e-12)
                         seg.thickness *= keep                   # the crust on it does not change
                         seg.mass *= keep
@@ -427,6 +454,7 @@ class TectonicSim:
                 seg.append(new)
             self.idx, self.dist = idx, dist
 
+        t_ = _tick("thin_spawn", t_)
         # 4. crystallisation, then delamination of over-thickened roots
         T = self.heat_at(seg.pos)
         mass1 = seg.total_mass()
@@ -436,6 +464,7 @@ class TectonicSim:
             self.ledger["delaminated"] -= delaminate(
                 seg, float(tp.max_crust_thickness), float(tp.delamination))
 
+        t_ = _tick("thin_delam", t_)
         # 5. heat diffusion + slow relaxation towards the background field
         if tp.heat_insulation > 0 and self.idx is not None:
             # the background itself moves: cold grows under continents, warm
@@ -455,6 +484,7 @@ class TectonicSim:
         np.clip(self.heat.data, 0.0, 1.0, out=self.heat.data)
         self._diffuse_heat()
 
+        t_ = _tick("thin_heat", t_)
         # 6. forces
         self.heat.exchange_halos()
         grad3 = heat_gradient_3d(self.heat, seg.pos)
@@ -495,6 +525,7 @@ class TectonicSim:
             # of the time because there was hardly any relief left to refine
             self.ledger["extent_close"] = self.ledger.get("extent_close", 0.0) + abs(close - 1.0)
             self.ledger["extent_close_net"] = self.ledger.get("extent_close_net", 0.0) + (close - 1.0)
+        t_ = _tick("thin_rest", t_)              # everything after the forces: events, closure
         info = {
             "step": k,
             "M": seg.M,

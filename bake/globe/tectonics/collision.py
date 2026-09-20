@@ -345,7 +345,7 @@ def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float
 # --------------------------------------------------------------------------
 # gaps -> new crust (PLAN 6.2.4)
 # --------------------------------------------------------------------------
-def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, oceanic_density: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None, tree: cKDTree | None = None, ext: float | None = None, stretch: float = 0.0) -> tuple[Segments, np.ndarray]:
+def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, oceanic_density: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None, tree: cKDTree | None = None, ext: float | None = None, stretch: float = 0.0, thin_floor: float = 0.0) -> tuple[Segments, np.ndarray]:
     """Cells farther than ``gap_radius`` from every segment are divergent
     boundaries — provided the nearest segment is moving *away* from the
     cell (``omega`` (P, 3) rad/step given; holes left by subduction at a
@@ -430,14 +430,27 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
             share = min(float(ext), float(stretch) / max(int(interior_cont.sum()), 1))
             add = np.zeros(seg.M, dtype=np.float64)
             np.add.at(add, nb[interior_cont, 0], share)
+            if thin_floor > 0.0:
+                # ...and no further than the crust can stretch: at the floor it breaks, and
+                # the ground it could not take is a rift, filled with sea floor below
+                room = seg.ext * np.maximum(seg.thickness / thin_floor - 1.0, 0.0)
+                add = np.minimum(add, room)
             grown = add > 0.0
             if grown.any():
                 keep = seg.ext[grown] / (seg.ext[grown] + add[grown])       # volume conserved
                 seg.thickness[grown] *= keep
                 seg.mass[grown] *= keep
                 seg.ext[grown] += add[grown]
-            pos, plate, th, de, cr = (x[~interior_cont] for x in (pos, plate, th, de, cr))
-            kind = kind[~interior_cont]
+            # a gap whose crust could not stretch to cover it is a rift after all: it spawns
+            taken = add[nb[interior_cont, 0]] >= share * 0.999 if thin_floor > 0.0 else np.ones(int(interior_cont.sum()), bool)
+            filled = interior_cont.copy()
+            filled[interior_cont] = taken
+            kind = np.where(filled, kind, OCEANIC).astype(np.int8)
+            th = np.where(filled, th, new_thickness)
+            de = np.where(filled, de, oceanic_density)
+            cr = np.where(filled, cr, 0).astype(np.int8)
+            pos, plate, th, de, cr = (x[~filled] for x in (pos, plate, th, de, cr))
+            kind = kind[~filled]
         new = Segments(pos, th, de, 0.0, plate, mean_area, kind=kind, craton=cr, ext=ext if ext is not None else mean_area)
     else:
         new = Segments(pos, new_thickness, oceanic_density, 0.0, plate, mean_area, kind=OCEANIC, ext=ext if ext is not None else mean_area)
@@ -569,7 +582,7 @@ CONTINENTAL_K = np.int8(CONTINENTAL)
 
 
 @njit(cache=True)
-def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, kind, craton, weld, ext, polarity, alive, overlap2, accretion, arc_birth, birth_draw, shortening, radius, weld_steps, extent_min):
+def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, kind, craton, weld, ext, spent, polarity, alive, overlap2, accretion, arc_birth, birth_draw, shortening, radius, weld_steps, extent_min, arc_thickness, arc_density):
     n = pairs.shape[0]
     losers = np.empty(n, dtype=np.int64)
     survivors = np.empty(n, dtype=np.int64)
@@ -675,6 +688,7 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
                     vol = take * thickness[lo]                       # crust standing on it
                     mvol = take * mass[lo]
                     ext[lo] -= take
+                    spent[0] += take
                     thickness[su] += vol / max(ext[su], 1e-12)
                     mass[su] += mvol / max(ext[su], 1e-12)
                     density[su] = mass[su] / max(thickness[su], 1e-12)
@@ -744,6 +758,14 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
         # supercontinent cycle runs down.
         if kind[su] == OCEANIC_K and kind[lo] == OCEANIC_K and birth_draw[e] < arc_birth:
             kind[su] = CONTINENTAL_K            # island arc -> new continental crust, not craton
+            if arc_thickness > 0.0:
+                # born as arc crust, not as a relabelled slab: the column an arc has and the
+                # belt's composition, the extra drawn from the mantle (spent[1] keeps the sum)
+                m0 = mass[su]
+                thickness[su] = max(thickness[su], arc_thickness)
+                density[su] = arc_density
+                mass[su] = thickness[su] * density[su]
+                spent[1] += mass[su] - m0
         alive[lo] = False
         losers[k] = lo
         survivors[k] = su
@@ -751,7 +773,8 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
     return losers[:k], survivors[:k]
 
 
-def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, alive: np.ndarray, overlap_fraction: float = 0.5, accretion: float = 1.0, arc_birth: float = 0.0, rng: np.random.Generator | None = None, shortening: float = 0.0, weld_steps: int = 0, extent_min: float = 0.0, spent_out: list | None = None):
+def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, alive: np.ndarray, overlap_fraction: float = 0.5, accretion: float = 1.0, arc_birth: float = 0.0, rng: np.random.Generator | None = None, shortening: float = 0.0, weld_steps: int = 0, extent_min: float = 0.0, spent_out: list | None = None,
+            arc_thickness: float = 0.0, arc_density: float = 0.804, arc_out: list | None = None):
     """Subduction: for every pair of segments of different plates within
     chord ``radius`` (KD-tree pair query, applied in sorted order) that are
     *approaching* — or closer than ``overlap_fraction * radius`` whatever
@@ -782,10 +805,12 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     draw = rng.random(pairs.shape[0]) if (rng is not None and arc_birth > 0.0) else np.zeros(pairs.shape[0])
     P = int(seg.plate_id.max()) + 1 if seg.M else 1
     pol = plate_pair_polarity(seg.plate_id, seg.age, seg.kind, pairs, P)
-    spent = np.zeros(1, dtype=np.float64)        # ground crustal shortening consumed
-    out = _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.kind, seg.craton, seg.weld, seg.ext, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw), float(shortening), float(radius), int(weld_steps), float(extent_min))
+    spent = np.zeros(2, dtype=np.float64)        # [ground crustal shortening consumed, mass arcs drew from the mantle]
+    out = _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.kind, seg.craton, seg.weld, seg.ext, spent, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw), float(shortening), float(radius), int(weld_steps), float(extent_min), float(arc_thickness), float(arc_density))
     if spent_out is not None:
         spent_out.append(float(spent[0]))
+    if arc_out is not None:
+        arc_out.append(float(spent[1]))
     return out
 
 
