@@ -228,7 +228,7 @@ def relax_orogens(seg, baseline_m: float, floor_m: float, height_unit_m: float,
 def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet_m: float,
                height_unit_m: float, strength: float, continental: int, accretion: float = 1.0,
                flat_slab_age: float = 0.0, along_strike: float = 1.5, census: dict | None = None,
-               shortening: float = 0.0, width_scale: float = 1.0) -> float:
+               shortening: float = 0.0, width_scale: float = 1.0, received=None) -> float:
     """Build each collision belt with a cross-section. Returns thickness moved.
 
     This *replaces* :func:`~globe.tectonics.collision.spread_collisions` for
@@ -360,6 +360,10 @@ def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet
         else:
             f = float(accretion)
         th_in, m_in = f * float(seg.thickness[lo]), f * float(seg.mass[lo])
+        if received is not None and received[0][e] >= 0.0:
+            # the extent model says what the survivor was handed -- a sliver of the loser's
+            # column, not the whole of it; laying out the whole took winners down to 1e-3
+            th_in, m_in = float(received[0][e]), float(received[1][e])
         # never hand out more than the survivor is holding: clamping the
         # thickness afterwards would conjure the shortfall out of nothing
         if th_in > float(seg.thickness[su]) - 1e-3:

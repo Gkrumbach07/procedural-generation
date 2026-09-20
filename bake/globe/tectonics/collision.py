@@ -586,6 +586,10 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
     n = pairs.shape[0]
     losers = np.empty(n, dtype=np.int64)
     survivors = np.empty(n, dtype=np.int64)
+    # what the survivor was actually handed, thickness and mass, where the extent model
+    # decided it (-1: the fixed-area rule, `_received_fraction` of the loser's column)
+    recv_th = np.full(n, -1.0)
+    recv_m = np.full(n, -1.0)
     k = 0
     for e in range(n):
         i = pairs[e, 0]
@@ -692,6 +696,11 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
                     thickness[su] += vol / max(ext[su], 1e-12)
                     mass[su] += mvol / max(ext[su], 1e-12)
                     density[su] = mass[su] / max(thickness[su], 1e-12)
+                    recv_th[k] = vol / max(ext[su], 1e-12)
+                    recv_m[k] = mvol / max(ext[su], 1e-12)
+                else:
+                    recv_th[k] = 0.0
+                    recv_m[k] = 0.0
             plate_id[lo] = plate_id[su]
             weld[lo] = weld_steps
             if ext[lo] <= extent_min:
@@ -701,6 +710,8 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
                 thickness[su] += vol / max(ext[su], 1e-12)
                 mass[su] += mvol / max(ext[su], 1e-12)
                 density[su] = mass[su] / max(thickness[su], 1e-12)
+                recv_th[k] = max(recv_th[k], 0.0) + vol / max(ext[su], 1e-12)
+                recv_m[k] = max(recv_m[k], 0.0) + mvol / max(ext[su], 1e-12)
                 ext[su] += ext[lo]
                 ext[lo] = 0.0
                 alive[lo] = False
@@ -770,11 +781,11 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
         losers[k] = lo
         survivors[k] = su
         k += 1
-    return losers[:k], survivors[:k]
+    return losers[:k], survivors[:k], recv_th[:k], recv_m[:k]
 
 
 def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, alive: np.ndarray, overlap_fraction: float = 0.5, accretion: float = 1.0, arc_birth: float = 0.0, rng: np.random.Generator | None = None, shortening: float = 0.0, weld_steps: int = 0, extent_min: float = 0.0, spent_out: list | None = None,
-            arc_thickness: float = 0.0, arc_density: float = 0.804, arc_out: list | None = None):
+            arc_thickness: float = 0.0, arc_density: float = 0.804, arc_out: list | None = None, recv_out: list | None = None):
     """Subduction: for every pair of segments of different plates within
     chord ``radius`` (KD-tree pair query, applied in sorted order) that are
     *approaching* — or closer than ``overlap_fraction * radius`` whatever
@@ -799,6 +810,8 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     if pairs.shape[0] == 0:
         if spent_out is not None:
             spent_out.append(0.0)
+        if recv_out is not None:
+            recv_out.append((np.zeros(0), np.zeros(0)))
         return np.zeros(0, np.int64), np.zeros(0, np.int64)
     pairs = np.sort(pairs, axis=1)
     pairs = pairs[np.lexsort((pairs[:, 1], pairs[:, 0]))]
@@ -811,7 +824,10 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
         spent_out.append(float(spent[0]))
     if arc_out is not None:
         arc_out.append(float(spent[1]))
-    return out
+    losers, survivors, recv_th, recv_m = out
+    if recv_out is not None:
+        recv_out.append((recv_th, recv_m))     # what each survivor was handed (-1: fixed-area rule)
+    return losers, survivors
 
 
 @njit(cache=True)
@@ -828,7 +844,7 @@ def _received_fraction(kind_lo, alive_lo, accretion, shortening):
 
 
 @njit(cache=True)
-def _spread_kernel(losers, survivors, nbrs, pos, plate_id, kind, mass, thickness, density, alive, inv2s2, accretion, shortening):
+def _spread_kernel(losers, survivors, nbrs, pos, plate_id, kind, mass, thickness, density, alive, inv2s2, accretion, shortening, recv_th, recv_m):
     K = nbrs.shape[1]
     w = np.empty(K, dtype=np.float64)
     for e in range(losers.shape[0]):
@@ -839,9 +855,15 @@ def _spread_kernel(losers, survivors, nbrs, pos, plate_id, kind, mass, thickness
         # only what the survivor actually received: an oceanic slab hands over
         # `accretion` of itself and the rest goes to the mantle, so spreading
         # the whole slab would create mass that was never accreted
-        f = _received_fraction(kind[lo], alive[lo], accretion, shortening)
-        m = f * mass[lo]
-        th = f * thickness[lo]
+        if recv_th[e] >= 0.0:
+            # the extent model said exactly what moved: a sliver of the loser's column, not
+            # the whole of it -- spreading the whole stripped the survivor to nothing
+            m = recv_m[e]
+            th = recv_th[e]
+        else:
+            f = _received_fraction(kind[lo], alive[lo], accretion, shortening)
+            m = f * mass[lo]
+            th = f * thickness[lo]
         tot = 0.0
         for q in range(K):
             n = nbrs[e, q]
@@ -871,7 +893,7 @@ def _spread_kernel(losers, survivors, nbrs, pos, plate_id, kind, mass, thickness
         density[su] = mass[su] / thickness[su]
 
 
-def spread_collisions(seg: Segments, tree: cKDTree, losers: np.ndarray, survivors: np.ndarray, alive: np.ndarray, sigma: float, knn: int = 12, accretion: float = 1.0, shortening: float = 0.0) -> None:
+def spread_collisions(seg: Segments, tree: cKDTree, losers: np.ndarray, survivors: np.ndarray, alive: np.ndarray, sigma: float, knn: int = 12, accretion: float = 1.0, shortening: float = 0.0, received=None) -> None:
     """Belt formation: the mass and thickness a survivor just received from
     a subducted segment are shared, with Gaussian weights ``exp(-d²/2σ²)``,
     among the survivor and its ``knn`` nearest *live, same-plate, same-kind* segments
@@ -884,7 +906,9 @@ def spread_collisions(seg: Segments, tree: cKDTree, losers: np.ndarray, survivor
     kk = min(int(knn), tree.n)
     _, nb = tree.query(seg.pos[survivors], k=kk, workers=-1)
     nb = np.atleast_2d(nb).reshape(survivors.size, kk).astype(np.int64)
-    _spread_kernel(np.ascontiguousarray(losers), np.ascontiguousarray(survivors), np.ascontiguousarray(nb), seg.pos, seg.plate_id, seg.kind, seg.mass, seg.thickness, seg.density, alive, 1.0 / (2.0 * float(sigma) ** 2), float(accretion), float(shortening))
+    rt = np.ascontiguousarray(received[0], dtype=np.float64) if received is not None else np.full(len(losers), -1.0)
+    rm = np.ascontiguousarray(received[1], dtype=np.float64) if received is not None else np.full(len(losers), -1.0)
+    _spread_kernel(np.ascontiguousarray(losers), np.ascontiguousarray(survivors), np.ascontiguousarray(nb), seg.pos, seg.plate_id, seg.kind, seg.mass, seg.thickness, seg.density, alive, 1.0 / (2.0 * float(sigma) ** 2), float(accretion), float(shortening), rt, rm)
 
 
 @njit(cache=True)

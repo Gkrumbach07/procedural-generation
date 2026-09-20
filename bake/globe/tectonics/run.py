@@ -299,13 +299,15 @@ class TectonicSim:
         alive = np.ones(seg.M, dtype=bool)
         spent_out: list = []
         arc_out: list = []
+        recv_out: list = []
         losers, survivors = collide(seg, tree, self.r_coll, plates.omega, alive, tp.overlap_fraction,
                                     float(tp.arc_accretion), float(tp.arc_birth), self.params.rng("tectonics", 7, k),
                                     shortening=float(tp.continental_shortening), weld_steps=int(tp.weld_steps),
                                     extent_min=(float(tp.extent_min) * self.spacing ** 2) if tp.variable_extent else 0.0,
-                                    spent_out=spent_out, arc_out=arc_out,
+                                    spent_out=spent_out, arc_out=arc_out, recv_out=recv_out,
                                     arc_thickness=float(tp.arc_thickness) * float(tp.continental_thickness),
                                     arc_density=float(tp.continental_density))
+        received = recv_out[0] if (recv_out and tp.variable_extent) else None
         if arc_out and arc_out[0]:
             self.ledger["arc_mantle"] = self.ledger.get("arc_mantle", 0.0) + float(arc_out[0])
         n_coll = int(losers.size)
@@ -318,10 +320,10 @@ class TectonicSim:
                     float(tp.height_scale_m), float(tp.orogen_shaping), CONTINENTAL,
                     accretion=float(tp.arc_accretion), flat_slab_age=float(tp.flat_slab_age),
                     along_strike=float(tp.orogen_along_strike), census=self.belt_census,
-                    shortening=float(tp.continental_shortening), width_scale=float(tp.orogen_width_scale))
+                    shortening=float(tp.continental_shortening), width_scale=float(tp.orogen_width_scale), received=received)
             else:
                 spread_collisions(seg, tree, losers, survivors, alive, tp.belt_width_factor * self.spacing,
-                                  accretion=float(tp.arc_accretion), shortening=float(tp.continental_shortening))
+                                  accretion=float(tp.arc_accretion), shortening=float(tp.continental_shortening), received=received)
             # crust that has been through a collision comes out lighter: the
             # light melt stays, the dense residue goes to the mantle.  This is
             # what separates continental from oceanic crust, and so what makes
