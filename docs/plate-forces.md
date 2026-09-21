@@ -452,6 +452,28 @@ instead of at 8000, where it is not.  The map shows dark cores with paler
 belts round them and whole young blocks where a margin has been active for the
 length of the run.
 
+### What the ledger was hiding
+
+Turning `variable_extent` on by default made the mass ledger stop closing,
+and neither reason was the default flip's fault -- both were bugs the old
+defaults could not show.
+
+The **invariant was wrong**.  Shortening moves crust between columns of
+different extent, so the plain sum of the column masses moves when nothing
+has been created or destroyed.  What that mode conserves is the sum of
+`ext * mass` -- `Segments.crust_mass`, as `crust_volume` is for thickness --
+and the ledger is now kept in whichever of the two its mode conserves.
+
+And **`arc_mantle` was counted twice**: the collision phase's own before-and-
+after difference already contains what the arcs drew from the mantle.  It
+could only show once `arc_thickness` was non-zero, and it was zero.
+
+The closure now has a ledger term of its own, `extent_closed`: it rescales
+`ext` globally and carries crust with it.  That figure is the one to watch
+for the drain above -- it says how much of the planet's crust the change of
+units is moving, where `extent_close` only says how far the factor is from
+one.  The ledger closes to 1e-16 in both modes.
+
 ### What ships
 
 `earth-v15`'s configuration is the preset now -- `variable_extent` on,
