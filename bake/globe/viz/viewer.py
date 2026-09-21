@@ -950,7 +950,15 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
         from . import detail as dt
 
         src = detail_source(root, manifest, refined, planet)
-        if src is not None:
+        if src is None:
+            # asked for and not delivered: say so.  `--planet` is a path *under the world*
+            # (`zoom/planet_R8`), and a bare level name finds nothing -- which used to
+            # export a viewer with no detail layer at all and not one word about it
+            hint = (f"no planet.json under {root / planet}" if planet
+                    else "no --planet level and refine's fine output is not there")
+            log(f"[viewer] WARNING: --detail asked for but there is no source for it ({hint}); "
+                f"the viewer has no close-up layer")
+        else:
             td = time.time()
             detail_info = dt.export_tiles(out, src, final.res, LAKE_DEPTH_RANGE_M, log)
             if detail_info:
