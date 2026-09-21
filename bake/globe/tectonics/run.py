@@ -603,8 +603,15 @@ def inherited_age(sim) -> np.ndarray:
     young as it looks), and :data:`PREHISTORY_RUNS` runs' worth for a craton."""
     seg = sim.seg
     at_start = seg.age >= float(sim.step_index) - 0.5      # there before the first step ran
-    # what the run made for itself, and so how much of a past it still needs
-    own = seg.age[seg.kind != OCEANIC]
+    # ...and how much of that column is still the crust it started with, rather than a belt
+    # the run stacked into it.  A share, not a flag: a craton that has had a tenth of its
+    # column reworked keeps nine tenths of its past, where a flag would drop it off a cliff
+    # to nothing and speckle the map wherever the two kinds of crust met
+    keep = np.clip(seg.rework / np.maximum(seg.age, 1.0), 0.0, 1.0)
+    # what the run made for itself, and so how much of a past it still needs.  Measured on
+    # the assembly age, the same number the map draws: a run whose collisions rework the
+    # continents has structure of its own there even while every protolith `age` is the run
+    own = seg.rework[seg.kind != OCEANIC]
     made = float(np.percentile(own, 75) - np.percentile(own, 25)) / max(float(sim.step_index), 1.0) if own.size else 0.0
     fade = min(max(1.0 - made / max(PREHISTORY_FADE, 1e-9), 0.0), 1.0)
     if fade <= 0.0:
@@ -616,7 +623,7 @@ def inherited_age(sim) -> np.ndarray:
     rng = np.random.default_rng(int(sim.params.world.seed) + PREHISTORY_KEY)
     f = np.clip(0.5 + 0.5 * fbm_at(seg.pos, rng, octaves=3, base_freq=2.0), 0.0, 1.0)
     old = np.where(seg.craton > 0, 0.70 + 0.30 * f, 0.12 + 0.48 * f)
-    return np.where((seg.kind != OCEANIC) & at_start, fade * span * old, 0.0)
+    return np.where((seg.kind != OCEANIC) & at_start, fade * span * old * keep, 0.0)
 
 
 def ridge_buoyancy(seg, tp) -> np.ndarray:
@@ -1120,7 +1127,11 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     # each kind's own splat, and the cell takes the one it is (cont_c, the same flag
     # crust_kind saves).  One blend over both would carry a continent's inherited age out into
     # the sea floor beside it and put a ring of impossibly old crust round every coast
-    ages = seg.age + inherited_age(sim)
+    # the sea floor is mapped at the age of the rock, which is the age it was born at a ridge;
+    # the continents at the age they were last assembled (`Segments.rework`), which is what a
+    # crust-age map of the land plots -- a craton's number is its own, an orogen's is its last
+    # orogeny, and the difference between the two is the structure the map is for
+    ages = np.where(seg.kind == OCEANIC, seg.age, seg.rework) + inherited_age(sim)
     ocean_m = (seg.kind == OCEANIC).astype(np.float64)
 
     def kind_age(mask):

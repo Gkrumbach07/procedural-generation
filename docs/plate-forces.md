@@ -367,6 +367,91 @@ share 0.37-0.45 throughout, three assemblies (0.60, 0.49, 0.49) and five
 breakups, ocean age median 72 steps at the end.  `earth-v14` is re-baking with
 all of it; what it shows decides whether `variable_extent` becomes the default.
 
+## 4e. What the decay knob cannot do, and the age a crust-age map plots (2026-09-20)
+
+Three questions after `earth-v15` (band error 12.7 against Earth, but light up
+high: 6.8 % of the land above 2 km against 13.3 %, peaks to 5601 m against
+8849).
+
+### `orogen_decay` between 0.004 and 0.006: refuted
+
+Four Earth-scale runs, 4000 steps, plates only, v15's parameters otherwise
+(`/tmp/hyps.py`-style probe, bedrock, area-weighted):
+
+| `orogen_decay` | land | bedrock median | above 2 km | ocean median | max |
+|---|---|---|---|---|---|
+| 0.0045 | 26.0 % | 899 m | 14.2 % | -4411 m | 9447 m |
+| 0.005 | 27.8 % | 899 m | 13.9 % | -4243 m | 10229 m |
+| 0.0055 | 26.5 % | 849 m | 14.0 % | -4005 m | 10093 m |
+| **0.006** (v15) | 27.1 % | 932 m | 12.6 % | -3965 m | **7217 m** |
+
+Lowering it buys 1.3-1.6 points of bedrock above 2 km -- inside the spread
+these runs show between each other, since the trajectory is chaotic and the
+ocean median wanders 450 m across the four -- and costs 2 to 3 km of peak,
+past Earth's 8849 m in all three.  So the missing high ground is not the
+decay's to give: our belts are too *narrow*, not too short, and what Earth has
+above 2 km is mostly plateau.  `orogen_decay` stays at 0.006; the next attempt
+at the 2-4 km band should widen belts, not raise them.
+
+### A longer run does get rid of the invented past -- and costs the planet
+
+The invented past (`run.inherited_age`) fades out on its own once a run makes
+a quarter of a run's worth of continental age spread.  It does -- and the
+planet goes with it (Earth scale, plates only, v15's parameters):
+
+| steps | land | continental crust | above 2 km | ocean median | max | age IQR |
+|---|---|---|---|---|---|---|
+| 4000 | 27.1 % | 40.5 % | 12.6 % | -3965 m | 7217 m | 0.00 runs |
+| 8000 | 17.3 % | 25.0 % | 31.1 % | -3133 m | 6976 m | 0.62 runs |
+| 12000 | 15.7 % | 22.1 % | 31.9 % | -2400 m | 11744 m | 0.90 runs |
+
+The continents drain, the crust they had piles onto what is left, and the sea
+floor shallows by 1.5 km as the area it has to cover grows.
+
+`small` does not do this: over 8000 steps its continental extent settles at
+0.38-0.45 and its crust volume holds (9.3-11.4), oscillating, with no trend.
+So this is another Earth-scale divergence of the kind section 4d found three
+of, not the model running down.  Worth noting from the same ledger: what gives
+continental area back is mostly not extension.  Over 8000 steps on `small`,
+collisions spend 11.5 steradians of continental extent and rift spawning
+returns 1.27 -- the balance comes from the closure that holds the total at
+4 pi, which returns area in proportion to extent, and so favours whichever
+kind covers more ground.  Earth scale is where that asymmetry should bite
+hardest, and it is the first place to look.
+
+**So: 4000 steps stands at Earth scale.**
+
+### `Segments.rework`: the age of the last assembly
+
+Which leaves the real problem, and it is not the run's length.  The land was
+one flat colour because `age` is when the *rock* formed, and a continent's
+rock all forms at step 0: at 4000 steps on Earth, three quarters of the
+continental area read exactly 4000 and the interquartile spread was **zero**.
+
+A crust-age map of the land does not plot that.  It plots when the crust was
+last *assembled* -- a craton's own number, an orogen's last orogeny.  So
+`Segments.rework` carries that: the same number as `age` until a collision
+stacks foreign crust into the column, and then the two mixed by mass
+(`rework *= 1 - received/total`), zero for an island arc, which is crust being
+made now.  Nothing but `crust_age` reads it -- no force, height or plate moves
+because it exists, and the ocean floor is still mapped at `age`, which for the
+sea floor is the same thing.
+
+`small`, 4000 steps, continental area by assembly age:
+
+| | protolith `age` | assembly `rework` |
+|---|---|---|
+| younger than a quarter of the run | 9.8 % | 16.1 % |
+| a quarter to three quarters | 14.7 % | 52.6 % |
+| three quarters to all of it | 0.0 % | 24.9 % |
+| never assembled since step 0 | **75.5 %** | **6.4 %** |
+
+and the spread the fade measures goes from nothing to 0.32 of a run, so the
+invented past switches itself off -- at 4000 steps, where the planet is right,
+instead of at 8000, where it is not.  The map shows dark cores with paler
+belts round them and whole young blocks where a margin has been active for the
+length of the run.
+
 ## 5.## 5.## 5.## 5. The field that moves: continental insulation
 
 `tectonics.heat_insulation`. The heat background that `heat_relax` pulls

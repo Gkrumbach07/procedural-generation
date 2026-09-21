@@ -331,11 +331,19 @@ def test_crust_age_says_how_old_the_crust_under_a_cell_is(tiny_sim, tiny_out, mo
     assert np.median(age[cont]) > steps                           # the continents came with a past
     assert np.median(age[~cont]) < np.median(age[cont]) and age[~cont].std() > 0.5
 
-    # the cratons are the old crust, and the belts between them are younger
+    # the cratons are the old crust, and the belts between them are younger.  Compared on
+    # the crust the run has not re-assembled: a column the run built is the run's to explain,
+    # so `inherited_age` hands it back its past only in the share still standing (`rework`),
+    # and a heavily reworked craton can and should read younger than a quiet margin
     seg = tiny_sim.seg
     inh = tect.inherited_age(tiny_sim)
     old = seg.craton > 0
-    assert inh[old].min() > inh[(~old) & (inh > 0)].max()
+    pristine = seg.rework >= seg.age - 1e-9
+    assert pristine.any() and inh[old & pristine].min() > inh[(~old) & pristine & (inh > 0)].max()
+    # and the share is a taper, not a cliff: reworked crust keeps some of its past
+    part = ((seg.kind != 0) & (seg.rework > 0.1 * seg.age) & ~pristine
+            & (seg.age >= float(tiny_sim.step_index) - 0.5))       # crust born in the run has no past
+    assert (inh[part] > 0).all() if part.any() else True
     assert (inh[seg.kind == 0] == 0).all() if (seg.kind == 0).any() else True   # not the ocean floor
 
     # and nothing the stage outputs depends on it: it is drawn from a stream of its own
@@ -1002,6 +1010,44 @@ def test_continental_shortening_conserves_area_and_mass():
     # live mass = initial - what the slab returned to the mantle
     assert np.isclose(seg.mass[alive].sum(), m0 - (1.0 - 0.15) * 0.2 * 0.88)
 
+
+
+def test_rework_is_the_age_of_the_last_assembly_and_moves_nothing_else():
+    """``Segments.rework``: the age a crust-age map plots.  It tracks ``age``
+    until a collision stacks foreign crust into a column, and then holds the
+    two mixed by mass -- so a survivor that takes half its column from a
+    loser reads half as old, an island arc reads zero, and a segment nothing
+    was ever stacked into reads its own age.  It is a diagnostic: no mass,
+    thickness, density or position moves because it exists."""
+    from globe.tectonics.segments import CONTINENTAL
+
+    # head-on continental pair, equal columns: the survivor ends up half protolith
+    s = 0.05
+    pos = np.array([[1.0, 0.0, 0.0], [np.cos(0.5 * s), np.sin(0.5 * s), 0.0]])
+    mk = lambda: Segments(pos.copy(), 1.0, 0.8, 100.0, [0, 1], 1.0,
+                          kind=np.array([CONTINENTAL, CONTINENTAL], np.int8))
+    seg = mk()
+    assert np.array_equal(seg.rework, seg.age)          # the same number until something happens
+    plates = Plates(2)
+    plates.update_stats(seg)
+    plates.omega[0] = 0.0
+    plates.omega[1] = np.array([0.0, 0.0, -0.1])
+    alive = np.ones(2, dtype=bool)
+    losers, survivors = collide(seg, build_tree(seg), 1.2 * s, plates.omega, alive, shortening=1.0)
+    su = survivors[0]
+    assert np.isclose(seg.thickness[su], 2.0)           # it took the whole of the other column
+    assert np.isclose(seg.rework[su], 50.0)             # ...so half of what it reads is new
+    assert seg.age[su] == 100.0                         # while the rock is as old as it was
+
+    # and nothing the simulation reads has moved: the same run with rework held flat
+    ref, alive_r = mk(), np.ones(2, dtype=bool)
+    ref.rework[:] = 0.0
+    plates_r = Plates(2)
+    plates_r.update_stats(ref)
+    plates_r.omega[0], plates_r.omega[1] = 0.0, np.array([0.0, 0.0, -0.1])
+    collide(ref, build_tree(ref), 1.2 * s, plates_r.omega, alive_r, shortening=1.0)
+    for f in ("pos", "mass", "thickness", "density", "age", "plate_id", "kind", "ext"):
+        assert np.array_equal(getattr(seg, f), getattr(ref, f)), f
 
 # ---------------------------------------------------------------------------
 # ranges along the belts (globe/tectonics/ranges.py)

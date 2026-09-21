@@ -339,6 +339,7 @@ def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float
     seg.density = np.clip(seg.mass / np.maximum(seg.thickness, 1e-12), 0.0, 1.0)
     seg.mass = seg.thickness * seg.density
     seg.age += 1.0
+    seg.rework += 1.0                                             # and so does the last assembly
     seg.weld = np.maximum(seg.weld - np.int16(1), np.int16(0))     # a weld wears off
 
 
@@ -582,7 +583,7 @@ CONTINENTAL_K = np.int8(CONTINENTAL)
 
 
 @njit(cache=True)
-def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, kind, craton, weld, ext, spent, polarity, alive, overlap2, accretion, arc_birth, birth_draw, shortening, radius, weld_steps, extent_min, arc_thickness, arc_density):
+def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, rework, kind, craton, weld, ext, spent, polarity, alive, overlap2, accretion, arc_birth, birth_draw, shortening, radius, weld_steps, extent_min, arc_thickness, arc_density):
     n = pairs.shape[0]
     losers = np.empty(n, dtype=np.int64)
     survivors = np.empty(n, dtype=np.int64)
@@ -698,6 +699,11 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
                     density[su] = mass[su] / max(thickness[su], 1e-12)
                     recv_th[k] = vol / max(ext[su], 1e-12)
                     recv_m[k] = mvol / max(ext[su], 1e-12)
+                    # The belt is new crust.  The column now holds its own protolith and
+                    # what has just been stacked into it, so the age it would be *mapped*
+                    # at -- when this crust was last assembled -- is the two mixed by mass.
+                    # `age` does not move: the rock is as old as it ever was
+                    rework[su] *= 1.0 - min(recv_m[k] / max(mass[su], 1e-12), 1.0)
                 else:
                     recv_th[k] = 0.0
                     recv_m[k] = 0.0
@@ -710,6 +716,7 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
                 thickness[su] += vol / max(ext[su], 1e-12)
                 mass[su] += mvol / max(ext[su], 1e-12)
                 density[su] = mass[su] / max(thickness[su], 1e-12)
+                rework[su] *= 1.0 - min((mvol / max(ext[su], 1e-12)) / max(mass[su], 1e-12), 1.0)
                 recv_th[k] = max(recv_th[k], 0.0) + vol / max(ext[su], 1e-12)
                 recv_m[k] = max(recv_m[k], 0.0) + mvol / max(ext[su], 1e-12)
                 ext[su] += ext[lo]
@@ -727,6 +734,7 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
             mass[su] += f * mass[lo]
             thickness[su] += f * thickness[lo]
             density[su] = mass[su] / thickness[su]
+            rework[su] *= 1.0 - min(f * mass[lo] / max(mass[su], 1e-12), 1.0)
             mass[lo] *= 1.0 - f
             thickness[lo] *= 1.0 - f
             plate_id[lo] = plate_id[su]
@@ -762,6 +770,9 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
         # whole slab; an arc is new crust welded to old, not old crust
         if f >= 1.0 and age[lo] > age[su]:
             age[su] = age[lo]
+        # ...and whatever was stacked into it, of either kind, is new crust in the column:
+        # the accreted fraction of a slab is what builds an accretionary margin
+        rework[su] *= 1.0 - min(f * mass[lo] / max(mass[su], 1e-12), 1.0)
         # Island arcs: repeated ocean-on-ocean subduction is how continental
         # crust is *born* (the Japans, the Aleutians, the Andean margin before
         # it was a margin).  Without a birth channel the continental area can
@@ -769,6 +780,7 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
         # supercontinent cycle runs down.
         if kind[su] == OCEANIC_K and kind[lo] == OCEANIC_K and birth_draw[e] < arc_birth:
             kind[su] = CONTINENTAL_K            # island arc -> new continental crust, not craton
+            rework[su] = 0.0                    # juvenile: the crust is being made right now
             if arc_thickness > 0.0:
                 # born as arc crust, not as a relabelled slab: the column an arc has and the
                 # belt's composition, the extra drawn from the mantle (spent[1] keeps the sum)
@@ -819,7 +831,7 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     P = int(seg.plate_id.max()) + 1 if seg.M else 1
     pol = plate_pair_polarity(seg.plate_id, seg.age, seg.kind, pairs, P)
     spent = np.zeros(2, dtype=np.float64)        # [ground crustal shortening consumed, mass arcs drew from the mantle]
-    out = _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.kind, seg.craton, seg.weld, seg.ext, spent, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw), float(shortening), float(radius), int(weld_steps), float(extent_min), float(arc_thickness), float(arc_density))
+    out = _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.rework, seg.kind, seg.craton, seg.weld, seg.ext, spent, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw), float(shortening), float(radius), int(weld_steps), float(extent_min), float(arc_thickness), float(arc_density))
     if spent_out is not None:
         spent_out.append(float(spent[0]))
     if arc_out is not None:

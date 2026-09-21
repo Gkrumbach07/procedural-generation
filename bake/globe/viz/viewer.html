@@ -1063,7 +1063,9 @@ vec3 rain(float t){ return ramp(t, vec3(0.93,0.87,0.72), vec3(0.72,0.80,0.45), v
 vec3 viridis(float t){ return ramp(t, vec3(0.27,0.00,0.33), vec3(0.23,0.32,0.55), vec3(0.13,0.57,0.55), vec3(0.37,0.79,0.38), vec3(0.99,0.91,0.14)); }
 // Crust age.  The sea floor reads as the age maps do -- the ridge hot, through yellow and
 // green to the cold blue of old floor -- and the continents keep a ramp of their own, pale
-// where they last grew to the dark red of a craton, so the two are never taken for each other
+// where they last grew to the dark red of a craton, so the two are never taken for each other.
+// The land is drawn at the age it was last *assembled* (Segments.rework), which is what a
+// crust-age map of a continent plots: the craton its own number, an orogen its last orogeny
 vec3 crustAge(float t, bool cont){
   return cont ? ramp(t, vec3(0.93,0.93,0.72), vec3(0.80,0.74,0.40), vec3(0.68,0.50,0.26), vec3(0.52,0.26,0.20), vec3(0.30,0.09,0.13))
               : ramp(t, vec3(0.80,0.12,0.16), vec3(0.96,0.58,0.20), vec3(0.88,0.90,0.38), vec3(0.24,0.62,0.56), vec3(0.06,0.16,0.42));

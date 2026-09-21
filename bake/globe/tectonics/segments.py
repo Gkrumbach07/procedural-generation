@@ -232,9 +232,9 @@ class Segments:
     """Structure-of-arrays segment store (see module docstring).  All
     mutating methods keep the parallel arrays aligned."""
 
-    FIELDS = ("pos", "mass", "thickness", "density", "age", "plate_id", "area", "h_ref", "kind", "craton", "weld", "ext")
+    FIELDS = ("pos", "mass", "thickness", "density", "age", "plate_id", "area", "h_ref", "kind", "craton", "weld", "ext", "rework")
 
-    def __init__(self, pos, thickness, density, age, plate_id, area, h_ref=None, mass=None, kind=OCEANIC, craton=0, weld=0, ext=None):
+    def __init__(self, pos, thickness, density, age, plate_id, area, h_ref=None, mass=None, kind=OCEANIC, craton=0, weld=0, ext=None, rework=None):
         self.pos = np.ascontiguousarray(pos, dtype=np.float64).reshape(-1, 3)
         M = self.pos.shape[0]
         self.thickness = np.array(np.broadcast_to(np.asarray(thickness, dtype=np.float64), (M,)), dtype=np.float64)
@@ -256,6 +256,17 @@ class Segments:
         #: With ``tectonics.variable_extent`` off it is 4 pi / M everywhere and nothing reads it
         self.ext = (self.area.copy() if ext is None
                     else np.array(np.broadcast_to(np.asarray(ext, dtype=np.float64), (M,)), dtype=np.float64))
+        #: steps since the crust in this column was last *assembled* -- ``age`` is when the
+        #: rock formed, this is when it last became crust of this continent.  They are the
+        #: same number until a collision stacks foreign crust into the column: then the
+        #: protolith is as old as it ever was, but the belt around it is new, and the two
+        #: parts of the column are mixed by mass (:func:`collision.collide`).  A real
+        #: crust-age map plots this, not the protolith: the cratons carry the whole run
+        #: because nothing has been stacked into them, while an orogen reads as young as its
+        #: last orogeny.  Diagnostic: `crust_age` is the only thing that reads it, so no
+        #: force, height or plate in the simulation moves because it exists
+        self.rework = (self.age.copy() if rework is None
+                       else np.array(np.broadcast_to(np.asarray(rework, dtype=np.float64), (M,)), dtype=np.float64))
 
     @property
     def M(self) -> int:
@@ -297,7 +308,7 @@ class Segments:
             setattr(self, name, np.ascontiguousarray(np.concatenate([getattr(self, name), getattr(other, name)])))
 
     def copy(self) -> "Segments":
-        return Segments(self.pos.copy(), self.thickness.copy(), self.density.copy(), self.age.copy(), self.plate_id.copy(), self.area.copy(), self.h_ref.copy(), self.mass.copy(), self.kind.copy(), self.craton.copy(), self.weld.copy(), self.ext.copy())
+        return Segments(self.pos.copy(), self.thickness.copy(), self.density.copy(), self.age.copy(), self.plate_id.copy(), self.area.copy(), self.h_ref.copy(), self.mass.copy(), self.kind.copy(), self.craton.copy(), self.weld.copy(), self.ext.copy(), self.rework.copy())
 
     def renormalise(self) -> None:
         self.pos /= np.linalg.norm(self.pos, axis=1, keepdims=True)
