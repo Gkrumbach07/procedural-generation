@@ -200,7 +200,9 @@ def test_mass_ledger_closes_and_subduction_is_a_sink(tiny_sim):
     # new ledger term has to be classified as mass or counter to pass
     assert set(L) <= set(tect.MASS_KEYS) | set(tect.COUNTER_KEYS), sorted(set(L) - set(tect.MASS_KEYS) - set(tect.COUNTER_KEYS))
     expected = sum(L.get(k, 0.0) for k in tect.MASS_KEYS)
-    assert sim.seg.total_mass() == pytest.approx(expected, rel=1e-9)
+    # against the quantity this mode conserves: with `variable_extent` on, crust moves
+    # between columns of different extent, so the plain sum of the column masses is not it
+    assert sim.crust_mass() == pytest.approx(expected, rel=1e-9)
     # subduction and delamination are sinks, never sources: crust returns to
     # the mantle at a trench and under an over-thickened root, and nothing in
     # either path can add mass.  A positive value here means a kernel is
@@ -239,8 +241,11 @@ def test_extent_is_the_ground_a_segment_covers():
     from globe.tectonics.segments import CONTINENTAL
 
     # with the knob off nothing writes extent, so the blend never leaves the scalar path
+    # (it is on by default now -- this is the old fixed-area model, which every world
+    # baked before earth-v14 used and which must stay reproducible)
     off = WorldParams.tiny_world()
     off.tectonics.steps = 200
+    off.tectonics.variable_extent = False
     sim_off = tect.simulate(off, log=None)
     assert np.allclose(sim_off.seg.ext, sim_off.seg.ext[0], rtol=1e-12, atol=0)
 
@@ -268,7 +273,7 @@ def test_extent_is_the_ground_a_segment_covers():
     # continent does not drain away as it does when a contact costs a whole segment
     var = WorldParams.tiny_world()
     var.tectonics.steps = 300
-    var.tectonics.variable_extent = True
+    var.tectonics.variable_extent = True                             # the default; stated for the contrast
     sim = tect.simulate(var, log=None)
     seg = sim.seg
     A0 = sim.spacing ** 2
@@ -290,11 +295,13 @@ def test_a_shortened_continent_keeps_the_plate_it_welded_onto():
 
     off = WorldParams.tiny_world()
     off.tectonics.steps = 120
+    off.tectonics.variable_extent = False    # extent's own shortening welds too; this is the other path
     sim_off = tect.simulate(off, log=None)
-    assert (sim_off.seg.weld == 0).all()                     # the default run never welds
+    assert (sim_off.seg.weld == 0).all()                     # with neither, nothing is ever welded
 
     on = WorldParams.tiny_world()
     on.tectonics.steps = 120
+    on.tectonics.variable_extent = False
     on.tectonics.continental_shortening = 0.25
     sim_on = tect.simulate(on, log=None)
     seg = sim_on.seg
@@ -309,8 +316,11 @@ def test_a_shortened_continent_keeps_the_plate_it_welded_onto():
     mine = np.asarray(seg.plate_id)[welded][:, None]
     assert (around != mine).any(), "a weld that changes nothing is not a weld"
 
-    # and the continent survives the collisions instead of being deleted by them
-    keep = tect.simulate(WorldParams.tiny_world(), log=None)
+    # and the continent survives the collisions instead of being deleted by them --
+    # against the fixed-area model's own baseline, where a contact costs a whole segment
+    base = WorldParams.tiny_world()
+    base.tectonics.variable_extent = False
+    keep = tect.simulate(base, log=None)
     share_off = float((keep.seg.kind == CONTINENTAL).mean())
     assert float((seg.kind == CONTINENTAL).mean()) > share_off
 
@@ -338,7 +348,9 @@ def test_crust_age_says_how_old_the_crust_under_a_cell_is(tiny_sim, tiny_out, mo
     seg = tiny_sim.seg
     inh = tect.inherited_age(tiny_sim)
     old = seg.craton > 0
-    pristine = seg.rework >= seg.age - 1e-9
+    # there from the start (a gap inside a craton spawns crust with the craton's flag and
+    # the run's own age, which has no past to inherit) and not re-assembled since
+    pristine = (seg.rework >= seg.age - 1e-9) & (seg.age >= float(tiny_sim.step_index) - 0.5)
     assert pristine.any() and inh[old & pristine].min() > inh[(~old) & pristine & (inh > 0)].max()
     # and the share is a taper, not a cliff: reworked crust keeps some of its past
     part = ((seg.kind != 0) & (seg.rework > 0.1 * seg.age) & ~pristine
@@ -632,7 +644,25 @@ def _check_knob(sim, out0, out1, r, max_ratio, scale_tol=0.02):
     return before["ratio"], after["ratio"]
 
 
-def test_splat_knn_base_smooths_the_coast_at_equal_area(small_sim):
+def _fixed_area_small(seed: int = 0):
+    """`small` in the fixed-area model.  The splat measurements below were taken
+    against it (docs/coast-fringe.md sections 5-6) and the numbers they assert are
+    its numbers; with `variable_extent` on -- the default since earth-v16 -- the
+    splat weights each segment by the ground it covers, and both knobs move the
+    vertical scale much further than the 2 % these allow (measured: `splat_knn_base`
+    48 to 2.7 %, wendland to 14.3 %).  Neither is on by default, so what they guard
+    is unchanged; using either *with* extent wants re-measuring first."""
+    p = WorldParams.small_world(seed=seed)
+    p.tectonics.variable_extent = False
+    # and the rest of the planet they were taken on: every default earth-v16 moved that
+    # `small_world` does not already override for its 4 km body
+    p.tectonics.arc_thickness = 0.0
+    p.tectonics.continental_fraction = 0.60
+    p.tectonics.orogen_decay = 0.004
+    return tect.simulate(p, log=None)
+
+
+def test_splat_knn_base_smooths_the_coast_at_equal_area():
     """With the base height blended from 48 neighbours (the excess from 12)
     the crust-type boundary is bit-identical, the land fraction and the
     belts' p99 are within 2 %, the top of the land (in units) moves by
@@ -641,9 +671,10 @@ def test_splat_knn_base_smooths_the_coast_at_equal_area(small_sim):
     at equal area is less convoluted: measured 12.917 -> 12.195 (0.944x) on
     seed 0 and 13.497 -> 13.108 (0.971x) on seed 1 (docs/coast-fringe.md
     section 5)."""
-    out0, out1, r = _knob_pair(small_sim, 48)
-    _check_knob(small_sim, out0, out1, r, 0.98, scale_tol=0.02)
-    sim1 = tect.simulate(WorldParams.small_world(seed=1), log=None)
+    small_fixed = _fixed_area_small()
+    out0, out1, r = _knob_pair(small_fixed, 48)
+    _check_knob(small_fixed, out0, out1, r, 0.98, scale_tol=0.02)
+    sim1 = _fixed_area_small(seed=1)
     out0, out1, r = _knob_pair(sim1, 48)
     _check_knob(sim1, out0, out1, r, 0.99, scale_tol=0.05)
 
@@ -792,7 +823,7 @@ def test_wendland_gathers_the_whole_support():
         assert np.allclose([got[k] for k in want], list(want.values()), rtol=1e-10, atol=1e-15)
 
 
-def test_splat_kernel_wendland_on_small_seed0(small_sim):
+def test_splat_kernel_wendland_on_small_seed0():
     """The shipping conditions (docs/coast-fringe.md sections 3, 5, 6) for
     `splat_kernel = 'wendland'` on `small` seed 0, where they hold: the
     coast at equal area is less convoluted (measured 12.917 -> 12.273,
@@ -802,7 +833,7 @@ def test_splat_kernel_wendland_on_small_seed0(small_sim):
     +0.7 %), and the crust-type boundary moves on < 1 % of the cells
     (0.28 %).  `tiny` seed 1 is where it fails (fingers 6.00 -> 6.37 %,
     land and belt medians +8 %), so it is not the default."""
-    sim = small_sim
+    sim = _fixed_area_small()          # the model these numbers were measured in
     out0 = tect.finalise(_with_tectonics(sim, splat_kernel="gaussian"))
     out1 = tect.finalise(_with_tectonics(sim, splat_kernel="wendland"))
     assert out1["_splat_kernel"] == "wendland" and out1["_splat_support_covered"] > 0.999
@@ -918,15 +949,25 @@ def test_strata_fabric_gives_hardness_structure_at_basin_scale():
             per_face.append(np.nanmean(x[:, :-8] * x[:, 8:]) / max(np.nanmean(x * x), 1e-12))
         return spread, float(np.mean(per_face)), h
 
-    spread_ratio, ac_ratio = [], []
+    spread_ratio, ac_ratio, bands = [], [], []
     for seed in (0, 1, 2):
         flat_spread, flat_ac, _ = measure(seed, strata_amp=0.0)
         band_spread, band_ac, band = measure(seed)
         spread_ratio.append(band_spread / flat_spread)
         ac_ratio.append(band_ac / flat_ac)
+        bands.append(band_spread)
         assert float(band.min()) >= 0.0 and float(band.max()) <= 1.0
 
-    assert np.mean(spread_ratio) > 1.5 and min(spread_ratio) > 1.3, spread_ratio
+    # Re-measured on earth-v16's defaults: 1.33 / 1.25 / 1.15, mean 1.25, where the old
+    # fixed-area `small` read 1.39 / 1.58 / 1.75.  The fabric did not weaken -- it is the
+    # *baseline* that gained structure, the flat land spread going 0.206/0.214/0.214 to
+    # 0.297/0.246/0.305 now that extents, ages and arc crust vary across a continent, while
+    # the banded spread held or rose (0.286/0.338/0.373 -> 0.396/0.308/0.351).  So the
+    # absolute figure is asserted too: a ratio that falls because the fabric stopped
+    # working would take it with it, where one that falls because the rest of the planet
+    # caught up does not
+    assert np.mean(spread_ratio) > 1.2 and min(spread_ratio) > 1.1, spread_ratio
+    assert min(bands) > 0.28, bands
     assert np.mean(ac_ratio) < 0.6, ac_ratio
 
 

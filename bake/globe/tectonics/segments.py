@@ -293,6 +293,17 @@ class Segments:
     def total_mass(self) -> float:
         return float(self.mass.sum())
 
+    def crust_mass(self) -> float:
+        """The mass of the crust: every column's mass times the ground it stands
+        on.  This, not :meth:`total_mass`, is what the simulation conserves once
+        ``tectonics.variable_extent`` is on -- shortening moves crust between
+        columns of *different* extent, so the plain sum of the column masses
+        moves even when nothing is created or destroyed (the pair conserves
+        ``ext * mass``, as it conserves ``ext * thickness`` in
+        :meth:`crust_volume`).  With extent fixed the two differ only by that
+        constant, and `run.TectonicSim` uses whichever its mode conserves."""
+        return float((self.ext * self.mass).sum())
+
     def compress(self, keep: np.ndarray) -> None:
         """Drop segments where ``keep`` is False (in place)."""
         keep = np.asarray(keep, dtype=bool)

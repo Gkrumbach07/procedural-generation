@@ -789,6 +789,7 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
                 density[su] = arc_density
                 mass[su] = thickness[su] * density[su]
                 spent[1] += mass[su] - m0
+                spent[2] += ext[su] * (mass[su] - m0)
         alive[lo] = False
         losers[k] = lo
         survivors[k] = su
@@ -830,12 +831,14 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     draw = rng.random(pairs.shape[0]) if (rng is not None and arc_birth > 0.0) else np.zeros(pairs.shape[0])
     P = int(seg.plate_id.max()) + 1 if seg.M else 1
     pol = plate_pair_polarity(seg.plate_id, seg.age, seg.kind, pairs, P)
-    spent = np.zeros(2, dtype=np.float64)        # [ground crustal shortening consumed, mass arcs drew from the mantle]
+    # [ground crustal shortening consumed, mass arcs drew from the mantle by column and
+    #  by crust (column x extent) -- the ledger is kept in whichever its mode conserves]
+    spent = np.zeros(3, dtype=np.float64)
     out = _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.rework, seg.kind, seg.craton, seg.weld, seg.ext, spent, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw), float(shortening), float(radius), int(weld_steps), float(extent_min), float(arc_thickness), float(arc_density))
     if spent_out is not None:
         spent_out.append(float(spent[0]))
     if arc_out is not None:
-        arc_out.append(float(spent[1]))
+        arc_out.append((float(spent[1]), float(spent[2])))
     losers, survivors, recv_th, recv_m = out
     if recv_out is not None:
         recv_out.append((recv_th, recv_m))     # what each survivor was handed (-1: fixed-area rule)

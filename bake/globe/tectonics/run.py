@@ -134,7 +134,8 @@ OUTPUTS = ["bedrock", "uplift", "hardness", "plate_id", "plate_vel"]
 #: has to be added here or the books stop balancing. Sinks are negative by
 #: convention -- crust that went back to the mantle -- and only `initial`,
 #: `spawned` and `crystallised` may be positive.
-MASS_KEYS = ("initial", "spawned", "crystallised", "subducted", "delaminated", "orogen_decayed", "arc_mantle")
+MASS_KEYS = ("initial", "spawned", "crystallised", "subducted", "delaminated", "orogen_decayed", "arc_mantle",
+             "extent_closed")
 #: Ledger keys that are *counters*: how much crust a process relocated. They
 #: are diagnostics and must be left out of any mass balance.
 COUNTER_KEYS = ("orogen_shaped", "differentiated",
@@ -191,15 +192,19 @@ class TectonicSim:
         cell_rad = 0.75 * (math.pi / 2.0) / heat.grid.N
         self.diff_substeps = 0 if tp.heat_diffusion <= 0 else int(math.ceil(tp.heat_diffusion / (0.2 * cell_rad**2)))
         self.ref_step = max(0, int(tp.steps) - int(tp.uplift_window))
+        #: the quantity the ledger is kept in, and the one this mode conserves.  With
+        #: `variable_extent` on, crust moves between columns of different extent, so the
+        #: plain sum of the column masses is not it -- `Segments.crust_mass` is
+        self.crust_mass = seg.crust_mass if tp.variable_extent else seg.total_mass
         self.idx = None
         self.dist = None
-        # mass bookkeeping: total segment mass == initial + spawned + crystallised (collisions/relaxation conserve)
+        # mass bookkeeping: the crust mass == initial + spawned + crystallised (collisions/relaxation conserve)
         # `subducted` is a real sink, not a drift term: an oceanic slab hands the
         # overriding plate only `arc_accretion` of itself and the rest goes back
         # to the mantle. It used to be zero to within rounding, because
         # collisions transferred 100 %.
         self.ledger = {k: 0.0 for k in MASS_KEYS}
-        self.ledger["initial"] = seg.total_mass()
+        self.ledger["initial"] = self.crust_mass()
         #: how many belts of each :mod:`~globe.tectonics.orogeny` type the run
         #: built, and the crust-type pairing of every collision that reached
         #: the classifier (`pair_oc` = oceanic slab under continental
@@ -279,7 +284,7 @@ class TectonicSim:
 
         t_ = _thin()
         # 1. move
-        mass0 = seg.total_mass()
+        mass0 = self.crust_mass()
         tau_slab = None
         cc_pair_max = 0
         rotate_segments(seg, plates)
@@ -308,8 +313,10 @@ class TectonicSim:
                                     arc_thickness=float(tp.arc_thickness) * float(tp.continental_thickness),
                                     arc_density=float(tp.continental_density))
         received = recv_out[0] if (recv_out and tp.variable_extent) else None
-        if arc_out and arc_out[0]:
-            self.ledger["arc_mantle"] = self.ledger.get("arc_mantle", 0.0) + float(arc_out[0])
+        arc_now = float(arc_out[0][1 if tp.variable_extent else 0]) if arc_out else 0.0
+        if arc_now:
+            # by column or by crust, whichever this mode's ledger is kept in
+            self.ledger["arc_mantle"] = self.ledger.get("arc_mantle", 0.0) + arc_now
         n_coll = int(losers.size)
         if n_coll:
             if tp.orogen_shaping > 0.0:
@@ -356,7 +363,9 @@ class TectonicSim:
             tree = build_tree(seg)
         if tp.relax_rate > 0:
             relax_segments(seg, tree, tp.relax_rate, tp.relax_threshold, self.spacing, int(tp.relax_knn))
-        self.ledger["subducted"] += seg.total_mass() - mass0
+        # everything the collision phase changed *except* what the arcs drew from the
+        # mantle, which this difference also contains and `arc_mantle` has already taken
+        self.ledger["subducted"] += self.crust_mass() - mass0 - arc_now
 
         # two continents that have been grinding together long enough are one plate
         if tp.suture_collisions > 0.0 and self.suture_count:
@@ -396,10 +405,12 @@ class TectonicSim:
         # erosion and root delamination take back down.  After the `subducted`
         # accounting above, which attributes every mass change since `mass0`.
         if tp.orogen_decay > 0.0:
-            self.ledger["orogen_decayed"] -= orogeny.relax_orogens(
+            m_before = self.crust_mass()
+            orogeny.relax_orogens(
                 seg, float(tp.belt_thickness * (1.0 - tp.continental_density) * tp.height_scale_m),
                 float(tp.orogen_floor_m), float(tp.height_scale_m),
                 float(tp.orogen_decay), CONTINENTAL)
+            self.ledger["orogen_decayed"] += self.crust_mass() - m_before
 
         if tp.variable_extent:
             c1, o1 = _ext_by_kind()
@@ -452,19 +463,20 @@ class TectonicSim:
                 tr = boundary_torques(new.pos, new.plate_id, float(tp.ridge_push) * new.area, plates.com, plates.P, towards=False)
                 tau_slab = tr if tau_slab is None else _padded_sum(tau_slab, tr)
             if n_new:
-                self.ledger["spawned"] += new.total_mass()
+                self.ledger["spawned"] += new.crust_mass() if tp.variable_extent else new.total_mass()
                 seg.append(new)
             self.idx, self.dist = idx, dist
 
         t_ = _tick("thin_spawn", t_)
         # 4. crystallisation, then delamination of over-thickened roots
         T = self.heat_at(seg.pos)
-        mass1 = seg.total_mass()
+        mass1 = self.crust_mass()
         crystallise(seg, T, tp.growth, tp.density_base, tp.deposit_density, tp.dissolution_factor, tp.max_thickness)
-        self.ledger["crystallised"] += seg.total_mass() - mass1
+        self.ledger["crystallised"] += self.crust_mass() - mass1
         if tp.max_crust_thickness > 0 and tp.delamination > 0:
-            self.ledger["delaminated"] -= delaminate(
-                seg, float(tp.max_crust_thickness), float(tp.delamination))
+            m_before = self.crust_mass()
+            delaminate(seg, float(tp.max_crust_thickness), float(tp.delamination))
+            self.ledger["delaminated"] += self.crust_mass() - m_before
 
         t_ = _tick("thin_delam", t_)
         # 5. heat diffusion + slow relaxation towards the background field
@@ -517,6 +529,7 @@ class TectonicSim:
             # means the local processes are not keeping up and the number is doing the work
             tot = float(seg.ext.sum())
             close = (4.0 * math.pi) / max(tot, 1e-12)
+            m_before = self.crust_mass()
             seg.ext *= close
             # and the crust is not touched.  Thinning it by the same factor -- on the argument
             # that the volume on a segment is fixed -- was wrong twice over: the closure is a
@@ -525,6 +538,10 @@ class TectonicSim:
             # Earth bake with the knob on: the sea floor came out at -1461 m against -4095,
             # the bedrock range -2750..10949 against -5705..8704, and refine ran in a sixth
             # of the time because there was hardly any relief left to refine
+            # the crust the change of units carries with it.  A mass term, not a counter:
+            # it is the ledger's measure of how much of the planet's crust the closure is
+            # moving, which is the number to look at when the continents drain (section 4e)
+            self.ledger["extent_closed"] = self.ledger.get("extent_closed", 0.0) + (self.crust_mass() - m_before)
             self.ledger["extent_close"] = self.ledger.get("extent_close", 0.0) + abs(close - 1.0)
             self.ledger["extent_close_net"] = self.ledger.get("extent_close_net", 0.0) + (close - 1.0)
         t_ = _tick("thin_rest", t_)              # everything after the forces: events, closure

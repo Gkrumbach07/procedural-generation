@@ -452,7 +452,19 @@ instead of at 8000, where it is not.  The map shows dark cores with paler
 belts round them and whole young blocks where a margin has been active for the
 length of the run.
 
-## 5.## 5.## 5.## 5. The field that moves: continental insulation
+### What ships
+
+`earth-v15`'s configuration is the preset now -- `variable_extent` on,
+`arc_thickness` 0.55, `shelf_fraction` 0.33, `orogen_decay` 0.006,
+`initial_plates` 4, `steps` 4000, `rift_every` 600, `continental_fraction`
+0.75 -- so `--preset earth` reproduces it exactly and every new planet starts
+there.  `variable_extent: false` in a params.yaml is still bit-identical to
+the model every world before `earth-v14` was baked with, so those reproduce
+too.  `earth-v16` is the bake: the same planet as v15, with the crust-age map
+this section is about, the 1.2 km planet level and the detail tiles.
+
+
+## 5. The field that moves: continental insulation
 
 `tectonics.heat_insulation`. The heat background that `heat_relax` pulls
 the live field towards is no longer the step-0 noise for the whole run:
