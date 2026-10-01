@@ -902,6 +902,9 @@ def test_scorecard_observer_is_bit_identical():
     assert [s["step"] for s in rep["samples"]] == list(range(0, steps + 1, 10))
     assert rep["final"]["rifts"] >= 1 and rep["final"]["plates_born_rift"] >= 1
     json.dumps(rep)
+    summ = D.summarise([rep])
+    assert list(summ["checkpoints"]) == [str(steps)]
+    assert summ["checkpoints"][str(steps)]["books.cont_extent_share"]["n"] == 1
     # the time unit it reports in is not a parameter of the world
     q = WorldParams.tiny_world()
     q.tectonics.myr_per_step = 0.3

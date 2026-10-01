@@ -135,9 +135,14 @@ FINAL_TABLE = (
     ("short_lived_share_dead", "share living < 10 steps", "{:.3f}"),
     ("lifetime_median_all", "median life incl. alive, steps", "{:.1f}"),
     ("rifts", "rifts", "{:.1f}"),
-    ("rift_far_share", "rift halves' collisions > 90 deg out", "{:.3f}"),
+    ("rift_far_share", "all rifts: collisions > 90 deg out", "{:.3f}"),
     ("rift_cc_share", "  ... of which C-C", "{:.3f}"),
     ("rift_halves_min_area_median", "smaller half's area (median)", "{:.3f}"),
+    ("rift_hemi_n", "rifts of a plate > half the planet", "{:.1f}"),
+    ("rift_hemi_far_share", "  the first: collisions > 90 deg out", "{:.3f}"),
+    ("rift_hemi_cc_share", "  ... of which C-C", "{:.3f}"),
+    ("rift_hemi_area_before", "  ... the plate it cut (share)", "{:.3f}"),
+    ("rift_hemi_step", "  ... at step", "{:.0f}"),
 )
 
 
@@ -183,7 +188,7 @@ def print_compare(summs: list[tuple[str, dict]]) -> None:
     """Side by side: one block per checkpoint step all the files share, one column per file."""
     common = [c for c in summs[0][1]["checkpoints"] if all(c in s["checkpoints"] for _, s in summs[1:])]
     w0, wc = 36, 28
-    names = [Path(n).parent.name or n for n, _ in summs]
+    names = [(Path(n).name if Path(n).is_dir() else Path(n).parent.name) or n for n, _ in summs]
     for c in common:
         print(f"\n== step {c} ==")
         print(f"{'metric':<{w0}}" + "".join(f"{n[:wc - 2]:>{wc}}" for n in names) + "   Earth")
@@ -240,6 +245,8 @@ def main() -> int:
     ap.add_argument("--launcher", default=None, help="command a seed subprocess is run with (default: "
                     "$TECT_SCORECARD_LAUNCHER, else scratch/artifact/pyc above this script, else this python)")
     ap.add_argument("--compare", nargs="+", default=None, metavar="SUMMARY", help="print these side by side and exit")
+    ap.add_argument("--summarise-only", action="store_true", dest="summarise_only",
+                    help="run nothing: rebuild DIR/summary.json from the seed files already in --out")
     ap.add_argument("--worker", type=int, default=None, help=argparse.SUPPRESS)
     args = ap.parse_args()
     if args.preset is None and args.params is None:
@@ -259,7 +266,9 @@ def main() -> int:
         return 0
 
     t0 = time.time()
-    if args.jobs <= 0:
+    if args.summarise_only:
+        pass
+    elif args.jobs <= 0:
         for s in args.seeds:
             rep = run_one(args, s)
             (out / f"seed_{s}.json").write_text(json.dumps(rep))
@@ -304,12 +313,12 @@ def main() -> int:
     if not runs:
         return 1
     summ = D.summarise(runs)
-    summ.update({"preset": args.preset, "params_file": args.params, "set": list(args.set),
-                 "steps": runs[0]["steps"], "every": int(args.every), "myr_per_step": runs[0]["myr_per_step"],
+    summ.update({"preset": runs[0].get("preset"), "params_file": runs[0].get("params_file"), "set": runs[0].get("set"),
+                 "steps": runs[0]["steps"], "every": runs[0].get("every"), "myr_per_step": runs[0]["myr_per_step"],
                  "spacing_km": runs[0]["spacing_km"], "earth_targets": D.EARTH_TARGETS,
                  "seconds": time.time() - t0})
     (out / "summary.json").write_text(json.dumps(summ, indent=1))
-    print_summary(summ, f"{args.preset or args.params} {' '.join(args.set)}  ->  {out / 'summary.json'}")
+    print_summary(summ, f"{summ['preset'] or summ['params_file']} {' '.join(summ['set'] or [])}  ->  {out / 'summary.json'}")
     return 0
 
 

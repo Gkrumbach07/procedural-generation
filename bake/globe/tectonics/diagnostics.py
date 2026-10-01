@@ -141,6 +141,7 @@ class Observer:
         # plate genealogy: id -> (birth step, cause); id -> death step
         self.plate_birth: dict[int, tuple[int, str]] = {q: (-1, "initial") for q in range(sim.plates.P)}
         self.plate_death: dict[int, int] = {}
+        self._retired: list[tuple[int, int, str]] = []     # (birth, death, cause) of plates a reorganise ended
         self._alive_prev = sim.plates.alive.copy()
         self._P_prev = int(sim.plates.P)
         self.rifts: list[dict] = []
@@ -284,9 +285,10 @@ class Observer:
         w["rifts"] += len(rift_new)
         self._step_rifts = []
         if any(ev.get("event") == "reorganise" for ev in sim.events):
-            # every plate is new: count the old ones dead and the new ones born
-            for q in np.flatnonzero(self._alive_prev):
-                self.plate_death.setdefault(int(q), k)
+            # every plate is new: the old ones are retired dead and the new ones born
+            for q, (b, c) in self.plate_birth.items():
+                if b >= 0:
+                    self._retired.append((b, self.plate_death.get(q, k), c))
             w["deaths"] += int(self._alive_prev.sum())
             self.plate_birth = {q: (k, "other") for q in range(P)}
             self.plate_death = {}
@@ -380,6 +382,7 @@ class Observer:
             "shares": [round(float(x), 5) for x in share[shown]],
             "cont_share": [round(float(x), 4) for x in cshare[shown]],
             "speed_cmyr": [round(float(x * cms), 3) for x in v_rms_p[shown]],
+            "speed_kmstep": [round(float(x * R_km), 3) for x in v_rms_p[shown]],
             "n_below_0p1pct": int(order.size - shown.size),
         }
 
@@ -644,10 +647,11 @@ class Observer:
         """Run totals: plate lifetimes and births by cause, and the rifts."""
         k = int(self.sim.step_index)
         born = {q: v for q, v in self.plate_birth.items() if v[0] >= 0}
-        life_dead = np.array([self.plate_death[q] - born[q][0] for q in born if q in self.plate_death], np.float64)
-        life_all = np.array([self.plate_death.get(q, k) - born[q][0] for q in born], np.float64)
+        old = [d - b for b, d, _ in self._retired]
+        life_dead = np.array([self.plate_death[q] - born[q][0] for q in born if q in self.plate_death] + old, np.float64)
+        life_all = np.array([self.plate_death.get(q, k) - born[q][0] for q in born] + old, np.float64)
         causes = {}
-        for _, c in born.values():
+        for c in [v[1] for v in born.values()] + [r[2] for r in self._retired]:
             causes[c] = causes.get(c, 0) + 1
         rifts = [dict(r) for r in self.rifts]
         for r in rifts:
@@ -656,7 +660,7 @@ class Observer:
         tot = sum(r["coll"] for r in rifts)
         return {
             "steps": k,
-            "plates_born": int(len(born)),
+            "plates_born": int(len(born) + len(self._retired)),
             "plates_born_rift": int(causes.get("rift", 0)),
             "plates_born_split": int(causes.get("split", 0)),
             "plates_born_other": int(causes.get("other", 0)),
@@ -672,12 +676,30 @@ class Observer:
             if any(r["far_share"] is not None for r in rifts) else None,
             "rift_cc_share": _f(sum(r["coll_cc"] for r in rifts) / tot) if tot else None,
             "rift_halves_min_area_median": _median([min(r["area_a"], r["area_b"]) for r in rifts]),
+            **hemisphere_rift(rifts),
             "rift_list": rifts,
         }
 
     def report(self) -> dict:
         return {"myr_per_step": self.myr, "R_km": self.R_km, "spacing_rad": self.spacing,
                 "spacing_km": self.spacing * self.R_km, "samples": self.samples, "final": self.final()}
+
+
+def hemisphere_rift(rifts: list[dict]) -> dict:
+    """The first rift through a plate covering more than half the planet --
+    on the shipped start, the supercontinent plate.  A cut longer than 180 deg
+    *must* partly converge (the normal component of a rigid relative rotation
+    along a great circle goes as cos), so the share of its halves' collisions
+    > 90 deg from its centre is the number to watch; the later, smaller rifts
+    average it away in ``rift_far_share``.  ``rift_hemi_n`` counts such rifts."""
+    big = [x for x in rifts if (x.get("area_before") or 0.0) > 0.5]
+    r = next((x for x in big if x.get("coll")), None)
+    out = {"rift_hemi_n": len(big), "rift_hemi_step": None, "rift_hemi_far_share": None,
+           "rift_hemi_cc_share": None, "rift_hemi_area_before": None}
+    if r is not None:
+        out.update({"rift_hemi_step": r["step"], "rift_hemi_far_share": _f(r["coll_far"] / r["coll"]),
+                    "rift_hemi_cc_share": _f(r["coll_cc"] / r["coll"]), "rift_hemi_area_before": r.get("area_before")})
+    return out
 
 
 def observe(sim, steps: int, every: int, myr_per_step: float | None = None, log=None) -> dict:
@@ -757,7 +779,9 @@ def summarise(runs: list[dict], checkpoints: list[int] | None = None) -> dict:
                 rows.append(flatten(m[0]))
         keys = sorted({k for row in rows for k in row})
         out["checkpoints"][str(cp)] = {k: _stats([row.get(k) for row in rows]) for k in keys}
-    fins = [flatten({kk: vv for kk, vv in r["final"].items() if kk != "rift_list"}) for r in runs]
+    # (hemisphere_rift again: a report written before it existed still has the rift list)
+    fins = [flatten({**hemisphere_rift(r["final"].get("rift_list", [])),
+                     **{kk: vv for kk, vv in r["final"].items() if kk != "rift_list"}}) for r in runs]
     keys = sorted({k for f in fins for k in f})
     out["final"] = {k: _stats([f.get(k) for f in fins]) for k in keys}
     return out
@@ -797,4 +821,4 @@ EARTH_TARGETS = {
 }
 
 
-__all__ = ["Observer", "observe", "summarise", "flatten", "checkpoints_for", "headline", "EARTH_TARGETS"]
+__all__ = ["Observer", "observe", "hemisphere_rift", "summarise", "flatten", "checkpoints_for", "headline", "EARTH_TARGETS"]
