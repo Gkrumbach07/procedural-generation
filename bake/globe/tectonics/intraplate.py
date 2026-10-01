@@ -49,7 +49,7 @@ from .plates import Plates, cluster_plates, random_unit_vectors, snap_cratons
 
 
 def _rebuild(seg, plate_id: np.ndarray, n_plates: int, rng, speed: float, keep: np.ndarray | None = None,
-             snap: bool = True) -> Plates:
+             snap: bool = True, keep_welds: bool = False) -> Plates:
     """A fresh :class:`Plates` for an existing crust.
 
     With `keep` given, those Euler poles carry over and only the plates
@@ -72,11 +72,12 @@ def _rebuild(seg, plate_id: np.ndarray, n_plates: int, rng, speed: float, keep: 
     whichever held more of it, a piece of crust jumping to a plate it was not
     touching -- which the next split then promoted to a plate of its own:
     450-2100 plate births a run, half of them dead within 10 steps. The
-    fixed-area model (``variable_extent`` off) keeps the old rule, bit for bit.
+    fixed-area model (``variable_extent`` off) keeps the old rule, bit for bit:
+    a snap on every rebuild, welds and all (`keep_welds`, see snap_cratons).
     """
     seg.plate_id = np.ascontiguousarray(plate_id, dtype=np.int32)
     if snap:
-        snap_cratons(seg)      # a boundary goes around a craton, not through it
+        snap_cratons(seg, keep_welds)      # a boundary goes around a craton, not through it
     plates = Plates(int(n_plates))
     plates.update_stats(seg)
     if keep is None:
@@ -136,7 +137,8 @@ def reorganise(sim, n_plates: int, rng) -> dict:
     """
     seg = sim.seg
     pid = cluster_plates(seg.pos, int(n_plates), rng, size_jitter=float(sim.tp.plate_size_jitter))
-    sim.plates = _rebuild(seg, pid, int(n_plates), rng, float(sim.tp.initial_speed) * sim.spacing)
+    sim.plates = _rebuild(seg, pid, int(n_plates), rng, float(sim.tp.initial_speed) * sim.spacing,
+                          keep_welds=bool(sim.tp.variable_extent))
     return {"event": "reorganise", "plates": int(sim.plates.n_alive())}
 
 

@@ -401,7 +401,7 @@ def seed_supercontinent(pos: np.ndarray, continental_fraction: float, craton_fra
     return kind, craton, taper
 
 
-def snap_cratons(seg) -> int:
+def snap_cratons(seg, keep_welds: bool = True) -> int:
     """Give every craton wholly to the plate that holds most of it.
 
     Plate boundaries follow weak lithosphere. A craton is the opposite of
@@ -419,12 +419,15 @@ def snap_cratons(seg) -> int:
     the vote handed the shortened rim straight back, inside the plate it had
     just collided with. Measured at Earth scale before this, 68-74 % of the
     150k-320k segments snapped over a 4000-step run were such welds.
+    ``keep_welds=False`` is the old vote, which the fixed-area model keeps
+    bit for bit (with ``continental_shortening`` on it welds too, and its
+    tiny-world continental share moved 0.751 -> 0.708 under the new vote).
 
     Returns the number of cratons that had to be re-assigned. Mutates
     `seg.plate_id` in place.
     """
     cr, pid = seg.craton, seg.plate_id
-    free = seg.weld <= 0
+    free = seg.weld <= 0 if keep_welds else np.ones(cr.shape[0], dtype=bool)
     moved = 0
     for c in np.unique(cr[cr > 0]):
         m = (cr == c) & free
