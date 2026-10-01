@@ -85,6 +85,20 @@ SHORT_LIFE = 10
 #: land component area bins, km^2
 AREA_BINS = (0.0, 1e3, 1e4, 1e5, 1e6, np.inf)
 AREA_BIN_NAMES = ("lt1e3", "1e3_1e4", "1e4_1e5", "1e5_1e6", "gt1e6")
+#: an intra-oceanic arc: an oceanic column at least this thick (thickness units, 14 km -- twice
+#: the ocean floor), as the arcs prototype measured it
+ARC_COLUMN = 0.4
+#: an arc is "at an active trench" within this distance (km) of a currently converging boundary
+ARC_ACTIVE_KM = 300.0
+#: trench froth: new sea floor within this many spacings of a segment subducted in the last
+#: FROTH_STEPS steps (32 % of all new floor on the shipped model, 45x random)
+FROTH_LINK = 1.0
+FROTH_STEPS = 3
+#: a slab younger than this many steps went down almost as soon as it was made
+YOUNG_SLAB = 15
+#: island area bins, km^2 (a coarse cell is ~95 km^2 at the Earth preset)
+ISLAND_BINS = (0.0, 300.0, 1e3, 1e4, np.inf)
+ISLAND_BIN_NAMES = ("lt300", "300_1e3", "1e3_1e4", "gt1e4")
 
 
 def _chord(theta: float) -> float:
@@ -128,9 +142,14 @@ class Observer:
     context manager (or :meth:`attach` / :meth:`detach`) so the wrapped
     module functions are restored however the run ends."""
 
-    def __init__(self, sim, myr_per_step: float | None = None):
+    def __init__(self, sim, myr_per_step: float | None = None, coarse_at=None):
         self.sim = sim
         tp = sim.tp
+        #: steps at which a sample also builds the coarse bed the stage would write
+        #: (``run.finalise_bed``: the arc ridge and the volcanic cones at 9.8 km) and measures
+        #: the arc crests and the islands on it -- ~15 s and ~1.5 GB a time at the Earth preset
+        self.coarse_at = set(int(s) for s in coarse_at) if coarse_at else set()
+        self._recent_slabs: list[np.ndarray] = []
         self.myr = float(myr_per_step if myr_per_step is not None else getattr(tp, "myr_per_step", 0.15))
         self.R_km = float(sim.params.R_planet) / 1000.0
         self.spacing = float(sim.spacing)
@@ -160,9 +179,9 @@ class Observer:
         def collide(seg, tree, radius, omega_dt, alive, *a, **kw):
             if seg is not obs.sim.seg:
                 return orig_collide(seg, tree, radius, omega_dt, alive, *a, **kw)
-            pid0, kind0, pos0 = seg.plate_id.copy(), seg.kind.copy(), seg.pos.copy()
+            pid0, kind0, pos0, age0 = seg.plate_id.copy(), seg.kind.copy(), seg.pos.copy(), seg.age.copy()
             out = orig_collide(seg, tree, radius, omega_dt, alive, *a, **kw)
-            obs._on_collide(seg, pid0, kind0, pos0, np.asarray(out[0]), np.asarray(out[1]))
+            obs._on_collide(seg, pid0, kind0, pos0, np.asarray(out[0]), np.asarray(out[1]), alive=alive, age0=age0)
             return out
 
         orig_rift = intraplate.rift
@@ -192,6 +211,7 @@ class Observer:
             if other.M:
                 obs.born_step = np.concatenate([obs.born_step, np.full(other.M, obs.sim.step_index, np.int32)])
                 obs.born_kind = np.concatenate([obs.born_kind, np.asarray(other.kind, np.int8)])
+                obs._on_spawn(np.asarray(other.pos), np.asarray(other.kind))
 
         tect_run.collide = collide
         intraplate.rift = rift
@@ -217,9 +237,10 @@ class Observer:
     # -- per-step bookkeeping -------------------------------------------------
     def _reset_window(self) -> None:
         self.win = {"steps": 0, "coll_cc": 0, "coll_oc": 0, "coll_oo": 0, "arc_births": 0, "births_rift": 0,
-                    "births_split": 0, "births_other": 0, "deaths": 0, "rifts": 0, "spawned": 0, "gap_cells": 0}
+                    "births_split": 0, "births_other": 0, "deaths": 0, "rifts": 0, "spawned": 0, "gap_cells": 0,
+                    "new_floor": 0, "froth": 0, "slabs": 0, "slabs_young": 0}
 
-    def _on_collide(self, seg, pid0, kind0, pos0, losers, survivors) -> None:
+    def _on_collide(self, seg, pid0, kind0, pos0, losers, survivors, alive=None, age0=None) -> None:
         lk, sk = kind0[losers], kind0[survivors]
         w = self.win
         w["coll_cc"] += int(((lk == CONTINENTAL) & (sk == CONTINENTAL)).sum())
@@ -227,6 +248,16 @@ class Observer:
         w["coll_oo"] += int(((lk == OCEANIC) & (sk == OCEANIC)).sum())
         # arcs: crust that went into the call oceanic and came out continental
         w["arc_births"] += int(((kind0 == OCEANIC) & (seg.kind == CONTINENTAL)).sum())
+        if alive is not None and losers.size:
+            # slabs: oceanic losers the call took out, how young, and where (for the froth)
+            sl = losers[(lk == OCEANIC) & ~np.asarray(alive)[losers]]
+            w["slabs"] += int(sl.size)
+            if age0 is not None:
+                w["slabs_young"] += int((age0[sl] < YOUNG_SLAB).sum())
+            self._recent_slabs.append(pos0[sl])
+        else:
+            self._recent_slabs.append(np.zeros((0, 3)))
+        self._recent_slabs = self._recent_slabs[-FROTH_STEPS:]
         if not self._active_rifts or losers.size == 0:
             return
         k = self.sim.step_index
@@ -244,6 +275,20 @@ class Observer:
             r["coll"] += n
             r["coll_far"] += int(far.sum())
             r["coll_cc"] += int(((lk[pair] == CONTINENTAL) & (sk[pair] == CONTINENTAL)).sum())
+
+    def _on_spawn(self, pos, kind) -> None:
+        """Trench froth: new sea floor within FROTH_LINK spacings of a slab that went down in
+        the last FROTH_STEPS steps -- a hole a trench left, refilled with age-0 crust that the
+        same trench consumes at once."""
+        oc = kind == OCEANIC
+        n = int(oc.sum())
+        if n == 0:
+            return
+        self.win["new_floor"] += n
+        rec = [p for p in self._recent_slabs if p.shape[0]]
+        if rec:
+            d, _ = cKDTree(np.concatenate(rec)).query(pos[oc], k=1, distance_upper_bound=_chord(FROTH_LINK * self.spacing))
+            self.win["froth"] += int(np.isfinite(d).sum())
 
     def _on_rift(self, sim, ev, com0, ext0) -> None:
         seg = sim.seg
@@ -460,6 +505,8 @@ class Observer:
             "oc_share": _f(w["coll_oc"] / n_c) if n_c else None,
             "oo_share": _f(w["coll_oo"] / n_c) if n_c else None,
             "births": w["births_rift"] + w["births_split"] + w["births_other"],
+            "froth_share": _f(w["froth"] / w["new_floor"]) if w["new_floor"] else None,
+            "young_slab_share": _f(w["slabs_young"] / w["slabs"]) if w["slabs"] else None,
         }
         self._reset_window()
 
@@ -477,10 +524,14 @@ class Observer:
             row["ocean"] = {}
 
         # ---- arcs -------------------------------------------------------------
+        scale = tect_run.metres_per_unit(bed, area, tp, sim.spacing, sim.params.R_planet)
         row["arcs"] = self._arcs(seg, tree, cont, ext, ext_tot, conv0_seg, bed, k)
+        row["arcs"].update(self._ocean_arcs(seg, tree, ext, ext_tot, conv0_seg, B))
+        row["arcs"].update(self._docked_sea_level(seg, tree, cont, bed, c, area, scale))
+        if k in self.coarse_at:
+            row["islands"] = self._coarse_arcs(seg, B)
 
         # ---- hypsometry on the tect grid, metres ----------------------------
-        scale = tect_run.metres_per_unit(bed, area, tp, sim.spacing, sim.params.R_planet)
         bm = bed * scale
         lw, ow = area[land], area[~land]
         row["hyps"] = {
@@ -642,6 +693,177 @@ class Observer:
         out["arc_land_km2"] = _f(arc_a.sum())
         return out
 
+    def _ocean_arcs(self, seg, tree, ext, ext_tot, conv0_seg, B) -> dict:
+        """Intra-oceanic arc crust (te/arcs): oceanic columns of at least ARC_COLUMN (14 km),
+        their share of the planet and thickness, and where they are -- within ARC_ACTIVE_KM of
+        a boundary converging now (the strict test: any approach, this sample), within it of
+        a converging *ocean-ocean* boundary, or stranded (no other plate within STRANDED
+        spacings).  Earth's intra-oceanic arc crust is ~1 % of the planet, 20-35 km thick."""
+        oc = seg.kind == OCEANIC
+        arc = oc & (seg.thickness >= ARC_COLUMN)
+        ai = np.flatnonzero(arc)
+        out = {"ocean_arc_n": int(ai.size), "ocean_arc_share": _f(ext[arc].sum() / ext_tot),
+               "ocean_arc_th_p50_km": None, "ocean_arc_th_p90_km": None, "ocean_arc_active_share": None,
+               "ocean_arc_active_oo_share": None, "ocean_arc_stranded_share": None}
+        if ai.size == 0:
+            return out
+        th = seg.thickness[ai] * THICKNESS_KM
+        w = ext[ai]
+        out["ocean_arc_th_p50_km"] = _wq(th, w, 0.5)
+        out["ocean_arc_th_p90_km"] = _wq(th, w, 0.9)
+        r = _chord(ARC_ACTIVE_KM / self.R_km)
+
+        def near(mask):
+            q = np.flatnonzero(mask)
+            if q.size == 0:
+                return np.zeros(ai.size, bool)
+            d, _ = cKDTree(seg.pos[q]).query(seg.pos[ai], k=1, distance_upper_bound=r)
+            return np.isfinite(d)
+
+        out["ocean_arc_active_share"] = _f((w * near(conv0_seg)).sum() / w.sum())
+        if B is not None:
+            i, j = B["i"], B["j"]
+            oo = (seg.kind[i] == OCEANIC) & (seg.kind[j] == OCEANIC) & (B["vn"] > 0.0)
+            m = np.zeros(seg.M, bool)
+            m[i[oo]] = True
+            m[j[oo]] = True
+            out["ocean_arc_active_oo_share"] = _f((w * near(m)).sum() / w.sum())
+        pid = seg.plate_id
+        balls = tree.query_ball_point(seg.pos[ai], _chord(STRANDED * self.spacing))
+        stranded = np.fromiter((not np.any(pid[np.asarray(nb, np.int64)] != pid[q]) for q, nb in zip(ai, balls)),
+                               dtype=bool, count=ai.size)
+        out["ocean_arc_stranded_share"] = _f((w * stranded).sum() / w.sum())
+        return out
+
+    def _docked_sea_level(self, seg, tree, cont, bed, c, area, scale) -> dict:
+        """How far the docked terranes (continental crust born oceanic) pull the shelf-mode sea
+        level down: the shelf_fraction quantile of the continental mask with and without the
+        tect cells nearest to them, metres (positive: sea level is that much lower with them)."""
+        f = float(self.sim.tp.shelf_fraction)
+        dock = cont & (self.born_kind == OCEANIC)
+        out = {"docked_share": _f(seg.ext[dock].sum() / max(float(seg.ext.sum()), 1e-30)),
+               "docked_sea_level_shift_m": None, "docked_mask_share": None}
+        if f <= 0.0:
+            return out
+        rc = np.flatnonzero((c > 0.5).ravel())
+        if rc.size == 0:
+            return out
+        out["docked_sea_level_shift_m"] = 0.0
+        out["docked_mask_share"] = 0.0
+        if not dock.any():
+            return out
+        _, nn = tree.query(interior_centers_flat(self.sim.grid)[rc], k=1)
+        d = dock[nn]
+        if not d.any() or d.all():
+            return out
+        b, a = bed.ravel()[rc], area.ravel()[rc]
+        q_all = weighted_quantile(b, a, f)
+        q_no = weighted_quantile(b[~d], a[~d], f)
+        out["docked_sea_level_shift_m"] = _f((q_no - q_all) * scale)
+        out["docked_mask_share"] = _f(a[d].sum() / a.sum())
+        return out
+
+    def _coarse_arcs(self, seg, B) -> dict:
+        """The arcs and islands on the coarse bed the stage would write (``run.finalise_bed``:
+        the arc ridge at its own width and the volcanic cones, 9.8 km cells at the Earth
+        preset).  Arc crests (the ground under the cones at the arc segments), the oceanic
+        islands by the kind of edifice that made them, their area per km of converging
+        ocean-ocean trench, the ground under them (on the arc ridge or on abyssal floor), the
+        spacing of the active arc vents and how many stand on arc crust."""
+        from . import volcanoes as volc
+
+        sim = self.sim
+        t0 = time.time()
+        fb = tect_run.finalise_bed(sim)
+        coarse = sim.params.coarse_grid()
+        bed = fb["bed"].astype(np.float64).ravel()
+        ck = fb["ck"].astype(bool).ravel()
+        cone = fb["cone"].astype(np.float64).ravel() if "cone" in fb else np.zeros_like(bed)
+        who = fb["cone_kind"].ravel() if "cone_kind" in fb else np.full(bed.size, -1, np.int8)
+        ground = bed - cone
+        area_km2 = coarse.interior_cell_area.astype(np.float64).ravel() / 1e6
+        out = {"scale_m_per_unit": _f(fb["scale"]), **{f"v_{k}": _f(v) for k, v in fb["volcanoes"].items()
+                                                     if isinstance(v, (int, float, np.integer, np.floating))}}
+        # arc crests
+        arc = np.flatnonzero((seg.kind == OCEANIC) & (seg.thickness >= ARC_COLUMN))
+        if arc.size:
+            gz = ground[volc.cell_index(coarse, seg.pos[arc])]
+            out.update({"crest_p10_m": _f(np.percentile(gz, 10)), "crest_p50_m": _f(np.median(gz)),
+                        "crest_p90_m": _f(np.percentile(gz, 90)),
+                        "crest_1_3km_share": _f(((gz >= -3000.0) & (gz <= -1000.0)).mean()),
+                        "crest_above_sea_share": _f((gz > 0.0).mean())})
+        # active ocean-ocean trench length (km), as the boundary census counts lengths
+        oo_km = None
+        if B is not None:
+            i, j = B["i"], B["j"]
+            oo = (seg.kind[i] == OCEANIC) & (seg.kind[j] == OCEANIC) & (B["obl"] > OBLIQUITY)
+            oo_km = float(np.unique(np.concatenate([i[oo], j[oo]])).size * self.spacing * self.R_km / 2.0)
+        out["oo_trench_km"] = _f(oo_km)
+        # oceanic islands: land off the continental mask, in connected pieces
+        isl = np.flatnonzero((bed > 0.0) & ~ck)
+        out.update({"n_arc": 0, "n_hotspot": 0, "n_other": 0, "km2_arc": 0.0, "km2_hotspot": 0.0, "km2_other": 0.0})
+        for nm in ISLAND_BIN_NAMES:
+            out["arc_" + nm] = 0
+        if isl.size:
+            cen = interior_centers_flat(coarse)[isl]
+            pairs = cKDTree(cen).query_pairs(1.6 * (math.pi / 2.0) / coarse.N, output_type="ndarray")
+            n = isl.size
+            g = coo_matrix((np.ones(pairs.shape[0], np.int8), (pairs[:, 0], pairs[:, 1])), shape=(n, n)) if pairs.size \
+                else coo_matrix((n, n))
+            ncomp, comp = connected_components(g, directed=False)
+            ca = np.bincount(comp, weights=area_km2[isl], minlength=ncomp)
+            # each island takes the kind of the edifice under its highest cell (none: a piece of
+            # arc ridge or of margin that stands above the sea on its own)
+            order = np.lexsort((-bed[isl], comp))
+            first = order[np.r_[True, comp[order][1:] != comp[order][:-1]]]
+            top = isl[first]
+            kind = who[top]
+            kind = np.where((kind == volc.ARC_OCEAN) | (kind == volc.ARC_CONT), 0, np.where(kind == volc.HOTSPOT, 2, -1))
+            for nm, kk in (("arc", 0), ("hotspot", 2), ("other", -1)):
+                m = kind == kk
+                out["n_" + nm] = int(m.sum())
+                out["km2_" + nm] = _f(ca[m].sum())
+                out["median_km2_" + nm] = _f(np.median(ca[m])) if m.any() else None
+                out["max_km2_" + nm] = _f(ca[m].max()) if m.any() else None
+            ma = kind == 0
+            hist = np.histogram(ca[ma], bins=np.asarray(ISLAND_BINS))[0]
+            for nm, h in zip(ISLAND_BIN_NAMES, hist):
+                out["arc_" + nm] = int(h)
+            out["arc_one_cell_share"] = _f((np.bincount(comp, minlength=ncomp)[ma] == 1).mean()) if ma.any() else None
+            if ma.any():
+                # the ground under the arc islands' summits: on the ridge, or on abyssal floor
+                gt = ground[top[ma]]
+                out["arc_island_ground_p50_m"] = _f(np.median(gt))
+                out["arc_island_on_ridge_share"] = _f((gt >= -3000.0).mean())
+        if oo_km:
+            out["arc_km2_per_trench_km"] = _f((out["km2_arc"] or 0.0) / oo_km)
+        # the vents
+        v = sim.volc
+        if v is not None and len(v):
+            k = int(sim.step_index)
+            act = v.active(k)
+            arcv = np.flatnonzero(act & (v.kind == volc.ARC_OCEAN))
+            out["vents_active_arc"] = int(arcv.size)
+            out["vents_standing"] = int(len(v))
+            out["vents_hotspot"] = int((v.kind == volc.HOTSPOT).sum())
+            if arcv.size >= 2:
+                d, _ = cKDTree(v.pos[arcv]).query(v.pos[arcv], k=2)
+                nn = d[:, 1] * self.R_km
+                out["vent_nn_p10_km"] = _f(np.percentile(nn, 10))
+                out["vent_nn_p50_km"] = _f(np.median(nn))
+                out["vent_nn_p90_km"] = _f(np.percentile(nn, 90))
+            if arcv.size:
+                ab = np.flatnonzero((seg.kind == OCEANIC) & (seg.thickness - float(sim.tp.oceanic_thickness) >= volc.ARC_MIN_TH))
+                if ab.size:
+                    d, _ = cKDTree(seg.pos[ab]).query(v.pos[arcv], k=1, distance_upper_bound=_chord(100.0 / self.R_km))
+                    out["vents_on_arc_share"] = _f(np.isfinite(d).mean())
+            hot = v.kind == volc.HOTSPOT
+            if hot.any():
+                per = np.bincount(np.maximum(v.src[hot], 0), minlength=max(int(v.src.max()) + 1, 1))
+                out["hotspot_chains_ge3"] = int((per >= 3).sum())
+        out["seconds"] = _f(time.time() - t0)
+        return out
+
     # -- the end ----------------------------------------------------------------
     def final(self) -> dict:
         """Run totals: plate lifetimes and births by cause, and the rifts."""
@@ -702,10 +924,11 @@ def hemisphere_rift(rifts: list[dict]) -> dict:
     return out
 
 
-def observe(sim, steps: int, every: int, myr_per_step: float | None = None, log=None) -> dict:
+def observe(sim, steps: int, every: int, myr_per_step: float | None = None, log=None, coarse_at=None) -> dict:
     """Step ``sim`` ``steps`` times under an :class:`Observer`, sampling at
-    step 0, every ``every`` steps and at the end; returns the report."""
-    obs = Observer(sim, myr_per_step)
+    step 0, every ``every`` steps and at the end; returns the report.
+    ``coarse_at`` (steps) adds the coarse-bed arc and island block there."""
+    obs = Observer(sim, myr_per_step, coarse_at=coarse_at)
     with obs:
         obs.sample()
         for i in range(int(steps)):
@@ -811,7 +1034,13 @@ EARTH_TARGETS = {
     "ocean.mean_age_myr": "64",
     "ocean.median_over_mean": "0.88 (triangular)",
     "ocean.max_over_mean": "~3",
-    "arcs.planet_share": "~0.01 (intra-oceanic arc crust)",
+    "arcs.planet_share": "docked terranes (continental crust born oceanic; coin-flip arcs on the classic model)",
+    "arcs.ocean_arc_share": "~0.01-0.02 (intra-oceanic arc crust)",
+    "arcs.ocean_arc_th_p50_km": "20-35",
+    "islands.crest_p50_m": "-1000 to -3000 (arc crests)",
+    "islands.arc_km2_per_trench_km": "0.4-9 (Marianas 0.36, Tonga 0.9, Antilles/Aleutians/Vanuatu 7-9)",
+    "islands.vent_nn_p50_km": "50-100",
+    "window.froth_share": "~0 (Earth); 0.32 on the shipped model",
     "final.lifetime_median_dead_myr": "small plates live < 10-20 My",
     "hyps.land_median_m": "~350",
     "hyps.ocean_median_m": "~-4070",

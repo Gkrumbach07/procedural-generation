@@ -119,7 +119,7 @@ class TectonicsParams:
     plate_split_min: int = 16  # segments a severed piece needs to become a plate in its own right (it inherits its parent's motion); smaller fragments are welded onto the plate around them. With `variable_extent` on it is the *floor* under `plate_min_area`, in design segments' worth of ground (summed extent / (4 pi / segments)): below a handful of points a plate is the sampling, not the planet, which is what keeps `small` (1500 segments, where 8e-4 of the sphere is 1.2 of them) at its old 16. Off, it is the whole rule, a count, as it always was
     plate_min_area: float = 8.0e-4  # with `variable_extent` on, the ground a severed piece needs to become a plate, as a fraction of the sphere (summed extent / 4 pi; at least `plate_split_min` design segments' worth). A size, not a count: 16 segments is this at the shipped 20000 and a quarter of it at 80000, where seed 2 ran 35/48/83 plates at steps 1000/1250/1500 with the count against 6/15/14 with it scaled to 64 (and 10/15/11 at 20000). 8e-4 is exactly 16 segments at 20000, so the threshold did not move at the shipped resolution, only what it is measured in: a piece of 16 shortened slivers is no longer a plate. 0.010 sr, 4.1e5 km2 at Earth's radius: a microplate
     rift_min_area: float = 4.0e-4  # the ground a plate needs before a rift may cut it, as a fraction of the sphere (at least 8 design segments' worth, the hard-coded count this replaces and still the whole rule with `variable_extent` off). 4e-4 is those 8 at 20000
-    hotspots: int = 0  # fixed points in the mantle frame that thicken crust drifting over them (0 = none)
+    hotspots: int = 12  # fixed points in the mantle frame (plumes).  They thicken crust drifting over them only with hotspot_rate > 0; with `volcanoes` on each one builds a chain of edifices on the plate passing over it (Hawaii-Emperor).  Earth has ~10-15 strong plumes (Courtillot et al. 2003).  The classic dynamics keep 0
     hotspot_rate: float = 0.0  # thickness added per step at a hotspot centre, tapering to 0 at its rim
     hotspot_radius_factor: float = 3.0  # × mean segment spacing: hotspot radius
     # --- crust types (globe/tectonics/segments.py) -----------------------
@@ -155,7 +155,7 @@ class TectonicsParams:
     orogen_width_scale: float = 1.0  # every zone of the orogen cross-sections (orogeny.TYPES, in km: andean ~1,050, himalayan ~1,350, laramide ~1,750 wide) scaled by this. The heights are only the weights the accreted crust is shared by, so a narrower profile stacks the same mass onto fewer segments. At 1 the belts above 1500 m come out ~1,700-1,900 km wide on the earth preset against the Andes' 200-700 and the Rockies' 110-480 km; the splat's ~137 km blur and the relax limiter floor a belt at ~2-3 spacings (320-480 km) whatever this is. 1 = the profiles as written
     max_crust_thickness: float = 2.3  # continental thickness (× the 1.0 initial) above which the root delaminates; 0 = no limit. 2.3 is ~80 km, the thickest crust on Earth (southern Tibet). Unlimited, a few segments stacked to 8.3x and squashed the vertical scale everyone else shares. At 2.0 the 4-5 km land was 74-100 % crust at the cap on every seed (3-4 km: 12-74 %): orogens are mostly craton-derived (density ~0.84, not the belts' 0.804), and 2x of that stands only ~3.7 km above sea level, so the 4-5 km band held 0.2-0.9 % of the land against Earth's 1.7 (docs/ocean-depth.md)
     delamination: float = 0.05  # fraction of the excess over max_crust_thickness shed to the mantle per step
-    arc_birth: float = 0.05  # probability that an ocean-on-ocean subduction converts the survivor to continental crust (island arcs -- how continents are actually born). Was 0.20 when the old scattered-blob start needed propping up; with a supercontinent start it no longer sustains the continental area at all (52.1 % at 0 against 55.6 % at 0.20) and only scatters specks -- 312 continental components at 0.20 against 62 at 0, for 3.6 % of the area
+    arc_birth: float = 0.0  # (te/arcs: 0; the classic dynamics keep 0.05) probability that an ocean-on-ocean subduction converts the survivor to continental crust by a coin flip. It made one-segment continental specks -- 24-36 % isolated, the rest one-segment chains, 3.4-5.1 % of the planet by 600 My against Earth's ~1 % of intra-oceanic arc crust, none of them ever subducted -- and drew their extra crust from the mantle (`arc_mantle`). Arcs are now oceanic crust thickened at the volcanic front (`arc_front`), and they become continental only by docking (`arc_dock_km`). Was 0.20 when the old scattered-blob start needed propping up; with a supercontinent start it no longer sustains the continental area at all (52.1 % at 0 against 55.6 % at 0.20) and only scatters specks -- 312 continental components at 0.20 against 62 at 0, for 3.6 % of the area
     differentiation: float = 0.0  # fraction of the gap to `density_continental` a survivor closes per collision (0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion)). Collision alone only averages density, so the elevation histogram stays one narrow spike; Earth is bimodal because thickened crust partially melts, the light granitic fraction stays and the dense residue is lost to the mantle
     density_continental: float = 0.30  # density floor differentiation drives collided crust toward: granitic continental crust, which floats high
     animate_frames: int = 0  # capture this many animation frames DURING the run and write quicklook/tectonics.webp (0 = off (the default until the end-to-end measurement below is in: the coarse-grid prototype measured beta 3.71 -> 1.84, but that was a different amplitude basis and did not check whether the variance survives erosion)). Re-simulating for an animation afterwards costs a second full run -- 39 minutes at Earth scale
@@ -310,18 +310,56 @@ class TectonicsParams:
     ocean_tiling: str = "zipf"  # 'zipf': the initial ocean plates get rank^-ocean_plate_alpha target sizes in [ocean_plate_min, ocean_plate_max] (dyn-forcebalance's power-law tiling: one Pacific-like plate, then a tail); 'cluster': dyn-minimal's redrawn cluster_plates
     ocean_plate_alpha: float = 1.0
     ocean_plate_min: float = 0.012
+    # --- island arcs (te/arcs; globe/tectonics/volcanoes.py) ---
+    # An intra-oceanic arc is two things at two scales: a ridge of arc crust (20-35 km thick,
+    # 100-200 km wide, crest 1-3 km deep) that the segment cloud carries as oceanic crust
+    # thickened at the volcanic front, and the volcanoes standing on it (cones 10-30 km across,
+    # 50-100 km apart, mostly seamounts) that no reconstruction of a 160 km cloud can show, so
+    # they are point edifices riding the plates that finalise stamps at their own size.  Every
+    # length here is km on the tectonic sphere (tectonic_radius_km), every time My
+    # (myr_per_step), every height m at Earth's vertical scale (volc_ref_m_per_unit).
+    crust_km: float = 35.0  # km of crust per thickness unit (continental_thickness 1.0 ~ 35 km), for the knobs below given in km
+    arc_front: float = 1.0  # (classic 0) share of what an ocean-under-ocean subduction hands the overriding plate (arc_accretion of the slab) that goes to its VOLCANIC FRONT -- the overriding plate's oceanic segment nearest the point arc_front_km behind the trench -- as arc crust, volume for volume, instead of being spread over the island-arc belt profile (50-370 km behind the trench, 2 spacings wide), over which it never thickened past ~10 km.  Earth adds 30-90 km3 of arc crust per km of arc per My in a band 100-150 km wide over the slab's 100 km contour; arc_accretion 0.15 of a 7 km slab at 5 cm/yr is ~52
+    arc_front_km: float = 180.0  # trench to volcanic front, km (Earth 100-300, mode ~180)
+    arc_keep: float = 0.5  # (classic -1 = off) when an oceanic column thinner than arc_dock_km subducts, the overriding plate scrapes off this share of its arc crust (the column above oceanic_thickness) and arc_accretion of the sea floor under it; the rest goes down.  Off, a subducting arc's crust went down like sea floor
+    arc_dock_km: float = 17.5  # (classic 0 = off) an oceanic column at least this thick (km) on the down-going side of an approaching pair does not subduct: it docks.  Onto ocean floor it joins the overriding plate as a terrane; onto a continent it turns continental (booked `docked`) and the same contact shortens it into the margin (arc-continent collision: Taiwan).  A docked terrane is never handed back: while it is welded the other side goes down under it, its weld is renewed while the contact lasts, and a thick unwelded arc meeting it docks onto it.  Earth: crust thicker than ~17 km jams a trench (Cloos 1993)
+    arc_max_km: float = 35.0  # (classic 0 = off) root foundering: an oceanic column thicker than this (km) sheds `delamination` of its excess a step to the mantle (booked in `delaminated`, counted in `arc_foundered`).  Earth's intra-oceanic arcs are 20-35 km thick however long they have been active; denser cumulates founder below that
+    terrane_relax_my: float = 30.0  # (classic 0 = off) continental crust denser than craton_density -- what docking makes: arc crust at slab density 0.88, which stood 1-2 km below the shelves and pulled the shelf-mode sea level down by up to 170 m -- loses its dense mafic root to the mantle with this e-folding time (density towards continental_density at constant thickness; booked in `residue`, counted in `terrane_relaxed`), as accreted arcs on Earth turn into andesitic continental crust
+    arc_ridge_km: float = 60.0  # (classic 0 = off) finalise redraws the arc crust on ocean floor (the column above oceanic_thickness) as a ridge this sigma across strike (km) and one along-strike spacing along it, volume for volume, in place of what the one-spacing splat made of it (a swell 400 km across at half the column's relief)
+    arc_water_loading: float = 1.45  # the arc ridge's relief above the ocean floor is Airy relief under water: a column stands rho_m / (rho_m - rho_w) = 3.3 / 2.27 = 1.45x as high in the sea as its (1 - density) buoyancy gives in air, which the shared vertical scale (set on land) does not know.  Without it a 28 km arc stood 1.9 km over the abyssal floor against Earth's ~3.7 km, and the crests sat at -2.7 to -3.0 km (p50) on the first Earth runs, the deep edge of Earth's 1-3 km
+    volcanoes: bool = True  # (classic False) volcanic edifices as points riding the plates: arc volcanoes at the volcanic front of persistent ocean-ocean trenches where the overriding crust is an arc, fed by the slab going down beneath them, and hotspot volcanoes over the `hotspots` plumes.  Finalise stamps them as cones into the bedrock; extinct ones go through erosion (uplift, replay), active ones are added back on top after it (the `volcano_active` field)
+    volc_slab_g: float = 0.5  # an arc vent is founded or fed only where the slab under the trench (TectonicSim.slab, min(S / slab_sat_km, 1)) is at least this: >= 200 km of slab, i.e. the same trench converging >= 1 cm/yr for 4-15 My.  Sliver contacts that consume a few segments make no volcanoes
+    volc_sep_km: float = 60.0  # along-strike spacing of arc vents: a slab event feeds the nearest standing vent of its plate within this distance, else founds one, so the vents fill the front at 1-2x this (random sequential packing: mean ~1.34x).  Earth's arc volcanoes stand 50-100 km apart
+    volc_active_my: float = 6.0  # an arc vent not fed for this long is extinct
+    volc_height_m: float = 2600.0  # median height of an active arc edifice above the arc ridge, m (Mariana / Izu volcanoes rise 2-3.5 km off the arc crest), scaled by sqrt(slab flux / a 5 cm/yr trench's) in [0.35, 1.6] and a lognormal(0.3) per vent
+    volc_height_max_m: float = 4500.0  # cap on an arc edifice above its ridge, m
+    volc_flank_deg: float = 11.0  # arc edifice flank slope: base radius = height / tan (2.6 km -> 13 km)
+    volc_decay_my: float = 8.0  # an extinct arc edifice's height e-folding time, My (subsidence and erosion: remnant-arc volcanoes are guyots)
+    volc_hot_height_m: float = 4500.0  # median hotspot edifice above the sea floor, m (Hawaii ~9 km, Canaries / Reunion ~7, most < 4)
+    volc_hot_height_max_m: float = 9000.0
+    volc_hot_flank_deg: float = 6.0  # shield volcano flanks
+    volc_hot_decay_my: float = 20.0  # a hotspot edifice decays from the moment the plate carries it off the plume (Kauai 1.6 km high at 5 My; guyots after ~30 My)
+    volc_hot_active_my: float = 2.0  # ...and is active (not eroded: added after the erosion stage) for this long after its last feed
+    volc_hot_sep_km: float = 80.0  # a plume founds its next edifice once the last has drifted this far off it...
+    volc_hot_jitter: float = 0.4  # ...x U(1 - this, 1 + this), drawn per edifice, so a chain is not a string of equal beads at one cadence
+    volc_hot_size_jitter: float = 0.3  # lognormal sigma of a hotspot edifice's size, per edifice (on top of a per-plume lognormal 0.35)
+    volc_continental: bool = False  # also stamp the volcanoes of continental arcs and continental hotspots (Andes, Cascades, Yellowstone); off: only intra-oceanic arcs and ocean-floor hotspots
+    volc_ref_m_per_unit: float = 26400.0  # the vertical scale (m per bedrock unit) the edifice heights are quoted at -- the Earth preset's height_scale_m; a planet whose finalise scale differs (a toy body) gets its cones scaled by scale / this, and their footprint follows the tectonic sphere
 
 
 #: The values that restore the shipped (pre-synth-dyn) tectonic dynamics: the random-pole
 #: supercontinent start at 0.75, the heat-gradient update with no boundary forces, the
 #: two-sided insulation, the rift clock, the nearest-segment spawn test, the proportional
-#: extent closure, no margin collapse or microplate capture.  ``small`` and ``tiny`` use
-#: them (their tests are calibrated to those dynamics); a world YAML can set them too.
+#: extent closure, no margin collapse or microplate capture, and the coin-flip arcs (no arc
+#: front, docking, foundering, volcanoes or plumes).  ``small`` and ``tiny`` use them (their
+#: tests are calibrated to those dynamics); a world YAML can set them too.
 CLASSIC_DYNAMICS = dict(start_mode="classic", rift_mode="clock", continental_fraction=0.75, initial_plates=4,
                         rift_every=600, slab_force=0.0, boundary_drag_km=0.0, collision_drag=0.0,
                         basal_drag_continental=0.0, insulation_time_my=0.0, cc_heating=True, margin_collapse_my=0.0,
                         spawn_gate="nearest", closure_ocean_only=False, micro_area=0.0, orogen_push=0.0,
-                        suture_time_my=0.0)
+                        suture_time_my=0.0,
+                        arc_birth=0.05, arc_front=0.0, arc_keep=-1.0, arc_dock_km=0.0, arc_max_km=0.0,
+                        terrane_relax_my=0.0, arc_ridge_km=0.0, volcanoes=False, hotspots=0)
 
 
 def classic_dynamics(tp: "TectonicsParams", **over) -> "TectonicsParams":

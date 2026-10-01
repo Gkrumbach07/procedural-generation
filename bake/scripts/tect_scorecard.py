@@ -11,7 +11,9 @@ bit-identical to one without it -- and is sampled every ``--every`` steps:
 crust books and the rendered continental / land share, landmasses, plates and
 their speeds, boundary lengths by kind, collisions by crust pairing, the
 ocean floor's age, arcs, land components on the tect grid, rifts, and the
-hypsometry in metres.  ``DIR/seed_<s>.json`` holds every sample of a seed,
+hypsometry in metres; at the checkpoint steps also the arc crests and the
+oceanic islands on the coarse bed the stage would write (``--no-coarse`` skips
+that, ~15 s and ~1.5 GB a checkpoint at the Earth preset).  ``DIR/seed_<s>.json`` holds every sample of a seed,
 ``DIR/summary.json`` the mean / min / max over seeds at steps
 1000 / 2000 / 4000 / 8000 (those the run reached, and its last), and the
 printed table sets them beside Earth's numbers (``EARTH_TARGETS``).
@@ -115,6 +117,36 @@ TABLE = (
     ("arcs.land_gt1e6", "  > 1e6 km2", "{:.1f}"),
     ("arcs.arc_dominated", "arc-dominated land masses", "{:.1f}"),
     ("arcs.arc_only", "  touching no other continent", "{:.1f}"),
+    ("island arcs", None, None),
+    ("arcs.ocean_arc_share", "oceanic arc crust (>= 14 km) share", "{:.4f}"),
+    ("arcs.ocean_arc_th_p50_km", "  thickness p50 km", "{:.1f}"),
+    ("arcs.ocean_arc_th_p90_km", "  thickness p90 km", "{:.1f}"),
+    ("arcs.ocean_arc_active_share", "  within 300 km of a converging bnd", "{:.3f}"),
+    ("arcs.ocean_arc_active_oo_share", "  ... of a converging O-O bnd", "{:.3f}"),
+    ("arcs.ocean_arc_stranded_share", "  stranded > 3 spacings", "{:.3f}"),
+    ("arcs.docked_share", "docked terranes share", "{:.4f}"),
+    ("arcs.docked_sea_level_shift_m", "  sea-level shift they cause m", "{:.0f}"),
+    ("window.froth_share", "trench froth (new floor at a slab)", "{:.3f}"),
+    ("window.young_slab_share", "slabs younger than 15 steps", "{:.3f}"),
+    ("islands.crest_p50_m", "arc crest p50 m (coarse bed)", "{:.0f}"),
+    ("islands.crest_p10_m", "  p10 m", "{:.0f}"),
+    ("islands.crest_p90_m", "  p90 m", "{:.0f}"),
+    ("islands.crest_1_3km_share", "  share 1-3 km deep", "{:.3f}"),
+    ("islands.oo_trench_km", "converging O-O boundary km", "{:.0f}"),
+    ("islands.n_arc", "arc islands", "{:.1f}"),
+    ("islands.km2_arc", "  total km2", "{:.0f}"),
+    ("islands.median_km2_arc", "  median km2", "{:.0f}"),
+    ("islands.arc_km2_per_trench_km", "  km2 per km of O-O trench", "{:.2f}"),
+    ("islands.arc_one_cell_share", "  one-cell share", "{:.2f}"),
+    ("islands.arc_island_ground_p50_m", "  ground under them p50 m", "{:.0f}"),
+    ("islands.arc_island_on_ridge_share", "  standing on the ridge (> -3 km)", "{:.2f}"),
+    ("islands.n_hotspot", "hotspot islands", "{:.1f}"),
+    ("islands.km2_hotspot", "  total km2", "{:.0f}"),
+    ("islands.hotspot_chains_ge3", "plumes with >= 3 edifices", "{:.1f}"),
+    ("islands.n_other", "other oceanic islands", "{:.1f}"),
+    ("islands.vents_active_arc", "active arc vents", "{:.0f}"),
+    ("islands.vent_nn_p50_km", "  nearest-vent spacing p50 km", "{:.0f}"),
+    ("islands.vents_on_arc_share", "  on arc crust (< 100 km)", "{:.2f}"),
     ("hypsometry (tect grid, m)", None, None),
     ("hyps.land_median_m", "land median m", "{:.0f}"),
     ("hyps.ocean_median_m", "ocean median m", "{:.0f}"),
@@ -224,7 +256,8 @@ def run_one(args, seed: int) -> dict:
     myr = float(args.myr_per_step if args.myr_per_step is not None else getattr(params.tectonics, "myr_per_step", 0.15))
     t0 = time.time()
     sim = initialise(params, log=None)
-    rep = D.observe(sim, steps, args.every, myr, log=lambda s: print(f"[seed {seed}] {s}", flush=True))
+    coarse = None if getattr(args, "no_coarse", False) else D.checkpoints_for(steps)
+    rep = D.observe(sim, steps, args.every, myr, log=lambda s: print(f"[seed {seed}] {s}", flush=True), coarse_at=coarse)
     rep.update({"seed": seed, "preset": args.preset, "params_file": args.params, "set": list(args.set),
                 "steps": steps, "every": int(args.every), "seconds": time.time() - t0,
                 "peak_rss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0})
@@ -242,6 +275,8 @@ def main() -> int:
     ap.add_argument("--out", default=None, help="directory for seed_<s>.json and summary.json")
     ap.add_argument("--jobs", type=int, default=1, help="seeds run at once as subprocesses (0: in this process)")
     ap.add_argument("--myr-per-step", type=float, default=None, dest="myr_per_step")
+    ap.add_argument("--no-coarse", action="store_true", dest="no_coarse",
+                    help="skip the coarse-bed arc / island block at the checkpoint steps (run.finalise_bed, ~15 s each)")
     ap.add_argument("--launcher", default=None, help="command a seed subprocess is run with (default: "
                     "$TECT_SCORECARD_LAUNCHER, else scratch/artifact/pyc above this script, else this python)")
     ap.add_argument("--compare", nargs="+", default=None, metavar="SUMMARY", help="print these side by side and exit")
@@ -283,6 +318,8 @@ def main() -> int:
             base += ["--steps", str(args.steps)]
         if args.myr_per_step is not None:
             base += ["--myr-per-step", str(args.myr_per_step)]
+        if args.no_coarse:
+            base += ["--no-coarse"]
         for kv in args.set:
             base += ["--set", kv]
         queue, running, failed = list(args.seeds), [], []
