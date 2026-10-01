@@ -341,7 +341,9 @@ def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rn
     # and the same pair would collide again next step (globe/tectonics/collision.py)
     if hasattr(seg, "weld"):
         orphans &= seg.weld <= 0
-    if orphans.any():
+    if orphans.any() and sim.tp.variable_extent:
+        _weld_whole(seg, pid, comp, orphans, pairs)
+    elif orphans.any():
         # weld a fragment onto the plate around it: the commonest plate among
         # the nearest segments that are not part of the fragment itself
         idx = np.flatnonzero(orphans)
@@ -360,6 +362,67 @@ def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rn
                           snap=not sim.tp.variable_extent)
     return {"event": "split", "split": len(extra), "welded": int(orphans.sum()),
             "plates": int(sim.plates.n_alive())}
+
+
+def _tally(frag: np.ndarray, plate: np.ndarray, n_comp: int) -> np.ndarray:
+    """Per component (n_comp,), the plate that appears most often among the
+    (frag, plate) votes, ties to the lower plate id; -1 where nothing voted."""
+    win = np.full(int(n_comp), -1, dtype=np.int64)
+    if frag.size == 0:
+        return win
+    K = int(plate.max()) + 1
+    key, cnt = np.unique(frag.astype(np.int64) * K + plate, return_counts=True)
+    f, p = key // K, key % K
+    o = np.lexsort((p, -cnt, f))                     # per fragment: most votes, then lowest id
+    f, p = f[o], p[o]
+    first = np.unique(f, return_index=True)[1]
+    win[f[first]] = p[first]
+    return win
+
+
+def _weld_whole(seg, pid: np.ndarray, comp: np.ndarray, orphans: np.ndarray, pairs: np.ndarray) -> None:
+    """Weld every sub-threshold fragment, whole and in one pass, onto the
+    plate it is embedded in: the plate owning most of its boundary -- the
+    links (``pairs``, the split's own neighbour pairs) from its segments to
+    segments that are not being welded themselves. In place on `pid`.
+
+    The per-segment rule (the commonest plate among each segment's 9 nearest
+    neighbours outside the fragment) only reached the fragment's rim, since
+    an interior segment has no outside neighbour among its nine. A fragment
+    was peeled one rim a step -- 150 segments kept 95 / 59 / 26 / 7 / 0 on
+    their old plate over five calls -- and meanwhile its interior rode a pole
+    it was no longer attached to, tearing it apart.
+
+    A fragment whose only links lead into other fragments waits for them to
+    be welded first; one with no links at all falls back to its segments' 9
+    nearest neighbours, tallied over the whole fragment.
+    """
+    n_comp = int(comp.max()) + 1
+    todo = orphans.copy()
+    a = np.concatenate([pairs[:, 0], pairs[:, 1]])
+    b = np.concatenate([pairs[:, 1], pairs[:, 0]])
+    m = orphans[a] & (comp[a] != comp[b])
+    a, b = a[m], b[m]
+    while todo.any():
+        live = todo[a] & ~todo[b]
+        if not live.any():
+            break
+        win = _tally(comp[a[live]], pid[b[live]].astype(np.int64), n_comp)
+        sel = todo & (win[comp] >= 0)
+        pid[sel] = win[comp[sel]]
+        todo &= ~sel
+    if todo.any():
+        from .collision import build_tree
+
+        idx = np.flatnonzero(todo)
+        k = min(9, seg.M)
+        _, nb = build_tree(seg).query(seg.pos[idx], k=k, workers=-1)
+        nb = np.atleast_2d(nb).reshape(idx.size, k)
+        ok = ~todo[nb] & (comp[nb] != comp[idx][:, None])
+        fr = np.broadcast_to(comp[idx][:, None], nb.shape)[ok]
+        win = _tally(fr, pid[nb][ok].astype(np.int64), n_comp)
+        sel = todo & (win[comp] >= 0)
+        pid[sel] = win[comp[sel]]
 
 
 def suture(sim, a: int, b: int, rng) -> dict:
