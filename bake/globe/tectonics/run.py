@@ -204,7 +204,7 @@ COUNTER_KEYS = ("orogen_shaped", "differentiated",
                 # continental crust by process (te/mass): volume (ext x thickness) `cv_*`
                 # and ground (steradians) `cg_*`, plus counts -- what the continents gained and lost
                 # where, so a drift can be read off instead of guessed at
-                "cv_arc", "cg_arc", "cv_collide", "cg_collide", "cv_margin", "cg_margin",
+                "cv_arc", "cg_arc", "cv_docked", "cv_collide", "cg_collide", "cv_margin", "cg_margin",
                 "cv_belt", "cv_relax", "cv_orogen_mantle", "cv_orogen_kept", "cg_orogen", "cv_spawn", "cg_spawn",
                 "cv_delam", "cv_delam_kept", "cg_delam", "cv_split", "cg_split", "n_split", "n_split_fail", "n_split_active", "n_merge_coast",
                 "split_ground", "split_dist", "n_undo", "n_undo_young", "cg_close", "cv_close", "ocean_relax", "rift_stretch")
@@ -754,6 +754,9 @@ class TectonicSim:
             self.ledger["cg_arc"] = self.ledger.get("cg_arc", 0.0) + float(dg[17])
             self.ledger["cv_margin"] = self.ledger.get("cv_margin", 0.0) - float(dg[18])
             self.ledger["cg_margin"] = self.ledger.get("cg_margin", 0.0) - float(dg[20])
+            if float(dg[21]):
+                # island arcs that docked onto a continent (te/arcs): part of cv_collide
+                self.ledger["cv_docked"] = self.ledger.get("cv_docked", 0.0) + float(dg[21])
         cvg = _cbook("cv_collide", "cg_collide", cvg)
         arc_now = float(arc_out[0][u]) if arc_out else 0.0
         if arc_now:

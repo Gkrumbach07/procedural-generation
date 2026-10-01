@@ -699,6 +699,13 @@ def test_scorecard_observer_stays_pure_on_the_earth_dynamics():
     assert all(w["kin_all"] > 0.0 and 0.0 <= w["cc_kin_share"] <= 1.0 for w in ws)
     rifts = [r for r in rep["final"]["rift_list"] if r.get("G0") is not None]
     assert rifts and all("peak_open_cmyr" in r for r in rifts)
+    # the books residual and the continental books by process in km3/yr (te/mass's cv_*)
+    assert last["books"]["residual_max"] < 1e-9
+    m = last["mass"]
+    for k in ("additions_kmyr", "docked_kmyr", "accreted_kmyr", "gross_kmyr", "margin_kmyr", "growth_kmyr", "net_kmyr",
+              "additions_kmyr_win", "gross_kmyr_win", "net_kmyr_win"):
+        assert k in m, k
+    assert abs(m["additions_kmyr"] - m["gross_kmyr"] - m["growth_kmyr"]) < 1e-9 and m["gross_kmyr"] >= 0.0
     import json
     json.dumps(rep)
 

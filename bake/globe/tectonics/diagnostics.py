@@ -237,6 +237,10 @@ class Observer:
         self._rift_traces: dict[tuple[int, int, int], list] = {}
         self._restore: list = []
         self._t0 = time.time()
+        #: the continental books (``cv_*``) at the previous sample, for the window rates
+        self._mass_prev: tuple[int, dict] | None = None
+        c0 = sim.seg.kind == CONTINENTAL
+        self._mass_v0 = (int(sim.step_index), float((sim.seg.ext[c0] * sim.seg.thickness[c0]).sum()))
         self._reset_window()
 
     # -- wiring ---------------------------------------------------------------
@@ -567,6 +571,8 @@ class Observer:
             "land_share": _f(area[land].sum() / A),
             "land_of_rendered_cont": _f(area[land & rc].sum() / max(area[rc].sum(), 1e-30)),
             "ledger": {kk: _f(v) for kk, v in sim.ledger.items()},
+            # each kind's books against its crust (TectonicSim.books_residual): ~1e-14 when closed
+            "residual_max": _f(max(abs(float(x)) for x in sim.books_residual())) if hasattr(sim, "books_residual") else None,
         }
 
         # ---- continents (landmasses on the cloud) -------------------------
@@ -723,6 +729,9 @@ class Observer:
         # ---- the dynamics (girdle, cycle, closing rates, slab-attached plates) ---
         row["dyn"] = self._dyn(seg, pl, tree, cont, ext, ext_tot, k)
 
+        # ---- continental crust by process (te/mass's cv_* books), km3/yr -----
+        row["mass"] = self._mass(k, cvol)
+
         # ---- hypsometry on the tect grid, metres ----------------------------
         bm = bed * scale
         lw, ow = area[land], area[~land]
@@ -756,6 +765,55 @@ class Observer:
             else coo_matrix((n, n))
         ncomp, lab = connected_components(g, directed=False)
         return lab, np.bincount(lab, weights=ext, minlength=ncomp)
+
+    def _mass(self, k: int, cvol: float) -> dict:
+        """What the continents gained and lost, by process, in km3/yr -- read off the
+        continental books run.py keeps with variable_extent (``cv_*``: ext x thickness, so
+        sr x thickness units; 1 = R^2 x crust_km km3).  ``additions`` are what collisions
+        bring (slab accreted onto continents, arcs docked onto them -- ``docked`` -- and
+        coin-flip arcs): cv_collide less margin erosion's own (negative) share of it.
+        ``gross`` recycling is what goes to the mantle: margin erosion (subduction erosion and
+        sediment subduction), the part of orogenic collapse not kept as ground, and the part
+        of the thickness cap not kept.  ``net`` is the continental volume's own change.  Each
+        is given since step 0 (``*_kmyr``) and over the window since the previous sample
+        (``*_kmyr_win``).  Earth: gross 3.2-4.9 km3/yr, balanced by arcs (Clift 2009; Scholl &
+        von Huene 2009), the continents growing by a few tenths of a km3/yr at most.
+        Reads the ledger only."""
+        sim, tp = self.sim, self.sim.tp
+        L = sim.ledger
+        if "cv_collide" not in L:
+            return {}
+        unit = self.R_km ** 2 * float(getattr(tp, "crust_km", THICKNESS_KM)) / max(float(tp.continental_thickness), 1e-12)
+        g = lambda key: float(L.get(key, 0.0) or 0.0)
+        cur = {
+            "additions": g("cv_collide") - g("cv_margin"),
+            "docked": g("cv_docked"),
+            "arc_born": g("cv_arc"),
+            "margin": -g("cv_margin"),
+            "orogen_mantle": -g("cv_orogen_mantle"),
+            "cap_mantle": -g("cv_delam"),
+            "kept_as_ground": g("cv_orogen_kept") + g("cv_delam_kept"),
+            "volume": cvol,
+        }
+        cur["accreted"] = cur["additions"] - cur["docked"] - cur["arc_born"]
+        cur["gross"] = cur["margin"] + cur["orogen_mantle"] + cur["cap_mantle"]
+        out = {}
+        yrs = max(k, 1) * self.myr * 1e6
+        for key, v in cur.items():
+            if key == "volume":
+                continue
+            out[key + "_kmyr"] = _f(v * unit / yrs) if k > 0 else None
+        out["net_kmyr"] = _f((cvol - self._mass_v0[1]) * unit / max((k - self._mass_v0[0]) * self.myr * 1e6, 1.0)) \
+            if k > self._mass_v0[0] else None
+        out["growth_kmyr"] = _f((cur["additions"] - cur["gross"]) * unit / yrs) if k > 0 else None
+        if self._mass_prev is not None and k > self._mass_prev[0]:
+            k0, prev = self._mass_prev
+            wy = (k - k0) * self.myr * 1e6
+            for key in ("additions", "docked", "accreted", "margin", "orogen_mantle", "cap_mantle", "gross"):
+                out[key + "_kmyr_win"] = _f((cur[key] - prev[key]) * unit / wy)
+            out["net_kmyr_win"] = _f((cur["volume"] - prev["volume"]) * unit / wy)
+        self._mass_prev = (k, cur)
+        return out
 
     def _dyn(self, seg, pl, tree, cont, ext, ext_tot, k) -> dict:
         """The dynamics block (module docstring).  Reads the sim only."""
@@ -1400,6 +1458,9 @@ EARTH_TARGETS = {
     "hyps.land_gt1km_pct": "28.8",
     "hyps.land_gt2km_pct": "13.4",
     "hyps.max_m": "8849",
+    "mass.gross_kmyr": "3.2-4.9 (gross recycling: subduction erosion + sediment + collisional loss)",
+    "mass.additions_kmyr": "~3-4 (arcs, balancing the recycling)",
+    "mass.growth_kmyr": "~0-0.6 (additions less gross)",
     "dyn.trench400_share": "~0.25-0.30 active (today); a girdle while assembled",
     "dyn.largest_noarc_share": ">=0.75 assembled; dispersed between",
     "dyn.slab_ocean_speed_cmyr": "7.9-8.1 (slab-attached)",

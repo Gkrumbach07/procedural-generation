@@ -1017,6 +1017,7 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
                 spent[10] += ext[lo] * mass[lo]
                 spent[11] += 1.0
                 spent[12] += ext[lo]
+                spent[21] += ext[lo] * thickness[lo]      # the continental volume it brings
                 kind[lo] = CONTINENTAL_K
                 rework[lo] = 0.0                     # juvenile crust, assembled now
                 # ...and falls through to the continental shortening below.  It is the
@@ -1337,8 +1338,9 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     #  (ground), [13] onto ocean plates (count), [14] docks of a terrane that had docked
     #  before (count), [15] terranes stacked into terranes of another plate (count); then
     #  te/mass's continental counters: [16] volume and [17] ground an arc birth makes
-    #  continental, [18] volume, [19] crust and [20] ground margin erosion takes]
-    spent = np.zeros(21, dtype=np.float64)
+    #  continental, [18] volume, [19] crust and [20] ground margin erosion takes; [21] the
+    #  continental volume the docks onto continents bring]
+    spent = np.zeros(22, dtype=np.float64)
     ra = np.zeros(0, np.int64)
     rb = np.zeros(0, np.int64)
     if rift_pairs:
