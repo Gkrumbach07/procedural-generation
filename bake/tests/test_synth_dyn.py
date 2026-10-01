@@ -752,7 +752,11 @@ def test_earth_dynamics_scorecard_gate_2000_steps():
         assert all(s["plates"]["capped_share"] == 0.0 for s in rep["samples"]), seed
         assert 8.0 <= fin["lifetime_median_dead_myr"] <= 25.0, seed
         assert 0.36 <= last["books"]["rendered_cont_share"] <= 0.44, seed
-        assert last["books"]["ledger"]["ext_coll_cont"] >= -0.5, seed
+        # continental ground the collision phase spent, less what margin erosion took there:
+        # te/mass's subduction erosion is a rated sink of its own (balanced in the mass books),
+        # booked in the same phase; the gate is about C-C convergence spending ground unresisted
+        L = last["books"]["ledger"]
+        assert L["ext_coll_cont"] - (L.get("cg_margin") or 0.0) >= -0.5, seed
         assert 45.0 <= last["ocean"]["mean_age_myr"] <= 85.0, seed
         dispersed += any((s["dyn"]["largest_noarc_share"] or 1.0) <= 0.7 for s in rep["samples"])
     assert dispersed >= 3
