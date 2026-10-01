@@ -191,6 +191,187 @@ def test_rift_opens_the_cut_rather_than_shearing_along_it(tiny_sim):
 
 
 # --------------------------------------------------------------------------
+# plate membership: crust changes plate only for a reason
+# --------------------------------------------------------------------------
+def _carved(segments: int = 6000, n_frag: int = 60, variable_extent: bool = True, **tect_overrides):
+    """A step-0 `small` world at `segments`, with the `n_frag` segments around
+    the deepest point of its largest ocean plate handed to plate 0 (the
+    continent): a fragment of one plate embedded in another, the shape a trench
+    or a rift leaves.  Returns (sim, fragment indices, the plate around it)."""
+    from scipy.spatial import cKDTree
+
+    p = WorldParams.small_world()
+    p.tectonics = dataclasses.replace(p.tectonics, segments=segments, variable_extent=variable_extent, **tect_overrides)
+    sim = tect.initialise(p, log=None)
+    seg = sim.seg
+    B = int(np.argmax(np.bincount(seg.plate_id)[1:])) + 1
+    inB = np.flatnonzero(seg.plate_id == B)
+    depth, _ = cKDTree(seg.pos[seg.plate_id != B]).query(seg.pos[inB])
+    centre = seg.pos[inB[int(np.argmax(depth))]]
+    frag = inB[np.argsort(seg.pos[inB] @ -centre)[:n_frag]]
+    seg.plate_id[frag] = 0
+    sim.plates.update_stats(seg)
+    return sim, frag, B
+
+
+def test_plate_minimum_is_ground_not_a_count():
+    """With variable extent a severed piece becomes a plate by the ground it
+    covers (``plate_min_area`` of the sphere, floored at ``plate_split_min``
+    design segments), not by how many points it has: a count is a size that
+    shrinks with the resolution, and says nothing of shortened crust."""
+    from types import SimpleNamespace
+
+    # the area is the same at any resolution; the count floor only binds where it is coarse
+    at = lambda M: intraplate.min_ground(SimpleNamespace(spacing=mean_spacing(M)), 8e-4, 16)
+    assert at(20000) == pytest.approx(16 * 4 * np.pi / 20000, rel=1e-12)
+    assert at(80000) == pytest.approx(at(20000), rel=1e-12)            # 64 segments' worth, not 16
+    assert at(1500) == pytest.approx(16 * 4 * np.pi / 1500, rel=1e-12)  # the floor: `small` keeps 16
+
+    # 40 segments against a minimum of 30 segments' worth of ground
+    kw = dict(n_frag=40, plate_split_min=16, plate_min_area=30 / 6000)
+    sim, frag, B = _carved(**kw)
+    P0 = sim.plates.P
+    intraplate.split_disconnected(sim, 16, min_area=30 / 6000)
+    new = sim.seg.plate_id[frag]
+    assert (new >= P0).all() and np.unique(new).size == 1               # one new plate, all of it
+
+    # the same 40 shortened to half their extent are 20 segments of ground: welded, not a plate
+    sim, frag, B = _carved(**kw)
+    sim.seg.ext[frag] *= 0.5
+    intraplate.split_disconnected(sim, 16, min_area=30 / 6000)
+    assert (sim.seg.plate_id[frag] == B).all()
+
+    # the fixed-area model keeps the count: 40 >= 16 is a plate whatever the area says
+    sim, frag, B = _carved(variable_extent=False, **kw)
+    P0 = sim.plates.P
+    intraplate.split_disconnected(sim, 16, min_area=30 / 6000)
+    assert (sim.seg.plate_id[frag] >= P0).all()
+
+    # and a plate needs `rift_min_area` of ground to be rifted, not 8 points
+    sim, frag, B = _carved(**kw)
+    plate = sim.seg.plate_id == B
+    sim.tp.rift_min_area = 1.01 * float(sim.seg.ext[plate].sum()) / (4 * np.pi)
+    assert intraplate._rift_one(sim, B, sim.params.rng("tectonics", 6, 1))["split"] == -1
+    sim.tp.rift_min_area = 0.99 * float(sim.seg.ext[plate].sum()) / (4 * np.pi)
+    assert intraplate._rift_one(sim, B, sim.params.rng("tectonics", 6, 1))["split"] == B
+
+
+def test_a_fragment_is_welded_whole_in_one_pass():
+    """A piece under the plate minimum goes to the plate it is embedded in,
+    all of it at once.  Welding each segment to the commonest plate among its
+    9 nearest neighbours outside the fragment only reached the rim (an inner
+    segment has no outside neighbour among its nine), so a fragment was peeled
+    a rim a step while its interior rode a pole it was no longer attached to."""
+    for n in (12, 60, 150):
+        sim, frag, B = _carved(n_frag=n)
+        intraplate.split_disconnected(sim, 16, min_area=1.0)             # nothing is big enough
+        assert (sim.seg.plate_id[frag] == B).all(), (n, np.bincount(sim.seg.plate_id[frag]))
+    # the rule it replaces (still the fixed-area model's): the rim only
+    sim, frag, B = _carved(n_frag=150, variable_extent=False)
+    intraplate.split_disconnected(sim, 200)
+    assert 0 < int((sim.seg.plate_id[frag] == B).sum()) < frag.size
+
+
+def _craton_pair(th, ext, approach):
+    """Two continental segments of different cratons on different plates, 0.8
+    of a design spacing apart, plate 0 (segment 0) moving at `approach`
+    design spacings a step towards segment 1 (negative: away)."""
+    from globe.tectonics.segments import CONTINENTAL
+
+    s = 0.05
+    pos = np.array([[1.0, 0.0, 0.0], [np.cos(0.8 * s), np.sin(0.8 * s), 0.0]])
+    seg = Segments(pos, np.asarray(th, float), 0.82, 0.0, np.array([0, 1]), s * s, kind=CONTINENTAL,
+                   craton=np.array([1, 2]), ext=np.asarray(ext, float) * s * s)
+    omega = np.array([[0.0, 0.0, approach * s], [0.0, 0.0, 0.0]])
+    return seg, omega, s
+
+
+def test_craton_against_craton_the_weaker_column_yields():
+    """Where two cratons meet, the thinner column (then the one with less
+    ground) is the one shortened -- not the pair's higher array index,
+    which says nothing about either craton."""
+    for th, ext, loser in (([1.2, 1.5], [1.0, 1.0], 0), ([1.5, 1.2], [1.0, 1.0], 1),
+                           ([1.3, 1.3], [0.8, 1.0], 0), ([1.3, 1.3], [1.0, 0.8], 1)):
+        seg, omega, s = _craton_pair(th, ext, 0.1)
+        ext0 = seg.ext.copy()
+        losers, survivors = collide(seg, build_tree(seg), s, omega, np.ones(2, bool), extent_min=0.25 * s * s,
+                                    weld_steps=60)
+        assert list(losers) == [loser] and list(survivors) == [1 - loser], (th, ext)
+        assert seg.ext[loser] < ext0[loser] and seg.thickness[1 - loser] > th[1 - loser]
+        # it shortened onto the winner's plate, and stays there
+        assert seg.plate_id[loser] == 1 - loser and seg.weld[loser] == 60
+    # the fixed-area model keeps the old rule: the higher index goes, whatever the crust
+    seg, omega, s = _craton_pair([1.5, 1.2], [1.0, 1.0], 0.1)
+    losers, _ = collide(seg, build_tree(seg), s, omega, np.ones(2, bool))
+    assert list(losers) == [1]
+
+
+def test_a_continental_contact_that_spends_no_ground_changes_nothing():
+    """A receding pair inside ``overlap_fraction`` is a contact, but it
+    converged on nothing and spent no ground: the loser keeps its plate, and
+    the contact is not reported as a collision."""
+    seg, omega, s = _craton_pair([1.2, 1.5], [1.0, 1.0], -0.1)
+    seg.pos[1] = [np.cos(0.3 * s), np.sin(0.3 * s), 0.0]               # inside 0.5 x the radius
+    before = (seg.plate_id.copy(), seg.ext.copy(), seg.thickness.copy())
+    losers, _ = collide(seg, build_tree(seg), s, omega, np.ones(2, bool), extent_min=0.25 * s * s, weld_steps=60)
+    assert losers.size == 0
+    assert (seg.plate_id == before[0]).all() and (seg.weld == 0).all()
+    assert (seg.ext == before[1]).all() and (seg.thickness == before[2]).all()
+
+
+def test_snap_cratons_leaves_a_weld_where_it_welded():
+    """A craton margin a collision has shortened onto the other plate stays
+    there while the weld lasts: the majority vote would hand it straight back
+    into the plate it is colliding with."""
+    from globe.tectonics.plates import snap_cratons
+    from globe.tectonics.segments import CONTINENTAL
+
+    pos = best_candidate_sphere(5, np.random.default_rng(0))
+    seg = Segments(pos, 1.0, 0.82, 0.0, np.array([0, 0, 0, 1, 1]), 4 * np.pi / 5, kind=CONTINENTAL,
+                   craton=np.array([1, 1, 1, 1, 0]), weld=np.array([0, 0, 0, 60, 0]))
+    snap_cratons(seg)
+    assert list(seg.plate_id) == [0, 0, 0, 1, 1]
+    old = seg.copy()
+    snap_cratons(old, keep_welds=False)            # the fixed-area model's vote: welds and all
+    assert list(old.plate_id) == [0, 0, 0, 0, 1]
+    seg.weld[:] = 0
+    snap_cratons(seg)
+    assert list(seg.plate_id) == [0, 0, 0, 0, 1]
+
+
+def test_a_rift_leaves_no_island_of_one_half_inside_the_other():
+    """The zig-zag cut pinches off teeth of one half inside the other; every
+    one is handed to the half around it, so no piece is left for the next
+    split to promote to a plate driven by the far half's pole."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    p = WorldParams()
+    p.tectonics.segments = 8000
+    stranded = 0
+    for seed in range(3):
+        sim = tect.initialise(p, log=None)
+        ev = intraplate._rift_one(sim, 0, np.random.default_rng(seed))
+        assert ev["split"] == 0
+        stranded += ev["stranded"]
+        seg, pid = sim.seg, sim.seg.plate_id
+        pairs = build_tree(seg).query_pairs(1.6 * sim.spacing, output_type="ndarray")
+        e = pairs[pid[pairs[:, 0]] == pid[pairs[:, 1]]]
+        g = coo_matrix((np.ones(e.shape[0], np.int8), (e[:, 0], e[:, 1])), shape=(seg.M, seg.M))
+        _, comp = connected_components(g, directed=False)
+        sizes = np.bincount(comp)
+        for q, other in ((0, ev["new"]), (ev["new"], 0)):
+            cs = np.unique(comp[pid == q])
+            body = cs[np.argmax(sizes[cs])]
+            for c in cs[cs != body]:
+                # whatever piece is left touches no part of the other half
+                a, b = pairs[:, 0], pairs[:, 1]
+                touch = ((comp[a] == c) & (pid[b] == other)) | ((comp[b] == c) & (pid[a] == other))
+                assert not touch.any(), (seed, q, int(sizes[c]))
+    assert stranded > 0           # and there were pieces to settle
+
+
+# --------------------------------------------------------------------------
 # simulation bookkeeping
 # --------------------------------------------------------------------------
 def test_mass_ledger_closes_and_subduction_is_a_sink(tiny_sim):
