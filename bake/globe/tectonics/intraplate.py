@@ -103,6 +103,30 @@ def _capped(omega: np.ndarray, cap: float) -> np.ndarray:
     return omega * (cap / s) if cap > 0.0 and s > cap else omega
 
 
+#: the fewest segments a plate may be cut from (the count the fixed-area model still uses,
+#: and the sampling floor under ``tectonics.rift_min_area`` with variable extent)
+RIFT_MIN_SEGMENTS = 8
+
+
+def min_ground(sim, area: float, segments: int) -> float:
+    """The ground, in steradians, a plate-sized piece of crust needs: `area` of
+    the sphere, but never less than `segments` design segments' worth.
+
+    A size rather than a count, because a count is a size that shrinks with
+    the resolution: 16 segments is 8e-4 of the sphere at 20000 and a quarter
+    of that at 80000, and the 80k runs shattered into 3-10x the plates at
+    equal steps. The count stays as a floor, because below a handful of
+    points a plate is the sampling rather than the planet.
+    """
+    return max(float(area) * 4.0 * np.pi, float(segments) * float(sim.spacing) ** 2)
+
+
+def plate_ground(sim) -> np.ndarray:
+    """Summed extent per plate, steradians (P,)."""
+    P = sim.plates.P
+    return np.bincount(sim.seg.plate_id, weights=sim.seg.ext, minlength=P)[:P]
+
+
 def reorganise(sim, n_plates: int, rng) -> dict:
     """Re-partition the crust into `n_plates` new plates, keeping heights.
 
@@ -140,7 +164,8 @@ def _rift_one(sim, target: int, rng) -> dict:
     """
     seg, plates, tp = sim.seg, sim.plates, sim.tp
     sel = seg.plate_id == target
-    if int(sel.sum()) < 8:
+    if (float(seg.ext[sel].sum()) < min_ground(sim, tp.rift_min_area, RIFT_MIN_SEGMENTS) if tp.variable_extent
+            else int(sel.sum()) < RIFT_MIN_SEGMENTS):
         return {"event": "rift", "split": -1}
 
     com = plates.com[target]
@@ -229,8 +254,10 @@ def rift(sim, rng, max_plates: int = 1) -> dict:
     it a *tendency* rather than a certainty. The count is 1 or 2 so an event
     is not always the same size either.
     """
-    plates = sim.plates
-    alive = np.flatnonzero(plates.alive & (plates.count >= 8))
+    plates, tp = sim.plates, sim.tp
+    big = (plate_ground(sim) >= min_ground(sim, tp.rift_min_area, RIFT_MIN_SEGMENTS) if tp.variable_extent
+           else plates.count >= RIFT_MIN_SEGMENTS)
+    alive = np.flatnonzero(plates.alive & big)
     if alive.size == 0:
         return {"event": "rift", "split": -1}
     n = 1 + int(rng.integers(0, max(1, int(max_plates))))
@@ -249,7 +276,7 @@ def rift(sim, rng, max_plates: int = 1) -> dict:
             "moved": sum(r.get("moved", 0) for r in out)}
 
 
-def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rng=None) -> dict:
+def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rng=None, min_area: float = 0.0) -> dict:
     """A plate that has been cut in two is two plates.
 
     Subduction eats a plate from its edges, and where a trench cuts right
@@ -270,6 +297,10 @@ def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rn
     motion and free to diverge from it under the forces afterwards.  Smaller
     fragments are welded onto whichever neighbouring plate surrounds them --
     a sliver of crust is part of the plate it is embedded in, not a plate.
+
+    With ``tectonics.variable_extent`` on, "at least" is a size: the piece's
+    summed extent against ``min_area`` of the sphere, floored at
+    ``min_segments`` design segments' worth (:func:`min_ground`).
     """
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
@@ -286,6 +317,10 @@ def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rn
     g = coo_matrix((np.ones(e.shape[0], np.int8), (e[:, 0], e[:, 1])), shape=(seg.M, seg.M))
     _, comp = connected_components(g, directed=False)
     sizes = np.bincount(comp)
+    if sim.tp.variable_extent:
+        big = np.bincount(comp, weights=seg.ext) >= min_ground(sim, min_area, min_segments)
+    else:
+        big = sizes >= int(min_segments)
     pid = seg.plate_id.copy()
     P = plates.P
     extra: list[np.ndarray] = []
@@ -296,7 +331,7 @@ def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rn
             continue
         for c in cs[np.argsort(sizes[cs])[::-1]][1:]:      # every piece but the largest
             m = comp == c
-            if sizes[c] >= int(min_segments):
+            if big[c]:
                 pid[m] = P + len(extra)
                 extra.append(plates.omega[p].copy())
             else:

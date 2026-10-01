@@ -396,7 +396,8 @@ class TectonicSim:
 
         # a plate the trenches have just cut in two is two plates from here on
         if tp.plate_split_every > 0 and k % int(tp.plate_split_every) == 0:
-            ev = intraplate.split_disconnected(self, int(tp.plate_split_min), rng=self.params.rng("tectonics", 9, k))
+            ev = intraplate.split_disconnected(self, int(tp.plate_split_min), rng=self.params.rng("tectonics", 9, k),
+                                               min_area=float(tp.plate_min_area))
             if ev["split"] or ev.get("welded"):
                 self.events.append(ev)
                 plates = self.plates
