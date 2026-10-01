@@ -202,9 +202,15 @@ def _rift_one(sim, target: int, rng) -> dict:
     if side.all() or not side.any():
         return {"event": "rift", "split": -1}
 
+    idx = np.flatnonzero(sel)
+    stranded = 0
+    if tp.variable_extent:
+        side, stranded = _settle_cut(sim, idx, side)
+        if side.all() or not side.any():
+            return {"event": "rift", "split": -1}
+
     P = plates.P
     pid = seg.plate_id.copy()
-    idx = np.flatnonzero(sel)
     pid[idx[side]] = P  # the far half becomes a brand-new plate
     # the vote above is this rift's craton rule; a global snap here would move cratons on plates
     # the cut never touched (the fixed-area model keeps it, bit for bit)
@@ -235,7 +241,69 @@ def _rift_one(sim, target: int, rng) -> dict:
     new.omega[~new.alive] = 0.0
     sim.plates = new
     return {"event": "rift", "split": target, "new": int(P), "moved": int(side.sum()),
-            "cratons_spared": intact, "plates": int(new.n_alive())}
+            "cratons_spared": intact, "stranded": stranded, "plates": int(new.n_alive())}
+
+
+def _settle_cut(sim, idx: np.ndarray, side: np.ndarray, link_factor: float = 1.6, rounds: int = 4) -> tuple[np.ndarray, int]:
+    """Give the pieces a rift cut strands back to the half that surrounds them.
+
+    The zig-zag cut is a noisy plane, and noise makes islands: a tooth of one
+    half pinched off inside the other. Every one of 24 trial cuts of the
+    step-0 supercontinent left such pieces (up to 12 per half), and in 11 of
+    them a piece of 16 segments or more -- which the next
+    :func:`split_disconnected` promoted to a plate of its own, with the far
+    half's pole: a sliver driven through the half it sits in.
+
+    So the pieces are found the way the split finds them (segments of the
+    plate within ``link_factor`` spacings, same side), and every piece of a
+    half but its main body changes side if the other half borders it and
+    either it is smaller than a plate may be (`plate_min_area`, so the split
+    would only weld it to whatever surrounds it) or the other half owns at
+    least as much of its boundary as the plates beyond the rifted one do.
+    A large piece that lies mostly against other plates is a lobe of the
+    plate on this side of the cut, not an island, and keeps its side. A few
+    rounds catch an island inside an island. `idx` is the plate's segments,
+    `side` their half; returns the new `side` and how many segments changed.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    from .collision import build_tree
+
+    seg = sim.seg
+    side = side.copy()
+    n_loc = idx.size
+    pairs = build_tree(seg).query_pairs(float(link_factor) * sim.spacing, output_type="ndarray")
+    loc = np.full(seg.M, -1, dtype=np.int64)
+    loc[idx] = np.arange(n_loc)
+    a = np.concatenate([pairs[:, 0], pairs[:, 1]])
+    b = np.concatenate([pairs[:, 1], pairs[:, 0]])
+    a, b = loc[a], loc[b]
+    on = a >= 0
+    a, b = a[on], b[on]                    # links from the plate: to the plate (b >= 0) or off it
+    inside = b >= 0
+    ext = seg.ext[idx]
+    small = min_ground(sim, sim.tp.plate_min_area, sim.tp.plate_split_min)
+    changed = np.zeros(n_loc, dtype=bool)
+    for _ in range(int(rounds)):
+        same = inside & (side[a] == side[np.maximum(b, 0)])
+        g = coo_matrix((np.ones(int(same.sum()), np.int8), (a[same], b[same])), shape=(n_loc, n_loc))
+        n, comp = connected_components(g, directed=False)
+        ground = np.bincount(comp, weights=ext, minlength=n)
+        body = np.zeros(n, dtype=bool)
+        for s in (False, True):
+            cs = np.unique(comp[side == s])
+            if cs.size:
+                body[cs[np.argmax(ground[cs])]] = True
+        other = np.bincount(comp[a[inside & ~same]], minlength=n)      # links into the other half
+        beyond = np.bincount(comp[a[~inside]], minlength=n)            # links off the rifted plate
+        flip = ~body & (other > 0) & ((ground < small) | (other >= beyond))
+        if not flip.any():
+            break
+        f = flip[comp]
+        side ^= f
+        changed ^= f
+    return side, int(changed.sum())
 
 
 def rift(sim, rng, max_plates: int = 1) -> dict:
