@@ -2,8 +2,9 @@
 post-processing (cascade, Gaussian) of PLAN.md section 6.2 / 6.4.
 
 All functions are deterministic: KD-tree queries are exact per point (so
-``workers=-1`` is safe), pair lists are sorted before they are applied,
-and every sequential update runs in index order inside numba.
+the thread count -- :func:`kd_workers` -- never changes a result), pair
+lists are sorted before they are applied, and every sequential update runs
+in index order inside numba.
 """
 from __future__ import annotations
 
@@ -35,6 +36,23 @@ def interior_centers_flat(grid: Grid) -> np.ndarray:
     return c
 
 
+#: Query sets smaller than this run on the calling thread.  scipy's ``workers=-1`` starts
+#: one Python thread per core for every query, whatever its size, and most of a step's
+#: queries are tiny: on the Earth preset (steps 1000-1200) the heat blobs, the label map's
+#: gap fallback, the spawn and the orphan weld ask about 4-120 points, five queries a step,
+#: ~85 thread starts.  Measured on this box (20 cores, load ~2), a 9-NN query against the
+#: 19k-segment tree: 40 points 0.03 ms on one thread against 0.72 with all; break-even near
+#: 1000 points; 2000 points 1.5 against 0.7; the whole cloud 14.4 against 2.3.  Under load
+#: the threads start later, so the cut sits above the quiet-box break-even.  Results are
+#: exact per point, so the count changes nothing but the time
+KD_SERIAL_BELOW = 2000
+
+
+def kd_workers(n: int) -> int:
+    """``workers`` for a cKDTree query of ``n`` points (see :data:`KD_SERIAL_BELOW`)."""
+    return -1 if int(n) >= KD_SERIAL_BELOW else 1
+
+
 def build_tree(seg: Segments) -> cKDTree:
     """KD-tree on the current segment positions (one per step; reuse it for
     every query of that step)."""
@@ -47,7 +65,7 @@ def label_map(tree: cKDTree, grid: Grid):
     (6, N, N) float64 chord distance.  Every cell gets a label (there are
     no holes by construction)."""
     c = interior_centers_flat(grid)
-    dist, idx = tree.query(c, k=1, workers=-1)
+    dist, idx = tree.query(c, k=1, workers=kd_workers(c.shape[0]))
     N = grid.N
     return idx.reshape(6, N, N).astype(np.int32), dist.reshape(6, N, N)
 
@@ -118,7 +136,7 @@ def label_map_fast(seg: Segments, grid: Grid, cap_radius: float, tree: cKDTree |
     miss = idx < 0
     if miss.any():
         tree = build_tree(seg) if tree is None else tree
-        dm, im = tree.query(c[miss], k=1, workers=-1)
+        dm, im = tree.query(c[miss], k=1, workers=kd_workers(int(miss.sum())))
         idx[miss] = im
         dist[miss] = dm
     N = grid.N
@@ -185,7 +203,7 @@ def _wendland_chunk(tree: cKDTree, pts: np.ndarray, h: float, kk: int) -> tuple[
     m = pts.shape[0]
     short0 = -1
     while True:
-        d, nb = tree.query(pts, k=kk, workers=-1)
+        d, nb = tree.query(pts, k=kk, workers=kd_workers(m))
         d = np.atleast_2d(d).reshape(m, kk)
         nb = np.atleast_2d(nb).reshape(m, kk)
         n_short = int((d[:, -1] <= h).sum())
@@ -255,7 +273,7 @@ def splat_weights(tree: cKDTree, pts: np.ndarray, sigma: float, knn: int = 12, k
             lo += nb_c.shape[0]
     else:
         kk = min(int(knn), tree.n)
-        d, nb = tree.query(pts, k=kk, workers=-1)
+        d, nb = tree.query(pts, k=kk, workers=kd_workers(n))
         d = np.atleast_2d(d).reshape(n, kk)
         nb = np.atleast_2d(nb).reshape(n, kk)
         w = np.exp(-(d * d) / (2.0 * sigma ** 2))
@@ -403,7 +421,7 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
     mean_area = float(seg.area.mean()) if seg.M else 0.0
     if tree is not None and pos.shape[0] and seg.M > 1:
         kk = min(6, tree.n)
-        _, nb = tree.query(pos, k=kk, workers=-1)
+        _, nb = tree.query(pos, k=kk, workers=kd_workers(pos.shape[0]))
         nb = np.atleast_2d(nb).reshape(pos.shape[0], kk)
         pl = seg.plate_id[nb]
         boundary = (pl != pl[:, :1]).any(axis=1)          # >1 plate -> a real rift
@@ -919,7 +937,7 @@ def spread_collisions(seg: Segments, tree: cKDTree, losers: np.ndarray, survivor
     if losers.size == 0:
         return
     kk = min(int(knn), tree.n)
-    _, nb = tree.query(seg.pos[survivors], k=kk, workers=-1)
+    _, nb = tree.query(seg.pos[survivors], k=kk, workers=kd_workers(survivors.size))
     nb = np.atleast_2d(nb).reshape(survivors.size, kk).astype(np.int64)
     rt = np.ascontiguousarray(received[0], dtype=np.float64) if received is not None else np.full(len(losers), -1.0)
     rm = np.ascontiguousarray(received[1], dtype=np.float64) if received is not None else np.full(len(losers), -1.0)
@@ -963,7 +981,7 @@ def segment_cascade(seg: Segments, tree: cKDTree, survivors: np.ndarray, alive: 
     if survivors.size == 0:
         return
     order = np.unique(survivors)
-    _, nb = tree.query(seg.pos[order], k=min(knn + 1, tree.n), workers=-1)
+    _, nb = tree.query(seg.pos[order], k=min(knn + 1, tree.n), workers=kd_workers(order.size))
     nb = np.atleast_2d(nb).astype(np.int64)
     _segment_cascade(order, np.ascontiguousarray(nb), seg.kind, seg.thickness, seg.mass, seg.density, alive, float(rate), float(threshold))
 
@@ -1018,7 +1036,7 @@ def relax_segments(seg: Segments, tree: cKDTree, rate: float, threshold_per_spac
     if seg.M < 2:
         return
     kk = min(int(knn) + 1, tree.n)
-    _, nb = tree.query(seg.pos, k=kk, workers=-1)
+    _, nb = tree.query(seg.pos, k=kk, workers=kd_workers(seg.M))
     nb = np.atleast_2d(nb).reshape(seg.M, kk).astype(np.int64)
     _relax_kernel(np.ascontiguousarray(nb), seg.pos, seg.kind, seg.thickness, seg.mass, seg.density, float(rate), float(threshold_per_spacing) / float(spacing))
 
@@ -1074,7 +1092,7 @@ class CellTree:
         if points.shape[0] == 0:
             return
         sigma2 = (0.5 * radius) ** 2
-        lists = self.tree.query_ball_point(points, radius, workers=-1)
+        lists = self.tree.query_ball_point(points, radius, workers=kd_workers(points.shape[0]))
         cells = np.concatenate([np.asarray(l, dtype=np.int64) for l in lists]) if len(lists) else np.zeros(0, np.int64)
         if cells.size == 0:
             return
@@ -1087,7 +1105,7 @@ class CellTree:
         N = self.grid.N
         mask = np.zeros(6 * N * N, dtype=bool)
         if points.shape[0]:
-            lists = self.tree.query_ball_point(points, radius, workers=-1)
+            lists = self.tree.query_ball_point(points, radius, workers=kd_workers(points.shape[0]))
             for l in lists:
                 mask[np.asarray(l, dtype=np.int64)] = True
         return mask.reshape(6, N, N)
@@ -1191,7 +1209,7 @@ def boundary_distance(tree: cKDTree, seg: Segments, grid: Grid, idx: np.ndarray,
     segment among the ``k`` nearest get the distance of the k-th."""
     c = interior_centers_flat(grid)
     kk = min(k, tree.n)
-    dist, nb = tree.query(c, k=kk, workers=-1)
+    dist, nb = tree.query(c, k=kk, workers=kd_workers(c.shape[0]))
     dist = np.atleast_2d(dist).reshape(c.shape[0], kk)
     nb = np.atleast_2d(nb).reshape(c.shape[0], kk)
     own = seg.plate_id[idx.ravel()]
@@ -1220,7 +1238,7 @@ def weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> floa
 
 
 __all__ = [
-    "build_tree", "label_map", "label_map_fast", "cell_area_steradians", "accumulate_area", "splat",
+    "build_tree", "kd_workers", "KD_SERIAL_BELOW", "label_map", "label_map_fast", "cell_area_steradians", "accumulate_area", "splat",
     "SmoothSplat", "splat_weights", "wendland_support", "SPLAT_KERNELS", "deposit_density", "crystallise", "spawn_segments", "collide", "spread_collisions", "segment_cascade", "relax_segments",
     "CellTree", "grid_cascade", "gaussian_smooth", "boundary_distance", "resample_to", "weighted_quantile",
 ]

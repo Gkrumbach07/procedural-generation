@@ -156,12 +156,12 @@ def random_initial_omega(plates: Plates, rng: np.random.Generator, speed: float)
 # --------------------------------------------------------------------------
 # forces
 # --------------------------------------------------------------------------
-def heat_gradient_3d(heat: FaceField, pos: np.ndarray) -> np.ndarray:
+def heat_gradient_3d(heat: FaceField, pos: np.ndarray, fuv=None) -> np.ndarray:
     """∇heat at unit vectors ``pos`` (M, 3) as tangent 3-vectors in heat
     units per radian (see module docstring).  ``heat`` must have exchanged
-    halos."""
+    halos.  ``fuv`` is ``from_sphere_v(pos)`` when the caller has it."""
     grad = heat.gradient()
-    face, u, v = from_sphere_v(pos)
+    face, u, v = from_sphere_v(pos) if fuv is None else fuv
     ab = grad.sample_bilinear(face, u, v).astype(np.float64)  # (M, 2) owner-face cell components
     ju, jv = jacobian_v(face, u, v)
     g = heat.grid

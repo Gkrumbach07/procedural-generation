@@ -221,8 +221,12 @@ class TectonicSim:
         self.sutures = 0
 
     # -- helpers ------------------------------------------------------------
-    def heat_at(self, pos: np.ndarray) -> np.ndarray:
-        return np.clip(self.heat.sample_sphere(pos).astype(np.float64), 0.0, 1.0)
+    def heat_at(self, pos: np.ndarray, fuv=None) -> np.ndarray:
+        """Heat at unit vectors ``pos``; ``fuv`` is ``from_sphere_v(pos)`` when
+        the caller already has it."""
+        if fuv is None:
+            return np.clip(self.heat.sample_sphere(pos).astype(np.float64), 0.0, 1.0)
+        return np.clip(self.heat.sample_bilinear(*fuv).astype(np.float64), 0.0, 1.0)
 
     def _heat_blobs(self, pts: np.ndarray, peak: float) -> None:
         """Add Gaussian heat blobs (one spacing wide) at ``pts``."""
@@ -396,7 +400,8 @@ class TectonicSim:
 
         # a plate the trenches have just cut in two is two plates from here on
         if tp.plate_split_every > 0 and k % int(tp.plate_split_every) == 0:
-            ev = intraplate.split_disconnected(self, int(tp.plate_split_min), rng=self.params.rng("tectonics", 9, k))
+            # `tree` is this cloud's: built after the collisions, and nothing since has moved a segment
+            ev = intraplate.split_disconnected(self, int(tp.plate_split_min), rng=self.params.rng("tectonics", 9, k), tree=tree)
             if ev["split"] or ev.get("welded"):
                 self.events.append(ev)
                 plates = self.plates
@@ -469,7 +474,10 @@ class TectonicSim:
 
         t_ = _tick("thin_spawn", t_)
         # 4. crystallisation, then delamination of over-thickened roots
-        T = self.heat_at(seg.pos)
+        # the segments do not move again this step, so their face projection serves the
+        # crystallisation's heat and the forces' heat gradient alike (1.5 ms a step at Earth)
+        fuv = from_sphere_v(seg.pos)
+        T = self.heat_at(seg.pos, fuv)
         mass1 = self.crust_mass()
         crystallise(seg, T, tp.growth, tp.density_base, tp.deposit_density, tp.dissolution_factor, tp.max_thickness)
         self.ledger["crystallised"] += self.crust_mass() - mass1
@@ -501,7 +509,7 @@ class TectonicSim:
         t_ = _tick("thin_heat", t_)
         # 6. forces
         self.heat.exchange_halos()
-        grad3 = heat_gradient_3d(self.heat, seg.pos)
+        grad3 = heat_gradient_3d(self.heat, seg.pos, fuv)
         plates.update_stats(seg)
         tau = plate_torques(seg, grad3, plates.P)
         slab_ratio = 0.0
