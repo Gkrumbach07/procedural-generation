@@ -42,10 +42,44 @@ are *before* the coarse-grid finishing ``finalise`` adds (``inject_detail``,
 baked world's; what they measure is the crust the simulation built.
 
 Units: speeds in km per step and cm/yr, ages in steps and My, through
-``myr_per_step`` (``tectonics.myr_per_step``, a reporting unit the simulation
-never reads).  Areas are shares of the planet's *extent* (``Segments.ext``,
+``myr_per_step`` (``tectonics.myr_per_step``) and the tectonic reference radius
+(``TectonicSim.R_km``, Earth's 6371 km by default: the sphere the dynamics
+convert their km and cm/yr on, which is the planet's own radius on the Earth
+preset).  Areas are shares of the planet's *extent* (``Segments.ext``,
 the ground each segment covers), which with ``variable_extent`` off is the
 same for every segment.
+
+The dynamics block (``dyn``)
+----------------------------
+What the plate dynamics are doing, in the numbers the synth-dyn prototype was
+judged on (its ``synth_obs.py`` extras, moved here so every scorecard run has
+them):
+
+* ``trench400_share`` -- of the coast of the landmasses holding >= 1 % of the
+  planet, the share with a foreign oceanic segment converging on it within
+  400 km: the subduction girdle a supercontinent should sit in (the coast
+  metric above reads whatever is nearest, and could not tell the designs
+  apart);
+* ``largest_noarc_share`` -- the largest landmass with the arc crust left out,
+  as a share of that crust: arc chains between continents link them into one
+  landmass at 1.5 spacings, so the supercontinent cycle is read off this;
+* closing rates over the census's converging contacts: continent-continent
+  (all, and between non-arc crust), median and p90, and ocean-continent;
+* per-plate rows (area, continental share, speed, velocity-independent trench
+  share, slab-attached), and from them the slab-attached ocean plates' median
+  speed (pooled over windows of steps in ``final``) and the plate-size
+  exponent (cumulative number against area);
+* in the window: the continent-continent collisions between non-arc crust,
+  and the events of the dynamics (margin collapses, microplate captures,
+  suture welds, healed rifts);
+* in ``final``: every force rift's detail (free opening, G0, the cut) and its
+  opening trace -- how long it stayed slow, how fast it opened.
+
+**Arc crust** is defined as the arcs track defines it: oceanic crust thicker
+than :data:`ARC_COLUMN` (twice the ocean floor's column; the ocean floor never
+thickens otherwise, so the excess is convergent-margin crust), and
+continental crust born oceanic (the coin-flip arcs and docked terranes).  Only
+the second kind can link landmasses.
 """
 from __future__ import annotations
 
@@ -82,6 +116,22 @@ OBLIQUITY = 0.5
 RIFT_WINDOW = 100
 #: a plate that lives fewer steps than this is short-lived
 SHORT_LIFE = 10
+#: arc crust on the ocean floor: an oceanic column at least this thick (units of
+#: ``continental_thickness``; ~14 km, twice the ocean floor's 0.2), the arcs track's threshold
+ARC_COLUMN = 0.4
+#: a coast is "in the girdle" with a converging foreign oceanic segment within this many km
+TRENCH_COAST_KM = 400.0
+#: a plate is slab-attached when some of its contacts go down on a slab at least this share of
+#: saturation (forces.slab_contrib's g)
+SLAB_ATTACHED_G = 0.25
+#: plates entering the size exponent: >= this share of the planet
+SIZE_FIT_MIN = 0.002
+#: windows of steps the per-plate speeds are pooled over in ``final``
+SPEED_WINDOWS = ((0, 1000), (1000, 2000), (2000, 4000), (4000, 8000))
+#: a rift is in its slow phase while its contact-projected opening is under this, cm/yr
+RIFT_FAST_CMYR = 1.0
+#: a rift both of whose halves carry this much continent (share of the planet) is continental
+RIFT_CONT_HALF = 0.02
 #: land component area bins, km^2
 AREA_BINS = (0.0, 1e3, 1e4, 1e5, 1e6, np.inf)
 AREA_BIN_NAMES = ("lt1e3", "1e3_1e4", "1e4_1e5", "1e5_1e6", "gt1e6")
@@ -132,7 +182,8 @@ class Observer:
         self.sim = sim
         tp = sim.tp
         self.myr = float(myr_per_step if myr_per_step is not None else getattr(tp, "myr_per_step", 0.15))
-        self.R_km = float(sim.params.R_planet) / 1000.0
+        # the dynamics' own sphere (tectonic_radius_km; the planet's radius on the Earth preset)
+        self.R_km = float(getattr(sim, "R_km", float(sim.params.R_planet) / 1000.0))
         self.spacing = float(sim.spacing)
         self._seg = sim.seg
         # per-segment origin, aligned with the cloud by the compress / append wrappers
@@ -148,6 +199,8 @@ class Observer:
         self._active_rifts: list[dict] = []
         self._step_rifts: list[dict] = []
         self.samples: list[dict] = []
+        self.plate_rows: list[tuple[int, np.ndarray]] = []     # (step, rows) per sample, for the pooled speeds
+        self._rift_traces: dict[tuple[int, int, int], list] = {}
         self._restore: list = []
         self._t0 = time.time()
         self._reset_window()
@@ -217,12 +270,17 @@ class Observer:
     # -- per-step bookkeeping -------------------------------------------------
     def _reset_window(self) -> None:
         self.win = {"steps": 0, "coll_cc": 0, "coll_oc": 0, "coll_oo": 0, "arc_births": 0, "births_rift": 0,
-                    "births_split": 0, "births_other": 0, "deaths": 0, "rifts": 0, "spawned": 0, "gap_cells": 0}
+                    "births_split": 0, "births_other": 0, "deaths": 0, "rifts": 0, "spawned": 0, "gap_cells": 0,
+                    "coll_cc_arc": 0, "ev_collapse": 0, "ev_micro": 0, "ev_suture": 0, "ev_heal": 0}
 
     def _on_collide(self, seg, pid0, kind0, pos0, losers, survivors) -> None:
         lk, sk = kind0[losers], kind0[survivors]
         w = self.win
-        w["coll_cc"] += int(((lk == CONTINENTAL) & (sk == CONTINENTAL)).sum())
+        cc = (lk == CONTINENTAL) & (sk == CONTINENTAL)
+        w["coll_cc"] += int(cc.sum())
+        if cc.any() and self.born_kind.size == kind0.size:
+            # a C-C collision with arc crust (born oceanic) on either side
+            w["coll_cc_arc"] += int((cc & ((self.born_kind[losers] == OCEANIC) | (self.born_kind[survivors] == OCEANIC))).sum())
         w["coll_oc"] += int(((lk != sk)).sum())
         w["coll_oo"] += int(((lk == OCEANIC) & (sk == OCEANIC)).sum())
         # arcs: crust that went into the call oceanic and came out continental
@@ -262,7 +320,20 @@ class Observer:
                    "area_before": _f(ext0[a] / tot) if a < ext0.shape[0] else None,
                    "area_a": _f(ext_now[a] / tot), "area_b": _f(ext_now[b] / tot),
                    "cont_a": _f(cont_now[a] / max(ext_now[a], 1e-30)), "cont_b": _f(cont_now[b] / max(ext_now[b], 1e-30)),
+                   "cont_a_planet": _f(cont_now[a] / tot), "cont_b_planet": _f(cont_now[b] / tot),
                    "coll": 0, "coll_far": 0, "coll_cc": 0}
+            # the force rift's own detail (rift_mode 'force'): the released cut and its strength
+            det = next((d for d in ev.get("detail", ()) or () if d.get("a") == a and d.get("b") == b), None)
+            if det is not None:
+                for kk in ("free_cmyr", "G0", "conv", "q10_ratio", "extent_deg", "strength", "score"):
+                    if kk in det:
+                        rec[kk] = _f(det[kk])
+                st = getattr(sim, "rift_pairs", {}).get((a, b))
+                if st is not None:
+                    # the opening trace the dynamics keep while the rift holds its halves is picked
+                    # up in after_step (read only: a reference to the sim's list, never written)
+                    rec["k0"] = int(st.get("k0", -1))
+                    self._rift_traces[(a, b, rec["k0"])] = {"rec": rec, "trace": None, "delta": 0.0, "open": True}
             self.rifts.append(rec)
             self._active_rifts.append(rec)
             self._step_rifts.append(rec)
@@ -284,6 +355,27 @@ class Observer:
         rift_new = [r["new"] for r in self._step_rifts]
         w["rifts"] += len(rift_new)
         self._step_rifts = []
+        for ev in sim.events:
+            e = ev.get("event")
+            if e == "collapse":
+                w["ev_collapse"] += len(ev.get("collapses", ()))
+            elif e == "micro_merge":
+                w["ev_micro"] += len(ev.get("merges", ()))
+            elif e == "suture":
+                w["ev_suture"] += len(ev.get("welds", ()))
+            elif e == "rift_fail":
+                w["ev_heal"] += len(ev.get("healed", ()))
+        if self._rift_traces:
+            rp = getattr(sim, "rift_pairs", {})
+            for (a, b, k0), t in self._rift_traces.items():
+                if not t["open"]:
+                    continue
+                st = rp.get((a, b))
+                if st is not None and int(st.get("k0", -1)) == k0:
+                    t["trace"] = st.get("trace", t["trace"])
+                    t["delta"] = float(st.get("delta", 0.0))
+                else:
+                    t["open"] = False
         if any(ev.get("event") == "reorganise" for ev in sim.events):
             # every plate is new: the old ones are retired dead and the new ones born
             for q, (b, c) in self.plate_birth.items():
@@ -457,6 +549,7 @@ class Observer:
             "coll_total": n_c,
             "coll_per_step": _f(n_c / st),
             "cc_share": _f(w["coll_cc"] / n_c) if n_c else None,
+            "cc_noarc_share": _f((w["coll_cc"] - w["coll_cc_arc"]) / n_c) if n_c else None,
             "oc_share": _f(w["coll_oc"] / n_c) if n_c else None,
             "oo_share": _f(w["coll_oo"] / n_c) if n_c else None,
             "births": w["births_rift"] + w["births_split"] + w["births_other"],
@@ -479,6 +572,9 @@ class Observer:
         # ---- arcs -------------------------------------------------------------
         row["arcs"] = self._arcs(seg, tree, cont, ext, ext_tot, conv0_seg, bed, k)
 
+        # ---- the dynamics (girdle, cycle, closing rates, slab-attached plates) ---
+        row["dyn"] = self._dyn(seg, pl, tree, cont, ext, ext_tot, k)
+
         # ---- hypsometry on the tect grid, metres ----------------------------
         scale = tect_run.metres_per_unit(bed, area, tp, sim.spacing, sim.params.R_planet)
         bm = bed * scale
@@ -497,6 +593,128 @@ class Observer:
         return row
 
     # -- metric blocks --------------------------------------------------------
+    def arc_mask(self, seg) -> np.ndarray:
+        """Arc crust, as the arcs track defines it: oceanic columns thicker than ARC_COLUMN,
+        and continental crust born oceanic."""
+        thick = (seg.kind == OCEANIC) & (seg.thickness >= ARC_COLUMN * float(self.sim.tp.continental_thickness))
+        born = (seg.kind == CONTINENTAL) & (self.born_kind == OCEANIC) if self.born_kind.size == seg.M \
+            else np.zeros(seg.M, bool)
+        return thick | born
+
+    def _components(self, pos, ext, link):
+        """Connected pieces of the points ``pos`` within ``link`` spacings: (labels, areas)."""
+        n = pos.shape[0]
+        pairs = cKDTree(pos).query_pairs(_chord(link * self.spacing), output_type="ndarray")
+        g = coo_matrix((np.ones(pairs.shape[0], np.int8), (pairs[:, 0], pairs[:, 1])), shape=(n, n)) if pairs.size \
+            else coo_matrix((n, n))
+        ncomp, lab = connected_components(g, directed=False)
+        return lab, np.bincount(lab, weights=ext, minlength=ncomp)
+
+    def _dyn(self, seg, pl, tree, cont, ext, ext_tot, k) -> dict:
+        """The dynamics block (module docstring).  Reads the sim only."""
+        from . import forces
+
+        sim = self.sim
+        sp, myr = self.spacing, self.myr
+        cms = self.R_km * 0.1 / myr
+        M = seg.M
+        P = int(pl.P)
+        pid = seg.plate_id.astype(np.int64)
+        v = np.cross(pl.omega[pid], seg.pos)
+        out: dict = {}
+        arc = self.arc_mask(seg)
+        out["arc_crust_share"] = _f(ext[arc].sum() / ext_tot)
+        out["arc_oceanic_share"] = _f(ext[arc & ~cont].sum() / ext_tot)
+        # landmasses (all continental crust), and the same without the arc crust
+        ci = np.flatnonzero(cont)
+        major = np.zeros(M, bool)
+        if ci.size >= 2:
+            lab, ca = self._components(seg.pos[ci], ext[ci], LANDMASS_LINK)
+            major[ci[(ca / ext_tot >= MAJOR_SHARE)[lab]]] = True
+        nonarc = np.flatnonzero(cont & ~arc)
+        if nonarc.size >= 2:
+            _, cn = self._components(seg.pos[nonarc], ext[nonarc], LANDMASS_LINK)
+            out["largest_noarc_share"] = _f(cn.max() / cn.sum())
+            out["landmasses_noarc_ge_1pct"] = int((cn / ext_tot >= MAJOR_SHARE).sum())
+            out["landmass_noarc_areas"] = [round(float(x), 4) for x in np.sort(cn / ext_tot)[::-1][:8]]
+        else:
+            out["largest_noarc_share"] = None
+        # the girdle: coast of the major landmasses with a foreign oceanic segment converging on it
+        # within TRENCH_COAST_KM
+        oi = np.flatnonzero(~cont)
+        out["trench400_share"] = None
+        if oi.size and major.any():
+            to = cKDTree(seg.pos[oi])
+            d, _ = to.query(seg.pos, k=1)
+            cidx = np.flatnonzero(major & (d < _chord(1.5 * sp)))
+            out["coast_n"] = int(cidx.size)
+            if cidx.size:
+                lists = to.query_ball_point(seg.pos[cidx], _chord(TRENCH_COAST_KM / self.R_km))
+                lens = np.fromiter((len(l) for l in lists), dtype=np.int64, count=len(lists))
+                if lens.sum():
+                    jj = oi[np.concatenate([np.asarray(l, dtype=np.int64) for l in lists])]
+                    ii = np.repeat(cidx, lens)
+                    row = np.repeat(np.arange(cidx.size), lens)
+                    f_ = pid[jj] != pid[ii]
+                    dv = seg.pos[jj] - seg.pos[ii]
+                    dv /= np.maximum(np.linalg.norm(dv, axis=1, keepdims=True), 1e-12)
+                    conv = f_ & (np.sum((v[ii] - v[jj]) * dv, axis=1) > 0.0)
+                    act = np.bincount(row[conv], minlength=cidx.size) > 0
+                    out["trench400_share"] = _f(act.mean())
+                else:
+                    out["trench400_share"] = 0.0
+        # closing rates over the velocity-independent census (forces.census, 1.5 spacings)
+        cen = forces.census(seg, pl, sp, radius_factor=BOUNDARY_LINK)
+        i, j, appr = cen["i"], cen["j"], cen["appr"]
+        ccm = (cen["ki"] == CONTINENTAL) & (cen["kj"] == CONTINENTAL) & (appr > 0.0)
+        ccn = ccm & ~arc[i] & ~arc[j]
+        for nm, m in (("cc", ccm), ("cc_noarc", ccn)):
+            out[nm + "_conv_median_cmyr"] = _f(np.median(appr[m]) * cms) if m.any() else None
+            out[nm + "_conv_p90_cmyr"] = _f(np.percentile(appr[m], 90) * cms) if m.any() else None
+            on = np.zeros(M, bool)
+            on[i[m]] = True
+            on[j[m]] = True
+            out[nm + "_conv_km"] = _f(np.sqrt(ext[on]).sum() * self.R_km / 2.0)
+        ocm = (cen["ki"] != cen["kj"]) & (appr > 0.0)
+        out["oc_conv_median_cmyr"] = _f(np.median(appr[ocm]) * cms) if ocm.any() else None
+        # per plate: area, continental share, speed, trench share (velocity-independent: the share
+        # of its boundary segments that go down), slab-attached
+        A = np.bincount(pid, weights=ext, minlength=P)[:P]
+        C = np.bincount(pid[cont], weights=ext[cont], minlength=P)[:P]
+        vm = np.bincount(pid, weights=np.linalg.norm(v, axis=1) * ext, minlength=P)[:P] / np.maximum(A, 1e-30)
+        bnd = np.zeros(M, bool)
+        bnd[i] = True
+        bnd[j] = True
+        dn = np.zeros(M, bool)
+        dn[i[cen["down_i"]]] = True
+        dn[j[cen["down_j"]]] = True
+        nb = np.bincount(pid[bnd], minlength=P)[:P]
+        nd = np.bincount(pid[dn], minlength=P)[:P]
+        slab = np.zeros(P, bool)
+        si = getattr(sim, "slab_info", None)
+        if si is not None and si["seg"].size and int(si["seg"].max()) < M:
+            live = si["seg"][si["g"] >= SLAB_ATTACHED_G]
+            slab[np.unique(pid[live])] = True
+        q = np.flatnonzero(pl.alive[:P] & (A > 0))
+        rows = np.stack([A[q] / ext_tot, C[q] / np.maximum(A[q], 1e-30), vm[q] * cms, nd[q] / np.maximum(nb[q], 1),
+                         slab[q].astype(np.float64)], axis=1) if q.size else np.zeros((0, 5))
+        self.plate_rows.append((int(k), rows))
+        out["plate_rows"] = [[round(float(x), 5) for x in r] for r in rows]        # area, cont, cm/yr, trench, slab
+        big = rows[rows[:, 0] >= CORR_SHARE] if rows.size else rows
+        oce = big[big[:, 1] < 0.2] if big.size else big
+        att = oce[oce[:, 4] > 0.5] if oce.size else oce
+        free = oce[oce[:, 4] <= 0.5] if oce.size else oce
+        out["slab_ocean_speed_cmyr"] = _median(att[:, 2]) if att.size else None
+        out["noslab_ocean_speed_cmyr"] = _median(free[:, 2]) if free.size else None
+        out["n_slab_ocean"] = int(att.shape[0])
+        out["n_noslab_ocean"] = int(free.shape[0])
+        out["spearman_speed_trench_ocean_vi"] = _spearman(oce[:, 2], oce[:, 3]) if oce.shape[0] >= 3 else None
+        As = np.sort(rows[:, 0])[::-1] if rows.size else np.zeros(0)
+        As = As[As >= SIZE_FIT_MIN]
+        out["size_exponent"] = _f(np.polyfit(np.log(As), np.log(np.arange(1, As.size + 1)), 1)[0]) if As.size >= 5 else None
+        out["rift_pairs_open"] = len(getattr(sim, "rift_pairs", {}) or {})
+        return out
+
     def _landmasses(self, seg, cont, ext) -> dict:
         """Largest connected landmass as a share of the continental extent and the
         number of landmasses holding at least 1 % of it (continental segments
@@ -658,6 +876,35 @@ class Observer:
             r["far_share"] = _f(r["coll_far"] / r["coll"]) if r["coll"] else None
             r["cc_share"] = _f(r["coll_cc"] / r["coll"]) if r["coll"] else None
         tot = sum(r["coll"] for r in rifts)
+        cms = self.R_km * 0.1 / self.myr
+        for (a, b, k0), t in self._rift_traces.items():
+            r = next((x for x in rifts if x["target"] == a and x["new"] == b and x.get("k0") == k0), None)
+            if r is None:
+                continue
+            tr = list(t["trace"] or ())
+            rate = np.array([x[1] for x in tr], np.float64) * cms
+            fast = np.flatnonzero(rate >= RIFT_FAST_CMYR)
+            r["opened_km"] = _f(t["delta"] * self.R_km)
+            r["peak_open_cmyr"] = _f(rate.max()) if rate.size else None
+            # how long it stayed slow: from the cut to the first step it opened faster than
+            # RIFT_FAST_CMYR (None: never, while it held its halves)
+            r["slow_phase_my"] = _f((tr[int(fast[0])][0] - k0) * self.myr) if fast.size else None
+            r["trace_cmyr"] = [(int(s_ - k0), round(float(x * cms), 3)) for s_, x in tr[::5]]
+        cont_rifts = [r for r in rifts if min(r.get("cont_a_planet") or 0.0, r.get("cont_b_planet") or 0.0) >= RIFT_CONT_HALF]
+        first = min((r["step"] for r in cont_rifts), default=None)
+        det = [r for r in rifts if r.get("G0") is not None]
+        pooled = {}
+        for lo, hi in SPEED_WINDOWS:
+            rows = [x for st, x in self.plate_rows if lo < st <= hi and x.size]
+            if not rows:
+                continue
+            R = np.concatenate(rows)
+            R = R[R[:, 0] >= CORR_SHARE]
+            oce, con = R[R[:, 1] < 0.2], R[R[:, 1] > 0.5]
+            tag = f"{lo}_{hi}"
+            pooled[f"pooled_slab_ocean_cmyr_{tag}"] = _median(oce[oce[:, 4] > 0.5, 2])
+            pooled[f"pooled_noslab_ocean_cmyr_{tag}"] = _median(oce[oce[:, 4] <= 0.5, 2])
+            pooled[f"pooled_cont_cmyr_{tag}"] = _median(con[:, 2])
         return {
             "steps": k,
             "plates_born": int(len(born) + len(self._retired)),
@@ -676,6 +923,14 @@ class Observer:
             if any(r["far_share"] is not None for r in rifts) else None,
             "rift_cc_share": _f(sum(r["coll_cc"] for r in rifts) / tot) if tot else None,
             "rift_halves_min_area_median": _median([min(r["area_a"], r["area_b"]) for r in rifts]),
+            "rift_cont_n": len(cont_rifts),
+            "rift_first_myr": _f(first * self.myr) if first is not None else None,
+            "rift_cascade_150my": sum(1 for r in cont_rifts if first is not None and r["step"] - first <= 150.0 / self.myr),
+            "rift_free_median_cmyr": _median([r["free_cmyr"] for r in det if r.get("free_cmyr") is not None]),
+            "rift_G0_median": _median([r["G0"] for r in det]),
+            "rift_slow_phase_median_my": _median([r["slow_phase_my"] for r in rifts if r.get("slow_phase_my") is not None]),
+            "rift_peak_open_median_cmyr": _median([r["peak_open_cmyr"] for r in rifts if r.get("peak_open_cmyr") is not None]),
+            **pooled,
             **hemisphere_rift(rifts),
             "rift_list": rifts,
         }
@@ -818,6 +1073,12 @@ EARTH_TARGETS = {
     "hyps.land_gt1km_pct": "28.8",
     "hyps.land_gt2km_pct": "13.4",
     "hyps.max_m": "8849",
+    "dyn.trench400_share": "~0.25-0.30 active (today); a girdle while assembled",
+    "dyn.largest_noarc_share": ">=0.75 assembled; dispersed between",
+    "dyn.slab_ocean_speed_cmyr": "7.9-8.1 (slab-attached)",
+    "dyn.size_exponent": "-1/3 (Bird 2003, cumulative number vs area)",
+    "final.rift_slow_phase_median_my": "slow < 1 cm/yr for 20-25 My (Brune 2016)",
+    "final.rift_peak_open_median_cmyr": "> 3.5 within ~6 My of the speed-up (Brune 2016)",
 }
 
 

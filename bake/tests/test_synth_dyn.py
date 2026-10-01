@@ -645,3 +645,71 @@ def test_earth_preset_is_deterministic():
             sim.step()
         fps.append(_fingerprint(sim))
     assert fps[0] == fps[1]
+
+
+def test_scorecard_observer_stays_pure_on_the_earth_dynamics():
+    """The dynamics block reads the force state (slab_info), takes its own census and follows
+    the rifts' opening traces: none of it may touch the run.  And it reports them."""
+    from globe.tectonics import diagnostics as D
+
+    a, _ = _dyn_events_run(90)
+    b = tect.initialise(_small_earth(seed=2, rift_deficit=0.4), log=None)
+    rep = D.observe(b, 90, 30)
+    assert _fingerprint(a) == _fingerprint(b) and a.ledger == b.ledger
+    last = rep["samples"][-1]
+    for k in ("trench400_share", "largest_noarc_share", "arc_crust_share", "oc_conv_median_cmyr", "size_exponent",
+              "slab_ocean_speed_cmyr", "plate_rows"):
+        assert k in last["dyn"], k
+    assert "cc_noarc_share" in last["window"] and "ev_micro" in last["window"]
+    rifts = [r for r in rep["final"]["rift_list"] if r.get("G0") is not None]
+    assert rifts and all("peak_open_cmyr" in r for r in rifts)
+    import json
+    json.dumps(rep)
+
+
+def test_earth_dynamics_regression_gate():
+    """The Earth preset's first 300 steps (45 My) against the synth-dyn measurements: a
+    girdled Pangaea in a power-law superocean, nothing at the speed cap, the books closed."""
+    from globe.config import PRESETS
+    from globe.tectonics import diagnostics as D
+
+    p = PRESETS["earth"]()
+    p.world.seed = 1
+    sim = tect.initialise(p, log=None)
+    rep = D.observe(sim, 300, 150)
+    s0, s1, s2 = rep["samples"]
+    assert 55e3 <= s0["bnd"]["subduction_km"] <= 80e3                   # Pangaea's girdle ~65,500 km
+    assert 0.18 <= s0["plates"]["largest_share"] <= 0.42 and s0["plates"]["top7_share"] >= 0.9
+    oc = [x for x, c in zip(s0["plates"]["shares"], s0["plates"]["cont_share"]) if c < 0.2]
+    assert 0.18 <= max(oc) <= 0.24                                     # the Pacific-sized plate
+    assert 35.0 <= s0["ocean"]["mean_age_myr"] <= 65.0
+    for s in rep["samples"]:
+        assert s["plates"]["capped_share"] == 0.0
+    assert s1["dyn"]["trench400_share"] >= 0.75 and s2["dyn"]["trench400_share"] >= 0.6
+    assert s2["dyn"]["slab_ocean_speed_cmyr"] > 2.0 * s2["kin"]["v_cont_median_cmyr"]
+    assert 0.38 <= s2["books"]["cont_extent_share"] <= 0.43
+    assert max(map(abs, sim.books_residual())) < 1e-9
+
+
+@pytest.mark.slow
+def test_earth_dynamics_scorecard_gate_2000_steps():
+    """The synth-dyn spec's landing gate, seeds 0-3 to 2000 steps (300 My): rifts without a far
+    side, no plate at the cap, Earth-like plate lives, the continents kept, the supercontinent
+    dispersed by 300 My, an ocean floor of Earth's age."""
+    from globe.config import PRESETS
+    from globe.tectonics import diagnostics as D
+
+    dispersed = 0
+    for seed in range(4):
+        p = PRESETS["earth"]()
+        p.world.seed = seed
+        rep = D.observe(tect.initialise(p, log=None), 2000, 250)
+        fin, last = rep["final"], rep["samples"][-1]
+        assert (fin["rift_far_share"] or 0.0) <= 0.06, seed
+        assert all(s["plates"]["capped_share"] == 0.0 for s in rep["samples"]), seed
+        assert 8.0 <= fin["lifetime_median_dead_myr"] <= 25.0, seed
+        assert 0.36 <= last["books"]["rendered_cont_share"] <= 0.44, seed
+        assert last["books"]["ledger"]["ext_coll_cont"] >= -0.5, seed
+        assert 45.0 <= last["ocean"]["mean_age_myr"] <= 85.0, seed
+        dispersed += any((s["dyn"]["largest_noarc_share"] or 1.0) <= 0.7 for s in rep["samples"])
+    assert dispersed >= 3
