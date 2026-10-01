@@ -199,13 +199,34 @@ def load_checkpoint(state: ErosionState, path: Path, meta: dict) -> None:
     state.iteration = int(meta["iteration"])
 
 
+#: the active volcanic edifices tectonics hands over (globe.tectonics.run.VOLCANO_FIELD)
+VOLCANO_FIELD = "volcano_active"
+
+
+def active_volcanoes(store: WorldStore, grid) -> FaceField | None:
+    """The cones of the edifices active at the end of tectonics (m), or None."""
+    return store.load_field(VOLCANO_FIELD, grid) if store.has_field(VOLCANO_FIELD) else None
+
+
 def build_state(store: WorldStore, params: WorldParams, replay: bool = True) -> ErosionState:
     """The iteration-0 state: ``bedrock`` as tectonics left it, lowered to
     the uplift reference step when ``erosion.uplift_mode`` is ``'replay'``
     (:func:`globe.erosion.maps.start_replay`) unless ``replay`` is False --
-    :func:`run` takes that step itself, to measure the bedrock first."""
+    :func:`run` takes that step itself, to measure the bedrock first.
+
+    The active volcanic edifices (``volcano_active``, tectonics.volcanoes)
+    are taken off the bedrock first: the stage erodes the ground under them
+    and :func:`run` puts them back on top at its end.  An active volcano is
+    being built faster than it erodes, and the coarse erosion is not a model
+    of a cone 10-30 km across on 10 km cells: run on them, the shipped
+    parameters cut 2-5 km cones to 0.03-0.6 km islets even at hardness 1
+    (window test, proto/arcs critique).  Extinct edifices are in the
+    uplift and go through the stage like any other relief."""
     grid = params.coarse_grid()
     bed = store.load_field("bedrock", grid)
+    cone = active_volcanoes(store, grid)
+    if cone is not None:
+        bed.data = bed.data - cone.data
     hard = store.load_field("hardness", grid)
     upl = store.load_field("uplift", grid)
     pr = store.load_field("precip", grid)
@@ -215,6 +236,20 @@ def build_state(store: WorldStore, params: WorldParams, replay: bool = True) -> 
     if replay:
         start_replay(state, params)
     return state
+
+
+def restore_volcanoes(state: ErosionState, cone: FaceField | None) -> dict:
+    """Put the active edifices back on top of the eroded surface (in place)."""
+    if cone is None:
+        return {}
+    add = cone.data.astype(np.float64) / state.height_unit_m
+    state.height += add
+    inter = state.interior
+    c = cone.interior
+    surf = (state.height + state.sediment)[inter]
+    on = c > 0.0
+    return {"volcano_cells": int(on.sum()), "volcano_max_m": float(c.max()) if on.any() else 0.0,
+            "volcano_land_cells": int((on & (surf >= 0.0)).sum())}
 
 
 def write_outputs(store: WorldStore, state: ErosionState) -> None:
@@ -292,6 +327,11 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
                 log(f"[erosion] quicklook -> {qp}")
             except Exception as e:  # never break a bake on a picture
                 log(f"[erosion] quicklook failed: {e!r}")
+    # the active volcanic edifices go back on top of what the stage made of the ground under them
+    volc = restore_volcanoes(state, active_volcanoes(store, grid))
+    if volc:
+        log(f"[erosion] active volcanoes back on top: {volc['volcano_cells']} cells, max {volc['volcano_max_m']:.0f} m, "
+            f"{volc['volcano_land_cells']} of them land")
     write_outputs(store, state)
     surf = (state.height + state.sediment)[state.interior]
     info = {
@@ -320,6 +360,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         "uplift_capped_cells": n_capped,
         # 'stack' or 'replay' (docs/uplift-replay.md)
         "uplift_mode": str(ep.uplift_mode),
+        **volc,
     }
     if rep is not None:
         # the start was the reference-step crust: the most a cell was lowered

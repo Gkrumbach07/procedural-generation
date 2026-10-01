@@ -100,6 +100,7 @@ from .collision import (
     deposit_density,
     gaussian_smooth,
     grid_cascade,
+    interior_centers_flat,
     label_map_fast,
     relax_segments,
     spawn_segments,
@@ -127,8 +128,12 @@ from .plates import (
     update_omega,
 )
 from .segments import CONTINENTAL, OCEANIC, Segments, best_candidate_sphere, mean_spacing
+from . import volcanoes as volc
 
 OUTPUTS = ["bedrock", "uplift", "hardness", "plate_id", "plate_vel"]
+#: the cones of the edifices active at the last step (m), with tectonics.volcanoes on: in
+#: ``bedrock``, not in ``uplift``; the erosion stage takes them off and puts them back on top
+VOLCANO_FIELD = "volcano_active"
 
 
 # --------------------------------------------------------------------------
@@ -169,8 +174,10 @@ KINDS = ("continental", "oceanic")
 #: amount negative on the oceanic, so they sum to zero over the kinds and the global ledger
 #: leaves them out.  ``accreted`` is the ``arc_accretion`` share of an oceanic slab welded
 #: onto a continent; ``arc_born`` is the oceanic column an ``arc_birth`` relabels
-#: continental (its accretion included, its ``arc_mantle`` top-up not).
-CONVERSION_KEYS = ("accreted", "arc_born")
+#: continental (its accretion included, its ``arc_mantle`` top-up not); ``docked`` is an
+#: oceanic column at least ``arc_dock_km`` thick -- an island arc -- that docked onto a
+#: continent and turned continental (``tectonics.arc_dock_km``).
+CONVERSION_KEYS = ("accreted", "arc_born", "docked")
 #: Every key of a kind's books: each kind's sum is that kind's crust, step for step.
 KIND_KEYS = MASS_KEYS + CONVERSION_KEYS
 #: Ledger keys that are *counters*: how much crust a process relocated. They
@@ -180,7 +187,16 @@ COUNTER_KEYS = ("orogen_shaped", "differentiated",
                 # count of thin continental segments each phase leaves -- variable_extent's
                 # own bookkeeping (docs/plate-forces.md section 4d), none of it mass
                 "ext_coll_cont", "ext_coll_ocean", "ext_spawn_cont", "ext_spawn_ocean", "extent_close", "extent_close_net",
-                "thin_move", "thin_collide", "thin_spawn", "thin_delam", "thin_heat", "thin_rest")
+                "thin_move", "thin_collide", "thin_spawn", "thin_delam", "thin_heat", "thin_rest",
+                # island arcs (te/arcs): arcs that docked instead of subducting -- onto continents
+                # (count, ground) and onto ocean plates (count) -- the arc crust arc_front moved to
+                # the volcanic front, and the parts of `delaminated` that were arc roots
+                # foundering (arc_max_km) and of `residue` that were docked terranes losing their
+                # dense roots (terrane_relax_my); how many docks were of a terrane that had
+                # docked before (its weld wore off, or it was welded onto the plate around it),
+                # and how many terranes were stacked into another plate's (arc-arc collisions)
+                "arc_docked_cont", "arc_docked_cont_ext", "arc_docked_ocean", "arc_front_moved", "arc_foundered",
+                "terrane_relaxed", "arc_redocked", "arc_merged")
 SINK_KEYS = ("subducted", "delaminated", "orogen_decayed", "residue")
 #: What fills a void inside a continent that no shortening paid for, with variable_extent on
 #: (``collision.spawn_segments``, where the alternatives are measured; the fixed-area model
@@ -288,12 +304,59 @@ class TectonicSim:
         #: step (radius, pairs, the KD tree, the positions it was built on): the census reads its
         #: own pairs off them instead of a third tree and query a step (see _census_pairs)
         self._pair_cache = None
+        #: volcanic edifices riding the plates (tectonics.volcanoes; None when off)
+        self.volc = volc.Volcanoes(self, int(self.hotspot_pos.shape[0])) if bool(self.tp.volcanoes) else None
 
     #: the plate-id dictionaries of the dynamics, all keyed by plate id (or a pair of them);
-    #: anything that renumbers plates from scratch (reorganise) must empty them
+    #: anything that renumbers plates from scratch (reorganise) must empty them, and anything
+    #: that empties a plate (a dock, a terrane stack) must drop it from them (forget_plates)
     DYN_BOOKS = ("rift_pairs", "last_rift", "rift_jitter", "collapse_jitter", "micro_passive", "suture_quiet", "suture_held")
 
     # -- helpers ------------------------------------------------------------
+    def forget_plates(self, ids) -> None:
+        """Drop plates that no longer exist from the dynamics' plate-keyed bookkeeping
+        (every dict in DYN_BOOKS: rift pairs, quiet and held sutures, passive microplates,
+        rift clocks and jitters)."""
+        ids = {int(q) for q in ids}
+        if not ids:
+            return
+        for name in self.DYN_BOOKS:
+            d = getattr(self, name)
+            for key in [key for key in d
+                        if (key[0] in ids or key[1] in ids if isinstance(key, tuple) else int(key) in ids)]:
+                d.pop(key)
+
+    def relax_terranes(self, km: tuple[float, float] | None = None) -> tuple[float, float]:
+        """One step of ``terrane_relax_my``: a docked arc is continental crust at slab density
+        (0.88), which stood 1-2 km below the shelves and, being in the shelf mask, pulled sea
+        level down.  Accreted arcs on Earth become andesitic continental crust by losing their
+        dense mafic roots to the mantle, so a docked terrane (``Segments.terrane``) relaxes
+        towards the belts' density at constant thickness, the mass it loses booked as residue.
+        Gated on density alone (continental crust denser than a craton) the relaxation stopped
+        at the craton's 0.856, a kilometre below the belts, and the terranes still pulled the
+        shelf-mode sea level down by 230-370 m at 600 My; gated on less, it would lighten every
+        orogen that took in craton-derived crust.  Returns the kind masses after."""
+        tp, seg = self.tp, self.seg
+        km = self.kind_mass() if km is None else km
+        dense = (seg.terrane > 0) & (seg.kind == CONTINENTAL) & (seg.density > float(tp.continental_density))
+        if not dense.any():
+            return km
+        rate = min(1.0, float(tp.myr_per_step) / float(tp.terrane_relax_my))
+        seg.density[dense] += rate * (float(tp.continental_density) - seg.density[dense])
+        seg.mass[dense] = seg.thickness[dense] * seg.density[dense]
+        after = self._book_change("residue", km)
+        self.ledger["terrane_relaxed"] = self.ledger.get("terrane_relaxed", 0.0) + (after[0] - km[0])
+        return after
+
+    def slab_g(self, pos: np.ndarray) -> np.ndarray:
+        """The slab field's ``g = min(S / slab_sat_km, 1)`` at ``pos`` (the slab hanging there,
+        the same g `forces.slab_contrib` and so ``slab_info`` carry): how persistent the
+        trench there has been."""
+        if pos.shape[0] == 0:
+            return np.zeros(0)
+        self.slab.exchange_halos()
+        S = self.slab.sample_sphere(pos).astype(np.float64)
+        return np.clip(S / max(self.km(self.tp.slab_sat_km), 1e-12), 0.0, 1.0)
     def kind_mass(self, live: np.ndarray | None = None) -> tuple[float, float]:
         """``crust_mass`` split by kind: (continental, oceanic).  ``live`` (a mask over the
         cloud) counts only those segments: between `collide` and `Segments.compress` the
@@ -596,6 +659,8 @@ class TectonicSim:
         tau_slab = None
         cc_pair_max = 0
         rotate_segments(seg, plates)
+        if self.volc is not None:
+            self.volc.move(plates)
 
         t_ = _tick("thin_move", t_)
         # 2. collisions
@@ -609,11 +674,18 @@ class TectonicSim:
         if tp.variable_extent:
             c0, o0 = _ext_by_kind()
         tree = build_tree(seg)
+        if self.volc is not None:
+            # the vents ride the crust under them (plates relabelled since), and the plumes feed
+            self.volc.refresh(seg, tree, k)
+            if self.hotspot_pos.shape[0]:
+                self.volc.hotspots(seg, tree, self.hotspot_pos, k)
         alive = np.ones(seg.M, dtype=bool)
         spent_out: list = []
         arc_out: list = []
         recv_out: list = []
         books_out: list = []
+        dock_out: list = []
+        arc_dock = float(tp.arc_dock_km) / float(tp.crust_km) * float(tp.continental_thickness)
         losers, survivors = collide(seg, tree, self.r_coll, plates.omega, alive, tp.overlap_fraction,
                                     float(tp.arc_accretion), float(tp.arc_birth), self.params.rng("tectonics", 7, k),
                                     shortening=float(tp.continental_shortening), weld_steps=int(tp.weld_steps),
@@ -621,7 +693,9 @@ class TectonicSim:
                                     spent_out=spent_out, arc_out=arc_out, recv_out=recv_out,
                                     arc_thickness=float(tp.arc_thickness) * float(tp.continental_thickness),
                                     arc_density=float(tp.continental_density), books_out=books_out,
-                                    frozen_ids=bool(tp.collide_frozen_ids))
+                                    arc_dock=arc_dock, arc_keep=float(tp.arc_keep), ocean_base=float(tp.oceanic_thickness),
+                                    rift_pairs=list(self.rift_pairs) if arc_dock > 0.0 else None, dock_out=dock_out,
+                                    dock_keep=float(tp.arc_dock_keep), frozen_ids=bool(tp.collide_frozen_ids))
         received = recv_out[0] if (recv_out and tp.variable_extent) else None
         # by column or by crust, whichever this mode's ledger is kept in
         u = 1 if tp.variable_extent else 0
@@ -629,10 +703,31 @@ class TectonicSim:
         self._book("subducted", 0.0, -moved["subducted"][u])
         self._book("accreted", moved["accreted"][u], -moved["accreted"][u])
         self._book("arc_born", moved["arc_born"][u], -moved["arc_born"][u])
+        docks = dock_out[0] if dock_out else (0.0, 0.0, 0.0, 0.0, 0.0)
+        if docks[4]:
+            self.ledger["arc_merged"] = self.ledger.get("arc_merged", 0.0) + docks[4]
+        if docks[0] or docks[2]:
+            # island arcs that docked rather than subducting: the kind flip of those that
+            # docked onto a continent, and the counts and ground
+            self._book("docked", moved["docked"][u], -moved["docked"][u])
+            self.ledger["arc_docked_cont"] = self.ledger.get("arc_docked_cont", 0.0) + docks[0]
+            self.ledger["arc_docked_cont_ext"] = self.ledger.get("arc_docked_cont_ext", 0.0) + docks[1]
+            self.ledger["arc_docked_ocean"] = self.ledger.get("arc_docked_ocean", 0.0) + docks[2]
+            self.ledger["arc_redocked"] = self.ledger.get("arc_redocked", 0.0) + docks[3]
         arc_now = float(arc_out[0][u]) if arc_out else 0.0
         if arc_now:
             self._book("arc_mantle", arc_now, 0.0)
         n_coll = int(losers.size)
+        ft = None
+        if n_coll and (float(tp.arc_front) > 0.0 or self.volc is not None):
+            ft = volc.front_targets(seg, tree, losers, survivors, alive, self.km(tp.arc_front_km))
+            if float(tp.arc_front) > 0.0 and received is not None:
+                # the overriding plate's share of an ocean-ocean slab is arc crust at the
+                # volcanic front, not a belt spread over 2 spacings (before the belt is laid out,
+                # which spreads what `received` says is left; the fixed-area model's belt reads
+                # the loser's column instead, so the front needs variable_extent)
+                mv = volc.arc_front(seg, ft, losers, survivors, received, float(tp.arc_front), float(tp.arc_accretion))
+                self.ledger["arc_front_moved"] = self.ledger.get("arc_front_moved", 0.0) + mv
         if n_coll:
             if tp.orogen_shaping > 0.0:
                 # the accreted crust *is* the belt: lay it out along the
@@ -684,12 +779,20 @@ class TectonicSim:
             if k >= self.ref_step:
                 self.subduction_pts.append(pts)
             slab_pts = pts[seg.kind[losers] == OCEANIC]
+            if self.volc is not None:
+                # arc vents at the front of persistent trenches: the slab hanging under each
+                # trench before this step's adds to it
+                self.volc.on_subduction(seg, losers, survivors, alive, k, ft, self.slab_g(pts), tree=tree,
+                                        theta=self.km(tp.arc_front_km))
             if tp.subduction_heating > 0:
                 # a downwelling is a slab: a continent-continent collision has none (cc_heating off)
                 self._heat_blobs(pts if tp.cc_heating else slab_pts, tp.subduction_heating)
-            if tp.slab_force > 0.0 and slab_pts.shape[0]:
+            if (tp.slab_force > 0.0 or self.volc is not None) and slab_pts.shape[0]:
                 # the slab hanging under the trench grows by the length that went down: a line of
-                # blobs of peak ext / (sqrt(2 pi) sigma) adds that length to the ridge's crest
+                # blobs of peak ext / (sqrt(2 pi) sigma) adds that length to the ridge's crest.
+                # The arc vents read it too (slab_g: a vent grows only over a persistent slab),
+                # so it is kept whenever the volcanoes are on, slab pull or not -- without it
+                # volcanoes=True with slab_force 0 made hotspots and no arc vent at all
                 ext_lo = seg.ext[losers[seg.kind[losers] == OCEANIC]]
                 flat = self.slab.interior.reshape(-1).copy()
                 forces.deposit_blobs(flat, self.heat_tree, slab_pts, ext_lo / (math.sqrt(2.0 * math.pi) * self.spacing),
@@ -697,6 +800,21 @@ class TectonicSim:
                 self.slab.interior[...] = flat.reshape(self.slab.interior.shape)
             seg.compress(alive)
             tree = build_tree(seg)
+        elif not alive.all():
+            # terranes stacked into terranes (no loser of this step's): the dead go all the same
+            seg.compress(alive)
+            tree = build_tree(seg)
+        if docks[0] or docks[2] or docks[4]:
+            # a plate the docking emptied (a terrane that was all of a small plate) is gone:
+            # the plates are rebuilt the way every other relabel does it (the poles kept, no
+            # craton snap) and the dynamics forget it
+            cnt = np.bincount(seg.plate_id, minlength=plates.P)[:plates.P]
+            emptied = np.flatnonzero(plates.alive & (cnt == 0))
+            if emptied.size:
+                self.plates = intraplate._rebuild(seg, seg.plate_id, plates.P, self.params.rng("tectonics", 22, k),
+                                                  float(tp.initial_speed) * self.spacing, keep=plates.omega, snap=False)
+                plates = self.plates
+                self.forget_plates(emptied)
         if tp.relax_rate > 0:
             relax_segments(seg, tree, tp.relax_rate, tp.relax_threshold, self.spacing, int(tp.relax_knn),
                            conserve_volume=bool(tp.variable_extent))
@@ -823,7 +941,22 @@ class TectonicSim:
         km = self._book_change("crystallised", km)
         if tp.max_crust_thickness > 0 and tp.delamination > 0:
             delaminate(seg, float(tp.max_crust_thickness), float(tp.delamination))
-            self._book_change("delaminated", km)
+            km = self._book_change("delaminated", km)
+        if float(tp.arc_max_km) > 0.0 and float(tp.arc_founder_my) > 0.0:
+            # arc root foundering: an intra-oceanic arc does not thicken without limit either.
+            # Its dense mafic-ultramafic cumulates founder once the crust passes ~35 km, which is
+            # why arcs are 20-35 km thick however long they have been active
+            lim = float(tp.arc_max_km) / float(tp.crust_km) * float(tp.continental_thickness)
+            over = (seg.kind == OCEANIC) & (seg.thickness > lim)
+            if over.any():
+                rate = min(1.0, float(tp.myr_per_step) / float(tp.arc_founder_my))
+                seg.thickness[over] -= (seg.thickness[over] - lim) * rate
+                seg.mass[over] = seg.thickness[over] * seg.density[over]
+                after = self._book_change("delaminated", km)
+                self.ledger["arc_foundered"] = self.ledger.get("arc_foundered", 0.0) + (after[1] - km[1])
+                km = after
+        if float(tp.terrane_relax_my) > 0.0:
+            km = self.relax_terranes(km)
 
         t_ = _tick("thin_delam", t_)
         # 5. heat diffusion + slow relaxation towards the background field
@@ -885,7 +1018,7 @@ class TectonicSim:
             slab_ratio = self.force_update(grad3, extra_tau=ts if tau_slab is not None else None)
         else:
             update_omega(plates, tau, self.gain, tp.damping, self.max_omega)
-        if tp.slab_force > 0.0:
+        if tp.slab_force > 0.0 or self.volc is not None:
             self.slab.interior[...] *= math.exp(-float(tp.myr_per_step) / max(float(tp.slab_detach_my), 1e-9))
 
         self.step_index += 1
@@ -1589,11 +1722,24 @@ def inject_detail(bed: np.ndarray, coarse: Grid, tp, rng) -> np.ndarray:
     return bed + float(tp.detail_amp) * (hi - lo) * noise
 
 
-def finalise(sim: TectonicSim) -> dict[str, FaceField]:
+def finalise_bed(sim: TectonicSim) -> dict:
+    """The bedrock part of :func:`finalise` only: the coarse bed in metres as the stage
+    writes it (arc ridge and cones included), the cones (all, and the active ones), which
+    kind of edifice made each cone cell, the crust-type mask, the vertical scale, sea level
+    and the volcano info -- what analysis needs, at a fraction of finalise's memory."""
+    return finalise(sim, bed_only=True)
+
+
+def finalise(sim: TectonicSim, bed_only: bool = False) -> dict:
     """Coarse-grid outputs (docs/DEVELOPING.md): ``bedrock`` (m), ``uplift``
     (m per erosion iteration), ``hardness`` [0, 1], ``plate_id`` (int16),
     ``plate_vel`` (coarse cells per step, vector).  Also returns the
-    diagnostic ``collision_zone`` (uint8) and ``heat`` (resampled)."""
+    diagnostic ``collision_zone`` (uint8) and ``heat`` (resampled), and with
+    ``tectonics.volcanoes`` the ``volcano_active`` field (m): the cones of the
+    edifices active at the last step, which are in ``bedrock`` but not in
+    ``uplift`` -- the erosion stage takes them off before it starts and puts
+    them back on top when it ends, so only extinct edifices are eroded
+    (globe/erosion/run.py)."""
     params, tp = sim.params, sim.tp
     grid, seg, plates = sim.grid, sim.seg, sim.plates
     coarse = params.coarse_grid()
@@ -1618,7 +1764,22 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     # Coarse-grid arrays are 50 MB each in float64 at the Earth preset's 1024^2, so none is
     # copied where the resample already made a float64, and each is dropped once read
     bed = _resample(bed_t).astype(np.float64, copy=False)
-    dh = _resample(dh_t).astype(np.float64, copy=False)
+    wide = None
+    e_arc = None
+    if float(tp.arc_ridge_km) > 0.0:
+        e_arc = volc.arc_excess(seg, tp)
+        if (e_arc > 0.0).any():
+            # What the splat made of the arc crust, to be replaced by the ridge at its own
+            # width: the same pipeline without it.  The margin ramp, the cascade and the
+            # smoothing are not linear, so the prototype's blend of the excess alone left rims
+            # where the two differed; the difference of the two beds is exact
+            raw0, _, _ = margin_ramp(grid, blend, seg, h - e_arc, tp, sim.spacing, base_blend=base_blend)
+            wide = bed - _resample(_smooth_field(grid, raw0, tp, cascade=True)).astype(np.float64, copy=False)
+            del raw0
+    if bed_only:
+        dh = None
+    else:
+        dh = _resample(dh_t).astype(np.float64, copy=False)
     del dh_t
     area = coarse.interior_cell_area.astype(np.float64)
     # Crust type on the coarse grid.  `sea_level` uses it only in shelf mode,
@@ -1643,7 +1804,53 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
         bed = inject_ranges(bed, bed_t.interior, coarse, grid, tp, params.rng("tectonics", 9), params.R_planet, float(tp.height_scale_m))
         bed -= sea_level(bed, area, shelf_mask, params)
     scale = metres_per_unit(bed, area, tp, sim.spacing, params.R_planet)
-    bedrock = FaceField.from_interior(coarse, (bed * scale).astype(np.float32), name="bedrock")
+    bed *= scale                                             # metres from here on
+    vinfo: dict = {}
+    ctree = None
+    if wide is not None:
+        # the arc ridge at its own width (volume for volume), in place of the splat's swell
+        from scipy.spatial import cKDTree
+
+        ctree = cKDTree(interior_centers_flat(coarse))
+        wl = max(float(tp.arc_water_loading), 0.0)
+        narrow, rinfo = volc.ridge_field(seg, tp, coarse, e_arc * wl, scale, sim.spacing, sim.R_km, float(params.R_planet),
+                                         ctree=ctree)
+        wide *= scale
+        # the volume check: the ridge holds the splat's arc volume times the water loading
+        v_wide = float((wide * area).sum()) / float(params.R_planet) ** 2
+        v_narrow = float((narrow * area).sum()) / float(params.R_planet) ** 2
+        vinfo.update({"ridge_segments": rinfo["arc_segments"], "ridge_volume_ratio": v_narrow / max(wl * v_wide, 1e-30),
+                      "ridge_water_loading": wl, "ridge_crest_max_m": rinfo.get("crest_max_m", 0.0),
+                      "ridge_wide_max_m": float(wide.max())})
+        bed += narrow - wide
+        # the loading is the sea's: where the ridge comes out of it, what stands above sea level
+        # is relief in air, and only (1 - 1/loading) of it is taken back off
+        if wl > 1.0:
+            up_ = (narrow > 0.0) & (bed > 0.0)
+            bed[up_] -= np.minimum(bed[up_], narrow[up_]) * (1.0 - 1.0 / wl)
+        del narrow, wide
+    cone = cone_act = who = None
+    if getattr(sim, "volc", None) is not None:
+        # volcanic edifices at their own size, after sea level and the vertical scale, so they
+        # move neither: they stand on oceanic crust, which the shelf-mode sea level does not read
+        if ctree is None:
+            from scipy.spatial import cKDTree
+
+            ctree = cKDTree(interior_centers_flat(coarse))
+        cone, cone_act, who, vi = volc.stamp(sim.volc, coarse, cont_c, float(sim.step_index),
+                                             vfac=scale / float(tp.volc_ref_m_per_unit),
+                                             continental=bool(tp.volc_continental), ctree=ctree)
+        vinfo.update(vi)
+        vinfo.update({f"events_{k}": v for k, v in sim.volc.events.items()})
+        bed += cone
+    del ctree
+    if bed_only:
+        out = {"bed": bed.astype(np.float32), "ck": cont_c.astype(np.uint8), "scale": float(scale), "q": float(q),
+               "volcanoes": vinfo}
+        if cone is not None:
+            out.update({"cone": cone, "cone_active": cone_act, "cone_kind": who})
+        return out
+    bedrock = FaceField.from_interior(coarse, bed.astype(np.float32), name="bedrock")
 
     # collision zones of the uplift window
     if sim.subduction_pts:
@@ -1652,7 +1859,7 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     else:
         zone_t = np.zeros((6, grid.N, grid.N), dtype=bool)
     zone = _resample(FaceField.from_interior(grid, zone_t.astype(np.uint8), exchange=True), order=0).astype(bool)
-    slope_info = _land_slope_info(coarse, bed * scale, params)
+    slope_info = _land_slope_info(coarse, bed, params)
     del bed
     n_iter = max(int(params.erosion.iterations), 1)
     up = dh * scale * tp.uplift_scale / n_iter
@@ -1661,6 +1868,13 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     baseline = tp.uplift_baseline * float(np.percentile(pos_up, 99)) if pos_up.size else 0.0
     del pos_up
     up = np.where(zone, np.maximum(up, 0.0), np.where(up < 0.0, up, np.maximum(up, baseline)))
+    if cone is not None:
+        # Extinct edifices are built during the erosion stage like any other uplift: 'replay'
+        # starts from the bedrock less the total and adds this back every iteration, so they
+        # are eroded while they grow.  Active ones are not: the shipped erosion cut 2-5 km
+        # cones to 0.03-0.6 km islets even at hardness 1, so they leave the stage's input
+        # (volcano_active) and are put back on top at its end
+        up = up + (cone - cone_act).astype(np.float64) / n_iter
     uplift = FaceField.from_interior(coarse, up.astype(np.float32), name="uplift")
     del up
 
@@ -1689,6 +1903,9 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
         strata = np.tanh(2.5 * wave) / np.tanh(2.5)
         del wave
     hard = np.clip(0.3 + 0.5 * age_norm + 0.3 * den_norm - 0.4 * prox + float(tp.strata_amp) * strata, 0.0, 1.0)
+    if cone is not None:
+        # fresh lava and welded tuff: an edifice is hard rock whatever the crust under it
+        hard = hard + (0.85 - hard) * np.clip(cone / 300.0, 0.0, 1.0) * (hard < 0.85)
     hardness = FaceField.from_interior(coarse, hard.astype(np.float32), name="hardness")
     del age_c, den_c, bd_c, age_norm, den_norm, prox, strata, hard
 
@@ -1750,7 +1967,14 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     take_c |= ~cont_c & (w_o <= 1e-6)                   # crust near it falls back to the other
     crust_age = FaceField.from_interior(coarse, np.maximum(np.where(take_c, age_c, age_o), 0.0).astype(np.float32),
                                         name="crust_age")
+    extra = {}
+    if cone is not None:
+        extra["volcano_active"] = FaceField.from_interior(coarse, cone_act.astype(np.float32), name="volcano_active")
+        # every edifice, active and extinct (m above the ground it stands on): a diagnostic
+        extra["volcano_cone"] = FaceField.from_interior(coarse, cone.astype(np.float32), name="volcano_cone")
     return {
+        **extra,
+        "_volcanoes": vinfo,
         "bedrock": bedrock,
         "uplift": uplift,
         "hardness": hardness,
@@ -1835,12 +2059,21 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     out = finalise(sim)
     for name in OUTPUTS:
         store.save_field(out[name])
+    # the active edifices, which the erosion stage keeps out of its run and puts back on top
+    # (globe/erosion/run.py).  Not in OUTPUTS -- it is a function of the hashed tectonics
+    # parameters like every output, and listing it would move the stage hash of every world
+    # baked without volcanoes -- so a stale one from an earlier bake is removed here
+    store.clear_outputs([VOLCANO_FIELD])
+    if VOLCANO_FIELD in out:
+        store.save_field(out[VOLCANO_FIELD])
     # diagnostics (not part of the hashed outputs)
     diag_dir = store.root / "diagnostics"
     out["heat"].save(diag_dir)
     out["collision_zone"].save(diag_dir)
     out["crust_kind"].save(diag_dir)
     out["crust_age"].save(diag_dir)
+    if "volcano_cone" in out:
+        out["volcano_cone"].save(diag_dir)
     last = sim.stats[-1] if sim.stats else {}
     info = {
         "segments_final": int(sim.seg.M),
@@ -1868,6 +2101,9 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         "sim_seconds": t_sim,
         "seconds_per_step": t_sim / max(sim.step_index, 1),
         "belts": dict(sorted(sim.belt_census.items())),
+        # the arc ridge redraw and the volcanic edifices (empty with both off)
+        "volcanoes": {k: (float(v) if isinstance(v, (int, float, np.integer, np.floating)) else v)
+                      for k, v in out.get("_volcanoes", {}).items()},
         "bedrock_max_m": float(out["bedrock"].interior.max()),
         "bedrock_min_m": float(out["bedrock"].interior.min()),
         "uplift_max": float(out["uplift"].interior.max()),
@@ -1914,4 +2150,4 @@ def quicklook(store: WorldStore, params: WorldParams, path) -> Path:
     return out
 
 
-__all__ = ["OUTPUTS", "TectonicSim", "initialise", "simulate", "finalise", "run", "quicklook"]
+__all__ = ["OUTPUTS", "VOLCANO_FIELD", "TectonicSim", "initialise", "simulate", "finalise", "finalise_bed", "run", "quicklook"]

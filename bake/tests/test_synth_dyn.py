@@ -189,9 +189,17 @@ TRUNK_FINGERPRINTS = {
 }
 
 
-def _fingerprint(sim) -> str:
+#: the segment fields trunk 8fcf675 had, which its fingerprints hash; fields added since
+#: (te/arcs' ``terrane``, te/mass' ``shown``) are checked separately for their neutral values
+TRUNK_FIELDS = ("pos", "mass", "thickness", "density", "age", "plate_id", "area", "h_ref", "kind", "craton", "weld",
+                "ext", "rework")
+
+
+def _fingerprint(sim, fields=None) -> str:
+    """sha256 of the cloud, the plate omegas and the heat field.  ``fields`` defaults to every
+    field the cloud has (a determinism check); the trunk fingerprints pass TRUNK_FIELDS."""
     h = hashlib.sha256()
-    for f in sim.seg.FIELDS:
+    for f in (sim.seg.FIELDS if fields is None else fields):
         a = np.ascontiguousarray(getattr(sim.seg, f))
         h.update(f.encode())
         h.update(str(a.dtype).encode())
@@ -218,12 +226,28 @@ def _classic_run(preset: str, steps: int):
 def test_classic_dynamics_are_bit_identical_to_trunk(preset, steps):
     """CLASSIC_DYNAMICS (the toy presets, and Earth with the classic knobs) run the shipped
     dynamics bit for bit: the synth-dyn code paths are all behind knobs they leave off."""
-    assert _fingerprint(_classic_run(preset, steps)) == TRUNK_FINGERPRINTS[(preset, steps)]
+    sim = _classic_run(preset, steps)
+    assert _fingerprint(sim, TRUNK_FIELDS) == TRUNK_FINGERPRINTS[(preset, steps)]
+    _assert_new_fields_neutral(sim)
+
+
+def _assert_new_fields_neutral(sim):
+    """The fields added since trunk stay at their neutral values under the classic dynamics:
+    no arc docks (terrane 0) and the extent balance never flips a point (shown NEVER)."""
+    seg = sim.seg
+    extra = [f for f in seg.FIELDS if f not in TRUNK_FIELDS]
+    assert set(extra) <= {"terrane", "shown"}, extra
+    if "terrane" in extra:
+        assert not seg.terrane.any()
+    if "shown" in extra:
+        assert (seg.shown == seg.NEVER).all()
 
 
 @pytest.mark.slow
 def test_classic_earth_is_bit_identical_to_trunk_through_its_clock_rift():
-    assert _fingerprint(_classic_run("earth", 610)) == TRUNK_FINGERPRINTS[("earth", 610)]
+    sim = _classic_run("earth", 610)
+    assert _fingerprint(sim, TRUNK_FIELDS) == TRUNK_FINGERPRINTS[("earth", 610)]
+    _assert_new_fields_neutral(sim)
 
 
 def _halves(sim):
@@ -625,8 +649,9 @@ def test_earth_dynamics_are_deterministic_and_keep_the_books():
     """Two runs of the dynamics with the same seed end bit for bit alike -- the events draw
     their own rng streams (6 rift, 11 collapse, 12 micro, 13 heal, 14 weld) keyed on the step --
     and with the events firing every kind's books still close."""
-    a, kinds = _dyn_events_run(120)
-    b, _ = _dyn_events_run(120)
+    # 150 steps: with the arc knobs on (te/arcs) seed 2's first micro-merge comes at step 141
+    a, kinds = _dyn_events_run(150)
+    b, _ = _dyn_events_run(150)
     assert {"rift", "micro_merge"} <= kinds
     assert _fingerprint(a) == _fingerprint(b)
     assert max(map(abs, a.books_residual())) < 1e-9
