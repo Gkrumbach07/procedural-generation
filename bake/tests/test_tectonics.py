@@ -395,6 +395,264 @@ def test_mass_ledger_closes_and_subduction_is_a_sink(tiny_sim):
     assert np.allclose(sim.seg.mass, sim.seg.thickness * sim.seg.density)
     assert np.allclose(np.linalg.norm(sim.seg.pos, axis=1), 1.0, atol=1e-12)
     assert (sim.seg.thickness > 0).all() and (sim.seg.density > 0).all() and (sim.seg.density <= 1).all()
+    # the per-kind books: each kind sums to its own crust, they add up to the global
+    # ledger key by key, and a conversion is the same amount out of one and into the other
+    rc, ro = sim.books_residual()
+    assert abs(rc) < 1e-12 and abs(ro) < 1e-12, (rc, ro)
+    B = sim.books
+    assert set(B) == set(tect.KINDS) and all(set(B[kd]) == set(tect.KIND_KEYS) for kd in tect.KINDS)
+    for k in tect.MASS_KEYS:
+        assert B["continental"][k] + B["oceanic"][k] == pytest.approx(L[k], rel=1e-12, abs=1e-15), k
+    for k in tect.CONVERSION_KEYS:
+        assert B["continental"][k] == -B["oceanic"][k] and B["continental"][k] >= 0.0, k
+    # `subducted` is the slab sink and nothing else: oceanic, and something did go down
+    assert B["continental"]["subducted"] == 0.0 and B["oceanic"]["subducted"] < 0.0
+
+
+def _books_close_every_step(p, steps):
+    """Step a sim and return the worst per-kind books residual (relative) of any step."""
+    sim = tect.initialise(p, log=None)
+    worst = 0.0
+    for _ in range(steps):
+        sim.step()
+        worst = max(worst, *map(abs, sim.books_residual()))
+    return sim, worst
+
+
+def test_crust_books_close_for_each_kind_every_step():
+    """With `variable_extent` on, crust moves between columns of different extent: the
+    books are kept in sum(ext * mass), per crust kind, with the conversions between kinds
+    (slab accretion onto a continent, island-arc births) booked where they happen.  Every
+    transfer between segments -- collision, merge, belt, relax, extension -- is left out of
+    the books on purpose, so one that makes or loses crust shows up here: before the
+    transfers conserved volume, the belts alone made +11 units over 8000 Earth steps and all
+    of it was booked as `subducted`.  The fixed-area model keeps its own units and closes too."""
+    from globe.tectonics.segments import CONTINENTAL
+
+    p = WorldParams.tiny_world()
+    p.tectonics.steps = 120
+    sim, worst = _books_close_every_step(p, 120)
+    assert worst < 1e-12, worst
+    B = sim.books
+    # the run did exercise every channel the check is about
+    assert B["oceanic"]["subducted"] < 0.0 and B["continental"]["accreted"] > 0.0 and B["continental"]["arc_born"] > 0.0
+    assert B["continental"]["orogen_decayed"] <= 0.0 and B["continental"]["delaminated"] < 0.0
+    assert sim.stats[-1]["crust_mass"] == pytest.approx(sim.crust_mass(), rel=1e-15)
+    c = sim.seg.kind == CONTINENTAL
+    assert sim.stats[-1]["continental_volume"] == pytest.approx(float((sim.seg.ext * sim.seg.thickness)[c].sum()), rel=1e-12)
+    assert "mass" not in sim.stats[-1]          # the column sum is `column_mass`, by that name
+
+    off = WorldParams.tiny_world()
+    off.tectonics.variable_extent = False
+    _, worst_off = _books_close_every_step(off, 60)
+    assert worst_off < 1e-12, worst_off
+
+
+@pytest.mark.parametrize("variable_extent", [True, False])
+def test_differentiation_residue_is_booked_once(variable_extent):
+    """`differentiation` lightens every survivor of the step's collisions, and one of those
+    can be a segment a later pair of the same step subducted or merged: still in the cloud
+    until compress, but its whole crust booked out by the kernel already.  Measuring the
+    residue over the whole cloud booked that segment's share twice -- this run's books were
+    2e-3 off within 40 steps, in both modes (seed 1, because seed 0's extent run happens not
+    to show it in 120)."""
+    p = WorldParams.tiny_world(1)
+    p.tectonics.variable_extent = variable_extent
+    p.tectonics.differentiation = 0.1
+    p.tectonics.steps = 40
+    sim, worst = _books_close_every_step(p, 40)
+    assert worst < 1e-12, worst
+    L = sim.ledger
+    assert sim.crust_mass() == pytest.approx(sum(L[k] for k in tect.MASS_KEYS), rel=1e-12)
+    assert sim.books["continental"]["residue"] < 0.0 and sim.books["oceanic"]["residue"] < 0.0
+
+
+def _cc_pair(ext_su, ext_lo, th=(1.0, 0.6), rho=(0.80, 0.85)):
+    """Two continental segments of different plates, head-on, plate 1 moving into plate 0."""
+    from globe.tectonics.segments import CONTINENTAL
+
+    s = 0.05
+    pos = np.array([[1.0, 0.0, 0.0], [np.cos(0.5 * s), np.sin(0.5 * s), 0.0]])
+    seg = Segments(pos, list(th), list(rho), 100.0, [0, 1], 1.0, kind=np.array([CONTINENTAL, CONTINENTAL], np.int8),
+                   ext=[ext_su, ext_lo])
+    plates = Plates(2)
+    plates.update_stats(seg)
+    plates.omega[0] = 0.0
+    plates.omega[1] = np.array([0.0, 0.0, -0.1])
+    return seg, plates, s
+
+
+def test_extent_merge_conserves_the_crust():
+    """A continental loser shortened to `extent_min` is merged into the survivor: the
+    survivor's column becomes the extent-weighted mean of the two and only then takes the
+    loser's extent.  Raising it by the remnant's volume over its old extent and then adding
+    that extent too made ext_lo * th_su of crust per merge (+19.4 % of the pair in one)."""
+    A = 0.05 ** 2
+    seg, plates, s = _cc_pair(2.0 * A, 0.3 * A)
+    v0, m0, e0 = seg.crust_volume(), seg.crust_mass(), float(seg.ext.sum())
+    alive = np.ones(2, dtype=bool)
+    spent, recv = [], []
+    losers, survivors = collide(seg, build_tree(seg), 1.2 * s, plates.omega, alive, extent_min=0.25 * A,
+                                spent_out=spent, recv_out=recv)
+    assert losers.tolist() == [1] and not alive[1]                     # the denser one, merged away
+    live = lambda a: float((seg.ext * a)[alive].sum())
+    assert live(seg.thickness) == pytest.approx(v0, rel=1e-14)
+    assert live(seg.mass) == pytest.approx(m0, rel=1e-14)
+    assert float(seg.ext[alive].sum()) == pytest.approx(e0 - spent[0], rel=1e-14)   # only the ground shortened goes
+    assert np.isclose(seg.density[0], seg.mass[0] / seg.thickness[0])
+    # what the belt is told the survivor received is what its column gained
+    assert recv[0][0][0] == pytest.approx(seg.thickness[0] - 1.0, rel=1e-12)
+
+
+def test_slab_accretion_lands_on_the_survivors_ground():
+    """An oceanic slab under a continent: `arc_accretion` of its crust is welded on, the
+    rest goes to the mantle.  The crust stood on the slab's extent and is spread over the
+    survivor's, so the survivor's column rises by ext_lo / ext_su of the slab's -- and the
+    kernel reports both amounts exactly, which is what the per-kind books are kept from."""
+    from globe.tectonics.segments import CONTINENTAL, OCEANIC
+
+    A = 0.05 ** 2
+    seg, plates, s = _cc_pair(0.6 * A, 1.7 * A, th=(1.0, 0.2), rho=(0.80, 0.88))
+    seg.kind[1] = OCEANIC
+    f = 0.3
+    v_lo, m_lo = 1.7 * A * 0.2, 1.7 * A * 0.2 * 0.88
+    th_su, m_su = 1.0, 0.8
+    alive = np.ones(2, dtype=bool)
+    books, recv = [], []
+    losers, survivors = collide(seg, build_tree(seg), 1.2 * s, plates.omega, alive, accretion=f, extent_min=0.25 * A,
+                                books_out=books, recv_out=recv)
+    assert losers.tolist() == [1] and seg.kind[0] == CONTINENTAL
+    assert 0.6 * A * (seg.thickness[0] - th_su) == pytest.approx(f * v_lo, rel=1e-12)
+    assert 0.6 * A * (seg.mass[0] - m_su) == pytest.approx(f * m_lo, rel=1e-12)
+    b = books[0]
+    assert b["subducted"][1] == pytest.approx((1.0 - f) * m_lo, rel=1e-12)
+    assert b["accreted"][1] == pytest.approx(f * m_lo, rel=1e-12)
+    assert b["arc_born"] == (0.0, 0.0)
+    assert recv[0][0][0] == pytest.approx(seg.thickness[0] - th_su, rel=1e-12)
+
+
+def _extent_cloud(seed=4, n=800, cont=True):
+    """A cloud of three plates whose segments stand on very different extents."""
+    from globe.tectonics.segments import CONTINENTAL
+
+    rng = np.random.default_rng(seed)
+    pos = best_candidate_sphere(n, rng)
+    pid = cluster_plates(pos, 3, rng)
+    A = 4 * np.pi / n
+    ext = A * np.exp(rng.uniform(np.log(0.25), np.log(3.0), n))
+    ext *= 4 * np.pi / ext.sum()
+    kind = np.full(n, CONTINENTAL if cont else 0, np.int8)
+    seg = Segments(pos, rng.uniform(0.6, 2.0, n), rng.uniform(0.78, 0.86, n), 300.0, pid, A, kind=kind, ext=ext)
+    plates = Plates(3)
+    plates.update_stats(seg)
+    plates.omega[:] = rng.normal(size=(3, 3)) * 0.02
+    return seg, plates, mean_spacing(n), A
+
+
+def test_lateral_transfers_conserve_volume_with_extent():
+    """Belt layout, belt spreading and relaxation move crust between segments of
+    different extent.  With `conserve_volume` the belt and the spread lay the crust's
+    volume out by weight x the receiver's extent (every column rises by its weight's
+    share), and relax gives the receiver dth * ext_giver / ext_receiver with the height
+    step split by the two extents, so sum(ext * thickness) and sum(ext * mass) do not move;
+    column for column -- the fixed-area rule, still what the flag off does -- they do,
+    which is what made +11 units of continental crust in the belts over 8000 Earth steps."""
+    from globe.tectonics import orogeny
+    from globe.tectonics.segments import CONTINENTAL
+
+    vol = lambda seg, alive: (float((seg.ext * seg.thickness)[alive].sum()), float((seg.ext * seg.mass)[alive].sum()))
+    for layout in ("belt", "spread"):
+        seg, plates, s, A = _extent_cloud()
+        tree = build_tree(seg)
+        alive = np.ones(seg.M, bool)
+        recv = []
+        losers, survivors = collide(seg, tree, 1.2 * s, plates.omega, alive, extent_min=0.25 * A, recv_out=recv)
+        assert losers.size > 10
+        before = vol(seg, alive)
+        if layout == "belt":
+            moved = orogeny.shape_belt(seg, tree, losers, survivors, alive, s, 1.5e6, 26400.0, 0.25, CONTINENTAL,
+                                       received=recv[0], conserve_volume=True)
+            assert moved > 0.0
+        else:
+            spread_collisions(seg, tree, losers, survivors, alive, s, received=recv[0], conserve_volume=True)
+        after = vol(seg, alive)
+        assert after[0] == pytest.approx(before[0], rel=1e-12) and after[1] == pytest.approx(before[1], rel=1e-12), layout
+        assert np.allclose(seg.mass[alive], seg.thickness[alive] * seg.density[alive])
+
+    for conserve in (True, False):
+        seg, plates, s, A = _extent_cloud(seed=5)
+        seg.density[:] = 0.82                     # one rock, so a column is a height
+        seg.mass[:] = seg.thickness * seg.density
+        alive = np.ones(seg.M, bool)
+        v0, th0, top = vol(seg, alive), float(seg.thickness.sum()), float(seg.thickness.max())
+        relax_segments(seg, build_tree(seg), 0.3, 0.0, s, conserve_volume=conserve)
+        v1 = vol(seg, alive)
+        if conserve:
+            assert v1[0] == pytest.approx(v0[0], rel=1e-12) and v1[1] == pytest.approx(v0[1], rel=1e-12)
+            # and the step is split by the two extents, so a small receiver is not driven
+            # past its giver: relaxation makes no new peak
+            assert float(seg.thickness.max()) <= top * (1 + 1e-12)
+        else:      # the column sum is what moves column for column keeps, not the crust
+            assert float(seg.thickness.sum()) == pytest.approx(th0, rel=1e-12)
+            assert abs(v1[0] - v0[0]) > 1e-6 * v0[0]
+
+    # a big column above a small one: half the step off the giver, scaled up by the ratio of
+    # their extents (12 here), would put the receiver 0.2 above where the giver started
+    A = 1e-4
+    pair = Segments(np.array([[1.0, 0.0, 0.0], [np.cos(0.01), np.sin(0.01), 0.0]]), [1.0, 0.9], 0.82, 10.0, 0, A,
+                    kind=np.array([CONTINENTAL, CONTINENTAL], np.int8), ext=[3.0 * A, 0.25 * A])
+    v0 = pair.crust_volume()
+    relax_segments(pair, build_tree(pair), 1.0, 0.0, 0.01, knn=1, conserve_volume=True)
+    assert pair.crust_volume() == pytest.approx(v0, rel=1e-14)
+    assert pair.thickness[0] < 1.0 and pair.thickness[1] > 0.9 and pair.thickness[1] < pair.thickness[0]
+
+
+def test_a_void_inside_a_continent_is_filled_without_making_crust():
+    """A gap inside a continent that no shortening paid for (`stretch` 0).  `'create'`, the
+    fixed-area rule, fills it with new continental crust at its neighbours' column: crust
+    from nothing.  `'split'` (variable_extent's) has the continental neighbours hand over
+    ground and the crust on it, so their columns, the crust and the ground total all stay;
+    `'stretch'` keeps the crust but thins the neighbours over new ground, and `'ocean'`
+    fills it with sea floor -- both of which drown the middle of a supercontinent."""
+    from globe.tectonics.collision import spawn_segments
+    from globe.tectonics.segments import CONTINENTAL, OCEANIC
+
+    p = WorldParams.tiny_world()
+    grid = p.tect_grid()
+    rng = np.random.default_rng(3)
+    n = 300
+    s = mean_spacing(n)
+    pos = best_candidate_sphere(n, rng)
+    # punch a hole: drop every segment within 1.6 spacings of one point
+    keep = np.linalg.norm(pos - pos[0], axis=1) > 1.6 * s
+    pos = pos[keep]
+    m = pos.shape[0]
+    th0, ext0 = rng.uniform(0.8, 1.2, m), s * s * rng.uniform(0.6, 1.6, m)
+    out = {}
+    for void in ("create", "split", "stretch", "ocean"):
+        seg = Segments(pos, th0, 0.82, 50.0, 0, s * s, kind=np.full(m, CONTINENTAL, np.int8), ext=ext0)
+        before, ground = seg.crust_mass(), float(seg.ext.sum())
+        tree = build_tree(seg)
+        idx, dist = label_map_fast(seg, grid, 2.0 * s, tree)
+        taken = []
+        new, gap = spawn_segments(seg, idx, dist, grid, s, 0.85 * s, np.random.default_rng(0), None, 0.2, 0.88,
+                                  tree=tree, ext=s * s, void=void, taken_out=taken)
+        assert new.M > 0
+        out[void] = (seg.crust_mass() - before, new.crust_mass(), taken[0][1], new.kind,
+                     float(seg.ext.sum()) + float(new.ext.sum()) - ground, seg.thickness.copy())
+    d, made, took, kind, _, th = out["create"]
+    assert d == 0.0 and made > 0.0 and took == 0.0 and (kind == CONTINENTAL).all()     # crust from nothing
+    assert np.array_equal(th, th0)
+    for void in ("split", "stretch"):
+        d, made, took, kind, dground, th = out[void]
+        assert (kind == CONTINENTAL).all() and made > 0.0, void
+        assert took == pytest.approx(made, rel=1e-12) and -d == pytest.approx(made, rel=1e-12), void
+    _, _, _, _, dground, th = out["split"]
+    assert abs(dground) < 1e-12 and np.array_equal(th, th0)          # no ground made, no column thinned
+    _, _, _, _, dground, th = out["stretch"]
+    assert dground > 0.0 and (th <= th0).all() and (th < th0).any()   # new ground, thinner neighbours
+    d, made, took, kind, _, th = out["ocean"]
+    assert d == 0.0 and took == 0.0 and (kind == OCEANIC).all()
 
 
 def test_no_plateless_holes_after_gap_filling(tiny_sim):
@@ -754,7 +1012,10 @@ def test_margin_ramp_smooths_the_shelf_edge(small_sim):
     before, after = isoline_metrics(b0, edge, r), isoline_metrics(b1, edge, r)
     assert after["ratio"] < 0.9 * before["ratio"], (before["ratio"], after["ratio"])
     coast0, coast1 = isoline_metrics(b0, 0.0, r), isoline_metrics(b1, 0.0, r)
-    assert abs(coast1["ratio"] - coast0["ratio"]) < 0.02 * coast0["ratio"], (coast0["ratio"], coast1["ratio"])
+    # 3 %, not 2: the world under it moved when the crust books and the plate bookkeeping were
+    # fixed (2026-09-30), and on that `small` world the coast reads 13.93 -> 13.58 (2.5 %) --
+    # still a tenth of what the ramp does to the shelf edge, which is the property under test
+    assert abs(coast1["ratio"] - coast0["ratio"]) < 0.03 * coast0["ratio"], (coast0["ratio"], coast1["ratio"])
 
 
 def test_splat_knn_base_off_is_bit_identical(tiny_sim, tiny_out):
@@ -1190,6 +1451,12 @@ def test_stage_runs_in_pipeline(tmp_path):
     assert vel.is_vector
     stage = WorldStore(tmp_path / "w").stage_info("tectonics")["info"]
     assert isinstance(stage["segments_final"], int)
+    # the crust there is, not the column sum that variable_extent does not conserve, and
+    # the books that say where it went
+    assert "final_mass" not in stage and stage["final_crust_mass"] > 0.0
+    assert 0.0 < stage["final_continental_share"] < 1.0 and stage["final_continental_volume"] > 0.0
+    books = stage["crust_books"]
+    assert sum(books["continental"].values()) + sum(books["oceanic"].values()) == pytest.approx(stage["final_crust_mass"], rel=1e-9)
     assert 0.0 < stage["land_slope_median"] < p.erosion.talus_slope_hard  # recorded at bake time
 
 
@@ -1258,7 +1525,11 @@ def test_strata_fabric_gives_hardness_structure_at_basin_scale():
     # the banded spread held or rose (0.286/0.338/0.373 -> 0.396/0.308/0.351).  So the
     # absolute figure is asserted too: a ratio that falls because the fabric stopped
     # working would take it with it, where one that falls because the rest of the planet
-    # caught up does not
+    # caught up does not.  With the crust books balanced (the extent merge, slab accretion
+    # and the belt and relax transfers conserving volume) the banded spread reads 0.378 /
+    # 0.335 / 0.449 over flat 0.270 / 0.256 / 0.316 (ratios 1.40 / 1.31 / 1.42), seeds 3
+    # and 4 0.336 / 0.393.  Moving the volume with a plain ext[a] / ext[b] scaling instead,
+    # which piles crust on the smallest receivers, took seed 1 down to 0.276
     assert np.mean(spread_ratio) > 1.2 and min(spread_ratio) > 1.1, spread_ratio
     assert min(bands) > 0.28, bands
     assert np.mean(ac_ratio) < 0.6, ac_ratio

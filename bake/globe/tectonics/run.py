@@ -132,10 +132,43 @@ OUTPUTS = ["bedrock", "uplift", "hardness", "plate_id", "plate_vel"]
 # --------------------------------------------------------------------------
 #: Ledger keys that are *mass*: they sum to the segment total, so a new one
 #: has to be added here or the books stop balancing. Sinks are negative by
-#: convention -- crust that went back to the mantle -- and only `initial`,
-#: `spawned` and `crystallised` may be positive.
+#: convention -- crust that went back to the mantle.  The units are whichever
+#: quantity the mode conserves (`TectonicSim.crust_mass`).
+#:
+#: * ``initial`` -- the crust the run starts with.
+#: * ``spawned`` -- new crust at gaps: ridge basalt, and in the fixed-area model the
+#:   continental crust a void inside a continent is filled with.  Crust a new segment
+#:   took from its neighbours (``collision.spawn_segments(void='split')``) is not here:
+#:   it was there already.
+#: * ``crystallised`` -- growth and dissolution from the heat field.
+#: * ``subducted`` -- **the slab sink and nothing else**: oceanic crust lost to the mantle at
+#:   a trench, the ``1 - arc_accretion`` of every slab, as the collision kernel counts it.  It
+#:   used to be the collision phase's whole change in crust mass less the arcs, which also
+#:   held everything the belt, merge and relax transfers made or lost -- measured on Earth
+#:   seed 0 over 8000 steps, a net slab sink of -39.0 (-46.3 gone down, +7.3 of it welded on as
+#:   ``accreted``) against a booked -27.9.  Anything those transfers do
+#:   now shows as books that do not close (`books_residual`), not as subduction.
+#: * ``delaminated`` -- roots over ``max_crust_thickness`` foundering.
+#: * ``orogen_decayed`` -- belt height above the floor sent back to the mantle.
+#: * ``arc_mantle`` -- the crust an island arc draws from the mantle on top of the column it
+#:   was born from (``arc_thickness``; a sink when the relabelled column was heavier).
+#: * ``extent_closed`` -- the crust the extent closure carries with the ground it hands out
+#:   (``variable_extent``).
+#: * ``hotspot`` -- crust a hotspot track adds (``hotspots``; 0 by default).
+#: * ``residue`` -- the dense residue ``differentiation`` sends to the mantle, off the segments
+#:   that outlive the step's collisions (0 by default).
 MASS_KEYS = ("initial", "spawned", "crystallised", "subducted", "delaminated", "orogen_decayed", "arc_mantle",
-             "extent_closed")
+             "extent_closed", "hotspot", "residue")
+#: The two crust kinds the books are also kept for (`TectonicSim.books`).
+KINDS = ("continental", "oceanic")
+#: Moves between the two kinds' books: booked positive on the continental side and the same
+#: amount negative on the oceanic, so they sum to zero over the kinds and the global ledger
+#: leaves them out.  ``accreted`` is the ``arc_accretion`` share of an oceanic slab welded
+#: onto a continent; ``arc_born`` is the oceanic column an ``arc_birth`` relabels
+#: continental (its accretion included, its ``arc_mantle`` top-up not).
+CONVERSION_KEYS = ("accreted", "arc_born")
+#: Every key of a kind's books: each kind's sum is that kind's crust, step for step.
+KIND_KEYS = MASS_KEYS + CONVERSION_KEYS
 #: Ledger keys that are *counters*: how much crust a process relocated. They
 #: are diagnostics and must be left out of any mass balance.
 COUNTER_KEYS = ("orogen_shaped", "differentiated",
@@ -144,7 +177,12 @@ COUNTER_KEYS = ("orogen_shaped", "differentiated",
                 # own bookkeeping (docs/plate-forces.md section 4d), none of it mass
                 "ext_coll_cont", "ext_coll_ocean", "ext_spawn_cont", "ext_spawn_ocean", "extent_close", "extent_close_net",
                 "thin_move", "thin_collide", "thin_spawn", "thin_delam", "thin_heat", "thin_rest")
-SINK_KEYS = ("subducted", "delaminated", "orogen_decayed")
+SINK_KEYS = ("subducted", "delaminated", "orogen_decayed", "residue")
+#: What fills a void inside a continent that no shortening paid for, with variable_extent on
+#: (``collision.spawn_segments``, where the alternatives are measured; the fixed-area model
+#: keeps 'create').  'split' takes the ground and the crust on it from the neighbours, which
+#: conserves both and leaves the supercontinent's interior as whole as 'create' did
+VOID_FILL = "split"
 
 
 def _padded_sum(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -198,13 +236,16 @@ class TectonicSim:
         self.crust_mass = seg.crust_mass if tp.variable_extent else seg.total_mass
         self.idx = None
         self.dist = None
-        # mass bookkeeping: the crust mass == initial + spawned + crystallised (collisions/relaxation conserve)
-        # `subducted` is a real sink, not a drift term: an oceanic slab hands the
-        # overriding plate only `arc_accretion` of itself and the rest goes back
-        # to the mantle. It used to be zero to within rounding, because
-        # collisions transferred 100 %.
+        # mass bookkeeping: the crust mass == the sum of the MASS_KEYS (see there).  Every
+        # transfer between segments -- collisions, belts, merges, relaxation, extension --
+        # conserves, and none of them is booked, so a transfer that makes or loses crust
+        # leaves books that do not close instead of hiding inside a sink
         self.ledger = {k: 0.0 for k in MASS_KEYS}
-        self.ledger["initial"] = self.crust_mass()
+        #: the same books per crust kind (KINDS -> KIND_KEYS); each closes on its own, and
+        #: the conversions between them are booked where they happen
+        self.books = {kd: {k: 0.0 for k in KIND_KEYS} for kd in KINDS}
+        mc, mo = self.kind_mass()
+        self._book("initial", mc, mo)
         #: how many belts of each :mod:`~globe.tectonics.orogeny` type the run
         #: built, and the crust-type pairing of every collision that reached
         #: the classifier (`pair_oc` = oceanic slab under continental
@@ -221,6 +262,42 @@ class TectonicSim:
         self.sutures = 0
 
     # -- helpers ------------------------------------------------------------
+    def kind_mass(self, live: np.ndarray | None = None) -> tuple[float, float]:
+        """``crust_mass`` split by kind: (continental, oceanic).  ``live`` (a mask over the
+        cloud) counts only those segments: between `collide` and `Segments.compress` the
+        cloud still holds the ones the kernel has taken out, and booked out, already."""
+        seg = self.seg
+        w = seg.ext * seg.mass if self.tp.variable_extent else seg.mass
+        c = seg.kind == CONTINENTAL
+        if live is not None:
+            w, c = w[live], c[live]
+        return float(w[c].sum()), float(w[~c].sum())
+
+    def _book(self, key: str, dc: float, do: float) -> None:
+        """Book ``dc`` to the continental and ``do`` to the oceanic crust under ``key``
+        (and their sum to the global ledger, unless ``key`` is a conversion)."""
+        self.books["continental"][key] += dc
+        self.books["oceanic"][key] += do
+        if key not in CONVERSION_KEYS:
+            self.ledger[key] = self.ledger.get(key, 0.0) + dc + do
+
+    def _book_change(self, key: str, before: tuple[float, float], live: np.ndarray | None = None) -> tuple[float, float]:
+        """Book a single-purpose phase's whole change since ``before`` (a :meth:`kind_mass`
+        over the same ``live`` mask)."""
+        after = self.kind_mass(live)
+        self._book(key, after[0] - before[0], after[1] - before[1])
+        return after
+
+    def books_residual(self) -> tuple[float, float]:
+        """What each kind's crust is, less what its books say it should be, relative to
+        it: (continental, oceanic).  Rounding only (~1e-14), unless a transfer between
+        segments made or lost crust."""
+        out = []
+        for kd, m in zip(KINDS, self.kind_mass()):
+            booked = math.fsum(self.books[kd].values())
+            out.append((m - booked) / max(abs(m), 1e-300))
+        return out[0], out[1]
+
     def heat_at(self, pos: np.ndarray, fuv=None) -> np.ndarray:
         """Heat at unit vectors ``pos``; ``fuv`` is ``from_sphere_v(pos)`` when
         the caller already has it."""
@@ -268,9 +345,11 @@ class TectonicSim:
             for a, b in ev.get("pairs", ()):
                 self.suture_block[(min(a, b), max(a, b))] = k + int(tp.suture_cooldown)
         if self.hotspot_pos.shape[0] and tp.hotspot_rate > 0:
+            km = self.kind_mass()
             self.events.append(intraplate.apply_hotspots(
                 self, self.hotspot_pos, float(tp.hotspot_rate),
                 float(tp.hotspot_radius_factor) * self.spacing))
+            self._book_change("hotspot", km)
 
         if k == self.ref_step:
             seg.h_ref = seg.height()
@@ -288,7 +367,6 @@ class TectonicSim:
 
         t_ = _thin()
         # 1. move
-        mass0 = self.crust_mass()
         tau_slab = None
         cc_pair_max = 0
         rotate_segments(seg, plates)
@@ -309,18 +387,24 @@ class TectonicSim:
         spent_out: list = []
         arc_out: list = []
         recv_out: list = []
+        books_out: list = []
         losers, survivors = collide(seg, tree, self.r_coll, plates.omega, alive, tp.overlap_fraction,
                                     float(tp.arc_accretion), float(tp.arc_birth), self.params.rng("tectonics", 7, k),
                                     shortening=float(tp.continental_shortening), weld_steps=int(tp.weld_steps),
                                     extent_min=(float(tp.extent_min) * self.spacing ** 2) if tp.variable_extent else 0.0,
                                     spent_out=spent_out, arc_out=arc_out, recv_out=recv_out,
                                     arc_thickness=float(tp.arc_thickness) * float(tp.continental_thickness),
-                                    arc_density=float(tp.continental_density))
+                                    arc_density=float(tp.continental_density), books_out=books_out)
         received = recv_out[0] if (recv_out and tp.variable_extent) else None
-        arc_now = float(arc_out[0][1 if tp.variable_extent else 0]) if arc_out else 0.0
+        # by column or by crust, whichever this mode's ledger is kept in
+        u = 1 if tp.variable_extent else 0
+        moved = books_out[0]
+        self._book("subducted", 0.0, -moved["subducted"][u])
+        self._book("accreted", moved["accreted"][u], -moved["accreted"][u])
+        self._book("arc_born", moved["arc_born"][u], -moved["arc_born"][u])
+        arc_now = float(arc_out[0][u]) if arc_out else 0.0
         if arc_now:
-            # by column or by crust, whichever this mode's ledger is kept in
-            self.ledger["arc_mantle"] = self.ledger.get("arc_mantle", 0.0) + arc_now
+            self._book("arc_mantle", arc_now, 0.0)
         n_coll = int(losers.size)
         if n_coll:
             if tp.orogen_shaping > 0.0:
@@ -331,17 +415,28 @@ class TectonicSim:
                     float(tp.height_scale_m), float(tp.orogen_shaping), CONTINENTAL,
                     accretion=float(tp.arc_accretion), flat_slab_age=float(tp.flat_slab_age),
                     along_strike=float(tp.orogen_along_strike), census=self.belt_census,
-                    shortening=float(tp.continental_shortening), width_scale=float(tp.orogen_width_scale), received=received)
+                    shortening=float(tp.continental_shortening), width_scale=float(tp.orogen_width_scale), received=received,
+                    conserve_volume=bool(tp.variable_extent))
             else:
                 spread_collisions(seg, tree, losers, survivors, alive, tp.belt_width_factor * self.spacing,
-                                  accretion=float(tp.arc_accretion), shortening=float(tp.continental_shortening), received=received)
+                                  accretion=float(tp.arc_accretion), shortening=float(tp.continental_shortening), received=received,
+                                  conserve_volume=bool(tp.variable_extent))
             # crust that has been through a collision comes out lighter: the
             # light melt stays, the dense residue goes to the mantle.  This is
             # what separates continental from oceanic crust, and so what makes
             # the elevation histogram bimodal instead of one spike.
             if tp.differentiation > 0.0:
+                # the residue is measured over the live segments only.  `survivors` can hold a
+                # segment that a later pair of this step subducted or merged; the kernel booked
+                # its whole crust out already and compress drops it below, so counting what
+                # differentiate took off it as well booked it twice (small seed 3,
+                # differentiation 0.1, 300 steps: the global ledger 2e-4 of the crust off and
+                # the oceanic books 9e-4 with fixed area, 1.4e-5 and 2.9e-4 with extent, both
+                # first wrong at step 13)
+                km = self.kind_mass(alive)
                 self.ledger["differentiated"] = self.ledger.get("differentiated", 0.0) + differentiate(
                     seg, survivors, float(tp.differentiation), float(tp.density_continental))
+                self._book_change("residue", km, alive)
             pts = seg.pos[losers].copy()
             if tp.suture_collisions > 0.0:
                 cc = (seg.kind[losers] == CONTINENTAL) & (seg.kind[survivors] == CONTINENTAL)
@@ -366,10 +461,8 @@ class TectonicSim:
             seg.compress(alive)
             tree = build_tree(seg)
         if tp.relax_rate > 0:
-            relax_segments(seg, tree, tp.relax_rate, tp.relax_threshold, self.spacing, int(tp.relax_knn))
-        # everything the collision phase changed *except* what the arcs drew from the
-        # mantle, which this difference also contains and `arc_mantle` has already taken
-        self.ledger["subducted"] += self.crust_mass() - mass0 - arc_now
+            relax_segments(seg, tree, tp.relax_rate, tp.relax_threshold, self.spacing, int(tp.relax_knn),
+                           conserve_volume=bool(tp.variable_extent))
 
         # two continents that have been grinding together long enough are one plate
         if tp.suture_collisions > 0.0 and self.suture_count:
@@ -408,15 +501,14 @@ class TectonicSim:
                 plates = self.plates
 
         # active orogens become former ones: what convergence stops feeding,
-        # erosion and root delamination take back down.  After the `subducted`
-        # accounting above, which attributes every mass change since `mass0`.
+        # erosion and root delamination take back down
         if tp.orogen_decay > 0.0:
-            m_before = self.crust_mass()
+            km = self.kind_mass()
             orogeny.relax_orogens(
                 seg, float(tp.belt_thickness * (1.0 - tp.continental_density) * tp.height_scale_m),
                 float(tp.orogen_floor_m), float(tp.height_scale_m),
                 float(tp.orogen_decay), CONTINENTAL)
-            self.ledger["orogen_decayed"] += self.crust_mass() - m_before
+            self._book_change("orogen_decayed", km)
 
         if tp.variable_extent:
             c1, o1 = _ext_by_kind()
@@ -436,7 +528,9 @@ class TectonicSim:
         if k % max(1, int(tp.label_every)) == 0 or self.idx is None:
             idx, dist = label_map_fast(seg, grid, self.r_cap, tree)
             accumulate_area(seg, idx, self.area_sr, tp.area_blend)
-            new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega, tree=tree, ext=self.spacing ** 2, stretch=stretch_budget, thin_floor=float(tp.extent_thin_floor) * float(tp.continental_thickness) if tp.variable_extent else 0.0)
+            taken: list = []
+            new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega, tree=tree, ext=self.spacing ** 2, stretch=stretch_budget, thin_floor=float(tp.extent_thin_floor) * float(tp.continental_thickness) if tp.variable_extent else 0.0,
+                                      void=VOID_FILL if tp.variable_extent else "create", taken_out=taken)
             n_gap = int(gap.sum())
             n_new = new.M
             if tp.variable_extent and n_gap:
@@ -469,7 +563,10 @@ class TectonicSim:
                 tr = boundary_torques(new.pos, new.plate_id, float(tp.ridge_push) * new.area, plates.com, plates.P, towards=False)
                 tau_slab = tr if tau_slab is None else _padded_sum(tau_slab, tr)
             if n_new:
-                self.ledger["spawned"] += new.crust_mass() if tp.variable_extent else new.total_mass()
+                # what the new segments hold, less what they took from the old ones
+                w = new.ext * new.mass if tp.variable_extent else new.mass
+                cn = new.kind == CONTINENTAL
+                self._book("spawned", float(w[cn].sum()) - (taken[0][u] if taken else 0.0), float(w[~cn].sum()))
                 seg.append(new)
             self.idx, self.dist = idx, dist
 
@@ -479,13 +576,12 @@ class TectonicSim:
         # crystallisation's heat and the forces' heat gradient alike (1.5 ms a step at Earth)
         fuv = from_sphere_v(seg.pos)
         T = self.heat_at(seg.pos, fuv)
-        mass1 = self.crust_mass()
+        km = self.kind_mass()
         crystallise(seg, T, tp.growth, tp.density_base, tp.deposit_density, tp.dissolution_factor, tp.max_thickness)
-        self.ledger["crystallised"] += self.crust_mass() - mass1
+        km = self._book_change("crystallised", km)
         if tp.max_crust_thickness > 0 and tp.delamination > 0:
-            m_before = self.crust_mass()
             delaminate(seg, float(tp.max_crust_thickness), float(tp.delamination))
-            self.ledger["delaminated"] += self.crust_mass() - m_before
+            self._book_change("delaminated", km)
 
         t_ = _tick("thin_delam", t_)
         # 5. heat diffusion + slow relaxation towards the background field
@@ -538,7 +634,7 @@ class TectonicSim:
             # means the local processes are not keeping up and the number is doing the work
             tot = float(seg.ext.sum())
             close = (4.0 * math.pi) / max(tot, 1e-12)
-            m_before = self.crust_mass()
+            km = self.kind_mass()
             seg.ext *= close
             # and the crust is not touched.  Thinning it by the same factor -- on the argument
             # that the volume on a segment is fixed -- was wrong twice over: the closure is a
@@ -549,11 +645,13 @@ class TectonicSim:
             # of the time because there was hardly any relief left to refine
             # the crust the change of units carries with it.  A mass term, not a counter:
             # it is the ledger's measure of how much of the planet's crust the closure is
-            # moving, which is the number to look at when the continents drain (section 4e)
-            self.ledger["extent_closed"] = self.ledger.get("extent_closed", 0.0) + (self.crust_mass() - m_before)
+            # moving, which is the number to look at when the continents drain (section 4e);
+            # by kind it says how much of that the continents were handed
+            self._book_change("extent_closed", km)
             self.ledger["extent_close"] = self.ledger.get("extent_close", 0.0) + abs(close - 1.0)
             self.ledger["extent_close_net"] = self.ledger.get("extent_close_net", 0.0) + (close - 1.0)
         t_ = _tick("thin_rest", t_)              # everything after the forces: events, closure
+        cont = seg.kind == CONTINENTAL
         info = {
             "step": k,
             "M": seg.M,
@@ -563,7 +661,17 @@ class TectonicSim:
             "spawned": n_new,
             "speed_mean": float(spd.mean() / self.spacing) if spd.size else 0.0,
             "speed_max": float(spd.max() / self.spacing) if spd.size else 0.0,
-            "mass": seg.total_mass(),
+            # the crust there is, in the ledger's units -- the quantity this mode conserves
+            "crust_mass": self.crust_mass(),
+            # the continents' share of the ground, and the crust standing on it (steradians x
+            # column).  Neither is what the viewer draws, which follows the segment count
+            "continental_share": float(seg.ext[cont].sum()) / max(float(seg.ext.sum()), 1e-300),
+            "continental_volume": float((seg.ext * seg.thickness)[cont].sum()),
+            # The plain sum of the column masses, which is all this logged as `mass` -- and
+            # which variable_extent does not conserve: crust moves between columns of
+            # different extent, so it fell 25 % by step 4000 and 48 % by 8000 on the earth-v16
+            # seed while the crust itself fell 7 % and 20 %.  Kept under a name that says so
+            "column_mass": seg.total_mass(),
             "slab_ratio": slab_ratio,
             "sutures": self.sutures,
             "cc_pair_max": cc_pair_max,
@@ -592,7 +700,8 @@ class TectonicSim:
                 log(
                     f"[tectonics] step {self.step_index}/{steps}: M={info['M']} plates={info['plates']} "
                     f"coll={info['collisions']} gaps={info['gap_cells']} new={info['spawned']} "
-                    f"v={info['speed_mean']:.3f}/{info['speed_max']:.3f} sp/step mass={info['mass']:.1f} "
+                    f"v={info['speed_mean']:.3f}/{info['speed_max']:.3f} sp/step crust={info['crust_mass']:.4f} "
+                    f"cont={info['continental_share']:.3f} vol_c={info['continental_volume']:.3f} "
                     + (f"slab/heat={info['slab_ratio']:.2f} " if info.get('slab_ratio') else "")
                     + (f"sutures={info['sutures']} " if info.get('sutures') else "")
                     + (f"cc_pair_max={info['cc_pair_max']} " if info.get('cc_pair_max') else "")
@@ -1136,7 +1245,7 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
         bed = inject_ranges(bed, bed_t.interior, coarse, grid, tp, params.rng("tectonics", 9), params.R_planet, float(tp.height_scale_m))
         bed -= sea_level(bed, area, shelf_mask, params)
     scale = metres_per_unit(bed, area, tp, sim.spacing, params.R_planet)
-    bedrock =FaceField.from_interior(coarse, (bed * scale).astype(np.float32), name="bedrock")
+    bedrock = FaceField.from_interior(coarse, (bed * scale).astype(np.float32), name="bedrock")
 
     # collision zones of the uplift window
     if sim.subduction_pts:
@@ -1146,7 +1255,7 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
         zone_t = np.zeros((6, grid.N, grid.N), dtype=bool)
     zone = _resample(FaceField.from_interior(grid, zone_t.astype(np.uint8), exchange=True), order=0).astype(bool)
     slope_info = _land_slope_info(coarse, bed * scale, params)
-    del bed, land
+    del bed
     n_iter = max(int(params.erosion.iterations), 1)
     up = dh * scale * tp.uplift_scale / n_iter
     del dh
@@ -1350,7 +1459,14 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         "splat_support_covered": float(out["_splat_support_covered"]),
         "collisions_total": int(sum(s["collisions"] for s in sim.stats)),
         "spawned_total": int(sum(s["spawned"] for s in sim.stats)),
-        "final_mass": float(last.get("mass", 0.0)),
+        # the crust there is (the ledger's units), the continents' share of the ground and the
+        # crust on it -- not `final_mass`, the column sum this used to report, which the
+        # extent model does not conserve (see `column_mass` in TectonicSim.step)
+        "final_crust_mass": float(last.get("crust_mass", 0.0)),
+        "final_continental_share": float(last.get("continental_share", 0.0)),
+        "final_continental_volume": float(last.get("continental_volume", 0.0)),
+        # where it went: the books by kind (KIND_KEYS), each summing to that kind's crust
+        "crust_books": {kd: {k: float(v) for k, v in sim.books[kd].items() if v} for kd in KINDS},
         "sim_seconds": t_sim,
         "seconds_per_step": t_sim / max(sim.step_index, 1),
         "belts": dict(sorted(sim.belt_census.items())),
