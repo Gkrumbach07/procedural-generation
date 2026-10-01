@@ -382,13 +382,24 @@ def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet
         if th_in > float(seg.thickness[su]) - 1e-3:
             g = max(float(seg.thickness[su]) - 1e-3, 0.0) / max(th_in, 1e-12)
             th_in, m_in = th_in * g, m_in * g
+        if conserve_volume:
+            # the profile is a column profile -- how much higher each segment ends up -- so
+            # the crust lands in proportion to the profile *and the ground under it*, and the
+            # rise follows the profile whatever the extents.  Sharing by the profile alone and
+            # scaling each share by ext[su] / ext[n] amplified the smallest receivers: with that
+            # rule here and in the relaxation the thickest continental segment reached 8.9-10.2
+            # columns over 4000 Earth steps (seeds 1 and 0; the delamination cap is 2.3) where
+            # column for column it reached 5.6-6.0.  This keeps it at 4.9-6.1, and the 99.9th
+            # percentile at 2.8-3.5 against 2.9-4.1
+            e_up = np.maximum(seg.ext[idx[up]], 1e-12)
+            rise = prof[up] / float((prof[up] * e_up).sum())     # column per unit of volume
         if th_in > 0.0:
             seg.thickness[su] -= th_in
             seg.mass[su] -= m_in
             if conserve_volume:
-                r = float(seg.ext[su]) / np.maximum(seg.ext[idx[up]], 1e-12)
-                np.add.at(seg.thickness, idx[up], th_in * share * r)
-                np.add.at(seg.mass, idx[up], m_in * share * r)
+                e_su = float(seg.ext[su])
+                np.add.at(seg.thickness, idx[up], th_in * e_su * rise)
+                np.add.at(seg.mass, idx[up], m_in * e_su * rise)
             else:
                 np.add.at(seg.thickness, idx[up], th_in * share)
                 np.add.at(seg.mass, idx[up], m_in * share)
@@ -410,14 +421,13 @@ def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet
             pot = float((take * seg.density[idx]).sum())
             if pot > 0.0:
                 if conserve_volume:
-                    # the foreland's crust by volume, laid on the range by volume
-                    e_up = np.maximum(seg.ext[idx[up]], 1e-12)
+                    # the foreland's crust by volume, laid on the range along its profile
                     vol = float((take * seg.ext[idx]).sum())
                     vm = float((take * seg.density[idx] * seg.ext[idx]).sum())
                     seg.thickness[idx] -= take
                     seg.mass[idx] -= take * seg.density[idx]
-                    np.add.at(seg.thickness, idx[up], vol * share / e_up)
-                    np.add.at(seg.mass, idx[up], vm * share / e_up)
+                    np.add.at(seg.thickness, idx[up], vol * rise)
+                    np.add.at(seg.mass, idx[up], vm * rise)
                 else:
                     seg.thickness[idx] -= take
                     seg.mass[idx] -= take * seg.density[idx]

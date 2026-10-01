@@ -379,15 +379,30 @@ def test_lateral_transfers_conserve_volume_with_extent():
 
     for conserve in (True, False):
         seg, plates, s, A = _extent_cloud(seed=5)
+        seg.density[:] = 0.82                     # one rock, so a column is a height
+        seg.mass[:] = seg.thickness * seg.density
         alive = np.ones(seg.M, bool)
-        v0, th0 = vol(seg, alive), float(seg.thickness.sum())
+        v0, th0, top = vol(seg, alive), float(seg.thickness.sum()), float(seg.thickness.max())
         relax_segments(seg, build_tree(seg), 0.3, 0.0, s, conserve_volume=conserve)
         v1 = vol(seg, alive)
         if conserve:
             assert v1[0] == pytest.approx(v0[0], rel=1e-12) and v1[1] == pytest.approx(v0[1], rel=1e-12)
+            # and the step is split by the two extents, so a small receiver is not driven
+            # past its giver: relaxation makes no new peak
+            assert float(seg.thickness.max()) <= top * (1 + 1e-12)
         else:      # the column sum is what moves column for column keeps, not the crust
             assert float(seg.thickness.sum()) == pytest.approx(th0, rel=1e-12)
             assert abs(v1[0] - v0[0]) > 1e-6 * v0[0]
+
+    # a big column above a small one: half the step off the giver, scaled up by the ratio of
+    # their extents (12 here), would put the receiver 0.2 above where the giver started
+    A = 1e-4
+    pair = Segments(np.array([[1.0, 0.0, 0.0], [np.cos(0.01), np.sin(0.01), 0.0]]), [1.0, 0.9], 0.82, 10.0, 0, A,
+                    kind=np.array([CONTINENTAL, CONTINENTAL], np.int8), ext=[3.0 * A, 0.25 * A])
+    v0 = pair.crust_volume()
+    relax_segments(pair, build_tree(pair), 1.0, 0.0, 0.01, knn=1, conserve_volume=True)
+    assert pair.crust_volume() == pytest.approx(v0, rel=1e-14)
+    assert pair.thickness[0] < 1.0 and pair.thickness[1] > 0.9 and pair.thickness[1] < pair.thickness[0]
 
 
 def test_a_void_inside_a_continent_is_filled_without_making_crust():
@@ -1194,14 +1209,12 @@ def test_strata_fabric_gives_hardness_structure_at_basin_scale():
     # absolute figure is asserted too: a ratio that falls because the fabric stopped
     # working would take it with it, where one that falls because the rest of the planet
     # caught up does not.  With the crust books balanced (the extent merge, slab accretion
-    # and the belt and relax transfers conserving volume) the banded spread reads 0.341 /
-    # 0.276 / 0.360 over flat 0.235 / 0.245 / 0.290 (ratios 1.45 / 1.12 / 1.24, mean 1.27;
-    # autocorrelation 0.33 / 0.54 / 0.44), and seeds 3 and 4 read 0.267 / 0.428 against
-    # 0.345 / 0.600 before: once the belts stop making crust the land of a 4 km `small` is a
-    # different set of segments, and one seed's land is one trajectory.  0.26 still sits
-    # above the flat spread of seeds 0 and 1, so a fabric that stopped working fails it
+    # and the belt and relax transfers conserving volume) the banded spread reads 0.378 /
+    # 0.335 / 0.449 over flat 0.270 / 0.256 / 0.316 (ratios 1.40 / 1.31 / 1.42), seeds 3
+    # and 4 0.336 / 0.393.  Moving the volume with a plain ext[a] / ext[b] scaling instead,
+    # which piles crust on the smallest receivers, took seed 1 down to 0.276
     assert np.mean(spread_ratio) > 1.2 and min(spread_ratio) > 1.1, spread_ratio
-    assert min(bands) > 0.26, bands
+    assert min(bands) > 0.28, bands
     assert np.mean(ac_ratio) < 0.6, ac_ratio
 
 

@@ -390,13 +390,12 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
       segment's as well and thin to cover it, as extension does.
     * ``'ocean'`` -- sea floor.
 
-    Measured on Earth seeds 0 / 1 over the first 600 steps (all with the
-    crust books balanced), sea enclosed by land: 'create' 5 / 3 pits, 0.39 /
-    0.13 % of the sphere; 'split' 5 / 5, 0.63 / 0.23 %; 'stretch' 78 / 82,
-    4.5 / 5.6 %; 'ocean' 81 / 92, 4.9 / 5.8 %.  There are 130-150 such voids
-    in a run, almost all before step 150, and a column thinned by a seventh
-    (stretch) or replaced by sea floor (ocean) drowns in the middle of the
-    supercontinent.  ``taken_out`` receives the crust taken from existing
+    Measured on Earth seeds 0 / 1 at step 600 (everything else as shipped),
+    sea enclosed by land: 'create' 9 / 3 pits, 0.70 / 0.14 % of the sphere;
+    'split' 5 / 5, 0.52 / 0.20 %; 'stretch' 75 / 82, 4.6 / 5.7 %; 'ocean'
+    83 / 90, 4.9 / 5.8 %.  There are 130-150 such voids in a run, almost all
+    before step 150, and a column thinned by a seventh (stretch) or replaced
+    by sea floor (ocean) drowns in the middle of the supercontinent.  ``taken_out`` receives the crust taken from existing
     segments, ``(column units, crust units)``, so the caller can book what
     the new segments hold less what they took.
 
@@ -1027,6 +1026,7 @@ def _spread_kernel(losers, survivors, nbrs, pos, plate_id, kind, mass, thickness
             m = f * mass[lo]
             th = f * thickness[lo]
         tot = 0.0
+        tot_e = 0.0
         for q in range(K):
             n = nbrs[e, q]
             w[q] = 0.0
@@ -1037,6 +1037,8 @@ def _spread_kernel(losers, survivors, nbrs, pos, plate_id, kind, mass, thickness
             dz = pos[n, 2] - pos[su, 2]
             w[q] = np.exp(-(dx * dx + dy * dy + dz * dz) * inv2s2)
             tot += w[q]
+            if use_ext:
+                tot_e += w[q] * ext[n]
         if tot <= 0.0:
             continue
         # the survivor already holds (m, th); hand the neighbours their share
@@ -1046,15 +1048,20 @@ def _spread_kernel(losers, survivors, nbrs, pos, plate_id, kind, mass, thickness
             n = nbrs[e, q]
             if n == su:
                 continue
-            f = w[q] / tot
-            mass[su] -= f * m
-            thickness[su] -= f * th
             if use_ext:
-                # the crust left a column of ext[su] and lands on one of ext[n]
-                r = ext[su] / max(ext[n], 1e-12)
-                mass[n] += f * m * r
-                thickness[n] += f * th * r
+                # The Gaussian says how much each neighbour rises, so the crust (volume)
+                # lands by weight x the ground under it: every neighbour's column rises by its
+                # weight's share whatever its extent, and none is amplified for being small
+                g = w[q] * ext[n] / max(tot_e, 1e-300)
+                mass[su] -= g * m
+                thickness[su] -= g * th
+                r = w[q] * ext[su] / max(tot_e, 1e-300)
+                mass[n] += r * m
+                thickness[n] += r * th
             else:
+                f = w[q] / tot
+                mass[su] -= f * m
+                thickness[su] -= f * th
                 mass[n] += f * m
                 thickness[n] += f * th
             density[n] = mass[n] / thickness[n]
@@ -1071,11 +1078,12 @@ def spread_collisions(seg: Segments, tree: cKDTree, losers: np.ndarray, survivor
     peaks.  Mass conserving.  Must run before ``seg.compress`` (the dead
     losers' arrays still hold the transferred amounts).
 
-    ``conserve_volume`` (``tectonics.variable_extent``): a neighbour receives
-    the column scaled by ``ext[su] / ext[n]``, so ``sum(ext * thickness)``
-    and ``sum(ext * mass)`` do not move.  Off, a column moves column for
-    column, which conserves only the plain sums -- right when every extent is
-    the same, and the fixed-area model bit for bit."""
+    ``conserve_volume`` (``tectonics.variable_extent``): the crust is shared
+    as volume, by Gaussian weight times the receiver's extent, so every
+    neighbour's column rises by its weight's share and ``sum(ext *
+    thickness)`` and ``sum(ext * mass)`` do not move.  Off, a column moves
+    column for column, which conserves only the plain sums -- right when
+    every extent is the same, and the fixed-area model bit for bit."""
     if losers.size == 0:
         return
     kk = min(int(knn), tree.n)
@@ -1149,15 +1157,22 @@ def _relax_kernel(nbrs, pos, kind, thickness, mass, density, rate, thr_per_rad, 
             delta = hs - hn
             if delta <= thr:
                 continue
-            dh = rate * (delta - thr) * 0.5 / K
+            if use_ext:
+                # The step closes by the same share as ever, split between the two by their
+                # ground: the giver drops ext[n] / (ext[s] + ext[n]) of it and the receiver
+                # rises by the rest, so the crust that leaves one column is the crust that
+                # arrives on the other (column for column lost 2.3-2.8 units of continental
+                # volume over 8000 Earth steps) and a small receiver is not driven past the
+                # giver.  Equal extents give the old half and half
+                dh = rate * (delta - thr) / K * ext[n] / max(ext[s] + ext[n], 1e-300)
+            else:
+                dh = rate * (delta - thr) * 0.5 / K
             dth = dh / (1.0 - ds)
             if dth > 0.5 * thickness[s]:
                 dth = 0.5 * thickness[s]
             thickness[s] -= dth
             mass[s] -= dth * ds
             if use_ext:
-                # the crust left a column of ext[s] and lands on one of ext[n]: column for
-                # column lost 2.3-2.8 units of continental volume per 8000 Earth steps
                 r = ext[s] / max(ext[n], 1e-12)
                 thickness[n] += dth * r
                 mass[n] += dth * ds * r
@@ -1187,8 +1202,10 @@ def relax_segments(seg: Segments, tree: cKDTree, rate: float, threshold_per_spac
 
     ``conserve_volume`` (``tectonics.variable_extent``): what leaves a column
     of extent ``ext[s]`` arrives on one of ``ext[n]`` scaled by their ratio,
-    so ``sum(ext * thickness)`` does not move; off, the plain sum is what is
-    conserved (the fixed-area model, bit for bit)."""
+    so ``sum(ext * thickness)`` does not move, and the height step is split
+    between the two by their extents rather than half and half, so a small
+    receiver does not overshoot; off, the plain sum is what is conserved (the
+    fixed-area model, bit for bit)."""
     if seg.M < 2:
         return
     kk = min(int(knn) + 1, tree.n)
