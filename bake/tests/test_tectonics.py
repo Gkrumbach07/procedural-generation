@@ -949,6 +949,43 @@ def test_split_disconnected_makes_the_pieces_it_always_made(tiny_sim):
     assert np.array_equal(a.seg.plate_id[keep], want[keep])
 
 
+def test_scorecard_observer_is_bit_identical():
+    """scripts/tect_scorecard.py is what every tectonics change is judged
+    with, so it must not be a change itself: a run with the observer attached
+    -- wrapping run.collide, intraplate.rift and the cloud's compress/append,
+    sampling the map every few steps -- ends bit for bit where a plain run
+    does, and leaves the wrapped functions as it found them.  `tiny` rifts at
+    steps 20 and 40, so the rift wrapper is on the path."""
+    import json
+
+    from globe.tectonics import diagnostics as D
+
+    p = WorldParams.tiny_world()
+    steps = int(p.tectonics.steps)
+    a = tect.simulate(p, log=None)
+    b = tect.initialise(WorldParams.tiny_world(), log=None)
+    orig = (tect.collide, intraplate.rift)
+    rep = D.observe(b, steps, 10)
+    assert (tect.collide, intraplate.rift) == orig
+    assert "compress" not in b.seg.__dict__ and "append" not in b.seg.__dict__
+    for f in Segments.FIELDS:
+        assert np.array_equal(getattr(a.seg, f), getattr(b.seg, f)), f
+    assert np.array_equal(a.plates.omega, b.plates.omega)
+    assert np.array_equal(a.heat.data, b.heat.data)
+    assert a.ledger == b.ledger and a.stats == b.stats
+    # ...and it saw the run: a row at 0 and every 10 steps, the rifts, plain JSON
+    assert [s["step"] for s in rep["samples"]] == list(range(0, steps + 1, 10))
+    assert rep["final"]["rifts"] >= 1 and rep["final"]["plates_born_rift"] >= 1
+    json.dumps(rep)
+    summ = D.summarise([rep])
+    assert list(summ["checkpoints"]) == [str(steps)]
+    assert summ["checkpoints"][str(steps)]["books.cont_extent_share"]["n"] == 1
+    # the time unit it reports in is not a parameter of the world
+    q = WorldParams.tiny_world()
+    q.tectonics.myr_per_step = 0.3
+    assert q.content_hash() == p.content_hash()
+
+
 def test_determinism():
     p = WorldParams.tiny_world()
     a = tect.finalise(tect.simulate(p, log=None))

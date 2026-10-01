@@ -59,6 +59,9 @@ RUNTIME_KNOBS: dict[str, Any] = {
     # whole world (``bake`` refuses without ``--force``, and ``--force``
     # without ``--from`` reruns from tectonics).
     "erosion": {"checkpoint_every", "quicklook_every", "resume"},
+    # a reporting unit (scripts/tect_scorecard.py converts steps to My with it); the
+    # simulation never reads it, so it must not invalidate a baked world either
+    "tectonics": {"myr_per_step"},
     "render": ALL,
 }
 
@@ -94,6 +97,7 @@ class TectonicsParams:
     initial_plates: int = 4  # plates at step 0: ONE for the assembled supercontinent, the rest tiling the ocean. A supercontinent is a single rigid block -- nothing inside it collides until it breaks up -- so rifting is what raises this count, which is the right causal order
     steps: int = 4000  # 1500 ended the bake mid-dispersal with no belt younger than the breakup; 3000 is past the first reassembly (docs/plate-forces.md section 7), and 4000 is where `variable_extent` leaves the best hypsometry Earth scale has measured (band error 12.7, section 4d).  Not higher: at 8000 the continents drain to 25 % of the crust and 12000 to 22 %, an Earth-scale divergence `small` does not show (section 4e)
     convection: float = 10.0  # ★
+    myr_per_step: float = 0.15  # REPORTING ONLY: million years per tectonic step, for turning speeds into cm/yr and steps into My (scripts/tect_scorecard.py, globe/tectonics/diagnostics.py). Nothing in the simulation reads it -- it is hash-exempt (RUNTIME_KNOBS) -- because the model has no time unit of its own: speeds are in segment spacings per step, so the step's length in years is a calibration, not a parameter. Three independent readings of the shipped Earth preset (20000 segments, spacing ~160 km) agree on it: plate speeds against Earth's (slab-attached ~8 cm/yr, continents ~3), the mean age of the ocean floor against Earth's 64 My, and ridge_age (400 steps, subsidence done) against the ~80 My half-space cooling takes -- each gives 0.09-0.25 My/step, centred near 0.15, so 4000 steps are ~600 My. A run at another segment count has another spacing and so another calibration (speeds scale with the spacing)
     growth: float = 0.0  # ★ k_G (thickness units per step).  0: continental crust changes by tectonics, not by crystallising out of the mantle everywhere -- 0.05 inflated the median thickness to 2x its birth value over a run
     dissolution_factor: float = 0.05  # ★
     deposit_density: float = 0.5  # k_D

@@ -706,12 +706,15 @@ def sea_level(bed, area, continental, params) -> float:
     return float(weighted_quantile(bed, area, 1.0 - params.world.land_fraction))
 
 
-def frame_bed(sim, tree=None) -> np.ndarray:
+def frame_bed(sim, tree=None, with_c: bool = False):
     """The current crust as a sea-levelled bed on the tect grid.
 
     Shared by the in-simulation animation capture and the quicklook, so a
     frame drawn during the run is identical to the finished map.  ``tree``
-    is the segment KD-tree when the caller has already built it.
+    is the segment KD-tree when the caller has already built it.  With
+    ``with_c`` it returns ``(bed, c)``, ``c`` the narrow continental weight
+    the shelf mask is cut from (``c > 0.5`` is the crust the map draws as
+    continental), so a diagnostic reads the same pipeline instead of a copy.
     """
     from .collision import SmoothSplat, build_tree
 
@@ -723,7 +726,26 @@ def frame_bed(sim, tree=None) -> np.ndarray:
     bed = _smooth_field(grid, raw, tp, cascade=True).interior
     cont = c > 0.5 if tp.shelf_fraction > 0 else None
     sea = sea_level(bed, grid.interior_cell_area.astype(np.float64), cont, sim.params)
-    return bed - sea
+    return (bed - sea, c) if with_c else bed - sea
+
+
+def metres_per_unit(bed: np.ndarray, area: np.ndarray, tp, spacing: float, R_planet: float) -> float:
+    """The vertical scale :func:`finalise` puts on a sea-levelled bed, metres
+    per bedrock unit: the 99.9th area percentile of land at ``relief_m``, or
+    at ``relief_spacings`` mean segment spacings in metres, or plain
+    ``height_scale_m`` when both are 0 (the Earth preset).  One function, so
+    a measurement of the bed in metres uses the map the stage ships."""
+    land = bed > 0
+    # vertical scale: tie the relief to the *horizontal* scale of the
+    # tectonic pattern (the mean segment spacing, in metres) unless an
+    # explicit relief_m is given.  A constant relief_m puts the same 5 km
+    # on a pattern whose feature width in cells is preset-independent, so
+    # the land ends up at the talus angle everywhere.
+    target = float(tp.relief_m) if tp.relief_m > 0 else float(tp.relief_spacings) * spacing * R_planet
+    if target > 0 and land.any():
+        top = weighted_quantile(bed[land], area[land], 0.999)
+        return target / max(top, 1e-6)
+    return tp.height_scale_m
 
 
 def frame_image(sim, width: int = 900):
@@ -1112,19 +1134,8 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
 
         bed = inject_ranges(bed, bed_t.interior, coarse, grid, tp, params.rng("tectonics", 9), params.R_planet, float(tp.height_scale_m))
         bed -= sea_level(bed, area, shelf_mask, params)
-    land = bed > 0
-    # vertical scale: tie the relief to the *horizontal* scale of the
-    # tectonic pattern (the mean segment spacing, in metres) unless an
-    # explicit relief_m is given.  A constant relief_m puts the same 5 km
-    # on a pattern whose feature width in cells is preset-independent, so
-    # the land ends up at the talus angle everywhere.
-    target = float(tp.relief_m) if tp.relief_m > 0 else float(tp.relief_spacings) * sim.spacing * params.R_planet
-    if target > 0 and land.any():
-        top = weighted_quantile(bed[land], area[land], 0.999)
-        scale = target / max(top, 1e-6)
-    else:
-        scale = tp.height_scale_m
-    bedrock = FaceField.from_interior(coarse, (bed * scale).astype(np.float32), name="bedrock")
+    scale = metres_per_unit(bed, area, tp, sim.spacing, params.R_planet)
+    bedrock =FaceField.from_interior(coarse, (bed * scale).astype(np.float32), name="bedrock")
 
     # collision zones of the uplift window
     if sim.subduction_pts:
