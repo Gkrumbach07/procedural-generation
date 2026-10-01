@@ -366,7 +366,7 @@ def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float
 # --------------------------------------------------------------------------
 def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, oceanic_density: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None, tree: cKDTree | None = None, ext: float | None = None, stretch: float = 0.0, thin_floor: float = 0.0,
                    void: str = "create", taken_out: list | None = None, net_outflow: bool = False, pair_gate: bool = False,
-                   margin_stretch: float = 0.0, stretched_out: list | None = None) -> tuple[Segments, np.ndarray]:
+                   margin_stretch: float = 0.0, stretched_out: list | None = None, margin_width: float = 0.0) -> tuple[Segments, np.ndarray]:
     """Cells farther than ``gap_radius`` from every segment are divergent
     boundaries — provided the nearest segment is moving *away* from the
     cell (``omega`` (P, 3) rad/step given; holes left by subduction at a
@@ -419,19 +419,28 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
     ``(column units, crust units)``, so the caller can book what the new
     segments hold less what they took.
 
-    ``margin_stretch`` > 0: a gap between two plates with continental crust
-    around it is a continental rift, and the margins stretch into it before it
-    breaks -- the nearest continental neighbour takes the new segment's ground
-    and thins at constant volume, down to a column of ``margin_stretch``; only
-    then does sea floor spawn.  Rifted margins are
-    thinned ~2x over 100-300 km before breakup (Brune 2016; beta ~2-4), and
-    those thinned margins are the shelves that make up ~a third of the
-    continental crust.  Without it a continental rift spawned sea floor
-    against unthinned margins, nothing in the model made thin continental
-    crust again once the start's tapered margins were thickened by arcs and
-    collisions, and the continents' mean column rose ~18 % in 600 My (te/mass,
-    Earth seed 1).  ``stretched_out`` receives the ground the margins took, so
-    the caller does not hand it out again as open area.
+    ``margin_stretch`` > 0: a gap between two plates with continental crust on
+    *both* sides is a continental rift, and the crust it opens in is the
+    margins stretched, not sea floor, until they break: the new segment is
+    continental, on the ground the gap opened (the design cell every new
+    segment gets), and its crust is drawn at constant volume from the
+    non-craton continental crust within ``margin_width`` (radians) beyond the
+    rift's edge on either side -- the zone spreads over its ground plus the new
+    cell, so every member thins by one factor and the new segment carries the
+    zone's thinned column.  No member is thinned below ``margin_stretch``, and
+    once the zone can no longer give the new cell that column the rift has
+    broken up and the gap spawns sea floor.  Rifted margins thin from ~35 to
+    ~10-20 km over 100-300 km either side before breakup (Brune 2016; beta
+    ~2-4), and those margins are the shelves.  The rate is the divergence's:
+    a gap only opens again once the plates have drawn ~a spacing apart beside
+    the last new segment, exactly as at a ridge (Earth seed 5, 3000 steps:
+    6.4 margin segments per cell of newly opened continental-rift gap, 10.8
+    sea-floor segments per cell at the ridges).  The first form of this
+    absorbed the gap point instead, and the absorbed gap stayed open, so its
+    nearest continental segment took a whole design cell on every step it
+    stayed open: one segment wide, 1.27 to 0.64 columns in a step, cratons
+    included (review of te/mass, Earth seed 5).  ``stretched_out`` receives
+    the ground the margin segments took, for the ledger.
 
     Returns ``(new_segments, gap_mask)``; the caller appends the segments
     and cools the heat field under ``gap_mask``."""
@@ -529,31 +538,12 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
         th = np.where(interior_cont, seg.thickness[nb].mean(axis=1), new_thickness)
         de = np.where(interior_cont, seg.density[nb].mean(axis=1), oceanic_density)
         cr = np.where(interior_cont, seg.craton[nb][np.arange(pos.shape[0]), 0], 0).astype(np.int8)
+        # a continental rift: two plates, each with continental crust beside the gap
+        c_rift = None
         if margin_stretch > 0.0:
-            cont_rift = boundary & ((kinds == CONTINENTAL).mean(axis=1) >= 0.5)
-            absorbed = np.zeros(pos.shape[0], bool)
-            if cont_rift.any():
-                e_new = float(ext) if ext is not None else mean_area
-                add = {}
-                for v in np.flatnonzero(cont_rift):
-                    js = nb[v][kinds[v] == CONTINENTAL]
-                    j = int(js[0])
-                    room = float(seg.ext[j]) * max(float(seg.thickness[j]) / float(margin_stretch) - 1.0, 0.0) - add.get(j, 0.0)
-                    if room >= e_new:
-                        add[j] = add.get(j, 0.0) + e_new
-                        absorbed[v] = True
-                if add:
-                    jj = np.fromiter(add.keys(), np.int64)
-                    aa = np.fromiter(add.values(), np.float64)
-                    keep = seg.ext[jj] / (seg.ext[jj] + aa)                   # volume conserved
-                    seg.thickness[jj] *= keep
-                    seg.mass[jj] *= keep
-                    seg.ext[jj] += aa
-                if stretched_out is not None:
-                    stretched_out.append(float(absorbed.sum()) * e_new)
-                pos, plate, kind, th, de, cr, interior_cont, nb = (x[~absorbed] for x in (pos, plate, kind, th, de, cr, interior_cont, nb))
-            elif stretched_out is not None:
-                stretched_out.append(0.0)
+            cont_nb = kinds == CONTINENTAL
+            same = pl == pl[:, :1]
+            c_rift = boundary & (cont_nb & same).any(axis=1) & (cont_nb & ~same).any(axis=1)
         if stretch > 0.0 and interior_cont.any():
             # Extension, the other half of shortening.  With extent as state a void inside a
             # continent is not a hole to fill with new crust -- that manufactured continental
@@ -591,6 +581,8 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
             cr = np.where(filled, cr, 0).astype(np.int8)
             pos, plate, th, de, cr = (x[~filled] for x in (pos, plate, th, de, cr))
             kind = kind[~filled]
+            if c_rift is not None:
+                c_rift, nb = c_rift[~filled], nb[~filled]
         elif void != "create" and interior_cont.any():
             # No shortening this step to pay for the ground, and a void all the same -- 130-150
             # of them a run at Earth scale, nearly all in the first 150 steps.  Filling one with
@@ -647,7 +639,46 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
             cr = np.where(rift, 0, cr).astype(np.int8)
             if taken_out is not None:
                 taken_out[-1] = (took[0], took[1])
-        new = Segments(pos, th, de, 0.0, plate, mean_area, kind=kind, craton=cr, ext=ext if ext is not None else mean_area)
+        age_new, rw_new = 0.0, None
+        if c_rift is not None:
+            # The rifted margins: each rift point is the zone's crust spread over one more cell.
+            # Walked in the accepted order, so two new points on one rift share the zone's
+            # thinning, and a member is never taken below the floor
+            e_new = float(ext) if ext is not None else mean_area
+            n_rift = 0
+            if c_rift.any():
+                age_new, rw_new = np.zeros(pos.shape[0]), np.zeros(pos.shape[0])
+                ok = (seg.kind == CONTINENTAL) & (seg.craton == 0)       # cratons do not rift
+                moved = [0.0, 0.0]
+                for v in np.flatnonzero(c_rift):
+                    edge = float(np.linalg.norm(seg.pos[nb[v, 0]] - pos[v]))     # to the rift's edge
+                    zone = np.asarray(tree.query_ball_point(pos[v], edge + float(margin_width)), dtype=np.int64)
+                    zone = zone[ok[zone] & (seg.thickness[zone] > margin_stretch) & np.isin(seg.plate_id[zone], pl[v])]
+                    if zone.size == 0:
+                        continue                                   # nothing left to stretch: sea floor
+                    ez, tz, mz = seg.ext[zone], seg.thickness[zone], seg.mass[zone]
+                    keep = float(ez.sum()) / (float(ez.sum()) + e_new)
+                    give = ez * np.minimum((1.0 - keep) * tz, tz - margin_stretch)   # volume each gives
+                    c_new = float(give.sum()) / e_new
+                    if c_new < margin_stretch:
+                        continue                                   # broken up: sea floor
+                    f = 1.0 - give / (ez * tz)
+                    gm = ez * mz * (1.0 - f)                       # crust units each gives
+                    seg.thickness[zone] *= f                       # volume conserved: the zone's
+                    seg.mass[zone] *= f                            # crust now covers one more cell
+                    g_tot = float(gm.sum())
+                    kind[v], th[v], de[v], cr[v] = CONTINENTAL, c_new, g_tot / float(give.sum()), 0
+                    age_new[v] = float((gm * seg.age[zone]).sum()) / g_tot
+                    rw_new[v] = float((gm * seg.rework[zone]).sum()) / g_tot
+                    moved[0] += g_tot / e_new                      # column units
+                    moved[1] += g_tot                              # crust units
+                    n_rift += 1
+                if taken_out is not None:
+                    taken_out[-1] = (taken_out[-1][0] + moved[0], taken_out[-1][1] + moved[1])
+            if stretched_out is not None:
+                stretched_out.append(n_rift * e_new)
+        new = Segments(pos, th, de, age_new, plate, mean_area, kind=kind, craton=cr, ext=ext if ext is not None else mean_area,
+                       rework=rw_new)
     else:
         new = Segments(pos, new_thickness, oceanic_density, 0.0, plate, mean_area, kind=OCEANIC, ext=ext if ext is not None else mean_area)
     return new, gap

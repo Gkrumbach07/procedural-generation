@@ -35,10 +35,11 @@ plates slide past each other: on the label map the split and retreat counts were
 over 8000 steps, 80 % of retreats undoing a child, 21 % one at most 10 steps old), a plate
 needs ``band`` cells of imbalance either way (hysteresis), and a point the balance flipped is
 left alone for ``residence`` steps (``Segments.shown``).  Measured on the Earth preset
-(arc_birth 0, seeds 0-3 and 1423, 8000 steps): 2700-4000 splits and 680-890 retreats, of which
-72-121 take back a child and 31-40 one under 40 My old; the rendered continent is 0.93-1.01 of
-the extent at every sample.  A child lands on the margin nearest its parent, 840-1030 km away
-on average: the continent widens at its coast, not where the collapse made the ground.
+(arc_birth 0, seeds 0-3 and 1423, 8000 steps): 1890-2510 splits and 970-1180 retreats, of which
+97-166 take back a child and 42-67 one under 40 My old; the rendered continent is 0.94-1.02 of
+the extent at every sample.  A child lands on the margin nearest its parent, 1170-1410 km away
+on average: the continent widens at its coast, not where the collapse made the ground.  (The
+rifted margins need no split: each is a segment of its own, on the ground its rift opened.)
 """
 from __future__ import annotations
 

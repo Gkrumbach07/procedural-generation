@@ -328,9 +328,91 @@ def test_books_close_per_kind_with_every_piece_on():
     # every piece fired
     L = sim.ledger
     assert L["cv_orogen_kept"] > 0 and L["n_split"] > 0 and L["margin_eroded"] < 0 and L["ocean_relax"] > 0, L
-    assert L["rift_stretch"] > 0 and L["n_merge_coast"] > 0, L
+    assert L["n_merge_coast"] > 0, L          # (tiny's 300 segments open no continental rift in 400 steps:
+    #                                           the rifted margin's books are test_a_continental_rift_*)
     ocean = sim.seg.kind == OCEANIC
     assert sim.seg.ext[ocean].max() <= float(t.extent_max) * sim.spacing ** 2 * 1.01
+
+
+def _rift_cloud(th, craton_near=False):
+    """300 continental points, two plates split by the great circle through a hole punched at
+    point 0: the hole is a gap with continental crust of both plates around it."""
+    from globe.config import WorldParams
+    from globe.tectonics.collision import label_map_fast
+    from globe.tectonics.segments import best_candidate_sphere, mean_spacing
+    grid = WorldParams.tiny_world().tect_grid()
+    rng = np.random.default_rng(3)
+    s = mean_spacing(300)
+    pos = best_candidate_sphere(300, rng)
+    c = pos[0].copy()
+    pos = pos[np.linalg.norm(pos - c, axis=1) > 1.6 * s]
+    e = np.cross(c, [0.0, 0.0, 1.0])
+    e /= np.linalg.norm(e)
+    m = pos.shape[0]
+    plate = (pos @ e > 0.0).astype(np.int32)
+    seg = Segments(pos, th, 0.82, 50.0, plate, s * s, kind=np.full(m, CONTINENTAL, np.int8), ext=np.full(m, s * s))
+    seg.rework[:] = 20.0
+    if craton_near:
+        seg.craton[np.linalg.norm(pos - c, axis=1) < 2.4 * s] = 1
+    tree = build_tree(seg)
+    idx, dist = label_map_fast(seg, grid, 2.0 * s, tree)
+    return seg, tree, idx, dist, grid, s, c
+
+
+def _spawn_rift(seg, tree, idx, dist, grid, s, floor=0.6, width=0.5):
+    from globe.tectonics.collision import spawn_segments
+    taken, stretched = [], []
+    new, gap = spawn_segments(seg, idx, dist, grid, s, 0.85 * s, np.random.default_rng(0), None, 0.2, 0.88,
+                              tree=tree, ext=s * s, void="split", taken_out=taken, margin_stretch=floor,
+                              stretched_out=stretched, margin_width=width * s)
+    return new, taken, stretched
+
+
+def test_a_continental_rift_stretches_its_margins_at_constant_volume():
+    """A gap with continental crust of two plates around it is a rift: the new crust there is
+    the margins stretched (continental, the zone's thinned column, its age), drawn at constant
+    volume from the non-craton crust within `margin_width` beyond the rift's edge, none of it
+    below the floor -- and the crust books see the new segments' crust as taken, not made.
+    (The hole also has points with one plate around them: those are voids, `'split'` fills.)"""
+    seg, tree, idx, dist, grid, s, c = _rift_cloud(1.0)
+    th0, v0, g0, m0 = seg.thickness.copy(), seg.crust_volume(), float(seg.ext.sum()), seg.crust_mass()
+    new, taken, stretched = _spawn_rift(seg, tree, idx, dist, grid, s)
+    rift = new.age > 0.0                             # stretched crust keeps its age; a void fill is new
+    n_rift = int(rift.sum())
+    assert n_rift >= 1 and (new.kind[rift] == CONTINENTAL).all()
+    assert stretched[0] == pytest.approx(n_rift * s * s, rel=1e-12)
+    # volume and crust: what the new continental segments carry is what the cloud gave (the
+    # sea floor a broken-up rift spawns is new crust from the mantle, booked as 'spawned')
+    cn = new.kind == CONTINENTAL
+    assert seg.crust_volume() + float((new.ext * new.thickness)[cn].sum()) == pytest.approx(v0, rel=1e-12)
+    assert m0 - seg.crust_mass() == pytest.approx(float((new.ext * new.mass)[cn].sum()), rel=1e-12)
+    assert taken[0][1] == pytest.approx(m0 - seg.crust_mass(), rel=1e-12)
+    # ground: a rifted margin's cell is new ground (the gap opened it); a void fill's is handed over
+    n_void = int(((new.kind == CONTINENTAL) & ~rift).sum())
+    assert float(seg.ext.sum()) + float(new.ext.sum()) - g0 == pytest.approx((new.M - n_void) * s * s, rel=1e-12)
+    # the zone thinned together, not below the floor, on both margins, and only within reach of the rift
+    thin = seg.thickness < th0 - 1e-12
+    assert thin.sum() > n_rift and (seg.thickness >= 0.6 - 1e-12).all()
+    assert set(np.unique(seg.plate_id[thin])) == {0, 1}
+    reach = np.min(np.linalg.norm(seg.pos[thin][:, None, :] - new.pos[rift][None, :, :], axis=2), axis=1)
+    assert reach.max() <= 1.6 * s + 0.5 * s + 0.3 * s        # the edge (~the gap radius) + the width
+    assert (new.thickness[rift] < 1.0).all() and (new.thickness[rift] >= 0.6).all()
+    assert np.allclose(new.age[rift], 50.0) and np.allclose(new.rework[rift], 20.0)   # not new rock
+
+
+def test_a_rift_whose_margins_are_at_the_floor_breaks_up_and_cratons_do_not_stretch():
+    """Margins already stretched to the floor have nothing more to give: the rift has broken up
+    and the gap is sea floor.  A craton beside the rift is never thinned."""
+    seg, tree, idx, dist, grid, s, c = _rift_cloud(0.6)
+    th0 = seg.thickness.copy()
+    new, taken, stretched = _spawn_rift(seg, tree, idx, dist, grid, s)
+    assert (new.kind == OCEANIC).any() and stretched[0] == 0.0       # (the rest are 'split' void fills)
+    assert np.array_equal(seg.thickness, th0) and (new.age == 0.0).all()
+    seg, tree, idx, dist, grid, s, c = _rift_cloud(1.0, craton_near=True)
+    th0 = seg.thickness.copy()
+    new, taken, stretched = _spawn_rift(seg, tree, idx, dist, grid, s, width=2.0)
+    assert np.array_equal(seg.thickness[seg.craton == 1], th0[seg.craton == 1])
+    assert (new.kind == CONTINENTAL).any()           # the crust beyond the cratons stretched instead
 
 
 def test_fold_and_thrust_moves_what_the_convergence_delivered():
@@ -372,7 +454,7 @@ def test_fold_and_thrust_moves_what_the_convergence_delivered():
 
 @pytest.mark.slow
 def test_earth_keeps_its_continents_visible_and_in_the_books():
-    """Earth preset, arc_birth 0 (the arcs track's default), 1500 steps (~225 My, through the
+    """Earth preset (arc_birth 0), 1500 steps (~225 My, through the
     girdle phase and the first breakup): the continents keep 0.40 +- 0.04 of the ground, the
     map shows at least 0.95 of it, and each kind's books close."""
     from globe.config import PRESETS
@@ -380,7 +462,7 @@ def test_earth_keeps_its_continents_visible_and_in_the_books():
     p = PRESETS["earth"]()
     p.world.seed = 1
     p.tectonics.steps = 1500
-    p.tectonics.arc_birth = 0.0
+    assert p.tectonics.arc_birth == 0.0          # the shipped value (te/mass and te/arcs)
     sim = tect.initialise(p, log=None)
     for _ in range(1500):
         sim.step()
@@ -393,3 +475,4 @@ def test_earth_keeps_its_continents_visible_and_in_the_books():
     assert rendered / share > 0.95, (rendered, share)
     rc, ro = sim.books_residual()
     assert abs(rc) < 1e-12 and abs(ro) < 1e-12, (rc, ro)
+    assert sim.ledger["rift_stretch"] > 0.0          # the first breakup stretched its margins

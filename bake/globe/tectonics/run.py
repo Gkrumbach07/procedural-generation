@@ -580,7 +580,7 @@ class TectonicSim:
                                     spent_out=spent_out, arc_out=arc_out, recv_out=recv_out,
                                     arc_thickness=float(tp.arc_thickness) * float(tp.continental_thickness),
                                     arc_density=float(tp.continental_density), books_out=books_out,
-                                    margin_erosion=(float(tp.margin_erosion_km) / max(float(tp.column_km), 1e-9)) if tp.variable_extent else 0.0,
+                                    margin_erosion=(float(tp.margin_erosion_km) / max(float(tp.column_km), 1e-9) * float(tp.continental_thickness)) if tp.variable_extent else 0.0,
                                     diag_out=diag_out)
         received = recv_out[0] if (recv_out and tp.variable_extent) else None
         # by column or by crust, whichever this mode's ledger is kept in
@@ -723,7 +723,7 @@ class TectonicSim:
                 # a floor in metres through height_scale_m made it 1.15 columns on Earth and
                 # 2.45 on small, so only Earth ever decayed (BRIEF section 3)
                 base_bu = float(tp.belt_thickness * (1.0 - tp.continental_density))
-                floor_bu = (float(tp.orogen_floor_cols) * (1.0 - float(tp.continental_density))
+                floor_bu = (float(tp.orogen_floor_cols) * float(tp.continental_thickness) * (1.0 - float(tp.continental_density))
                             if float(tp.orogen_floor_cols) > 0.0 else float(tp.orogen_floor_m) / float(tp.height_scale_m))
                 rate = (1.0 - math.exp(-float(tp.myr_per_step) / float(tp.orogen_collapse_my))
                         if float(tp.orogen_collapse_my) > 0.0 else float(tp.orogen_decay))
@@ -762,7 +762,7 @@ class TectonicSim:
             new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega, tree=tree, ext=self.spacing ** 2, stretch=stretch_budget, thin_floor=float(tp.extent_thin_floor) * float(tp.continental_thickness) if tp.variable_extent else 0.0,
                                       void=VOID_FILL if tp.variable_extent else "create", taken_out=taken, net_outflow=str(tp.spawn_gate) == "outflow", pair_gate=str(tp.spawn_gate) == "pair",
                                       margin_stretch=float(tp.margin_stretch) * float(tp.continental_thickness) if tp.variable_extent else 0.0,
-                                      stretched_out=stretched)
+                                      stretched_out=stretched, margin_width=self.km(tp.margin_width_km))
             n_gap = int(gap.sum())
             n_new = new.M
             if tp.variable_extent and n_gap:
@@ -774,8 +774,8 @@ class TectonicSim:
                 # there is far more trench per continent than on `small` -- that alone drove
                 # them from 0.6 of the planet to 0.75
                 g = gap.ravel()
-                # (the ground rifting margins stretched over is taken already)
-                open_area = float(self.area_sr.ravel()[g].sum()) - n_new * self.spacing ** 2 - sum(stretched)
+                # (a rifted-margin segment is one of the new segments: its ground is counted there)
+                open_area = float(self.area_sr.ravel()[g].sum()) - n_new * self.spacing ** 2
                 if stretched:
                     self.ledger["rift_stretch"] = self.ledger.get("rift_stretch", 0.0) + sum(stretched)
                 if open_area > 0.0:
