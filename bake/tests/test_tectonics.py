@@ -267,6 +267,25 @@ def test_crust_books_close_for_each_kind_every_step():
     assert worst_off < 1e-12, worst_off
 
 
+@pytest.mark.parametrize("variable_extent", [True, False])
+def test_differentiation_residue_is_booked_once(variable_extent):
+    """`differentiation` lightens every survivor of the step's collisions, and one of those
+    can be a segment a later pair of the same step subducted or merged: still in the cloud
+    until compress, but its whole crust booked out by the kernel already.  Measuring the
+    residue over the whole cloud booked that segment's share twice -- this run's books were
+    2e-3 off within 40 steps, in both modes (seed 1, because seed 0's extent run happens not
+    to show it in 120)."""
+    p = WorldParams.tiny_world(1)
+    p.tectonics.variable_extent = variable_extent
+    p.tectonics.differentiation = 0.1
+    p.tectonics.steps = 40
+    sim, worst = _books_close_every_step(p, 40)
+    assert worst < 1e-12, worst
+    L = sim.ledger
+    assert sim.crust_mass() == pytest.approx(sum(L[k] for k in tect.MASS_KEYS), rel=1e-12)
+    assert sim.books["continental"]["residue"] < 0.0 and sim.books["oceanic"]["residue"] < 0.0
+
+
 def _cc_pair(ext_su, ext_lo, th=(1.0, 0.6), rho=(0.80, 0.85)):
     """Two continental segments of different plates, head-on, plate 1 moving into plate 0."""
     from globe.tectonics.segments import CONTINENTAL
@@ -351,8 +370,10 @@ def _extent_cloud(seed=4, n=800, cont=True):
 
 def test_lateral_transfers_conserve_volume_with_extent():
     """Belt layout, belt spreading and relaxation move crust between segments of
-    different extent.  With `conserve_volume` the receiver's column is scaled by
-    ext_giver / ext_receiver, so sum(ext * thickness) and sum(ext * mass) do not move;
+    different extent.  With `conserve_volume` the belt and the spread lay the crust's
+    volume out by weight x the receiver's extent (every column rises by its weight's
+    share), and relax gives the receiver dth * ext_giver / ext_receiver with the height
+    step split by the two extents, so sum(ext * thickness) and sum(ext * mass) do not move;
     column for column -- the fixed-area rule, still what the flag off does -- they do,
     which is what made +11 units of continental crust in the belts over 8000 Earth steps."""
     from globe.tectonics import orogeny

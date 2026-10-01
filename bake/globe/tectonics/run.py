@@ -145,7 +145,8 @@ OUTPUTS = ["bedrock", "uplift", "hardness", "plate_id", "plate_vel"]
 #:   a trench, the ``1 - arc_accretion`` of every slab, as the collision kernel counts it.  It
 #:   used to be the collision phase's whole change in crust mass less the arcs, which also
 #:   held everything the belt, merge and relax transfers made or lost -- measured on Earth
-#:   seed 0 over 8000 steps, slabs -46.3 against a booked -27.9.  Anything those transfers do
+#:   seed 0 over 8000 steps, a net slab sink of -39.0 (-46.3 gone down, +7.3 of it welded on as
+#:   ``accreted``) against a booked -27.9.  Anything those transfers do
 #:   now shows as books that do not close (`books_residual`), not as subduction.
 #: * ``delaminated`` -- roots over ``max_crust_thickness`` foundering.
 #: * ``orogen_decayed`` -- belt height above the floor sent back to the mantle.
@@ -154,7 +155,8 @@ OUTPUTS = ["bedrock", "uplift", "hardness", "plate_id", "plate_vel"]
 #: * ``extent_closed`` -- the crust the extent closure carries with the ground it hands out
 #:   (``variable_extent``).
 #: * ``hotspot`` -- crust a hotspot track adds (``hotspots``; 0 by default).
-#: * ``residue`` -- the dense residue ``differentiation`` sends to the mantle (0 by default).
+#: * ``residue`` -- the dense residue ``differentiation`` sends to the mantle, off the segments
+#:   that outlive the step's collisions (0 by default).
 MASS_KEYS = ("initial", "spawned", "crystallised", "subducted", "delaminated", "orogen_decayed", "arc_mantle",
              "extent_closed", "hotspot", "residue")
 #: The two crust kinds the books are also kept for (`TectonicSim.books`).
@@ -260,11 +262,15 @@ class TectonicSim:
         self.sutures = 0
 
     # -- helpers ------------------------------------------------------------
-    def kind_mass(self) -> tuple[float, float]:
-        """``crust_mass`` split by kind: (continental, oceanic)."""
+    def kind_mass(self, live: np.ndarray | None = None) -> tuple[float, float]:
+        """``crust_mass`` split by kind: (continental, oceanic).  ``live`` (a mask over the
+        cloud) counts only those segments: between `collide` and `Segments.compress` the
+        cloud still holds the ones the kernel has taken out, and booked out, already."""
         seg = self.seg
         w = seg.ext * seg.mass if self.tp.variable_extent else seg.mass
         c = seg.kind == CONTINENTAL
+        if live is not None:
+            w, c = w[live], c[live]
         return float(w[c].sum()), float(w[~c].sum())
 
     def _book(self, key: str, dc: float, do: float) -> None:
@@ -275,9 +281,10 @@ class TectonicSim:
         if key not in CONVERSION_KEYS:
             self.ledger[key] = self.ledger.get(key, 0.0) + dc + do
 
-    def _book_change(self, key: str, before: tuple[float, float]) -> tuple[float, float]:
-        """Book a single-purpose phase's whole change since ``before`` (a :meth:`kind_mass`)."""
-        after = self.kind_mass()
+    def _book_change(self, key: str, before: tuple[float, float], live: np.ndarray | None = None) -> tuple[float, float]:
+        """Book a single-purpose phase's whole change since ``before`` (a :meth:`kind_mass`
+        over the same ``live`` mask)."""
+        after = self.kind_mass(live)
         self._book(key, after[0] - before[0], after[1] - before[1])
         return after
 
@@ -415,10 +422,17 @@ class TectonicSim:
             # what separates continental from oceanic crust, and so what makes
             # the elevation histogram bimodal instead of one spike.
             if tp.differentiation > 0.0:
-                km = self.kind_mass()
+                # the residue is measured over the live segments only.  `survivors` can hold a
+                # segment that a later pair of this step subducted or merged; the kernel booked
+                # its whole crust out already and compress drops it below, so counting what
+                # differentiate took off it as well booked it twice (small seed 3,
+                # differentiation 0.1, 300 steps: the global ledger 2e-4 of the crust off and
+                # the oceanic books 9e-4 with fixed area, 1.4e-5 and 2.9e-4 with extent, both
+                # first wrong at step 13)
+                km = self.kind_mass(alive)
                 self.ledger["differentiated"] = self.ledger.get("differentiated", 0.0) + differentiate(
                     seg, survivors, float(tp.differentiation), float(tp.density_continental))
-                self._book_change("residue", km)
+                self._book_change("residue", km, alive)
             pts = seg.pos[losers].copy()
             if tp.suture_collisions > 0.0:
                 cc = (seg.kind[losers] == CONTINENTAL) & (seg.kind[survivors] == CONTINENTAL)

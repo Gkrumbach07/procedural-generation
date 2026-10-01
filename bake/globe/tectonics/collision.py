@@ -395,9 +395,10 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
     'split' 5 / 5, 0.52 / 0.20 %; 'stretch' 75 / 82, 4.6 / 5.7 %; 'ocean'
     83 / 90, 4.9 / 5.8 %.  There are 130-150 such voids in a run, almost all
     before step 150, and a column thinned by a seventh (stretch) or replaced
-    by sea floor (ocean) drowns in the middle of the supercontinent.  ``taken_out`` receives the crust taken from existing
-    segments, ``(column units, crust units)``, so the caller can book what
-    the new segments hold less what they took.
+    by sea floor (ocean) drowns in the middle of the supercontinent.
+    ``taken_out`` receives the crust taken from existing segments,
+    ``(column units, crust units)``, so the caller can book what the new
+    segments hold less what they took.
 
     Returns ``(new_segments, gap_mask)``; the caller appends the segments
     and cools the heat field under ``gap_mask``."""
