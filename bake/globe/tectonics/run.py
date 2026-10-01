@@ -120,6 +120,7 @@ from .plates import (
     seed_supercontinent,
     snap_cratons,
     superocean_plates,
+    zipf_ocean_plates,
     ocean_age_from_ridges,
     supercontinent_plates,
     tangent_to_cell_components,
@@ -469,7 +470,12 @@ class TectonicSim:
             plates = self.plates
             for a, b in ev.get("pairs", ()):
                 self.suture_block[(min(a, b), max(a, b))] = k + int(tp.suture_cooldown)
-        if str(tp.rift_mode) == "insulation" and k > 0 and k % max(1, int(tp.rift_check_every)) == 0:
+        if tp.micro_area > 0 and k > 0 and k % max(1, int(tp.micro_every)) == 0:
+            ev = intraplate.micro_merge(self, self.params.rng("tectonics", 12, k))
+            if ev.get("merges"):
+                self.events.append(ev)
+                plates = self.plates
+        if str(tp.rift_mode) in ("insulation", "force") and k > 0 and k % max(1, int(tp.rift_check_every)) == 0:
             ev = intraplate.rift(self, self.params.rng("tectonics", 6, k), int(tp.rift_plates))
             if ev.get("pairs"):
                 self.events.append(ev)
@@ -675,7 +681,7 @@ class TectonicSim:
             accumulate_area(seg, idx, self.area_sr, tp.area_blend)
             taken: list = []
             new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega, tree=tree, ext=self.spacing ** 2, stretch=stretch_budget, thin_floor=float(tp.extent_thin_floor) * float(tp.continental_thickness) if tp.variable_extent else 0.0,
-                                      void=VOID_FILL if tp.variable_extent else "create", taken_out=taken, net_outflow=bool(tp.spawn_net_outflow))
+                                      void=VOID_FILL if tp.variable_extent else "create", taken_out=taken, net_outflow=str(tp.spawn_gate) == "outflow", pair_gate=str(tp.spawn_gate) == "pair")
             n_gap = int(gap.sum())
             n_new = new.M
             if tp.variable_extent and n_gap:
@@ -1111,8 +1117,12 @@ def initialise(params: WorldParams, log=print) -> TectonicSim:
     cont_rho = np.where(is_cr, tp.craton_density, tp.continental_density)
     density = np.where(cont, cont_rho, tp.oceanic_density)
     if pangaea:
-        plate_id = superocean_plates(pos, kind, int(tp.initial_plates), rng, size_jitter=float(tp.plate_size_jitter),
-                                     max_share=float(tp.ocean_plate_max))
+        if str(tp.ocean_tiling) == "zipf":
+            plate_id = zipf_ocean_plates(pos, kind, int(tp.initial_plates), rng, lo=float(tp.ocean_plate_min),
+                                         hi=float(tp.ocean_plate_max), alpha=float(tp.ocean_plate_alpha))
+        else:
+            plate_id = superocean_plates(pos, kind, int(tp.initial_plates), rng, size_jitter=float(tp.plate_size_jitter),
+                                         max_share=float(tp.ocean_plate_max))
     else:
         plate_id = supercontinent_plates(pos, kind, int(tp.initial_plates), rng,
                                          size_jitter=float(tp.plate_size_jitter))

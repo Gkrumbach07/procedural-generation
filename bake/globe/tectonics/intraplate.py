@@ -328,6 +328,8 @@ def rift(sim, rng, max_plates: int = 1) -> dict:
     if str(tp.rift_mode) == "insulation":
         # one entry point for both modes, so whatever wraps `rift` sees every rift
         return insulation_rifts(sim, rng)
+    if str(tp.rift_mode) == "force":
+        return force_rifts(sim, rng)
     big = (plate_ground(sim) >= min_ground(sim, tp.rift_min_area, RIFT_MIN_SEGMENTS) if tp.variable_extent
            else plates.count >= RIFT_MIN_SEGMENTS)
     alive = np.flatnonzero(plates.alive & big)
@@ -528,6 +530,411 @@ def _rift_insulated(sim, target: int, rng, D: np.ndarray, candidates: int = 32) 
             "plates": int(new.n_alive())}
 
 
+def _strength(sim, idx: np.ndarray) -> np.ndarray:
+    """Lithospheric strength per segment, relative to a mobile belt (1): cratons
+    ``rift_craton_strength``, a suture or belt assembled within ``rift_suture_my``
+    ``rift_suture_strength`` (rifts reopen sutures; Buiter & Torsvik 2014), sea floor
+    ``rift_ocean_strength``."""
+    from .segments import CONTINENTAL
+
+    tp, seg = sim.tp, sim.seg
+    cont = seg.kind[idx] == CONTINENTAL
+    young = seg.rework[idx] < sim.steps_of(tp.rift_suture_my)
+    s = np.where(seg.craton[idx] > 0, float(tp.rift_craton_strength),
+                 np.where(young, float(tp.rift_suture_strength), 1.0))
+    return np.where(cont, s, float(tp.rift_ocean_strength))
+
+
+def _wq(x: np.ndarray, w: np.ndarray, q: float) -> float:
+    o = np.argsort(x)
+    cw = np.cumsum(w[o]) / max(float(w.sum()), 1e-30)
+    return float(x[o][min(int(np.searchsorted(cw, q)), x.size - 1)])
+
+
+def _keep_connected(side: np.ndarray, a: np.ndarray, b: np.ndarray, n: int) -> np.ndarray:
+    """Each half keeps only its largest connected piece; the rest join the other half."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    side = side.copy()
+    for s_val in (True, False):
+        idx = np.flatnonzero(side == s_val)
+        if idx.size < 2:
+            continue
+        loc = np.full(n, -1)
+        loc[idx] = np.arange(idx.size)
+        e = (side[a] == s_val) & (side[b] == s_val)
+        g = coo_matrix((np.ones(int(e.sum()), np.int8), (loc[a[e]], loc[b[e]])), shape=(idx.size, idx.size))
+        nc, comp = connected_components(g, directed=False)
+        if nc > 1:
+            sizes = np.bincount(comp)
+            side[idx[comp != int(np.argmax(sizes))]] = not s_val
+    return side
+
+
+def force_rifts(sim, rng) -> dict:
+    """Rift the continental plates whose lithosphere fails under the forces (synth-dyn).
+
+    The trigger is the force balance itself, released along a candidate cut
+    (dyn-events' test, in dyn-minimal's balance): a plate carrying at least
+    ``rift_min_cont`` of continent, insulated underneath (mean deficit >=
+    ``rift_deficit_min``: it has sat still long enough for the mantle under it
+    to well up) and not rifted within ``rift_refractory_my``, is cut along
+    ``rift_candidates`` great circles -- half through its insulation upwelling,
+    half through points drawn by deficit / strength -- and each cut is released
+    in the balance (:func:`forces.release`, every other plate held at its
+    terminal velocity).  A cut qualifies if
+
+    * it lies within ``rift_max_angle`` degrees of its centre (the normal
+      component of a relative rotation along a great circle goes as
+      cos(theta - theta0), so a cut longer than ~180 degrees must converge
+      somewhere -- the shipped rift's far side);
+    * at most ``rift_max_conv`` of it (by length) would converge, and its
+      10th-percentile opening is at least ``rift_end_open`` of the mean, so the
+      halves' relative pole is not at one end of the cut (dyn-minimal's
+      first rifts hinged at the pivot and the halves stayed one landmass for
+      ~500 My);
+    * both halves keep ``rift_half_min`` of the plate's continent and at least
+      ``rift_min_half`` of the sphere, and each half is one connected piece.
+
+    Its tension is the force per unit cut length that would hold the halves
+    together -- the free opening rate times the halves' reduced drag, over the
+    cut length -- divided by the cut's mean strength (cratons strong, young
+    sutures weak).  The best cut rifts if its tension exceeds
+    ``rift_tension`` (x a +-15 % per-plate jitter).  No kick: both halves keep
+    the plate's motion; the rift starts held by its own strength G0,
+    calibrated so it opens at ``rift_slow_cmyr``, and necks with opening
+    (forces.assemble), so it is slow first and fast after (Brune et al.
+    2016)."""
+    from .segments import CONTINENTAL
+
+    seg, plates, tp = sim.seg, sim.plates, sim.tp
+    bal = getattr(sim, "balance", None)
+    if bal is None or bal.rc is None or bal.D.shape[0] != seg.M:
+        return {"event": "rift", "split": [], "pairs": []}
+    k = int(sim.step_index)
+    D, Ac = insulation_deficit(sim)
+    cont = seg.kind == CONTINENTAL
+    P = plates.P
+    w = seg.ext * cont
+    Dp = np.bincount(seg.plate_id, weights=D * w, minlength=P)[:P] / np.maximum(np.bincount(seg.plate_id, weights=w, minlength=P)[:P], 1e-30)
+    refr = sim.steps_of(tp.rift_refractory_my)
+    busy = {a for pr in sim.rift_pairs for a in pr}
+    out = []
+    diag = {}
+    for q in np.flatnonzero(plates.alive & (Ac >= float(tp.rift_min_cont))):
+        q = int(q)
+        if q in busy or k - sim.last_rift.get(q, -10 ** 9) < refr:
+            continue
+        # the time gate: the insulation under the plate's continent, scaled gently by the
+        # continent's size (a small continent's dome leaks heat sideways), against the plate's
+        # strength (+-15 % jitter).  The released-cut tension alone is flat in time -- the
+        # girdle's pull is there from the start -- so it cannot say *when*; it says where
+        sigma = float(Dp[q]) * (float(Ac[q]) / float(tp.rift_size_ref)) ** float(tp.rift_size_exponent)
+        jit = sim.rift_jitter.setdefault(q, 1.0 + 0.15 * (2.0 * float(rng.random()) - 1.0))
+        diag[q] = round(sigma, 3)
+        if sigma < float(tp.rift_deficit) * jit:
+            continue
+        r = _force_rift_one(sim, q, rng, D)
+        diag[q] = (round(sigma, 3), r.get("best_score"))
+        if r.get("split", -1) >= 0:
+            out.append(r)
+            busy.update((r["a"], r["b"]))
+    sim.rift_diag = diag
+    pairs = [(r["a"], r["b"]) for r in out]
+    return {"event": "rift", "split": [r["a"] for r in out], "pairs": pairs,
+            "centre": out[0]["centre"] if out else None, "detail": out, "plates": int(sim.plates.n_alive())}
+
+
+def _force_rift_one(sim, q: int, rng, D: np.ndarray) -> dict:
+    from scipy.spatial import cKDTree
+
+    from . import forces
+    from .segments import CONTINENTAL
+
+    seg, plates, tp = sim.seg, sim.plates, sim.tp
+    bal = sim.balance
+    sp = sim.spacing
+    sel = np.flatnonzero(seg.plate_id == q)
+    if sel.size < 40:
+        return {"split": -1}
+    pos = seg.pos[sel]
+    cont = seg.kind[sel] == CONTINENTAL
+    ext = seg.ext[sel]
+    Ctot = float((ext * cont).sum())
+    pr = cKDTree(pos).query_pairs(1.25 * sp, output_type="ndarray")
+    if pr.shape[0] == 0:
+        return {"split": -1}
+    a, b = pr[:, 0], pr[:, 1]
+    strength = _strength(sim, sel)
+    Dl = D[sel]
+    wc = ext * cont * (0.05 + Dl)
+    c = (pos * wc[:, None]).sum(axis=0)
+    if np.linalg.norm(c) < 1e-9:
+        return {"split": -1}
+    c /= np.linalg.norm(c)
+    cl = np.flatnonzero(cont)
+    pw = (0.05 + Dl[cl]) / strength[cl]
+    pw /= pw.sum()
+    zig = float(tp.rift_cut_zigzag)
+    noise = zig * fbm_at(pos, rng, octaves=3, base_freq=float(tp.rift_zigzag_freq)) if zig > 0.0 else 0.0
+    half_min = max(float(tp.rift_half_min) * Ctot, float(tp.rift_min_half) * 4.0 * np.pi)
+    max_ang = float(tp.rift_max_angle)
+    drag = sim.drag_per_len()
+    damp = float(tp.damping)
+    m_o = float(tp.oceanic_thickness) * float(tp.oceanic_density)
+    cms = sim.R_km * 0.1 / float(tp.myr_per_step)
+    best = None
+    best_any = None
+    crs = seg.craton[sel]
+    ucr = np.unique(crs[crs > 0])
+    for n_try in range(int(tp.rift_candidates)):
+        p0 = c if n_try % 2 == 0 else pos[cl[rng.choice(cl.size, p=pw)]]
+        v = random_unit_vectors(rng, (1,))[0]
+        nn = v - p0 * float(v @ p0)
+        ln = float(np.linalg.norm(nn))
+        if ln < 1e-9:
+            continue
+        nn /= ln
+        side = (pos @ nn + noise) > 0.0
+        for cq in ucr:
+            m = crs == cq
+            side[m] = bool(side[m].mean() > 0.5)
+        side = _keep_connected(side, a, b, sel.size)
+        cb_ = float((ext * cont * side).sum())
+        if min(cb_, Ctot - cb_) < half_min:
+            continue
+        cross = side[a] != side[b]
+        if int(cross.sum()) < 4:
+            continue
+        ia = np.where(side[a[cross]], b[cross], a[cross])          # A side (False)
+        ib = np.where(side[a[cross]], a[cross], b[cross])          # B side (True)
+        mid = pos[ia] + pos[ib]
+        mid /= np.linalg.norm(mid, axis=1, keepdims=True)
+        cc = mid.mean(axis=0)
+        cc /= max(np.linalg.norm(cc), 1e-12)
+        ang = np.degrees(np.arccos(np.clip(mid @ cc, -1.0, 1.0)))
+        if float(ang.max()) > max_ang:
+            continue
+        wA, wB = forces.release(bal, seg, sel, side, sel[ia], sel[ib], drag)
+        nt = nn[None, :] - mid * (mid @ nn)[:, None]
+        nt /= np.maximum(np.linalg.norm(nt, axis=1, keepdims=True), 1e-12)
+        opening = np.sum(np.cross(wB - wA, mid) * nt, axis=1)          # rad/step, > 0 opening
+        lw = 0.5 * (np.sqrt(ext[ia]) + np.sqrt(ext[ib]))
+        mean = float(np.average(opening, weights=lw))
+        conv = float(lw[opening < 0].sum() / lw.sum())
+        q10 = _wq(opening, lw, 0.1)
+        L = float(lw.sum()) / 1.5                                       # pairs at 1.25 sp overcount the line ~1.5x
+        dA = float(np.trace(bal.D[sel[~side]].sum(axis=0))) / 3.0
+        dB = float(np.trace(bal.D[sel[side]].sum(axis=0))) / 3.0
+        mu = dA * dB / max(dA + dB, 1e-30) / (damp * m_o)
+        s_cut = float(np.average(0.5 * (strength[ia] + strength[ib]), weights=lw))
+        score = mean * cms * mu / max(L, 1e-6) / max(s_cut, 1e-9)
+        ok = (mean * cms >= float(tp.rift_min_open_cmyr) and conv <= float(tp.rift_max_conv)
+              and q10 >= float(tp.rift_end_open) * mean)
+        rec = dict(score=score, mean=mean, conv=conv, q10=q10, side=side, ia=ia, ib=ib, wA=wA, wB=wB, mid=mid, nt=nt,
+                   lw=lw, centre=cc, ext_deg=2.0 * float(ang.max()), s_cut=s_cut, mu=mu, L=L, ok=ok)
+        if best_any is None or score > best_any["score"]:
+            best_any = rec
+        if ok and (best is None or score > best["score"]):
+            best = rec
+    def _d(r):
+        if r is None:
+            return None
+        return (round(r["score"], 2), round(r["mean"] * cms, 2), round(r["mu"], 2), round(r["L"], 2), round(r["s_cut"], 2),
+                round(r["conv"], 3), round(r["q10"] / max(r["mean"], 1e-30), 2), round(float(Dl[cont].mean()), 2))
+    if best is None:
+        return {"split": -1, "best_score": ("x",) + (_d(best_any) or ())}
+    if best["score"] < float(tp.rift_tension):
+        return {"split": -1, "best_score": _d(best)}
+    side, ia, ib, mid, nt, lw = best["side"], best["ia"], best["ib"], best["mid"], best["nt"], best["lw"]
+    # the rift's strength: the coupling that holds the opening at rift_slow_cmyr.  A trial
+    # solve at G = 1 (the coupling forces.assemble gives a rift pair: G times the smaller
+    # half's basal drag, spread over the contacts) says how the opening falls with G
+    basal = sim.basal_seg()[sel] * float(tp.damping)
+    Idm = min(float(basal[~side].sum()), float(basal[side].sum()))
+    kv1 = Idm / max(float(lw.sum()), 1e-12) * lw
+    wA1, wB1 = forces.release(bal, seg, sel, side, sel[ia], sel[ib], drag, couple=kv1)
+    r0 = best["mean"]
+    r1 = float(np.average(np.sum(np.cross(wB1 - wA1, mid) * nt, axis=1), weights=lw))
+    slow = sim.cmyr(tp.rift_slow_cmyr)
+    if r1 > 1e-12 and r0 > r1 and r0 > slow:
+        G0 = (r0 / slow - 1.0) / (r0 / r1 - 1.0)
+    else:
+        G0 = 0.0
+    G0 = float(min(max(G0, 0.0), float(tp.rift_strength_max)))
+    P = plates.P
+    pid = seg.plate_id.copy()
+    pid[sel[side]] = P
+    new = _rebuild(seg, pid, P + 1, rng, float(tp.initial_speed) * sim.spacing, keep=plates.omega, snap=False)
+    new.omega[P] = plates.omega[q]
+    new.omega[~new.alive] = 0.0
+    sim.plates = new
+    k = int(sim.step_index)
+    sim.rift_pairs[(int(q), int(P))] = {"k0": k, "delta": 0.0, "G0": G0}
+    sim.last_rift[int(q)] = k
+    sim.last_rift[int(P)] = k
+    sim.rift_jitter.pop(int(q), None)
+    A4 = 4.0 * np.pi
+    return {"split": int(q), "a": int(q), "b": int(P), "k0": k, "centre": best["centre"].tolist(),
+            "score": round(best["score"], 3), "free_cmyr": round(r0 * sim.R_km * 0.1 / float(tp.myr_per_step), 3),
+            "G0": round(G0, 3), "conv": round(best["conv"], 4), "q10_ratio": round(best["q10"] / max(r0, 1e-30), 3),
+            "extent_deg": round(best["ext_deg"], 1), "strength": round(best["s_cut"], 2),
+            "area_a": float(seg.ext[sel[~side]].sum() / A4), "area_b": float(seg.ext[sel[side]].sum() / A4),
+            "cont_a": float((seg.ext * (seg.kind == CONTINENTAL))[sel[~side]].sum() / A4),
+            "cont_b": float((seg.ext * (seg.kind == CONTINENTAL))[sel[side]].sum() / A4),
+            "best_score": round(best["score"], 3)}
+
+
+def micro_merge(sim, rng) -> dict:
+    """Small plates live and die (dyn-events' merge_microplates, on dyn-minimal's slab field).
+
+    A plate below ``micro_area`` of the sphere that is not the down-going plate of a
+    live slab (slab >= a quarter of saturation along its trenches) and is not one half
+    of an open rift is *passive*; once it has been passive for ``micro_life_my`` it is
+    captured by the neighbour with the longest shared boundary that it is not
+    converging on (mean approach <= ``micro_conv_cmyr``).  A remnant below
+    ``plate_min_area`` -- what a trench leaves of a nearly consumed plate -- is
+    captured at once by the neighbour it shares most boundary with and is not diving
+    under (on its own it is a few segments with a slab's pull and little drag, and
+    spun at the speed cap; the Monterey and Arguello remnants of the Farallon plate
+    were captured by the Pacific).  Small plates on Earth live 10-20 My (Morra 2013)."""
+    seg, plates, tp = sim.seg, sim.plates, sim.tp
+    cen = getattr(sim, "census_last", None)
+    if cen is None or cen["i"].size == 0 or int(max(cen["i"].max(), cen["j"].max())) >= seg.M:
+        return {"event": "micro_merge", "merges": []}
+    k = int(sim.step_index)
+    P = plates.P
+    pid = seg.plate_id.astype(np.int64)
+    area = np.bincount(pid, weights=seg.ext, minlength=P)[:P] / (4.0 * np.pi)
+    slabbed = np.zeros(P, bool)
+    si = getattr(sim, "slab_info", None)
+    if si is not None and si["seg"].size and int(si["seg"].max()) < seg.M:
+        live = si["seg"][si["g"] >= 0.25]
+        slabbed[np.unique(pid[live])] = True
+    rifting = np.zeros(P, bool)
+    for a_, b_ in sim.rift_pairs:
+        if a_ < P:
+            rifting[a_] = True
+        if b_ < P:
+            rifting[b_] = True
+    small = plates.alive & (area > 0) & (area < float(tp.micro_area)) & ~slabbed & ~rifting
+    for q in list(sim.micro_passive):
+        if q >= P or not small[q]:
+            sim.micro_passive.pop(q, None)
+    for q in np.flatnonzero(small):
+        sim.micro_passive.setdefault(int(q), k)
+    life = sim.steps_of(tp.micro_life_my)
+    due = [q for q, s0 in sim.micro_passive.items() if k - s0 >= life]
+    remnant = [int(q) for q in np.flatnonzero(plates.alive & (area > 0) & (area < float(tp.plate_min_area))) if int(q) not in due]
+    todo = [(q, False) for q in due] + [(q, True) for q in remnant]
+    if not todo:
+        return {"event": "micro_merge", "merges": []}
+    i, j = cen["i"], cen["j"]
+    pi_, pj_ = pid[i], pid[j]
+    v = np.cross(plates.omega[pid], seg.pos)
+    appr = np.sum((v[i] - v[j]) * cen["dd"], axis=1)             # > 0: i converging on j
+    w = cen["w"]
+    # who dives under whom along each contact (the census's velocity-independent rule)
+    thr = sim.cmyr(tp.micro_conv_cmyr)
+    new_pid = pid.copy()
+    gone: set = set()
+    merges = []
+    for q, is_rem in todo:
+        if q in gone:
+            continue
+        mi = (pi_ == q) & (pj_ != q)
+        mj = (pj_ == q) & (pi_ != q)
+        if not (mi.any() or mj.any()):
+            continue
+        other = np.concatenate([pj_[mi], pi_[mj]])
+        ap = np.concatenate([appr[mi], appr[mj]])                   # q converging on the other: > 0
+        ww = np.concatenate([w[mi], w[mj]])
+        qdown = np.concatenate([cen["down_i"][mi], cen["down_j"][mj]])
+        best, best_w = None, 0.0
+        for o in np.unique(other):
+            o = int(o)
+            if o in gone or not plates.alive[o]:
+                continue
+            m = other == o
+            L = float(ww[m].sum())
+            dives = bool(qdown[m].mean() > 0.5) and slabbed[q]
+            if not is_rem:
+                if float(np.average(ap[m], weights=ww[m])) > thr or dives:
+                    continue
+            elif dives and np.unique(other).size > 1:
+                continue
+            if L > best_w:
+                best, best_w = o, L
+        if best is None:
+            continue
+        new_pid[new_pid == q] = best
+        gone.add(q)
+        merges.append({"plate": int(q), "into": int(best), "area": float(area[q]), "remnant": bool(is_rem)})
+    if merges:
+        sim.plates = _rebuild(seg, new_pid, P, rng, float(tp.initial_speed) * sim.spacing, keep=plates.omega, snap=False)
+        for m in merges:
+            q = m["plate"]
+            sim.micro_passive.pop(q, None)
+            sim.last_rift.pop(q, None)
+            for pr in [pr for pr in sim.rift_pairs if q in pr]:
+                sim.rift_pairs.pop(pr)
+    return {"event": "micro_merge", "merges": merges, "plates": int(sim.plates.n_alive())}
+
+
+def _margin_test(sim, p: int, co: np.ndarray, oc: np.ndarray) -> dict | None:
+    """Would the old floor of plate ``p`` go down under its own continent if it broke
+    away?  The plate is released along its continental margin in the force balance
+    (forces.release, every other plate at its terminal velocity), the floor carrying
+    the pull and the bending resistance of a seed slab of ``margin_collapse_slab_km``
+    at the margin -- the old, dense floor's own negative buoyancy (spontaneous
+    initiation, Stern 2004) -- and the margin is tested for convergence: the forced
+    part of initiation (Gurnis et al. 2004).  None when the plate has no margin."""
+    from scipy.spatial import cKDTree
+
+    from . import forces
+
+    seg, tp = sim.seg, sim.tp
+    bal = getattr(sim, "balance", None)
+    if bal is None or bal.rc is None or bal.D.shape[0] != seg.M:
+        return None
+    sel = np.concatenate([co, oc])
+    side = np.zeros(sel.size, bool)
+    side[co.size:] = True                                              # B: the floor
+    pr = cKDTree(seg.pos[sel]).query_pairs(1.25 * sim.spacing, output_type="ndarray")
+    cross = side[pr[:, 0]] != side[pr[:, 1]]
+    if int(cross.sum()) < 4:
+        return None
+    pr = pr[cross]
+    ia = np.where(side[pr[:, 0]], pr[:, 1], pr[:, 0])                 # continent
+    ib = np.where(side[pr[:, 0]], pr[:, 0], pr[:, 1])                 # floor
+    ga, gb = sel[ia], sel[ib]
+    pos = seg.pos
+    d = pos[ga] - pos[gb]                                              # floor -> continent
+    rm = pos[ga] + pos[gb]
+    rm /= np.linalg.norm(rm, axis=1, keepdims=True)
+    d -= np.sum(d * rm, axis=1, keepdims=True) * rm
+    d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-12)
+    ell = np.sqrt(seg.ext)
+    cnt = np.bincount(gb, minlength=seg.M)
+    ln = ell[gb] / np.maximum(cnt[gb], 1)
+    g = min(sim.km(tp.margin_collapse_slab_km) / max(sim.km(tp.slab_sat_km), 1e-12), 1.0)
+    a_age = np.sqrt(np.clip(seg.age[gb] / max(sim.steps_of(tp.slab_age_my), 1e-9), 0.0, 1.0))
+    a_age = float(tp.slab_age_floor) + (1.0 - float(tp.slab_age_floor)) * a_age
+    f = (float(tp.slab_force) * g * a_age * ln)[:, None] * d
+    tq = sim.gain * np.cross(pos[gb], f)
+    u = sim.cmyr(tp.slab_speed_cmyr)
+    trench = sim.gain * float(tp.slab_force) / u if u > 0 else 0.0
+    ac = np.cross(pos[gb], d)
+    blk = (trench * g * ln)[:, None, None] * ac[:, :, None] * ac[:, None, :]
+    wC, wO = forces.release(bal, seg, sel, side, ga, gb, sim.drag_per_len(), extra_t=(gb, tq), extra_D=(gb, blk))
+    vO = np.cross(wO, pos[gb])
+    vC = np.cross(wC, pos[ga])
+    appr = np.sum((vO - vC) * d, axis=1)                               # > 0: the floor closes on the margin
+    cms = sim.R_km * 0.1 / float(tp.myr_per_step)
+    return {"approach_cmyr": float(np.average(appr, weights=ln)) * cms, "conv_share": float(ln[appr > 0].sum() / ln.sum())}
+
+
 def margin_collapse(sim, rng) -> dict:
     """Old passive margins fail: the closing half of the Wilson cycle.
 
@@ -575,6 +982,11 @@ def margin_collapse(sim, rng) -> dict:
         jit = sim.collapse_jitter.setdefault(p, 1.0 + 0.15 * (2.0 * float(rng.random()) - 1.0))
         if float(np.median(seg.age[margin])) * myr < float(tp.margin_collapse_my) * jit:
             continue
+        test = None
+        if tp.margin_collapse_test:
+            test = _margin_test(sim, p, co, oc)
+            if test is None or test["approach_cmyr"] < float(tp.margin_collapse_min_cmyr) or test["conv_share"] < 0.5:
+                continue
         Pn = plates.P
         new_pid = seg.plate_id.copy()
         new_pid[oc] = Pn
@@ -589,7 +1001,8 @@ def margin_collapse(sim, rng) -> dict:
             flat = sim.slab.interior.reshape(-1).copy()
             forces.deposit_blobs(flat, sim.heat_tree, seg.pos[margin], np.full(margin.size, 0.4 * s0), 2.0 * sim.spacing)
             sim.slab.interior[...] = np.maximum(sim.slab.interior, np.minimum(flat.reshape(sim.slab.interior.shape), s0))
-        out.append({"plate": p, "new": int(Pn), "moved": int(oc.size), "margin_age_my": float(np.median(seg.age[margin]) * myr)})
+        out.append({"plate": p, "new": int(Pn), "moved": int(oc.size), "margin_age_my": float(np.median(seg.age[margin]) * myr),
+                    "test": test})
         P = plates.P
         pid = seg.plate_id
     return {"event": "collapse", "collapses": out, "plates": int(sim.plates.n_alive())}

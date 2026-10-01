@@ -365,7 +365,7 @@ def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float
 # gaps -> new crust (PLAN 6.2.4)
 # --------------------------------------------------------------------------
 def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, oceanic_density: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None, tree: cKDTree | None = None, ext: float | None = None, stretch: float = 0.0, thin_floor: float = 0.0,
-                   void: str = "create", taken_out: list | None = None, net_outflow: bool = False) -> tuple[Segments, np.ndarray]:
+                   void: str = "create", taken_out: list | None = None, net_outflow: bool = False, pair_gate: bool = False) -> tuple[Segments, np.ndarray]:
     """Cells farther than ``gap_radius`` from every segment are divergent
     boundaries — provided the nearest segment is moving *away* from the
     cell (``omega`` (P, 3) rad/step given; holes left by subduction at a
@@ -451,6 +451,38 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
                 ok = pk - cen_[mixed][:, None, :]
                 ok /= np.maximum(np.linalg.norm(ok, axis=2, keepdims=True), 1e-12)
                 div[mixed] = np.sum(vk * ok, axis=2).mean(axis=1) > 0.0
+        if pair_gate and tree is not None and seg.M > 8:
+            # The arcs track's gate (proto/arcs spawn_relative + spawn_normal), the one rule all
+            # three dynamics prototypes converged on: a gap with two plates around it is a ridge
+            # only if the two plates separate there.  Both plates' velocities are taken at the
+            # cell itself and compared across the boundary normal (the line from the nearest
+            # plate's neighbours' centroid to the other plate's).  The nearest segment moving
+            # away from the cell is not that: behind a slab the overriding plate often moves the
+            # same way as the down-going one, only slower, and the hole the slab left was filled
+            # with age-0 crust on the overrider -- trench froth, and on a nearly still
+            # supercontinent an oceanic apron that stepped the girdle off its margin.  A gap with
+            # one plate around it keeps the nearest-segment test
+            x_all = interior_centers_flat(grid)[cells]
+            kq = min(8, seg.M)
+            _, nb = tree.query(x_all, k=kq, workers=kd_workers(cells.size))
+            nb = np.atleast_2d(nb).reshape(cells.size, kq)
+            pl = seg.plate_id[nb]
+            other = pl != pl[:, :1]
+            two = other.any(axis=1)
+            if two.any():
+                r = np.flatnonzero(two)
+                a = nb[r, 0]
+                b = nb[r, np.argmax(other[r], axis=1)]
+                x = x_all[r]
+                pa, pb = seg.plate_id[a], seg.plate_id[b]
+                inA = (pl[r] == pa[:, None]).astype(np.float64)
+                inB = (pl[r] == pb[:, None]).astype(np.float64)
+                P3 = seg.pos[nb[r]]
+                ca = np.einsum("nk,nkc->nc", inA, P3) / np.maximum(inA.sum(axis=1), 1.0)[:, None]
+                cb = np.einsum("nk,nkc->nc", inB, P3) / np.maximum(inB.sum(axis=1), 1.0)[:, None]
+                va = np.cross(omega[pa], x)
+                vb = np.cross(omega[pb], x)
+                div[r] = np.sum((vb - va) * (cb - ca), axis=1) > 0.0
         gap.ravel()[cells[~div]] = False
     n = int(gap.sum())
     if n == 0:
