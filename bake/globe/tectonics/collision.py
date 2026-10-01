@@ -366,7 +366,7 @@ def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float
 # --------------------------------------------------------------------------
 def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, oceanic_density: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None, tree: cKDTree | None = None, ext: float | None = None, stretch: float = 0.0, thin_floor: float = 0.0,
                    void: str = "create", taken_out: list | None = None, net_outflow: bool = False, pair_gate: bool = False,
-                   margin_stretch: bool = False, stretched_out: list | None = None) -> tuple[Segments, np.ndarray]:
+                   margin_stretch: float = 0.0, stretched_out: list | None = None) -> tuple[Segments, np.ndarray]:
     """Cells farther than ``gap_radius`` from every segment are divergent
     boundaries — provided the nearest segment is moving *away* from the
     cell (``omega`` (P, 3) rad/step given; holes left by subduction at a
@@ -419,11 +419,11 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
     ``(column units, crust units)``, so the caller can book what the new
     segments hold less what they took.
 
-    ``margin_stretch`` (with ``thin_floor``): a gap between two plates with
-    continental crust around it is a continental rift, and the margins
-    stretch into it before it breaks -- the nearest continental neighbour
-    takes the new segment's ground and thins at constant volume, down to
-    ``thin_floor``; only then does sea floor spawn.  Rifted margins are
+    ``margin_stretch`` > 0: a gap between two plates with continental crust
+    around it is a continental rift, and the margins stretch into it before it
+    breaks -- the nearest continental neighbour takes the new segment's ground
+    and thins at constant volume, down to a column of ``margin_stretch``; only
+    then does sea floor spawn.  Rifted margins are
     thinned ~2x over 100-300 km before breakup (Brune 2016; beta ~2-4), and
     those thinned margins are the shelves that make up ~a third of the
     continental crust.  Without it a continental rift spawned sea floor
@@ -529,7 +529,7 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
         th = np.where(interior_cont, seg.thickness[nb].mean(axis=1), new_thickness)
         de = np.where(interior_cont, seg.density[nb].mean(axis=1), oceanic_density)
         cr = np.where(interior_cont, seg.craton[nb][np.arange(pos.shape[0]), 0], 0).astype(np.int8)
-        if margin_stretch and thin_floor > 0.0:
+        if margin_stretch > 0.0:
             cont_rift = boundary & ((kinds == CONTINENTAL).mean(axis=1) >= 0.5)
             absorbed = np.zeros(pos.shape[0], bool)
             if cont_rift.any():
@@ -538,7 +538,7 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
                 for v in np.flatnonzero(cont_rift):
                     js = nb[v][kinds[v] == CONTINENTAL]
                     j = int(js[0])
-                    room = float(seg.ext[j]) * max(float(seg.thickness[j]) / thin_floor - 1.0, 0.0) - add.get(j, 0.0)
+                    room = float(seg.ext[j]) * max(float(seg.thickness[j]) / float(margin_stretch) - 1.0, 0.0) - add.get(j, 0.0)
                     if room >= e_new:
                         add[j] = add.get(j, 0.0) + e_new
                         absorbed[v] = True

@@ -99,8 +99,8 @@ def tectonics_frame(sim, rec: FrameRecorder, index: int, total: int) -> None:
     finished map's ``crust_kind`` and the shelf mask are (and what
     scripts/tect_scorecard.py measures as the rendered continent) -- so the
     timeline's last frame and the map agree.  The nearest segment's label
-    drew a Voronoi continent that read up to ~0.01 of the planet off it
-    (te/mass, Earth seeds 0-1)."""
+    drew a Voronoi continent up to 0.005 of the planet off it (te/mass,
+    Earth seed 1, steps 0-2000)."""
     from ..tectonics.collision import build_tree, label_map_fast, splat
     from ..tectonics.run import frame_bed, inherited_age
 

@@ -761,7 +761,8 @@ class TectonicSim:
             stretched: list = []
             new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega, tree=tree, ext=self.spacing ** 2, stretch=stretch_budget, thin_floor=float(tp.extent_thin_floor) * float(tp.continental_thickness) if tp.variable_extent else 0.0,
                                       void=VOID_FILL if tp.variable_extent else "create", taken_out=taken, net_outflow=str(tp.spawn_gate) == "outflow", pair_gate=str(tp.spawn_gate) == "pair",
-                                      margin_stretch=bool(tp.margin_stretch) and bool(tp.variable_extent), stretched_out=stretched)
+                                      margin_stretch=float(tp.margin_stretch) * float(tp.continental_thickness) if tp.variable_extent else 0.0,
+                                      stretched_out=stretched)
             n_gap = int(gap.sum())
             n_new = new.M
             if tp.variable_extent and n_gap:

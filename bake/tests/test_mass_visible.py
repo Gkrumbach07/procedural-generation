@@ -1,12 +1,14 @@
 """Continental mass and visible area (te/mass: proto/crit-mass on the synth-dyn dynamics): the
 books close, collapse keeps crust as ground, the extent balance only shows ground (the child
 keeps its parent's column, no ground is made) and does not flicker, margin erosion takes
-ground at the overriding margin, and the sea floor's extent does not compound with age."""
+ground at the overriding margin, the fold-and-thrust moves what the convergence delivered,
+and the sea floor's extent does not compound with age."""
 from __future__ import annotations
 
 import math
 
 import numpy as np
+import pytest
 
 from globe.tectonics import orogeny
 from globe.tectonics.collision import build_tree, collide
@@ -292,7 +294,6 @@ def test_a_flipped_point_is_left_alone_for_the_residence_time():
 def test_extent_split_needs_the_ocean_only_closure():
     """The whole-cloud closure's refund becomes geometry that overruns sea floor and deepens
     the deficit (proto/mass-visible: extent 0.40 -> 0.97 by step 4000)."""
-    import pytest
     from globe.config import WorldParams
     from globe.tectonics import run as tect
     p = WorldParams.tiny_world()
@@ -367,3 +368,28 @@ def test_fold_and_thrust_moves_what_the_convergence_delivered():
         taken[cap] = float((drop * seg.ext).sum())
     assert taken[0.0] > 50 * th_in * sp * sp                 # uncapped: the profile, whatever converged
     assert taken[1.0] <= 1.0 * th_in * sp * sp * (1 + 1e-9)   # capped: what converged
+
+
+@pytest.mark.slow
+def test_earth_keeps_its_continents_visible_and_in_the_books():
+    """Earth preset, arc_birth 0 (the arcs track's default), 1500 steps (~225 My, through the
+    girdle phase and the first breakup): the continents keep 0.40 +- 0.04 of the ground, the
+    map shows at least 0.95 of it, and each kind's books close."""
+    from globe.config import PRESETS
+    from globe.tectonics import run as tect
+    p = PRESETS["earth"]()
+    p.world.seed = 1
+    p.tectonics.steps = 1500
+    p.tectonics.arc_birth = 0.0
+    sim = tect.initialise(p, log=None)
+    for _ in range(1500):
+        sim.step()
+    c = sim.seg.kind == CONTINENTAL
+    share = float(sim.seg.ext[c].sum()) / float(sim.seg.ext.sum())
+    _, cc = tect.frame_bed(sim, with_c=True)
+    a = sim.grid.interior_cell_area.astype(np.float64)
+    rendered = float(a[cc > 0.5].sum() / a.sum())
+    assert abs(share - 0.40) < 0.04, share
+    assert rendered / share > 0.95, (rendered, share)
+    rc, ro = sim.books_residual()
+    assert abs(rc) < 1e-12 and abs(ro) < 1e-12, (rc, ro)
