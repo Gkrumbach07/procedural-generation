@@ -874,6 +874,81 @@ def test_plate_vel_is_rigid_rotation_of_each_plate(tiny_sim, tiny_out):
     assert np.abs(tiny_out["plate_vel"].data).max() > 0
 
 
+def test_finalise_face_by_face_is_the_whole_grid_to_the_bit(tiny_sim):
+    """finalise resamples, and measures the land slope, one coarse face at a time
+    (the whole 1024^2 grid at once peaked at 4.09 GB on the Earth preset); each
+    value is a function of its own cell, so the result is the whole-grid one."""
+    from globe.cubesphere import from_sphere_v
+    from globe.field import FaceField
+
+    p = WorldParams.tiny_world()
+    coarse, grid = p.coarse_grid(), tiny_sim.grid
+    rng = np.random.default_rng(5)
+    fld = FaceField.from_interior(grid, rng.normal(size=(6, grid.N, grid.N)), exchange=True)
+    ids = FaceField.from_interior(grid, rng.integers(0, 9, size=(6, grid.N, grid.N)).astype(np.int32), exchange=True)
+    rs = tect._Resampler(coarse)
+    face, u, v = from_sphere_v(coarse.interior_centers)
+    for got, want in ((rs(fld), fld.sample_cubic(face, u, v)), (rs(fld, order=1), fld.sample_bilinear(face, u, v)),
+                      (rs(ids, order=0), ids.sample_nearest(face, u, v)), (rs(tiny_sim.heat, order=1), tiny_sim.heat.sample_bilinear(face, u, v))):
+        assert got.dtype == want.dtype and got.shape == want.shape
+        assert np.array_equal(got, want)
+    bed = rng.normal(size=(6, coarse.N, coarse.N)).astype(np.float32)
+    f = FaceField.from_interior(coarse, bed)
+    whole = f.gradient().vec_norm().interior
+    assert all(np.array_equal(tect._face_slope(f, k), whole[k]) for k in range(6))
+
+
+def test_split_disconnected_makes_the_pieces_it_always_made(tiny_sim):
+    """The pieces of each plate come from a component -> plate table now, not from
+    masking the cloud once per plate and per piece: the same new plates must come
+    out in the same order (plates ascending, then pieces by size), and the step's
+    own tree must split exactly as a fresh one does."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    sim = copy.deepcopy(tiny_sim)
+    seg = sim.seg
+    seg.weld[:] = 0
+    # hand the second- and third-largest plates a patch of crust each on the far side of the
+    # planet (new plates at a minimum of 8, so their order is tested) and the second three
+    # loose segments elsewhere (welded back), so they have pieces to lose
+    counts = np.bincount(seg.plate_id, minlength=sim.plates.P)
+    p1, p0 = (int(p) for p in np.argsort(counts)[-3:-1])
+    for p in (p0, p1):
+        centre = seg.pos[seg.plate_id == p].mean(axis=0)
+        seg.plate_id[np.argsort(seg.pos @ (centre / np.linalg.norm(centre)))[:10]] = p
+    _, nb = build_tree(seg).query(seg.pos, k=9)
+    lonely = np.flatnonzero((seg.plate_id[nb] != p0).all(axis=1))
+    seg.plate_id[lonely[::max(1, lonely.size // 3)][:3]] = p0
+    # the old loop, verbatim
+    pairs = build_tree(seg).query_pairs(1.6 * sim.spacing, output_type="ndarray")
+    e = pairs[seg.plate_id[pairs[:, 0]] == seg.plate_id[pairs[:, 1]]]
+    g = coo_matrix((np.ones(e.shape[0], np.int8), (e[:, 0], e[:, 1])), shape=(seg.M, seg.M))
+    _, comp = connected_components(g, directed=False)
+    sizes = np.bincount(comp)
+    want = seg.plate_id.copy()
+    n_new, orphans = 0, np.zeros(seg.M, dtype=bool)
+    for p in np.unique(seg.plate_id):
+        cs = np.unique(comp[seg.plate_id == p])
+        if cs.size < 2:
+            continue
+        for c in cs[np.argsort(sizes[cs])[::-1]][1:]:
+            if sizes[c] >= 8:
+                want[comp == c] = sim.plates.P + n_new
+                n_new += 1
+            else:
+                orphans |= comp == c
+    assert n_new == 2 and orphans.any()
+    a, b = copy.deepcopy(sim), copy.deepcopy(sim)
+    ev_a = intraplate.split_disconnected(a, 8, rng=np.random.default_rng(0))
+    ev_b = intraplate.split_disconnected(b, 8, rng=np.random.default_rng(0), tree=build_tree(b.seg))
+    assert ev_a == ev_b and ev_a["split"] == n_new and ev_a["welded"] == int(orphans.sum())
+    assert np.array_equal(a.seg.plate_id, b.seg.plate_id) and np.array_equal(a.plates.omega, b.plates.omega)
+    # every segment that did not weld is where the old loop put it (snap_cratons aside)
+    keep = ~orphans & (a.seg.craton == 0)
+    assert np.array_equal(a.seg.plate_id[keep], want[keep])
+
+
 def test_determinism():
     p = WorldParams.tiny_world()
     a = tect.finalise(tect.simulate(p, log=None))
