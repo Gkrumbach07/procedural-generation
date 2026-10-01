@@ -401,7 +401,8 @@ class TectonicSim:
         # a plate the trenches have just cut in two is two plates from here on
         if tp.plate_split_every > 0 and k % int(tp.plate_split_every) == 0:
             # `tree` is this cloud's: built after the collisions, and nothing since has moved a segment
-            ev = intraplate.split_disconnected(self, int(tp.plate_split_min), rng=self.params.rng("tectonics", 9, k), tree=tree)
+            ev = intraplate.split_disconnected(self, int(tp.plate_split_min), rng=self.params.rng("tectonics", 9, k),
+                                               tree=tree, min_area=float(tp.plate_min_area))
             if ev["split"] or ev.get("welded"):
                 self.events.append(ev)
                 plates = self.plates
