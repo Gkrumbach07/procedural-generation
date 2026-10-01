@@ -673,6 +673,7 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
             r_su = np.sqrt(ext[su] / np.pi)
             # how fast the two are closing, radians a step, along the line of centres
             approach = ((vix - vjx) * dx + (viy - vjy) * dy + (viz - vjz) * dz) / max(dn, 1e-12)
+            took = 0.0
             if dn < r_lo + r_su and dn > 1e-12:
                 # circle-circle lens area, planar at these radii
                 c1 = (dn2 + r_lo * r_lo - r_su * r_su) / (2.0 * dn * r_lo)
@@ -704,11 +705,17 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
                     # at -- when this crust was last assembled -- is the two mixed by mass.
                     # `age` does not move: the rock is as old as it ever was
                     rework[su] *= 1.0 - min(recv_m[k] / max(mass[su], 1e-12), 1.0)
+                    took = take
                 else:
                     recv_th[k] = 0.0
                     recv_m[k] = 0.0
-            plate_id[lo] = plate_id[su]
-            weld[lo] = weld_steps
+            if took > 0.0:
+                # The margin that shortened joins the plate it shortened onto.  Only then:
+                # relabelling every contact -- the receding and sliding ones inside
+                # `overlap_fraction` too, and approaching pairs whose discs do not yet meet --
+                # moved crust between plates that no convergence had spent any ground on
+                plate_id[lo] = plate_id[su]
+                weld[lo] = weld_steps
             if ext[lo] <= extent_min:
                 # nothing left to shorten: what remains joins the belt and the point goes
                 vol = ext[lo] * thickness[lo]
@@ -722,6 +729,15 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
                 ext[su] += ext[lo]
                 ext[lo] = 0.0
                 alive[lo] = False
+            elif took <= 0.0:
+                # No ground spent and nothing merged: the pair touched and nothing happened,
+                # so it is not a collision either.  Reported as one, it went on to the belt
+                # builder, which reads a contact with no extent receipt (-1, no lens) as the
+                # fixed-area rule and lays the loser's whole column out of the survivor --
+                # every step the pair stays in range, now that the relabel no longer ends it
+                recv_th[k] = -1.0               # the slot goes to the next contact as it found it
+                recv_m[k] = -1.0
+                continue
             losers[k] = lo
             survivors[k] = su
             k += 1
