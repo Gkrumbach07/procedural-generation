@@ -840,11 +840,40 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
         if arc_dock > 0.0 and kind[lo] == OCEANIC_K and kind[su] == OCEANIC_K and weld[lo] > 0 \
                 and thickness[lo] >= arc_dock:
             # A terrane that docked is part of its new plate's margin: it is never handed back
-            # because the boundary's polarity flickered.  Two terranes just stay where they are;
-            # against anything else the roles swap -- thinner floor goes down under the
-            # terrane, and a thick arc that has not docked anywhere (the case that fell
-            # through to the dock below and handed the terrane back) docks onto it instead
+            # because the boundary's polarity flickered: against anything but another terrane
+            # the roles swap -- thinner floor goes down under the terrane, and a thick arc that
+            # has not docked anywhere (the case that fell through to the dock below and handed
+            # the terrane back) docks onto it instead.
             if weld[su] > 0 and thickness[su] >= arc_dock:
+                # Two terranes of two plates: an arc-arc collision (the Molucca Sea).  Neither
+                # can go down, so the crust stacks: the thinner is shortened whole into the
+                # thicker, whose column thickens by its volume (arc root foundering, arc_max_km,
+                # takes back what passes 35 km).  Left alone they passed through each other, each
+                # renewing the other's weld, and clusters of them packed 2.7x the design density
+                # with the columns of three plates overlapping: arc "islands" of 0.2-0.5 Mkm2 (a
+                # 30 km thick plateau, its crest p90 to +7.6 km) on four of six Earth seeds at
+                # 300-600 My.  Docking the thinner onto the thicker's plate instead handed
+                # terranes in a cluster back and forth, often back within the step: 88-96 % of
+                # the ocean docks on the same six seeds were redocks.  A rift's halves keep apart
+                if _is_rift_pair(plate_id[lo], plate_id[su], rift_a, rift_b):
+                    continue
+                if thickness[lo] > thickness[su]:
+                    t_ = lo
+                    lo = su
+                    su = t_
+                if var_ext:
+                    g_ = ext[lo] / max(ext[su], 1e-12)
+                else:
+                    g_ = 1.0
+                m_lo = g_ * mass[lo]
+                thickness[su] += g_ * thickness[lo]
+                mass[su] += m_lo
+                density[su] = mass[su] / max(thickness[su], 1e-12)
+                rework[su] *= 1.0 - min(m_lo / max(mass[su], 1e-12), 1.0)
+                if age[lo] > age[su]:
+                    age[su] = age[lo]
+                alive[lo] = False
+                spent[15] += 1.0
                 continue
             t_ = lo
             lo = su
@@ -859,34 +888,55 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
             # same contact is a continental collision that shortens it into the margin
             # (arc-continent collision thickens the margin, Taiwan, rather than leaving a low
             # terrane).  A rift's two halves never dock onto each other
-            if dock_keep < 1.0:
+            if dock_keep < 1.0 and (terrane[lo] == 0 or kind[su] == CONTINENTAL_K):
                 # A colliding arc does not accrete whole: its forearc, its dense lower crust and
                 # the slab under it go down the trench (the Luzon arc under Taiwan, the Halmahera
                 # arc under the Sangihe in the Molucca Sea), and only the rest is scraped onto
                 # the overriding plate.  Whole, the docked arcs were 12 % of the planet's ground
                 # and +27 % of the continental crust over 600 My on the first Earth seed
                 # (continents 0.40 -> 0.48), and arcs docked onto ocean plates piled up into
-                # plateaus no trench could take
-                lost = 1.0 - dock_keep
+                # plateaus no trench could take.
+                # Once per terrane onto ocean floor: a terrane that docks onto an ocean plate
+                # again (its weld wore off, or it was welded onto the plate around it when its own
+                # was subducted from under it, intraplate.split_disconnected) is the same crust at
+                # the same trench, not another collision.  Halved at every dock, terranes that
+                # docked 4-5 times were 0.05-0.22 of a design segment's ground, below extent_min,
+                # and 878 of 2462 ocean docks on one seed were repeats.  Onto a continent it is a
+                # collision every time (and the last: it is continental crust after it); exempt
+                # there too, the docked terranes were 3.4-6.3 % of the planet at 600 My on six
+                # Earth seeds and the continental crust grew 1.03-1.29x.  Nor is a docking arc left
+                # with less ground than extent_min
+                if extent_min > 0.0:
+                    kept = max(dock_keep * ext[lo], min(ext[lo], extent_min))
+                    lost = 1.0 - kept / max(ext[lo], 1e-300)
+                else:
+                    lost = 1.0 - dock_keep
                 spent[3] += lost * mass[lo]
                 spent[4] += lost * ext[lo] * mass[lo]
                 if extent_min > 0.0:
-                    ext[lo] *= dock_keep
+                    ext[lo] *= 1.0 - lost
                 else:
-                    thickness[lo] *= dock_keep
-                    mass[lo] *= dock_keep
+                    thickness[lo] *= 1.0 - lost
+                    mass[lo] *= 1.0 - lost
+            elif terrane[lo] != 0:
+                spent[14] += 1.0
+            terrane[lo] = 1
+            # it moves with the overriding plate from here on, welded to it
+            plate_id[lo] = plate_id[su]
+            weld[lo] = weld_steps
             if kind[su] == CONTINENTAL_K:
                 spent[9] += mass[lo]
                 spent[10] += ext[lo] * mass[lo]
                 spent[11] += 1.0
                 spent[12] += ext[lo]
                 kind[lo] = CONTINENTAL_K
-                terrane[lo] = 1
                 rework[lo] = 0.0                     # juvenile crust, assembled now
-                # ...and falls through to the continental shortening below
+                # ...and falls through to the continental shortening below.  It is the
+                # continent's from here whether or not this contact spends any ground on it:
+                # relabelled only when the shortening took some, a disc that no longer reached
+                # the margin turned continental but stayed on its ocean plate, unwelded
+                # (a continental speck riding away on the plate it docked from)
             else:
-                plate_id[lo] = plate_id[su]
-                weld[lo] = weld_steps
                 spent[13] += 1.0
                 continue
 
@@ -1140,10 +1190,15 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     the loser of an ocean-ocean pair and stays welded while it is in contact,
     and the two halves of a rift (``rift_pairs``, plate id pairs) never dock
     onto each other.  Of a docking arc only ``dock_keep`` accretes -- of its
-    ground with variable extent, of its column without -- and the rest goes
-    down with its slab (booked ``subducted``).  ``dock_out``
-    receives ``(docked onto continents, the ground they kept, docked onto ocean
-    plates)``.  With ``arc_keep >= 0`` a
+    ground with variable extent (never less than ``extent_min``), of its column
+    without -- and the rest goes down with its slab (booked ``subducted``): at its
+    first dock onto ocean floor (``seg.terrane`` is set there), not when the same
+    terrane docks onto an ocean plate again, and at its dock onto a continent.
+    ``dock_out`` receives ``(docked onto continents, the ground they
+    kept, docked onto ocean plates, docks of terranes that had docked before,
+    terranes stacked into another plate's terrane)``: two terranes of two plates in
+    contact are an arc-arc collision, the thinner shortened whole into the thicker.
+    With ``arc_keep >= 0`` a
     thinner arc going down hands the overriding plate ``arc_keep`` of its crust
     above ``ocean_base`` and ``accretion`` of the sea floor under it."""
     pairs = tree.query_pairs(radius, output_type="ndarray")
@@ -1155,7 +1210,7 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
         if books_out is not None:
             books_out.append({"subducted": (0.0, 0.0), "accreted": (0.0, 0.0), "arc_born": (0.0, 0.0), "docked": (0.0, 0.0)})
         if dock_out is not None:
-            dock_out.append((0.0, 0.0, 0.0))
+            dock_out.append((0.0, 0.0, 0.0, 0.0, 0.0))
         return np.zeros(0, np.int64), np.zeros(0, np.int64)
     pairs = np.sort(pairs, axis=1)
     pairs = pairs[np.lexsort((pairs[:, 1], pairs[:, 0]))]
@@ -1167,8 +1222,9 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     #  then the same two for slab lost to the mantle, slab accreted to a continent,
     #  oceanic columns an arc birth relabelled, and oceanic columns that docked onto a
     #  continent; then the docks as counts and ground: onto continents (count, ground),
-    #  onto ocean plates (count)]
-    spent = np.zeros(14, dtype=np.float64)
+    #  onto ocean plates (count), docks of a terrane that had docked before (count), and
+    #  terranes stacked into terranes of another plate (count)]
+    spent = np.zeros(16, dtype=np.float64)
     ra = np.zeros(0, np.int64)
     rb = np.zeros(0, np.int64)
     if rift_pairs:
@@ -1184,7 +1240,7 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
         books_out.append({"subducted": (float(spent[3]), float(spent[4])), "accreted": (float(spent[5]), float(spent[6])),
                           "arc_born": (float(spent[7]), float(spent[8])), "docked": (float(spent[9]), float(spent[10]))})
     if dock_out is not None:
-        dock_out.append((float(spent[11]), float(spent[12]), float(spent[13])))
+        dock_out.append((float(spent[11]), float(spent[12]), float(spent[13]), float(spent[14]), float(spent[15])))
     losers, survivors, recv_th, recv_m = out
     if recv_out is not None:
         recv_out.append((recv_th, recv_m))     # what each survivor was handed (NaN: fixed-area rule)

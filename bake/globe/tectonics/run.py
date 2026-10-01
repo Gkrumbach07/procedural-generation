@@ -192,9 +192,11 @@ COUNTER_KEYS = ("orogen_shaped", "differentiated",
                 # (count, ground) and onto ocean plates (count) -- the arc crust arc_front moved to
                 # the volcanic front, and the parts of `delaminated` that were arc roots
                 # foundering (arc_max_km) and of `residue` that were docked terranes losing their
-                # dense roots (terrane_relax_my)
+                # dense roots (terrane_relax_my); how many docks were of a terrane that had
+                # docked before (its weld wore off, or it was welded onto the plate around it),
+                # and how many terranes were stacked into another plate's (arc-arc collisions)
                 "arc_docked_cont", "arc_docked_cont_ext", "arc_docked_ocean", "arc_front_moved", "arc_foundered",
-                "terrane_relaxed")
+                "terrane_relaxed", "arc_redocked", "arc_merged")
 SINK_KEYS = ("subducted", "delaminated", "orogen_decayed", "residue")
 #: What fills a void inside a continent that no shortening paid for, with variable_extent on
 #: (``collision.spawn_segments``, where the alternatives are measured; the fixed-area model
@@ -629,7 +631,9 @@ class TectonicSim:
         self._book("subducted", 0.0, -moved["subducted"][u])
         self._book("accreted", moved["accreted"][u], -moved["accreted"][u])
         self._book("arc_born", moved["arc_born"][u], -moved["arc_born"][u])
-        docks = dock_out[0] if dock_out else (0.0, 0.0, 0.0)
+        docks = dock_out[0] if dock_out else (0.0, 0.0, 0.0, 0.0, 0.0)
+        if docks[4]:
+            self.ledger["arc_merged"] = self.ledger.get("arc_merged", 0.0) + docks[4]
         if docks[0] or docks[2]:
             # island arcs that docked rather than subducting: the kind flip of those that
             # docked onto a continent, and the counts and ground
@@ -637,6 +641,7 @@ class TectonicSim:
             self.ledger["arc_docked_cont"] = self.ledger.get("arc_docked_cont", 0.0) + docks[0]
             self.ledger["arc_docked_cont_ext"] = self.ledger.get("arc_docked_cont_ext", 0.0) + docks[1]
             self.ledger["arc_docked_ocean"] = self.ledger.get("arc_docked_ocean", 0.0) + docks[2]
+            self.ledger["arc_redocked"] = self.ledger.get("arc_redocked", 0.0) + docks[3]
         arc_now = float(arc_out[0][u]) if arc_out else 0.0
         if arc_now:
             self._book("arc_mantle", arc_now, 0.0)
@@ -710,9 +715,12 @@ class TectonicSim:
             if tp.subduction_heating > 0:
                 # a downwelling is a slab: a continent-continent collision has none (cc_heating off)
                 self._heat_blobs(pts if tp.cc_heating else slab_pts, tp.subduction_heating)
-            if tp.slab_force > 0.0 and slab_pts.shape[0]:
+            if (tp.slab_force > 0.0 or self.volc is not None) and slab_pts.shape[0]:
                 # the slab hanging under the trench grows by the length that went down: a line of
-                # blobs of peak ext / (sqrt(2 pi) sigma) adds that length to the ridge's crest
+                # blobs of peak ext / (sqrt(2 pi) sigma) adds that length to the ridge's crest.
+                # The arc vents read it too (slab_g: a vent grows only over a persistent slab),
+                # so it is kept whenever the volcanoes are on, slab pull or not -- without it
+                # volcanoes=True with slab_force 0 made hotspots and no arc vent at all
                 ext_lo = seg.ext[losers[seg.kind[losers] == OCEANIC]]
                 flat = self.slab.interior.reshape(-1).copy()
                 forces.deposit_blobs(flat, self.heat_tree, slab_pts, ext_lo / (math.sqrt(2.0 * math.pi) * self.spacing),
@@ -720,7 +728,11 @@ class TectonicSim:
                 self.slab.interior[...] = flat.reshape(self.slab.interior.shape)
             seg.compress(alive)
             tree = build_tree(seg)
-        if docks[0] or docks[2]:
+        elif not alive.all():
+            # terranes stacked into terranes (no loser of this step's): the dead go all the same
+            seg.compress(alive)
+            tree = build_tree(seg)
+        if docks[0] or docks[2] or docks[4]:
             # a plate the docking emptied (a terrane that was all of a small plate) is gone:
             # the plates are rebuilt the way every other relabel does it (the poles kept, no
             # craton snap) and the dynamics forget it
@@ -853,14 +865,15 @@ class TectonicSim:
         if tp.max_crust_thickness > 0 and tp.delamination > 0:
             delaminate(seg, float(tp.max_crust_thickness), float(tp.delamination))
             km = self._book_change("delaminated", km)
-        if float(tp.arc_max_km) > 0.0 and tp.delamination > 0:
+        if float(tp.arc_max_km) > 0.0 and float(tp.arc_founder_my) > 0.0:
             # arc root foundering: an intra-oceanic arc does not thicken without limit either.
             # Its dense mafic-ultramafic cumulates founder once the crust passes ~35 km, which is
             # why arcs are 20-35 km thick however long they have been active
             lim = float(tp.arc_max_km) / float(tp.crust_km) * float(tp.continental_thickness)
             over = (seg.kind == OCEANIC) & (seg.thickness > lim)
             if over.any():
-                seg.thickness[over] -= (seg.thickness[over] - lim) * float(tp.delamination)
+                rate = min(1.0, float(tp.myr_per_step) / float(tp.arc_founder_my))
+                seg.thickness[over] -= (seg.thickness[over] - lim) * rate
                 seg.mass[over] = seg.thickness[over] * seg.density[over]
                 after = self._book_change("delaminated", km)
                 self.ledger["arc_foundered"] = self.ledger.get("arc_foundered", 0.0) + (after[1] - km[1])
@@ -928,7 +941,7 @@ class TectonicSim:
             slab_ratio = self.force_update(grad3, extra_tau=ts if tau_slab is not None else None)
         else:
             update_omega(plates, tau, self.gain, tp.damping, self.max_omega)
-        if tp.slab_force > 0.0:
+        if tp.slab_force > 0.0 or self.volc is not None:
             self.slab.interior[...] *= math.exp(-float(tp.myr_per_step) / max(float(tp.slab_detach_my), 1e-9))
 
         self.step_index += 1

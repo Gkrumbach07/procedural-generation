@@ -90,6 +90,10 @@ AREA_BIN_NAMES = ("lt1e3", "1e3_1e4", "1e4_1e5", "1e5_1e6", "gt1e6")
 ARC_COLUMN = 0.4
 #: an arc is "at an active trench" within this distance (km) of a currently converging boundary
 ARC_ACTIVE_KM = 300.0
+#: a docked terrane (welded oceanic column at least arc_dock_km thick) is isolated when no
+#: other segment of its own plate lies within this many spacings -- split_disconnected's
+#: link_factor, so an isolated terrane is one the plate split would call an orphan
+TERRANE_LINK = 1.6
 #: trench froth: new sea floor within this many spacings of a segment subducted in the last
 #: FROTH_STEPS steps (32 % of all new floor on the shipped model, 45x random)
 FROTH_LINK = 1.0
@@ -152,6 +156,12 @@ class Observer:
         self._recent_slabs: list[np.ndarray] = []
         self.myr = float(myr_per_step if myr_per_step is not None else getattr(tp, "myr_per_step", 0.15))
         self.R_km = float(sim.params.R_planet) / 1000.0
+        #: the sphere the tectonics and the volcanoes measure lengths on (tectonic_radius_km):
+        #: the arc rows' km are on it, so they mean the same on a toy body as on Earth
+        self.R_arc_km = float(getattr(sim, "R_km", self.R_km))
+        #: a docked terrane's column (thickness units), 0 when arcs do not dock
+        self.arc_dock = (float(tp.arc_dock_km) / float(tp.crust_km) * float(tp.continental_thickness)
+                         if float(getattr(tp, "arc_dock_km", 0.0)) > 0.0 else 0.0)
         self.spacing = float(sim.spacing)
         self._seg = sim.seg
         # per-segment origin, aligned with the cloud by the compress / append wrappers
@@ -180,8 +190,11 @@ class Observer:
             if seg is not obs.sim.seg:
                 return orig_collide(seg, tree, radius, omega_dt, alive, *a, **kw)
             pid0, kind0, pos0, age0 = seg.plate_id.copy(), seg.kind.copy(), seg.pos.copy(), seg.age.copy()
+            ter0 = obs._terranes(seg, tree) if obs.arc_dock > 0.0 else None
+            ext0 = seg.ext.copy() if ter0 is not None else None
             out = orig_collide(seg, tree, radius, omega_dt, alive, *a, **kw)
-            obs._on_collide(seg, pid0, kind0, pos0, np.asarray(out[0]), np.asarray(out[1]), alive=alive, age0=age0)
+            obs._on_collide(seg, pid0, kind0, pos0, np.asarray(out[0]), np.asarray(out[1]), alive=alive, age0=age0,
+                            ter0=ter0, ext0=ext0)
             return out
 
         orig_rift = intraplate.rift
@@ -238,9 +251,27 @@ class Observer:
     def _reset_window(self) -> None:
         self.win = {"steps": 0, "coll_cc": 0, "coll_oc": 0, "coll_oo": 0, "arc_births": 0, "births_rift": 0,
                     "births_split": 0, "births_other": 0, "deaths": 0, "rifts": 0, "spawned": 0, "gap_cells": 0,
-                    "new_floor": 0, "froth": 0, "slabs": 0, "slabs_young": 0}
+                    "new_floor": 0, "froth": 0, "slabs": 0, "slabs_young": 0,
+                    "slab_ext": 0.0, "slab_under_terrane_ext": 0.0, "slab_under_isolated_ext": 0.0}
 
-    def _on_collide(self, seg, pid0, kind0, pos0, losers, survivors, alive=None, age0=None) -> None:
+    def _terranes(self, seg, tree):
+        """Before a collision call: the docked terranes (welded oceanic columns at least
+        arc_dock thick) and which of them are isolated -- no other segment of their own plate
+        within TERRANE_LINK spacings, so riding a pole they have no physical link to through
+        the plate around them.  Returns (terrane mask, isolated mask)."""
+        ter = (seg.kind == OCEANIC) & (seg.weld > 0) & (seg.thickness >= self.arc_dock)
+        iso = np.zeros(seg.M, bool)
+        ti = np.flatnonzero(ter)
+        if ti.size:
+            if tree is None or getattr(tree, "n", -1) != seg.M:
+                tree = build_tree(seg)
+            balls = tree.query_ball_point(seg.pos[ti], _chord(TERRANE_LINK * self.spacing))
+            pid = seg.plate_id
+            iso[ti] = np.fromiter((not np.any((pid[np.asarray(nb, np.int64)] == pid[q]) & (np.asarray(nb, np.int64) != q))
+                                   for q, nb in zip(ti, balls)), dtype=bool, count=ti.size)
+        return ter, iso
+
+    def _on_collide(self, seg, pid0, kind0, pos0, losers, survivors, alive=None, age0=None, ter0=None, ext0=None) -> None:
         lk, sk = kind0[losers], kind0[survivors]
         w = self.win
         w["coll_cc"] += int(((lk == CONTINENTAL) & (sk == CONTINENTAL)).sum())
@@ -250,8 +281,18 @@ class Observer:
         w["arc_births"] += int(((kind0 == OCEANIC) & (seg.kind == CONTINENTAL)).sum())
         if alive is not None and losers.size:
             # slabs: oceanic losers the call took out, how young, and where (for the froth)
-            sl = losers[(lk == OCEANIC) & ~np.asarray(alive)[losers]]
+            dead = (lk == OCEANIC) & ~np.asarray(alive)[losers]
+            sl = losers[dead]
             w["slabs"] += int(sl.size)
+            if ter0 is not None and ext0 is not None:
+                # sea floor that went down under a docked terrane, and under an isolated one
+                # (the ground, as subducted_ext of the review probes)
+                t_, iso_ = ter0
+                su_ = survivors[dead]
+                e_ = ext0[sl]
+                w["slab_ext"] += float(e_.sum())
+                w["slab_under_terrane_ext"] += float(e_[t_[su_]].sum())
+                w["slab_under_isolated_ext"] += float(e_[iso_[su_]].sum())
             if age0 is not None:
                 w["slabs_young"] += int((age0[sl] < YOUNG_SLAB).sum())
             self._recent_slabs.append(pos0[sl])
@@ -507,6 +548,8 @@ class Observer:
             "births": w["births_rift"] + w["births_split"] + w["births_other"],
             "froth_share": _f(w["froth"] / w["new_floor"]) if w["new_floor"] else None,
             "young_slab_share": _f(w["slabs_young"] / w["slabs"]) if w["slabs"] else None,
+            "slab_under_terrane_share": _f(w["slab_under_terrane_ext"] / w["slab_ext"]) if w["slab_ext"] else None,
+            "slab_under_isolated_share": _f(w["slab_under_isolated_ext"] / w["slab_ext"]) if w["slab_ext"] else None,
         }
         self._reset_window()
 
@@ -528,6 +571,10 @@ class Observer:
         row["arcs"] = self._arcs(seg, tree, cont, ext, ext_tot, conv0_seg, bed, k)
         row["arcs"].update(self._ocean_arcs(seg, tree, ext, ext_tot, conv0_seg, B))
         row["arcs"].update(self._docked_sea_level(seg, tree, cont, bed, c, area, scale))
+        if self.arc_dock > 0.0:
+            ter, iso = self._terranes(seg, tree)
+            row["arcs"].update({"terranes_n": int(ter.sum()), "terranes_isolated": int(iso.sum()),
+                                "terranes_isolated_share": _f(iso.sum() / ter.sum()) if ter.any() else None})
         if k in self.coarse_at:
             row["islands"] = self._coarse_arcs(seg, B)
 
@@ -711,7 +758,7 @@ class Observer:
         w = ext[ai]
         out["ocean_arc_th_p50_km"] = _wq(th, w, 0.5)
         out["ocean_arc_th_p90_km"] = _wq(th, w, 0.9)
-        r = _chord(ARC_ACTIVE_KM / self.R_km)
+        r = _chord(ARC_ACTIVE_KM / self.R_arc_km)
 
         def near(mask):
             q = np.flatnonzero(mask)
@@ -781,7 +828,8 @@ class Observer:
         cone = fb["cone"].astype(np.float64).ravel() if "cone" in fb else np.zeros_like(bed)
         who = fb["cone_kind"].ravel() if "cone_kind" in fb else np.full(bed.size, -1, np.int8)
         ground = bed - cone
-        area_km2 = coarse.interior_cell_area.astype(np.float64).ravel() / 1e6
+        # on the tectonic sphere, as the trench km they are divided by (the same on Earth)
+        area_km2 = coarse.interior_cell_area.astype(np.float64).ravel() / 1e6 * (self.R_arc_km / self.R_km) ** 2
         out = {"scale_m_per_unit": _f(fb["scale"]), **{f"v_{k}": _f(v) for k, v in fb["volcanoes"].items()
                                                      if isinstance(v, (int, float, np.integer, np.floating))}}
         # arc crests
@@ -797,7 +845,7 @@ class Observer:
         if B is not None:
             i, j = B["i"], B["j"]
             oo = (seg.kind[i] == OCEANIC) & (seg.kind[j] == OCEANIC) & (B["obl"] > OBLIQUITY)
-            oo_km = float(np.unique(np.concatenate([i[oo], j[oo]])).size * self.spacing * self.R_km / 2.0)
+            oo_km = float(np.unique(np.concatenate([i[oo], j[oo]])).size * self.spacing * self.R_arc_km / 2.0)
         out["oo_trench_km"] = _f(oo_km)
         # oceanic islands: land off the continental mask, in connected pieces
         isl = np.flatnonzero((bed > 0.0) & ~ck)
@@ -848,14 +896,14 @@ class Observer:
             out["vents_hotspot"] = int((v.kind == volc.HOTSPOT).sum())
             if arcv.size >= 2:
                 d, _ = cKDTree(v.pos[arcv]).query(v.pos[arcv], k=2)
-                nn = d[:, 1] * self.R_km
+                nn = d[:, 1] * self.R_arc_km
                 out["vent_nn_p10_km"] = _f(np.percentile(nn, 10))
                 out["vent_nn_p50_km"] = _f(np.median(nn))
                 out["vent_nn_p90_km"] = _f(np.percentile(nn, 90))
             if arcv.size:
                 ab = np.flatnonzero((seg.kind == OCEANIC) & (seg.thickness - float(sim.tp.oceanic_thickness) >= volc.ARC_MIN_TH))
                 if ab.size:
-                    d, _ = cKDTree(seg.pos[ab]).query(v.pos[arcv], k=1, distance_upper_bound=_chord(100.0 / self.R_km))
+                    d, _ = cKDTree(seg.pos[ab]).query(v.pos[arcv], k=1, distance_upper_bound=_chord(100.0 / self.R_arc_km))
                     out["vents_on_arc_share"] = _f(np.isfinite(d).mean())
             hot = v.kind == volc.HOTSPOT
             if hot.any():
@@ -1040,6 +1088,7 @@ EARTH_TARGETS = {
     "islands.crest_p50_m": "-1000 to -3000 (arc crests)",
     "islands.arc_km2_per_trench_km": "0.4-9 (Marianas 0.36, Tonga 0.9, Antilles/Aleutians/Vanuatu 7-9)",
     "islands.vent_nn_p50_km": "50-100",
+    "arcs.terranes_isolated": "0 (a terrane moves with the plate it is part of)",
     "window.froth_share": "~0 (Earth); 0.32 on the shipped model",
     "final.lifetime_median_dead_myr": "small plates live < 10-20 My",
     "hyps.land_median_m": "~350",

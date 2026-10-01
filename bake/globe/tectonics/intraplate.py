@@ -1179,6 +1179,7 @@ def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rn
     from scipy.sparse.csgraph import connected_components
 
     from .collision import build_tree, kd_workers
+    from .segments import OCEANIC
 
     seg, plates = sim.seg, sim.plates
     if seg.M < 2:
@@ -1224,9 +1225,17 @@ def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rn
     orphans = orphan_c[comp]
     # a segment still welded from a continental collision keeps the plate it welded onto:
     # it lies inside the plate it came from, so the rule below would hand it straight back
-    # and the same pair would collide again next step (globe/tectonics/collision.py)
+    # and the same pair would collide again next step (globe/tectonics/collision.py).
+    # Not a docked island arc (welded oceanic crust, te/arcs).  It docks touching the plate
+    # it joins -- the collision radius is 1 spacing, inside the link_factor here -- so it is
+    # an orphan only once that plate's crust around it has gone (subducted from under it when
+    # the boundary's polarity turned), and then it is a sliver embedded in another plate.
+    # Exempt, it rode its own plate's pole through that plate, its weld renewed by the very
+    # contact it was ploughing through: Earth seeds 2 and 6 had 11-69 such terranes at every
+    # sample, their own plate p50 300-960 km away, moving p50 5-12 cm/yr against the plate
+    # around them, with 7 % of all the sea floor subducted in 600 My going down under them
     if hasattr(seg, "weld"):
-        orphans &= seg.weld <= 0
+        orphans &= (seg.weld <= 0) | (seg.kind == OCEANIC)
     if orphans.any() and sim.tp.variable_extent:
         _weld_whole(seg, pid, comp, orphans, pairs)
     elif orphans.any():

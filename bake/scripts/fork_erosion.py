@@ -301,8 +301,16 @@ def main() -> int:
                   + f"({time.time() - t0:.0f}s)", flush=True)
 
     p = write_checkpoint(out, state, args.label, ck.name, args.set)
+    # The checkpoint holds the ground without the active volcanic edifices, as the stage's own
+    # checkpoints do (build_state takes them off; erosion/run.py puts them back after its last
+    # checkpoint, so a resume adds them once), and so it compares like for like with the
+    # baseline's.  What the stage would write on top of it:
+    volc = erun.restore_volcanoes(state, erun.active_volcanoes(store, params.coarse_grid()))
+    if volc:
+        print(f"fork {args.label}: the checkpoint is the ground under {volc['volcano_cells']} cells of active "
+              f"volcanoes (max {volc['volcano_max_m']:.0f} m), which the stage adds back on top at its end", flush=True)
     diagnostics = {"label": args.label, "forked_from": str(ck), "start": start, "end": end,
-                   "overrides": args.set, "deaths": deaths_tot,
+                   "overrides": args.set, "deaths": deaths_tot, "volcanoes_not_in_checkpoint": volc,
                    "lost_offshore_m": lost_offshore * state.height_unit_m,
                    "seconds": time.time() - t0, "history": hist}
     if census is not None:

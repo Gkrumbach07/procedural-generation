@@ -154,7 +154,138 @@ def test_a_rifts_halves_never_dock_onto_each_other():
     docks = []
     collide(seg, build_tree(seg), s, omega, alive, accretion=0.15, weld_steps=60, extent_min=0.25 * s * s,
             arc_dock=0.5, arc_keep=0.5, ocean_base=0.2, rift_pairs=[(0, 1)], dock_out=docks)
-    assert docks[0] == (0.0, 0.0, 0.0) and seg.plate_id[0] == 0
+    assert docks[0] == (0.0, 0.0, 0.0, 0.0, 0.0) and seg.plate_id[0] == 0
+
+
+def test_a_terrane_loses_part_of_itself_once_per_collision():
+    """arc_dock_keep is the forearc and lower crust a colliding arc loses.  The same terrane
+    docking onto an ocean plate again (its weld wore off, or it was welded onto the plate
+    around it) keeps all it has -- halved at every dock, terranes that docked 4-5 times fell
+    below extent_min; onto a continent it loses its share again.  Nor does a dock leave less
+    ground than extent_min."""
+    s = 0.05
+    seg, omega = _pair(OCEANIC, 0.7, OCEANIC, 0.2, s)
+    w0 = seg.ext * seg.mass
+    alive = np.ones(2, bool)
+    books, docks = [], []
+    collide(seg, build_tree(seg), s, omega, alive, accretion=0.15, weld_steps=60, extent_min=0.25 * s * s,
+            books_out=books, dock_out=docks, arc_dock=0.5, arc_keep=0.25, ocean_base=0.2, dock_keep=0.5)
+    assert alive.all() and seg.plate_id[0] == 1 and seg.weld[0] == 60 and seg.terrane[0] == 1
+    assert books[0]["subducted"][1] == pytest.approx(0.5 * w0[0], rel=1e-12)
+    assert docks[0][2] == 1.0 and docks[0][3] == 0.0
+    # the same terrane docking a second time
+    seg, omega = _pair(OCEANIC, 0.7, OCEANIC, 0.2, s)
+    seg.terrane[0] = 1
+    alive = np.ones(2, bool)
+    books, docks = [], []
+    collide(seg, build_tree(seg), s, omega, alive, accretion=0.15, weld_steps=60, extent_min=0.25 * s * s,
+            books_out=books, dock_out=docks, arc_dock=0.5, arc_keep=0.25, ocean_base=0.2, dock_keep=0.5)
+    assert seg.plate_id[0] == 1 and seg.ext[0] == s * s and books[0]["subducted"] == (0.0, 0.0)
+    assert docks[0][2] == 1.0 and docks[0][3] == 1.0
+    # ...but onto a continent it is another collision, and loses its share again
+    seg, omega = _pair(OCEANIC, 0.7, CONTINENTAL, 1.0, s)
+    seg.terrane[0] = 1
+    w0 = seg.ext * seg.mass
+    books = []
+    collide(seg, build_tree(seg), s, omega, np.ones(2, bool), accretion=0.15, weld_steps=60, extent_min=0.25 * s * s,
+            books_out=books, arc_dock=0.5, arc_keep=0.25, ocean_base=0.2, dock_keep=0.5)
+    assert books[0]["subducted"][1] == pytest.approx(0.5 * w0[0], rel=1e-12)
+    # an arc with little ground keeps extent_min of it
+    seg, omega = _pair(OCEANIC, 0.7, OCEANIC, 0.2, s)
+    seg.ext[0] = 0.3 * s * s
+    w0 = seg.ext * seg.mass
+    books = []
+    collide(seg, build_tree(seg), s, omega, np.ones(2, bool), accretion=0.15, weld_steps=60, extent_min=0.25 * s * s,
+            books_out=books, arc_dock=0.5, arc_keep=0.25, ocean_base=0.2, dock_keep=0.5)
+    assert seg.ext[0] == pytest.approx(0.25 * s * s, rel=1e-12)
+    assert books[0]["subducted"][1] == pytest.approx((1.0 - 0.25 / 0.3) * w0[0], rel=1e-9)
+
+
+def test_an_arc_docked_onto_a_continent_joins_it_even_when_no_ground_is_shortened():
+    """The halved disc of an arc docking onto a continent can stop short of the margin, so the
+    shortening spends no ground on it: it is the continent's crust all the same -- relabelled
+    and welded, not a continental speck left riding the ocean plate it docked from."""
+    s = 0.05
+    d = 0.99 * s                                           # inside the radius; the halved discs do not meet
+    pos = np.array([[1.0, 0.0, 0.0], [math.cos(d), math.sin(d), 0.0]])
+    seg = Segments(pos, np.array([0.7, 1.0]), np.array([0.88, 0.804]), np.array([300.0, 10.0]),
+                   np.array([0, 1], np.int32), s * s, kind=np.array([OCEANIC, CONTINENTAL], np.int8))
+    seg.ext[:] = s * s
+    omega = np.array([[0.0, 0.0, 0.002], [0.0, 0.0, 0.0]])
+    alive = np.ones(2, bool)
+    docks, spent = [], []
+    collide(seg, build_tree(seg), s, omega, alive, accretion=0.15, weld_steps=60, extent_min=0.25 * s * s,
+            dock_out=docks, spent_out=spent, arc_dock=0.5, arc_keep=0.25, ocean_base=0.2, dock_keep=0.5)
+    assert spent[0] == 0.0 and alive.all()                  # nothing shortened...
+    assert seg.kind[0] == CONTINENTAL and seg.terrane[0] == 1 and docks[0][0] == 1.0
+    assert seg.plate_id[0] == 1 and seg.weld[0] == 60       # ...and it is the continent's
+
+
+def test_two_terranes_in_contact_stack():
+    """Two docked terranes of two plates in contact are an arc-arc collision: the thinner is
+    shortened whole into the thicker (volume for volume), not handed to the other plate -- which
+    passed terranes in a cluster back and forth -- nor left to pass through it."""
+    s = 0.05
+    for approach in (True, False):
+        seg, omega = _pair(OCEANIC, 0.7, OCEANIC, 0.9, s, approach=approach)
+        if not approach:
+            # receding, they still stack once they overlap deeply
+            seg.pos[1] = [math.cos(0.3 * s), math.sin(0.3 * s), 0.0]
+        seg.weld[:] = 3
+        seg.terrane[:] = 1
+        w0 = float((seg.ext * seg.mass).sum())
+        v0 = float((seg.ext * seg.thickness).sum())
+        alive = np.ones(2, bool)
+        docks, books = [], []
+        lo, su = collide(seg, build_tree(seg), s, omega, alive, accretion=0.15, weld_steps=60, extent_min=0.25 * s * s,
+                         arc_dock=0.5, arc_keep=0.25, ocean_base=0.2, dock_out=docks, books_out=books, dock_keep=0.5)
+        assert not alive[0] and alive[1] and lo.size == 0       # stacked, not subducted
+        assert seg.plate_id[1] == 1 and docks[0][4] == 1.0 and docks[0][2] == 0.0
+        assert float(seg.ext[1] * seg.mass[1]) == pytest.approx(w0, rel=1e-12)
+        assert float(seg.ext[1] * seg.thickness[1]) == pytest.approx(v0, rel=1e-12)
+        assert books[0]["subducted"] == (0.0, 0.0)
+
+
+def test_an_isolated_terrane_is_welded_onto_the_plate_around_it():
+    """A docked terrane whose own plate's crust around it has gone is a sliver inside another
+    plate: split_disconnected welds it onto that plate.  Exempt from the orphan weld like a
+    continental shortening weld, it rode its own plate's pole through the other plate as a
+    bulldozer, the floor in front of it subducting under it.  A continental weld keeps its
+    exemption (it lies inside the plate it came from, which would hand it straight back)."""
+    from globe.tectonics import diagnostics as D
+    from globe.tectonics import intraplate
+
+    for kind in (OCEANIC, CONTINENTAL):
+        sim = tect.initialise(_small_earth(0), log=None)
+        seg, tp = sim.seg, sim.tp
+        tree = build_tree(seg)
+        pid = seg.plate_id
+        # a segment deep inside its plate, handed to another plate far away
+        r = 2.0 * math.sin(1.0 * sim.spacing)
+        q = next(int(i) for i in np.flatnonzero(seg.kind == OCEANIC)
+                 if len(tree.query_ball_point(seg.pos[i], r)) >= 5
+                 and (pid[np.asarray(tree.query_ball_point(seg.pos[i], r))] == pid[i]).all())
+        host = int(pid[q])
+        near = set(pid[np.asarray(tree.query_ball_point(seg.pos[q], 2.0 * math.sin(2.0 * sim.spacing)))].tolist())
+        other = next(int(b) for b in np.flatnonzero(sim.plates.alive) if b not in near)
+        seg.plate_id[q] = other
+        seg.kind[q] = kind
+        seg.thickness[q] = 0.7
+        seg.mass[q] = seg.thickness[q] * seg.density[q]
+        seg.weld[q] = 40
+        seg.terrane[q] = 1
+        if kind == OCEANIC:
+            obs = D.Observer(sim)
+            ter, iso = obs._terranes(seg, build_tree(seg))
+            assert ter[q] and iso[q]                       # the scorecard sees it isolated
+        intraplate.split_disconnected(sim, int(tp.plate_split_min), rng=sim.params.rng("tectonics", 9, 0),
+                                      min_area=float(tp.plate_min_area))
+        if kind == OCEANIC:
+            assert sim.seg.plate_id[q] == host
+            ter, iso = obs._terranes(sim.seg, build_tree(sim.seg))
+            assert ter[q] and not iso[q]
+        else:
+            assert sim.seg.plate_id[q] == other
 
 
 def test_arc_front_moves_crust_volume_for_volume(arc_sim):
@@ -286,9 +417,10 @@ def test_observer_reports_the_arcs(arc_sim):
     row = rep["samples"][-1]
     a = row["arcs"]
     for k in ("ocean_arc_share", "ocean_arc_active_share", "ocean_arc_stranded_share", "docked_share",
-              "docked_sea_level_shift_m"):
+              "docked_sea_level_shift_m", "terranes_n", "terranes_isolated"):
         assert k in a
     assert row["window"]["froth_share"] is not None and row["window"]["young_slab_share"] is not None
+    assert "slab_under_terrane_share" in row["window"] and "slab_under_isolated_share" in row["window"]
     isl = row["islands"]
     for k in ("crest_p50_m", "n_arc", "n_hotspot", "oo_trench_km", "vents_standing"):
         assert k in isl

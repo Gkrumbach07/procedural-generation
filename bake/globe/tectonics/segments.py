@@ -12,7 +12,7 @@ A :class:`Segments` object holds parallel arrays, one entry per segment::
     h_ref      (M,)   float64  bedrock height at the uplift reference step
     kind       (M,)   int8     OCEANIC or CONTINENTAL (see below)
     craton     (M,)   int8     1 inside an Archean craton, 0 otherwise
-    terrane    (M,)   int8     1 on continental crust that docked as an island arc (te/arcs)
+    terrane    (M,)   int8     1 on crust that docked as an island arc (te/arcs)
 
 Crust type
 ----------
@@ -268,9 +268,11 @@ class Segments:
         #: force, height or plate in the simulation moves because it exists
         self.rework = (self.age.copy() if rework is None
                        else np.array(np.broadcast_to(np.asarray(rework, dtype=np.float64), (M,)), dtype=np.float64))
-        #: 1 on continental crust that docked as an island arc (collision.collide, arc_dock_km):
-        #: arc crust at slab density, which loses its dense root over terrane_relax_my (run.py).
-        #: Nothing else reads it; 0 everywhere unless arcs dock
+        #: 1 on crust that docked as an island arc (collision.collide, arc_dock_km), from its first
+        #: dock on: an oceanic terrane, which loses part of itself (arc_dock_keep) at that dock
+        #: and at no later one, or continental crust at slab density once it has docked onto a
+        #: continent, which loses its dense root over terrane_relax_my (run.py).  0 everywhere
+        #: unless arcs dock
         self.terrane = np.array(np.broadcast_to(np.asarray(terrane, dtype=np.int8), (M,)), dtype=np.int8)
 
     @property
