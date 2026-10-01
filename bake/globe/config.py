@@ -310,18 +310,45 @@ class TectonicsParams:
     ocean_tiling: str = "zipf"  # 'zipf': the initial ocean plates get rank^-ocean_plate_alpha target sizes in [ocean_plate_min, ocean_plate_max] (dyn-forcebalance's power-law tiling: one Pacific-like plate, then a tail); 'cluster': dyn-minimal's redrawn cluster_plates
     ocean_plate_alpha: float = 1.0
     ocean_plate_min: float = 0.012
+    # --- continental mass and visible area (te/mass: proto/crit-mass on these dynamics) ---------
+    # Every knob is in physical units (km of crust, My) converted through column_km and
+    # myr_per_step.  CLASSIC_DYNAMICS turns all of them off (the shipped sinks: everything
+    # thickened crust loses goes to the mantle, and extent is invisible)
+    column_km: float = 35.0  # crust thickness (km) of one unit of `continental_thickness`: the conversion for the knobs below given in km
+    orogen_return: float = 0.85  # share of the crust orogenic collapse takes off a belt that stays continental -- gravitational collapse and erosion spread it as ground (ext) at constant volume; the rest goes to the mantle (eclogitised roots, subducted sediment).  Earth's collisional loss is ~0.4 km3/yr of 3-5 gross (Scholl & von Huene 2009).  0 = the shipped sink, all of it to the mantle (relax_orogens)
+    orogen_floor_cols: float = 0.02  # > 0: the height a dead belt settles at, as a thickness of belt crust above `belt_thickness` (x continental_thickness), instead of `orogen_floor_m` through height_scale_m -- so small and Earth run the same crust physics (the metre floor was 2.45 columns on small and 1.15 on Earth, so only Earth ever decayed). Earth's 1200 m at height_scale_m 26400 is 0.232
+    orogen_collapse_my: float = 40.0  # > 0: e-folding time (My) of a belt's height above its floor -- the one rated thinning process (collapse spreads crust into ground at constant volume, `orogen_return` of it); 0 = `orogen_decay` per step (0.006 = 25 My at 0.15 My/step)
+    orogen_fold_cap: float = 1.0  # > 0: a belt's fold-and-thrust moves at most this x the volume the collision handed the survivor from its foreland into the range -- as fast as the plates converge, not once per contact per step (creeping C-C contacts thinned their forelands to 0.2-0.5 columns, 9-12 % of the continents, and dragged the shelf sea level down).  0 = the shipped rule (up to 0.4 of each foreland column per event)
+    margin_stretch: bool = True  # a gap opening between two plates with continental crust around it is a continental rift: the nearest margin stretches into it at constant volume, down to extent_thin_floor, before sea floor spawns (rifted margins thin ~2x over 100-300 km before breakup -- Brune 2016 -- and are the shelves).  Off: a continental rift spawned sea floor against unthinned margins, and nothing made thin continental crust after the start's tapered margins were thickened
+    delamination_return: float = 0.8  # share of the crust the thickness cap (max_crust_thickness, delamination) takes that stays continental as ground -- lateral flow and plateau collapse (Tibet extruding east) -- instead of foundering.  0 = the shipped sink: all of it to the mantle; the shipped cap took 5-8 km3/yr in a collision phase
+    margin_erosion_km: float = 0.55  # subduction erosion + sediment subduction at ocean-under-continent contacts: thickness (km) of overriding continental crust removed per km of sea floor subducted under it, taken as ground at the margin (the trench migrates into the continent). Earth: ~0.7 km forearc erosion + ~0.5 km sediment (Scholl & von Huene 2009; ~3 km3/yr at 55,000 km of trench). 0 = off
+    extent_split: bool = True  # make extent visible (globe/tectonics/extent.py): per plate, while its continents own more ground than the map gives them (the rolling Voronoi area, Segments.area), the segment with the most unseen ground sheds a child -- its own column, its own crust, no ground made -- onto its plate's margin sea floor; while they own less, a coastal segment hands its crust to a continental neighbour and becomes sea floor.  Needs closure_ocean_only
+    extent_band: float = 1.0  # the balance's hysteresis, in cells: a plate splits only while its unseen ground holds this many of the child's cell and retreats its coast only while it is short by this many of the coastal cell
+    extent_split_at: float = 0.75  # ...and a segment is a parent only once its own unseen ground (ext - its cell) holds this share of the child's cell, so a parent is not left far under its own cell
+    extent_residence_my: float = 10.0  # a split child is not retreated, and a retreated coast is not split onto, within this long (My): the coast does not flicker
+    extent_split_active: bool = True  # a plate with no sea floor of its own at its margin grows into a neighbour's (the trench pushed back) instead of keeping ground the map cannot show
+    extent_merge: bool = True  # with extent_split: a plate whose continents own less ground than their cells show (margin erosion, shortened C-C losers) retreats its coast
+    extent_every_my: float = 1.0  # the balance runs this often (My; every 7 steps at 0.15 My/step): it flips ~0.5 points a step and the rolling area it reads moves on a 3 My e-fold, so every step only cost (0.023 s of a 0.12 s step)
+    extent_split_rate_my: float = 2000.0  # cost bound: at most this many splits (and as many coast retreats) per My
+    ocean_ext_relax_my: float = 10.0  # > 0 (with closure_ocean_only): the sea floor's extent relaxes toward its own cell (the rolling Voronoi area) with this e-folding time before the closure rescales it, so the closure's factor does not compound on old sea floor (a segment living 4000 steps gained e^1.6 x; one old slab carried 6 design extents into a single event).  And no sea floor carries more than extent_max.  0 = the closure's uniform factor alone
+
 
 
 #: The values that restore the shipped (pre-synth-dyn) tectonic dynamics: the random-pole
 #: supercontinent start at 0.75, the heat-gradient update with no boundary forces, the
 #: two-sided insulation, the rift clock, the nearest-segment spawn test, the proportional
-#: extent closure, no margin collapse or microplate capture.  ``small`` and ``tiny`` use
+#: extent closure, no margin collapse or microplate capture -- and the shipped crust sinks
+#: (orogen decay and the thickness cap to the mantle, no margin erosion, invisible extent).  ``small`` and ``tiny`` use
 #: them (their tests are calibrated to those dynamics); a world YAML can set them too.
 CLASSIC_DYNAMICS = dict(start_mode="classic", rift_mode="clock", continental_fraction=0.75, initial_plates=4,
                         rift_every=600, slab_force=0.0, boundary_drag_km=0.0, collision_drag=0.0,
                         basal_drag_continental=0.0, insulation_time_my=0.0, cc_heating=True, margin_collapse_my=0.0,
                         spawn_gate="nearest", closure_ocean_only=False, micro_area=0.0, orogen_push=0.0,
-                        suture_time_my=0.0)
+                        suture_time_my=0.0,
+                        # te/mass: the shipped sinks and invisible extent
+                        orogen_return=0.0, orogen_floor_cols=0.0, orogen_collapse_my=0.0, delamination_return=0.0,
+                        margin_erosion_km=0.0, extent_split=False, ocean_ext_relax_my=0.0, orogen_fold_cap=0.0,
+                        margin_stretch=False)
 
 
 def classic_dynamics(tp: "TectonicsParams", **over) -> "TectonicsParams":

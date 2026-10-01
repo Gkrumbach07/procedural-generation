@@ -365,7 +365,8 @@ def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float
 # gaps -> new crust (PLAN 6.2.4)
 # --------------------------------------------------------------------------
 def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, oceanic_density: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None, tree: cKDTree | None = None, ext: float | None = None, stretch: float = 0.0, thin_floor: float = 0.0,
-                   void: str = "create", taken_out: list | None = None, net_outflow: bool = False, pair_gate: bool = False) -> tuple[Segments, np.ndarray]:
+                   void: str = "create", taken_out: list | None = None, net_outflow: bool = False, pair_gate: bool = False,
+                   margin_stretch: bool = False, stretched_out: list | None = None) -> tuple[Segments, np.ndarray]:
     """Cells farther than ``gap_radius`` from every segment are divergent
     boundaries — provided the nearest segment is moving *away* from the
     cell (``omega`` (P, 3) rad/step given; holes left by subduction at a
@@ -417,6 +418,20 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
     ``taken_out`` receives the crust taken from existing segments,
     ``(column units, crust units)``, so the caller can book what the new
     segments hold less what they took.
+
+    ``margin_stretch`` (with ``thin_floor``): a gap between two plates with
+    continental crust around it is a continental rift, and the margins
+    stretch into it before it breaks -- the nearest continental neighbour
+    takes the new segment's ground and thins at constant volume, down to
+    ``thin_floor``; only then does sea floor spawn.  Rifted margins are
+    thinned ~2x over 100-300 km before breakup (Brune 2016; beta ~2-4), and
+    those thinned margins are the shelves that make up ~a third of the
+    continental crust.  Without it a continental rift spawned sea floor
+    against unthinned margins, nothing in the model made thin continental
+    crust again once the start's tapered margins were thickened by arcs and
+    collisions, and the continents' mean column rose ~18 % in 600 My (te/mass,
+    Earth seed 1).  ``stretched_out`` receives the ground the margins took, so
+    the caller does not hand it out again as open area.
 
     Returns ``(new_segments, gap_mask)``; the caller appends the segments
     and cools the heat field under ``gap_mask``."""
@@ -514,6 +529,31 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
         th = np.where(interior_cont, seg.thickness[nb].mean(axis=1), new_thickness)
         de = np.where(interior_cont, seg.density[nb].mean(axis=1), oceanic_density)
         cr = np.where(interior_cont, seg.craton[nb][np.arange(pos.shape[0]), 0], 0).astype(np.int8)
+        if margin_stretch and thin_floor > 0.0:
+            cont_rift = boundary & ((kinds == CONTINENTAL).mean(axis=1) >= 0.5)
+            absorbed = np.zeros(pos.shape[0], bool)
+            if cont_rift.any():
+                e_new = float(ext) if ext is not None else mean_area
+                add = {}
+                for v in np.flatnonzero(cont_rift):
+                    js = nb[v][kinds[v] == CONTINENTAL]
+                    j = int(js[0])
+                    room = float(seg.ext[j]) * max(float(seg.thickness[j]) / thin_floor - 1.0, 0.0) - add.get(j, 0.0)
+                    if room >= e_new:
+                        add[j] = add.get(j, 0.0) + e_new
+                        absorbed[v] = True
+                if add:
+                    jj = np.fromiter(add.keys(), np.int64)
+                    aa = np.fromiter(add.values(), np.float64)
+                    keep = seg.ext[jj] / (seg.ext[jj] + aa)                   # volume conserved
+                    seg.thickness[jj] *= keep
+                    seg.mass[jj] *= keep
+                    seg.ext[jj] += aa
+                if stretched_out is not None:
+                    stretched_out.append(float(absorbed.sum()) * e_new)
+                pos, plate, kind, th, de, cr, interior_cont, nb = (x[~absorbed] for x in (pos, plate, kind, th, de, cr, interior_cont, nb))
+            elif stretched_out is not None:
+                stretched_out.append(0.0)
         if stretch > 0.0 and interior_cont.any():
             # Extension, the other half of shortening.  With extent as state a void inside a
             # continent is not a hole to fill with new crust -- that manufactured continental
@@ -738,7 +778,7 @@ CONTINENTAL_K = np.int8(CONTINENTAL)
 
 
 @njit(cache=True)
-def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, rework, kind, craton, weld, ext, spent, polarity, alive, overlap2, accretion, arc_birth, birth_draw, shortening, radius, weld_steps, extent_min, arc_thickness, arc_density):
+def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, rework, kind, craton, weld, ext, spent, polarity, alive, overlap2, accretion, arc_birth, birth_draw, shortening, radius, weld_steps, extent_min, arc_thickness, arc_density, margin_erosion):
     n = pairs.shape[0]
     losers = np.empty(n, dtype=np.int64)
     survivors = np.empty(n, dtype=np.int64)
@@ -983,6 +1023,26 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
             mass[su] += f * mass[lo]
             thickness[su] += f * thickness[lo]
         density[su] = mass[su] / thickness[su]
+        if margin_erosion > 0.0 and kind[lo] == OCEANIC_K and kind[su] == CONTINENTAL_K and var_ext:
+            # Subduction erosion and sediment subduction: the slab drags the base of the
+            # forearc and the trench fill down with it, `margin_erosion` columns of crust per
+            # unit of sea floor consumed (the slab's own ground), so the overriding margin loses
+            # ground at its own thickness -- the trench migrates into the continent.  A margin
+            # segment eroded down to `extent_min` is gone: its last sliver goes down too.
+            # [11] volume, [12] crust (ext x mass), [13] ground, all continental
+            vol = margin_erosion * ext[lo]
+            g = vol / max(thickness[su], 1e-9)
+            if ext[su] - g > extent_min:
+                spent[11] += vol
+                spent[12] += g * mass[su]
+                spent[13] += g
+                ext[su] -= g
+            else:
+                spent[11] += ext[su] * thickness[su]
+                spent[12] += ext[su] * mass[su]
+                spent[13] += ext[su]
+                ext[su] = 0.0
+                alive[su] = False
         # the survivor's age is the older of the two only when it keeps the
         # whole slab; an arc is new crust welded to old, not old crust
         if f >= 1.0 and age[lo] > age[su]:
@@ -1010,6 +1070,8 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
                 mass[su] = thickness[su] * density[su]
                 spent[1] += mass[su] - m0
                 spent[2] += ext[su] * (mass[su] - m0)
+            spent[9] += ext[su] * thickness[su]       # continental volume (and ground) an arc adds
+            spent[10] += ext[su]
         alive[lo] = False
         losers[k] = lo
         survivors[k] = su
@@ -1019,7 +1081,7 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
 
 def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, alive: np.ndarray, overlap_fraction: float = 0.5, accretion: float = 1.0, arc_birth: float = 0.0, rng: np.random.Generator | None = None, shortening: float = 0.0, weld_steps: int = 0, extent_min: float = 0.0, spent_out: list | None = None,
             arc_thickness: float = 0.0, arc_density: float = 0.804, arc_out: list | None = None, recv_out: list | None = None,
-            books_out: list | None = None):
+            books_out: list | None = None, margin_erosion: float = 0.0, diag_out: list | None = None):
     """Subduction: for every pair of segments of different plates within
     chord ``radius`` (KD-tree pair query, applied in sorted order) that are
     *approaching* — or closer than ``overlap_fraction * radius`` whatever
@@ -1055,7 +1117,7 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
         if recv_out is not None:
             recv_out.append((np.zeros(0), np.zeros(0)))
         if books_out is not None:
-            books_out.append({"subducted": (0.0, 0.0), "accreted": (0.0, 0.0), "arc_born": (0.0, 0.0)})
+            books_out.append({"subducted": (0.0, 0.0), "accreted": (0.0, 0.0), "arc_born": (0.0, 0.0), "margin_eroded": (0.0, 0.0)})
         return np.zeros(0, np.int64), np.zeros(0, np.int64)
     pairs = np.sort(pairs, axis=1)
     pairs = pairs[np.lexsort((pairs[:, 1], pairs[:, 0]))]
@@ -1065,16 +1127,19 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     # [ground crustal shortening consumed, mass arcs drew from the mantle by column and
     #  by crust (column x extent) -- the ledger is kept in whichever its mode conserves --
     #  then the same two for slab lost to the mantle, slab accreted to a continent, and
-    #  oceanic columns an arc birth relabelled]
-    spent = np.zeros(9, dtype=np.float64)
-    out = _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.rework, seg.kind, seg.craton, seg.weld, seg.ext, spent, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw), float(shortening), float(radius), int(weld_steps), float(extent_min), float(arc_thickness), float(arc_density))
+    #  oceanic columns an arc birth relabelled; [9] volume and [10] ground arcs make
+    #  continental; [11] volume, [12] crust and [13] ground margin erosion takes]
+    spent = np.zeros(14, dtype=np.float64)
+    out = _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.rework, seg.kind, seg.craton, seg.weld, seg.ext, spent, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw), float(shortening), float(radius), int(weld_steps), float(extent_min), float(arc_thickness), float(arc_density), float(margin_erosion))
     if spent_out is not None:
         spent_out.append(float(spent[0]))
     if arc_out is not None:
         arc_out.append((float(spent[1]), float(spent[2])))
     if books_out is not None:
         books_out.append({"subducted": (float(spent[3]), float(spent[4])), "accreted": (float(spent[5]), float(spent[6])),
-                          "arc_born": (float(spent[7]), float(spent[8]))})
+                          "arc_born": (float(spent[7]), float(spent[8])), "margin_eroded": (0.0, float(spent[12]))})
+    if diag_out is not None:
+        diag_out.append(spent.copy())
     losers, survivors, recv_th, recv_m = out
     if recv_out is not None:
         recv_out.append((recv_th, recv_m))     # what each survivor was handed (NaN: fixed-area rule)

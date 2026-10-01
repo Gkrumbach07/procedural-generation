@@ -232,9 +232,13 @@ class Segments:
     """Structure-of-arrays segment store (see module docstring).  All
     mutating methods keep the parallel arrays aligned."""
 
-    FIELDS = ("pos", "mass", "thickness", "density", "age", "plate_id", "area", "h_ref", "kind", "craton", "weld", "ext", "rework")
+    FIELDS = ("pos", "mass", "thickness", "density", "age", "plate_id", "area", "h_ref", "kind", "craton", "weld", "ext", "rework", "shown")
 
-    def __init__(self, pos, thickness, density, age, plate_id, area, h_ref=None, mass=None, kind=OCEANIC, craton=0, weld=0, ext=None, rework=None):
+    #: ``shown`` of a segment the extent balance has never flipped
+    NEVER = -(2 ** 30)
+
+    def __init__(self, pos, thickness, density, age, plate_id, area, h_ref=None, mass=None, kind=OCEANIC, craton=0, weld=0, ext=None, rework=None,
+                 shown=None):
         self.pos = np.ascontiguousarray(pos, dtype=np.float64).reshape(-1, 3)
         M = self.pos.shape[0]
         self.thickness = np.array(np.broadcast_to(np.asarray(thickness, dtype=np.float64), (M,)), dtype=np.float64)
@@ -267,6 +271,11 @@ class Segments:
         #: force, height or plate in the simulation moves because it exists
         self.rework = (self.age.copy() if rework is None
                        else np.array(np.broadcast_to(np.asarray(rework, dtype=np.float64), (M,)), dtype=np.float64))
+        #: the step at which the extent balance (``tectonics.extent_split``) last turned this
+        #: point continental (a split child) or oceanic (a retreated coast); ``NEVER`` otherwise.
+        #: The balance leaves a point it flipped alone for ``extent_residence_my``, so a coast
+        #: does not flicker.  Bookkeeping only: nothing else reads it
+        self.shown = np.array(np.broadcast_to(np.asarray(Segments.NEVER if shown is None else shown, dtype=np.int32), (M,)), dtype=np.int32)
 
     @property
     def M(self) -> int:
@@ -319,7 +328,7 @@ class Segments:
             setattr(self, name, np.ascontiguousarray(np.concatenate([getattr(self, name), getattr(other, name)])))
 
     def copy(self) -> "Segments":
-        return Segments(self.pos.copy(), self.thickness.copy(), self.density.copy(), self.age.copy(), self.plate_id.copy(), self.area.copy(), self.h_ref.copy(), self.mass.copy(), self.kind.copy(), self.craton.copy(), self.weld.copy(), self.ext.copy(), self.rework.copy())
+        return Segments(self.pos.copy(), self.thickness.copy(), self.density.copy(), self.age.copy(), self.plate_id.copy(), self.area.copy(), self.h_ref.copy(), self.mass.copy(), self.kind.copy(), self.craton.copy(), self.weld.copy(), self.ext.copy(), self.rework.copy(), self.shown.copy())
 
     def renormalise(self) -> None:
         self.pos /= np.linalg.norm(self.pos, axis=1, keepdims=True)

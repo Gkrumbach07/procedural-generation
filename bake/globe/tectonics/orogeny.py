@@ -233,11 +233,77 @@ def relax_orogens(seg, baseline_m: float, floor_m: float, height_unit_m: float,
     return shed
 
 
+def collapse_orogens(seg, baseline: float, floor: float, rate: float, continental: int,
+                    keep: float, thin_floor: float = 0.0) -> tuple[float, float]:
+    """Bring a belt down the way Earth does: mostly by spreading it, not by sinking it.
+
+    The same height loss as :func:`relax_orogens` -- ``rate`` of the height above
+    ``baseline + floor`` per step, both in *bedrock units* (``thickness * (1 - density)``,
+    no metres: a threshold in metres through ``height_scale_m`` made the floor 2.45
+    columns on `small` and 1.15 on Earth, so only Earth drained) -- but the crust it takes
+    off the column stays continental: share ``keep`` of it is spread as ground at
+    constant volume (gravitational collapse thins and widens the orogen; erosion carries
+    the top to the forelands and shelves), and only ``1 - keep`` returns to the mantle
+    (an eclogitised root, subducted sediment).  A collapsing column does not thin below
+    ``thin_floor``.  Without this the thickened crust of every collision had one way out,
+    the mantle -- orogen_decay and delamination took 18.4 + 11.2 units of continental
+    crust (1 unit = 1.42e9 km3) over 8000 Earth steps on the shipped preset (seed 1423).
+
+    Returns ``(volume kept as ground, ground added)`` in ext x thickness and steradians.
+    The mass that left is the caller's ledger difference."""
+    if rate <= 0.0:
+        return 0.0, 0.0
+    buoy = np.maximum(1.0 - seg.density, 1e-3)
+    excess = seg.thickness * buoy - (baseline + floor)
+    hot = (seg.kind == continental) & (excess > 0.0)
+    if not hot.any():
+        return 0.0, 0.0
+    th0 = seg.thickness[hot]
+    dth = float(rate) * excess[hot] / buoy[hot]
+    if thin_floor > 0.0:
+        dth = np.minimum(dth, np.maximum(th0 - thin_floor, 0.0))
+    th1 = th0 - dth
+    e0 = seg.ext[hot]
+    kept_col = float(keep) * dth                      # column (on the old ground) that stays crust
+    e1 = e0 * (th1 + kept_col) / np.maximum(th1, 1e-9)
+    seg.ext[hot] = e1
+    seg.thickness[hot] = th1
+    seg.mass[hot] = th1 * seg.density[hot]
+    return float((e0 * kept_col).sum()), float((e1 - e0).sum())
+
+
+def collapse_thick(seg, limit: float, rate: float, continental: int, keep: float) -> tuple[float, float]:
+    """The crustal-thickness cap as collapse rather than only foundering.
+
+    :func:`~globe.tectonics.collision.delaminate` sheds ``rate`` of the thickness above
+    ``limit`` per step to the mantle.  Earth's crust saturates near 70-80 km under the
+    largest collision going, but mostly by flowing sideways (Tibet's lower crust extrudes
+    east; plateaus collapse) -- the collisional loss to the mantle is ~0.4 km3/yr against
+    3-5 km3/yr of gross recycling.  Here share ``keep`` of what the cap takes spreads as
+    ground at constant volume (shown at the margins by the extent balance) and only
+    ``1 - keep`` founders.  Continental crust only.  Returns ``(volume kept, ground added)``."""
+    if limit <= 0.0 or rate <= 0.0:
+        return 0.0, 0.0
+    over = (seg.kind == continental) & (seg.thickness > limit)
+    if not over.any():
+        return 0.0, 0.0
+    th0 = seg.thickness[over]
+    dth = (th0 - limit) * float(rate)
+    th1 = th0 - dth
+    e0 = seg.ext[over]
+    kept_col = float(keep) * dth
+    e1 = e0 * (th1 + kept_col) / np.maximum(th1, 1e-9)
+    seg.ext[over] = e1
+    seg.thickness[over] = th1
+    seg.mass[over] = th1 * seg.density[over]
+    return float((e0 * kept_col).sum()), float((e1 - e0).sum())
+
+
 def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet_m: float,
                height_unit_m: float, strength: float, continental: int, accretion: float = 1.0,
                flat_slab_age: float = 0.0, along_strike: float = 1.5, census: dict | None = None,
                shortening: float = 0.0, width_scale: float = 1.0, received=None,
-               conserve_volume: bool = False) -> float:
+               conserve_volume: bool = False, fold_cap: float = 0.0) -> float:
     """Build each collision belt with a cross-section. Returns thickness moved.
 
     This *replaces* :func:`~globe.tectonics.collision.spread_collisions` for
@@ -296,6 +362,19 @@ def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet
     +11.7 units of volume over 8000 Earth steps (1 unit = 1.42e9 km3), the
     largest of the terms that hid two thirds of the orogen and delamination
     sinks. Off, it is the fixed-area model bit for bit.
+
+    **As much as the convergence delivered** (``fold_cap`` > 0, with
+    ``conserve_volume``). The fold-and-thrust relaxes the foreland toward the
+    profile on every *event*, whatever the event shortened, taking up to 0.4
+    of a column each time -- and a contact that creeps registers as a
+    collision every step (synth-dyn: 0.3-1.4 cm/yr, 124k C-C events in 2500
+    Earth steps on seed 1).  Measured there, the forelands went to 0.2-0.5
+    columns, a single segment 1.62 -> 0.50 in one step, and continental crust
+    thinner than half a column grew to 9-12 % of the continents, which drags
+    the shelf-mode sea level down and the land median up by ~500 m.  With the
+    cap the foreland gives the range at most ``fold_cap`` x the volume the
+    collision handed the survivor: thrusting moves crust as fast as the plates
+    converge, not as often as they touch.
     """
     if losers.size == 0:
         return 0.0
@@ -428,6 +507,11 @@ def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet
             take = np.zeros(idx.size, dtype=np.float64)
             take[low] = strength * (h[low] - (base + prof[low])) / buoy[low]
             take = np.clip(take, 0.0, 0.4 * seg.thickness[idx])
+            if fold_cap > 0.0 and conserve_volume:
+                cap = float(fold_cap) * th_in * float(seg.ext[su])
+                vol0 = float((take * seg.ext[idx]).sum())
+                if vol0 > cap:
+                    take *= cap / vol0
             pot = float((take * seg.density[idx]).sum())
             if pot > 0.0:
                 if conserve_volume:
@@ -449,4 +533,4 @@ def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet
     return moved
 
 
-__all__ = ["Orogen", "TYPES", "classify", "relax_orogens", "shape_belt"]
+__all__ = ["Orogen", "TYPES", "classify", "collapse_orogens", "collapse_thick", "relax_orogens", "shape_belt"]
