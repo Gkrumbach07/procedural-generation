@@ -633,6 +633,16 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
             # segment and gets consumed at the same rate as its surroundings.
             if craton[i] == 0:
                 lo, su = i, j
+            elif craton[j] == 0 or extent_min <= 0.0:
+                lo, su = j, i
+            # Craton against craton: the weaker lithosphere yields -- the thinner column,
+            # then the one with less ground.  Which went under was the pair's array order
+            # (`j`, the higher index, always lost), and array order says nothing about the
+            # two cratons, so along one suture they took turns to lose, contact by contact,
+            # instead of the stronger indenting the weaker
+            # (variable extent only: the fixed-area model keeps the old order, bit for bit)
+            elif thickness[i] < thickness[j] or (thickness[i] == thickness[j] and ext[i] < ext[j]):
+                lo, su = i, j
             else:
                 lo, su = j, i
         elif density[i] > density[j] + DENSITY_EPS:
