@@ -587,12 +587,13 @@ class Observer:
             # Collisions are counted per contact and step: a C-C contact closing at 0.8 cm/yr counts
             # every step, a trench segment once when it goes down, so the count's C-C share is not
             # the convergence's.  The convergence's is cc_kin_share: the census's boundary length
-            # x closing rate, C-C over all converging pairs (9-12 % on seeds 2/4/1423 at 225-525
-            # My, where the count says ~0.70).  cc_kernel_share is the C-C share of the ground
-            # the *kernel* consumed (shortened against subducted) -- its bookkeeping, not the
-            # convergence: it read 1.8-2.2 % on those states, because the subduction kernel
-            # takes ~4x the O-C/O-O convergence (sub_take) and C-C shortening ~0.65-0.9x the
-            # C-C convergence (cc_take; 1 = the kernel spends exactly what the plates close)
+            # x closing rate, C-C over all converging pairs -- 0.10-0.15 over 150-600 My on the
+            # Earth preset, seeds 0-3, where the count says 0.57-0.82.  cc_kernel_share is the C-C
+            # share of the ground the *kernel* consumed (shortened against subducted): its
+            # bookkeeping, not the convergence -- 0.02-0.03 on the same runs, because the
+            # subduction kernel takes 3.5-4.2x the O-C/O-O convergence (sub_take: it kills whole
+            # segments per contact) and C-C shortening 0.65-0.76x the C-C convergence (cc_take;
+            # 1 = the kernel spends exactly what the plates close)
             "cc_kin_share": _f(w["kin_cc"] / w["kin_all"]) if w["kin_all"] > 0 else None,
             "cc_kernel_share": _f(w["ground_cc"] / (w["ground_cc"] + w["ground_sub"]))
             if (w["ground_cc"] + w["ground_sub"]) > 0 else None,
