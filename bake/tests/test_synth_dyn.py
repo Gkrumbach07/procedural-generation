@@ -713,3 +713,87 @@ def test_earth_dynamics_scorecard_gate_2000_steps():
         assert 45.0 <= last["ocean"]["mean_age_myr"] <= 85.0, seed
         dispersed += any((s["dyn"]["largest_noarc_share"] or 1.0) <= 0.7 for s in rep["samples"])
     assert dispersed >= 3
+
+
+def _converging_halves(rate_cmyr, **kw):
+    """The supercontinent cut in two (no rift registered), the halves closing at ``rate_cmyr``
+    (median over their contact) about the cut's own pole."""
+    sim = tect.initialise(_small_earth(**kw), log=None)
+    for _ in range(2):
+        sim.step()
+    a, b, c, n = _halves(sim)
+    pl = sim.plates
+    e = np.cross(c, n)
+    intraplate._force_state(sim)
+    cen = sim.census_last
+    m = (cen["ki"] == CONTINENTAL) & (cen["kj"] == CONTINENTAL)
+    unit = np.median(np.abs(np.sum(np.cross(e, sim.seg.pos[cen["i"][m]]) * cen["dd"][m], axis=1)))
+    s = sim.cmyr(rate_cmyr) / unit
+    w = pl.omega[a].copy()
+    pl.omega[a], pl.omega[b] = w + 0.5 * s * e, w - 0.5 * s * e
+    if np.average(_cc_closing_rates(sim, a, b)) < 0:      # make it closing, whichever way the cut faces
+        pl.omega[a], pl.omega[b] = pl.omega[b].copy(), pl.omega[a].copy()
+    return sim, a, b
+
+
+def _cc_closing_rates(sim, a, b):
+    cen = forces.census(sim.seg, sim.plates, sim.spacing)
+    m = (cen["ki"] == CONTINENTAL) & (cen["kj"] == CONTINENTAL)
+    w = sim.plates.omega
+    vi = np.cross(w[cen["pi"][m]], sim.seg.pos[cen["i"][m]])
+    vj = np.cross(w[cen["pj"][m]], sim.seg.pos[cen["j"][m]])
+    return np.sum((vi - vj) * cen["dd"][m], axis=1)
+
+
+def test_contact_persistence_weld():
+    """suture_persist_my: a long C-C contact held that long is welded at any closing rate below
+    suture_persist_cmyr -- a pair closing at 3 cm/yr, which the quiet weld never takes."""
+    for limit, welds in ((0.0, True), (2.0, False)):
+        sim, a, b = _converging_halves(3.0, suture_persist_my=50.0, suture_persist_km=1500.0, suture_persist_cmyr=limit)
+        intraplate.suture_weld(sim, np.random.default_rng(0))
+        assert not sim.suture_quiet                                    # not quiet: 3 cm/yr
+        sim.step_index += int(sim.steps_of(50.0)) + 1
+        ev = intraplate.suture_weld(sim, np.random.default_rng(0))
+        assert bool(ev["welds"]) == welds
+
+
+def test_a_stalled_rift_lets_its_halves_go():
+    """rift_stall_km: a rift that opened past half its weakening length and then stopped is
+    released (two plates, an ordinary boundary, no coupling); one still opening is kept, and
+    one that never opened half-way heals as before."""
+    sim, (a, b), _ = _rifted(rift_stall_km=12.0)
+    st = sim.rift_pairs[(a, b)]
+    lim = int(sim.steps_of(sim.tp.rift_abort_my))
+    sim.step_index += lim + 1
+    k = sim.step_index
+    st["delta"] = 0.8 * sim.km(sim.tp.rift_weaken_km)
+    st["trace"] = [(k - 5, sim.km(1.0))]                          # 1 km in the last 40 My: stalled
+    ev = intraplate.heal_failed_rifts(sim, np.random.default_rng(0))
+    assert ev["released"] and not ev["healed"] and (a, b) not in sim.rift_pairs
+    assert sim.plates.alive[a] and sim.plates.alive[b]
+    sim.rift_pairs[(a, b)] = dict(st, trace=[(k - 5, sim.km(30.0))])       # still opening
+    assert not intraplate.heal_failed_rifts(sim, np.random.default_rng(0))["released"]
+    assert (a, b) in sim.rift_pairs
+    sim.tp.rift_stall_km = 0.0                                      # off: a stalled rift holds
+    sim.rift_pairs[(a, b)]["trace"] = []
+    assert not intraplate.heal_failed_rifts(sim, np.random.default_rng(0))["released"]
+
+
+def test_frozen_ids_stop_a_collision_chain_within_one_step():
+    """collide_frozen_ids: a continental loser relabelled onto the survivor's plate no longer
+    collides, in the same call, with its former plate-mates as if it were the survivor's --
+    which spent the step's convergence again at every link of the chain."""
+    same = {}
+    for frozen in (False, True):
+        sim, a, b = _converging_halves(20.0)
+        seg, tp = sim.seg, sim.tp
+        pid0 = seg.plate_id.copy()
+        alive = np.ones(seg.M, bool)
+        lo, su = tect.collide(seg, collision.build_tree(seg), sim.r_coll, sim.plates.omega, alive, tp.overlap_fraction,
+                              float(tp.arc_accretion), 0.0, None, shortening=float(tp.continental_shortening),
+                              weld_steps=int(tp.weld_steps), extent_min=float(tp.extent_min) * sim.spacing ** 2,
+                              spent_out=[], arc_out=[], recv_out=[], books_out=[], frozen_ids=frozen)
+        cc = (seg.kind[lo] == CONTINENTAL) & (seg.kind[su] == CONTINENTAL)
+        assert cc.sum() > 0
+        same[frozen] = int((pid0[lo] == pid0[su]).sum())
+    assert same[False] > 0 and same[True] == 0

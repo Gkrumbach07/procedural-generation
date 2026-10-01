@@ -283,6 +283,7 @@ class TectonicSim:
         self.grad3 = None
         self.micro_passive: dict[int, int] = {}
         self.suture_quiet: dict[tuple[int, int], int] = {}
+        self.suture_held: dict[tuple[int, int], int] = {}      # pair -> step its long C-C contact began (suture_persist_my)
         #: all segment pairs within some radius of the cloud as split_disconnected saw it this
         #: step (radius, pairs, the KD tree, the positions it was built on): the census reads its
         #: own pairs off them instead of a third tree and query a step (see _census_pairs)
@@ -290,7 +291,7 @@ class TectonicSim:
 
     #: the plate-id dictionaries of the dynamics, all keyed by plate id (or a pair of them);
     #: anything that renumbers plates from scratch (reorganise) must empty them
-    DYN_BOOKS = ("rift_pairs", "last_rift", "rift_jitter", "collapse_jitter", "micro_passive", "suture_quiet")
+    DYN_BOOKS = ("rift_pairs", "last_rift", "rift_jitter", "collapse_jitter", "micro_passive", "suture_quiet", "suture_held")
 
     # -- helpers ------------------------------------------------------------
     def kind_mass(self, live: np.ndarray | None = None) -> tuple[float, float]:
@@ -544,7 +545,7 @@ class TectonicSim:
             plates = self.plates
             for a, b in ev.get("pairs", ()):
                 self.suture_block[(min(a, b), max(a, b))] = k + int(tp.suture_cooldown)
-        if tp.suture_time_my > 0 and k > 0 and k % max(1, int(tp.micro_every)) == 0:
+        if (tp.suture_time_my > 0 or tp.suture_persist_my > 0) and k > 0 and k % max(1, int(tp.micro_every)) == 0:
             ev = intraplate.suture_weld(self, self.params.rng("tectonics", 14, k))
             if ev.get("welds"):
                 self.events.append(ev)
@@ -556,7 +557,7 @@ class TectonicSim:
                 plates = self.plates
         if str(tp.rift_mode) == "force" and self.rift_pairs and float(tp.rift_abort_my) > 0 and k % max(1, int(tp.rift_check_every)) == 0:
             ev = intraplate.heal_failed_rifts(self, self.params.rng("tectonics", 13, k))
-            if ev.get("healed"):
+            if ev.get("healed") or ev.get("released"):
                 self.events.append(ev)
                 plates = self.plates
         if str(tp.rift_mode) in ("insulation", "force") and k > 0 and k % max(1, int(tp.rift_check_every)) == 0:
@@ -619,7 +620,8 @@ class TectonicSim:
                                     extent_min=(float(tp.extent_min) * self.spacing ** 2) if tp.variable_extent else 0.0,
                                     spent_out=spent_out, arc_out=arc_out, recv_out=recv_out,
                                     arc_thickness=float(tp.arc_thickness) * float(tp.continental_thickness),
-                                    arc_density=float(tp.continental_density), books_out=books_out)
+                                    arc_density=float(tp.continental_density), books_out=books_out,
+                                    frozen_ids=bool(tp.collide_frozen_ids))
         received = recv_out[0] if (recv_out and tp.variable_extent) else None
         # by column or by crust, whichever this mode's ledger is kept in
         u = 1 if tp.variable_extent else 0

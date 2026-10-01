@@ -289,6 +289,7 @@ class TectonicsParams:
     rift_slow_cmyr: float = 0.8  # a new rift's strength G0 is calibrated so it opens at this rate at first (Brune 2016: < 1 cm/yr for 20-25 My)
     rift_strength_max: float = 60.0  # cap on G0
     rift_abort_my: float = 40.0  # a rift that has opened less than half of rift_weaken_km after this long has failed and heals (its halves are one plate again); 0 = never
+    rift_stall_km: float = 0.0  # (te/dyn, experimental) > 0: a rift past half of rift_weaken_km that opened less than this over the last rift_abort_my has stalled, and its halves' coupling is released (they are two plates with an ordinary boundary); 0 = it holds until it opens rift_break_factor x rift_weaken_km
     rift_craton_strength: float = 3.0  # lithospheric strength against a mobile belt's 1
     rift_suture_strength: float = 0.5  # crust assembled within rift_suture_my
     rift_suture_my: float = 150.0
@@ -304,6 +305,19 @@ class TectonicsParams:
     suture_time_my: float = 20.0  # > 0: two plates meeting along >= suture_min_km of continent-continent contact with a median relative normal speed below suture_rate_cmyr for this long are welded into one (a finished collision; the next rift reopens the young suture); 0 = off
     suture_min_km: float = 800.0
     suture_rate_cmyr: float = 1.0
+    # The C-C contacts of an assembled continent keep closing and count as collisions every step
+    # (synth-dyn risk 1: 0.66-0.84 of all collisions after 150 My).  Not the damping lag:
+    # measured on seed 1 at 375-480 My the contacts close at a median 0.79 cm/yr and the force
+    # balance's own terminal velocities at 0.75-0.79 -- the collisional drag slows them, as
+    # designed.  And the share is a count: every converging C-C pair counts every step, a trench
+    # segment once when it goes down; by the ground the convergence consumed (window
+    # cc_ground_share) C-C is 0.6-3 % of it.  What was wrong is collide_frozen_ids below; the
+    # persistence weld here (and rift_stall_km) are experimental and off: a 1500 km / 50 My
+    # weld never fired over 375-480 My on seed 1, where every long contact was a rift's half
+    suture_persist_my: float = 0.0  # > 0: two plates whose continent-continent contact stays >= suture_persist_km for this long are welded, at any closing rate below suture_persist_cmyr -- a contact-persistence weld; the young suture's strength (rift_suture_strength) lets the force rift reopen it.  0 = off
+    suture_persist_km: float = 1500.0
+    suture_persist_cmyr: float = 0.0  # ... with the median closing over the contact below this at every check (0 = any rate)
+    collide_frozen_ids: bool = True  # (te/dyn) the collision kernel reads every pair's plates as they were when the step's collisions began.  Off (the shipped rule, CLASSIC_DYNAMICS): a continental loser relabelled onto the survivor's plate collides again in the same call with its former plate-mates behind it, as the survivor's -- the step's convergence spent again at every link of the chain.  Measured on seed 1 at 375-405 My: 37 % of the C-C collisions were such chains (pairs of one plate at the call's start), and frozen ids took C-C collisions from 120 to 92 a step; on seeds 0-3 to 600 My the C-C share of collisions over 150-600 My fell from 0.77/0.80/0.65/0.76 to 0.72/0.73/0.71/0.70, continental extent held at 0.40-0.41 (0.38-0.42), land above 2 km fell to 1.9-3.4 % (1.4-14.7) and the cycle kept its dispersal (<= 0.65 by 150 My) and reassembly (0.72-1.00 by 525 My) on all four; the ocean floor ran older (76-89 My mean at 600 My against 52-71)
     orogen_push: float = 0.0  # > 0: thickened crust at a continent-continent contact pushes the plates apart, this much per unit contact length at full thickening (heat units, as slab_force): the orogen's gravitational potential energy balancing the collision (Tibet against India; Copley et al. 2010)
     orogen_push_th0: float = 1.2  # ...from this continental column (x continental_thickness)...
     orogen_push_dth: float = 0.8  # ...rising to full over this much more
@@ -321,7 +335,7 @@ CLASSIC_DYNAMICS = dict(start_mode="classic", rift_mode="clock", continental_fra
                         rift_every=600, slab_force=0.0, boundary_drag_km=0.0, collision_drag=0.0,
                         basal_drag_continental=0.0, insulation_time_my=0.0, cc_heating=True, margin_collapse_my=0.0,
                         spawn_gate="nearest", closure_ocean_only=False, micro_area=0.0, orogen_push=0.0,
-                        suture_time_my=0.0)
+                        suture_time_my=0.0, suture_persist_my=0.0, rift_stall_km=0.0, collide_frozen_ids=False)
 
 
 def classic_dynamics(tp: "TectonicsParams", **over) -> "TectonicsParams":

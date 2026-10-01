@@ -213,9 +213,17 @@ class Observer:
         def collide(seg, tree, radius, omega_dt, alive, *a, **kw):
             if seg is not obs.sim.seg:
                 return orig_collide(seg, tree, radius, omega_dt, alive, *a, **kw)
-            pid0, kind0, pos0 = seg.plate_id.copy(), seg.kind.copy(), seg.pos.copy()
+            pid0, kind0, pos0, ext0 = seg.plate_id.copy(), seg.kind.copy(), seg.pos.copy(), seg.ext.copy()
             out = orig_collide(seg, tree, radius, omega_dt, alive, *a, **kw)
             obs._on_collide(seg, pid0, kind0, pos0, np.asarray(out[0]), np.asarray(out[1]))
+            # the ground the step's convergence consumed: crustal shortening (collide's own sum,
+            # the list run.py hands it) against the sea floor that went down
+            lo = np.asarray(out[0])
+            sub = lo[(kind0[lo] == OCEANIC) & ~np.asarray(alive)[lo]] if lo.size else lo
+            obs.win["ground_sub"] += float(ext0[sub].sum())
+            sp_ = kw.get("spent_out")
+            if sp_:
+                obs.win["ground_cc"] += float(sp_[-1])
             return out
 
         orig_rift = intraplate.rift
@@ -271,7 +279,8 @@ class Observer:
     def _reset_window(self) -> None:
         self.win = {"steps": 0, "coll_cc": 0, "coll_oc": 0, "coll_oo": 0, "arc_births": 0, "births_rift": 0,
                     "births_split": 0, "births_other": 0, "deaths": 0, "rifts": 0, "spawned": 0, "gap_cells": 0,
-                    "coll_cc_arc": 0, "ev_collapse": 0, "ev_micro": 0, "ev_suture": 0, "ev_heal": 0}
+                    "coll_cc_arc": 0, "ev_collapse": 0, "ev_micro": 0, "ev_suture": 0, "ev_heal": 0, "ev_release": 0,
+                    "ground_cc": 0.0, "ground_sub": 0.0}
 
     def _on_collide(self, seg, pid0, kind0, pos0, losers, survivors) -> None:
         lk, sk = kind0[losers], kind0[survivors]
@@ -365,6 +374,7 @@ class Observer:
                 w["ev_suture"] += len(ev.get("welds", ()))
             elif e == "rift_fail":
                 w["ev_heal"] += len(ev.get("healed", ()))
+                w["ev_release"] += len(ev.get("released", ()) or ())
         if self._rift_traces:
             rp = getattr(sim, "rift_pairs", {})
             for (a, b, k0), t in self._rift_traces.items():
@@ -550,6 +560,11 @@ class Observer:
             "coll_per_step": _f(n_c / st),
             "cc_share": _f(w["coll_cc"] / n_c) if n_c else None,
             "cc_noarc_share": _f((w["coll_cc"] - w["coll_cc_arc"]) / n_c) if n_c else None,
+            # collisions are counted per contact and step: a C-C contact closing at 0.8 cm/yr counts
+            # every step, a trench segment once when it goes down, so the count's C-C share is not
+            # the convergence's.  This is: shortened ground against subducted ground
+            "cc_ground_share": _f(w["ground_cc"] / (w["ground_cc"] + w["ground_sub"]))
+            if (w["ground_cc"] + w["ground_sub"]) > 0 else None,
             "oc_share": _f(w["coll_oc"] / n_c) if n_c else None,
             "oo_share": _f(w["coll_oo"] / n_c) if n_c else None,
             "births": w["births_rift"] + w["births_split"] + w["births_other"],

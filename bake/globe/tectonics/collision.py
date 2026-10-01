@@ -741,7 +741,7 @@ CONTINENTAL_K = np.int8(CONTINENTAL)
 
 
 @njit(cache=True)
-def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, rework, kind, craton, weld, ext, spent, polarity, alive, overlap2, accretion, arc_birth, birth_draw, shortening, radius, weld_steps, extent_min, arc_thickness, arc_density):
+def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, rework, kind, craton, weld, ext, spent, polarity, alive, overlap2, accretion, arc_birth, birth_draw, shortening, radius, weld_steps, extent_min, arc_thickness, arc_density, pid_read):
     n = pairs.shape[0]
     losers = np.empty(n, dtype=np.int64)
     survivors = np.empty(n, dtype=np.int64)
@@ -758,8 +758,11 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
         j = pairs[e, 1]
         if not alive[i] or not alive[j]:
             continue
-        pi = plate_id[i]
-        pj = plate_id[j]
+        # which plate each side is on, for the same-plate test, the velocities and the
+        # polarity: ``pid_read`` is ``plate_id`` itself (the shipped rule: a loser relabelled
+        # earlier in this call collides again as the survivor's), or the ids at the call's start
+        pi = pid_read[i]
+        pj = pid_read[j]
         if pi == pj:
             continue
         # approaching?  (v_i - v_j) . (p_j - p_i) > 0 with v = (omega dt) x p
@@ -1022,7 +1025,7 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
 
 def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, alive: np.ndarray, overlap_fraction: float = 0.5, accretion: float = 1.0, arc_birth: float = 0.0, rng: np.random.Generator | None = None, shortening: float = 0.0, weld_steps: int = 0, extent_min: float = 0.0, spent_out: list | None = None,
             arc_thickness: float = 0.0, arc_density: float = 0.804, arc_out: list | None = None, recv_out: list | None = None,
-            books_out: list | None = None):
+            books_out: list | None = None, frozen_ids: bool = False):
     """Subduction: for every pair of segments of different plates within
     chord ``radius`` (KD-tree pair query, applied in sorted order) that are
     *approaching* — or closer than ``overlap_fraction * radius`` whatever
@@ -1070,7 +1073,8 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     #  then the same two for slab lost to the mantle, slab accreted to a continent, and
     #  oceanic columns an arc birth relabelled]
     spent = np.zeros(9, dtype=np.float64)
-    out = _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.rework, seg.kind, seg.craton, seg.weld, seg.ext, spent, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw), float(shortening), float(radius), int(weld_steps), float(extent_min), float(arc_thickness), float(arc_density))
+    out = _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.rework, seg.kind, seg.craton, seg.weld, seg.ext, spent, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw), float(shortening), float(radius), int(weld_steps), float(extent_min), float(arc_thickness), float(arc_density),
+                             seg.plate_id.copy() if frozen_ids else seg.plate_id)
     if spent_out is not None:
         spent_out.append(float(spent[0]))
     if arc_out is not None:

@@ -813,9 +813,24 @@ def heal_failed_rifts(sim, rng) -> dict:
     tp, seg, plates = sim.tp, sim.seg, sim.plates
     k = int(sim.step_index)
     out = []
+    released = []
     lim = sim.steps_of(tp.rift_abort_my)
+    stall = sim.km(float(getattr(tp, "rift_stall_km", 0.0) or 0.0))
     for (a, b), st in list(sim.rift_pairs.items()):
-        if k - int(st.get("k0", k)) < lim or st["delta"] >= 0.5 * sim.km(tp.rift_weaken_km):
+        if k - int(st.get("k0", k)) < lim:
+            continue
+        if st["delta"] >= 0.5 * sim.km(tp.rift_weaken_km):
+            # rift_stall_km: a rift that opened past half its weakening length and then stopped
+            # (it grew less than this in the last rift_abort_my) is over -- its halves are two
+            # plates with an ordinary boundary.  Kept, it held its coupling and kept both plates
+            # out of the suture weld and the next rift for as long as it stood: one on seed 1
+            # sat at 129 km from 375 to 425 My, its halves converging at 0.9 cm/yr along 3000 km
+            if stall > 0.0:
+                grown = sum(r for s_, r in st.get("trace", ()) if s_ >= k - lim)
+                if grown < stall:
+                    sim.rift_pairs.pop((a, b), None)
+                    released.append({"a": int(a), "b": int(b), "delta_km": round(float(st["delta"]) * sim.R_km, 1),
+                                     "age_my": round((k - int(st.get("k0", k))) * float(tp.myr_per_step), 1)})
             continue
         P = plates.P
         if a >= P or b >= P or not (plates.alive[a] and plates.alive[b]):
@@ -835,7 +850,7 @@ def heal_failed_rifts(sim, rng) -> dict:
         sim.last_rift[a] = k
         out.append({"kept": int(a), "joined": int(b), "delta_km": round(float(st["delta"]) * sim.R_km, 1),
                     "age_my": round((k - int(st.get("k0", k))) * float(tp.myr_per_step), 1)})
-    return {"event": "rift_fail", "healed": out, "plates": int(sim.plates.n_alive())}
+    return {"event": "rift_fail", "healed": out, "released": released, "plates": int(sim.plates.n_alive())}
 
 
 def suture_weld(sim, rng) -> dict:
@@ -873,21 +888,41 @@ def suture_weld(sim, rng) -> dict:
     lim_v = sim.cmyr(tp.suture_rate_cmyr)
     keys = np.minimum(pi_, pj_) * 1000003 + np.maximum(pi_, pj_)
     seen = set()
+    held_seen = set()
+    held = getattr(sim, "suture_held", None)
+    persist = float(getattr(tp, "suture_persist_my", 0.0) or 0.0)
+    lim_held = sim.km(getattr(tp, "suture_persist_km", 1500.0))
+    lim_hv = sim.cmyr(getattr(tp, "suture_persist_cmyr", 0.0) or 0.0)
     due = []
     if cc.any():
         for kk in np.unique(keys[cc]):
             m = cc & (keys == kk)
             a, b = int(kk // 1000003), int(kk % 1000003)
             L = float(cen["w"][m].sum())
-            quiet = L >= lim_len and float(np.median(np.abs(appr[m]))) < lim_v and a not in busy and b not in busy
+            if a in busy or b in busy:
+                continue
+            rate = float(np.median(np.abs(appr[m])))
+            quiet = tp.suture_time_my > 0 and L >= lim_len and rate < lim_v
             if quiet:
                 seen.add((a, b))
                 k0 = sim.suture_quiet.setdefault((a, b), k)
                 if k - k0 >= sim.steps_of(tp.suture_time_my):
                     due.append((L, a, b))
+                    continue
+            # the contact-persistence weld: a long contact held long enough, at a closing rate
+            # below suture_persist_cmyr (any, at 0) at every check
+            if held is not None and persist > 0 and L >= lim_held and (lim_hv <= 0 or rate < lim_hv):
+                held_seen.add((a, b))
+                k0 = held.setdefault((a, b), k)
+                if k - k0 >= sim.steps_of(persist):
+                    due.append((L, a, b))
     for pr in list(sim.suture_quiet):
         if pr not in seen:
             sim.suture_quiet.pop(pr)
+    if held is not None:
+        for pr in list(held):
+            if pr not in held_seen:
+                held.pop(pr)
     if not due:
         return {"event": "suture", "welds": []}
     due.sort(reverse=True)
@@ -917,6 +952,8 @@ def suture_weld(sim, rng) -> dict:
             sim.last_rift.pop(q, None)
             for pr in [pr for pr in sim.suture_quiet if q in pr]:
                 sim.suture_quiet.pop(pr)
+            for pr in [pr for pr in (held or {}) if q in pr]:
+                held.pop(pr)
     return {"event": "suture", "welds": welds, "plates": int(sim.plates.n_alive())}
 
 
