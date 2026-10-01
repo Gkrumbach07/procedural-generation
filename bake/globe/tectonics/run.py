@@ -929,17 +929,39 @@ def margin_ramp(grid: Grid, blend: SmoothSplat, seg: Segments, h: np.ndarray, tp
 class _Resampler:
     """Tect-grid field -> (6, N_c, N_c) interior values on the coarse grid
     (cubic by default; ``order=0`` = nearest, for integer maps).  The
-    (face, u, v) of the coarse cell centres are computed once."""
+    (face, u, v) of the coarse cell centres are computed once.
+
+    One coarse face at a time.  Over all 6.3M cells of the Earth preset's
+    1024^2 grid at once, the cubic stencil's index and weight arrays were
+    ~0.9 GB a call and the projection ~0.9 GB more, and finalise peaked at
+    4.05 GB -- over the 4 GB the analysis jobs run under.  Every sample is
+    a function of its own cell only, so a face at a time gives the same
+    numbers to the bit at a sixth of the transient."""
 
     def __init__(self, coarse: Grid):
-        self.face, self.u, self.v = from_sphere_v(coarse.interior_centers)
+        c = coarse.interior_centers
+        self.shape = (6, coarse.N, coarse.N)
+        self.parts = []
+        for f in range(6):
+            face, u, v = from_sphere_v(c[f])
+            # int8 on the shelf (the samplers take it back to int64): 7 bytes a cell less
+            self.parts.append((face.astype(np.int8), u, v))
 
     def __call__(self, field: FaceField, order: int = 3) -> np.ndarray:
         if order == 0:
-            return field.sample_nearest(self.face, self.u, self.v)
-        if order == 1:
-            return field.sample_bilinear(self.face, self.u, self.v)
-        return field.sample_cubic(self.face, self.u, self.v)
+            sample = field.sample_nearest
+        elif order == 1:
+            sample = field.sample_bilinear
+        else:
+            sample = field.sample_cubic
+        out = None
+        for f, (face, u, v) in enumerate(self.parts):
+            r = sample(face, u, v)
+            if out is None:
+                out = np.empty(self.shape + r.shape[2:], dtype=r.dtype)
+            out[f] = r
+            del r
+        return out
 
 
 def _land_slope_info(coarse: Grid, bed_m: np.ndarray, params: WorldParams) -> dict:
@@ -950,13 +972,37 @@ def _land_slope_info(coarse: Grid, bed_m: np.ndarray, params: WorldParams) -> di
     land = bed_m > 0.0
     if not land.any():
         return {"land_slope_median": None, "land_slope_p90": None, "land_above_talus_fraction": None}
-    slope = FaceField.from_interior(coarse, bed_m.astype(np.float32), name="bed").gradient().vec_norm().interior[land]
+    f = FaceField.from_interior(coarse, bed_m.astype(np.float32), name="bed")
+    # |grad| face by face, in the land cells' order (face, i, j) -- FaceField.gradient().
+    # vec_norm() over the whole extended grid was 0.57 GB of float64 temporaries at 1024^2
+    slope = np.concatenate([_face_slope(f, k)[land[k]] for k in range(6)])
+    del f
     hard = float(params.erosion.talus_slope_hard)
     return {
         "land_slope_median": float(np.median(slope)),
         "land_slope_p90": float(np.percentile(slope, 90)),
         "land_above_talus_fraction": float((slope > hard).mean()),
     }
+
+
+def _face_slope(f: FaceField, k: int) -> np.ndarray:
+    """``f.gradient().vec_norm().interior[k]``: the same expressions in the same order
+    (central differences, inverse metric, the metric norm, float32 between the two as
+    there), on the interior of face ``k`` only."""
+    g = f.grid
+    H, N = g.H, g.N
+    d = f.data[k].astype(np.float64)
+    gi = 0.5 * (d[H + 1:H + N + 1, H:H + N] - d[H - 1:H + N - 1, H:H + N])
+    gj = 0.5 * (d[H:H + N, H + 1:H + N + 1] - d[H:H + N, H - 1:H + N - 1])
+    del d
+    ginv = g.metric_inv[k, H:H + N, H:H + N].astype(np.float64)
+    cs2 = g.cell_size_m ** 2
+    a = ((ginv[..., 0] * gi + ginv[..., 1] * gj) / cs2).astype(np.float32).astype(np.float64)
+    b = ((ginv[..., 1] * gi + ginv[..., 2] * gj) / cs2).astype(np.float32).astype(np.float64)
+    del ginv, gi, gj
+    m = g.metric[k, H:H + N, H:H + N].astype(np.float64)
+    n2 = m[..., 0] * a * a + 2 * m[..., 1] * a * b + m[..., 2] * b * b
+    return (np.sqrt(np.maximum(n2, 0.0)) * g.cell_size_m).astype(np.float32)
 
 
 def inject_detail(bed: np.ndarray, coarse: Grid, tp, rng) -> np.ndarray:
@@ -1039,15 +1085,19 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     raw, c_t, lift = margin_ramp(grid, blend, seg, h, tp, sim.spacing, base_blend=base_blend)
     bed_t = _smooth_field(grid, raw, tp, cascade=True)
     dh_t = _smooth_field(grid, blend(seg.height() - seg.h_ref + buoy - buoy_ref), tp, cascade=True)
-    bed = _resample(bed_t).astype(np.float64)
-    dh = _resample(dh_t).astype(np.float64)
+    # Coarse-grid arrays are 50 MB each in float64 at the Earth preset's 1024^2, so none is
+    # copied where the resample already made a float64, and each is dropped once read
+    bed = _resample(bed_t).astype(np.float64, copy=False)
+    dh = _resample(dh_t).astype(np.float64, copy=False)
+    del dh_t
     area = coarse.interior_cell_area.astype(np.float64)
     # Crust type on the coarse grid.  `sea_level` uses it only in shelf mode,
     # but it is saved as a diagnostic either way (see `crust_kind` below), so
     # it is computed unconditionally and `shelf_mask` -- not `cont_c` -- is
     # what reaches `sea_level`, which keeps the placement unchanged.
     cont_t = FaceField.from_interior(grid, c_t, exchange=True)
-    cont_c = _resample(cont_t).astype(np.float64) > 0.5
+    cont_c = _resample(cont_t).astype(np.float64, copy=False) > 0.5
+    del cont_t
     shelf_mask = cont_c if tp.shelf_fraction > 0 else None
     q = sea_level(bed, area, shelf_mask, params)
     bed -= q
@@ -1084,20 +1134,24 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
         zone_t = np.zeros((6, grid.N, grid.N), dtype=bool)
     zone = _resample(FaceField.from_interior(grid, zone_t.astype(np.uint8), exchange=True), order=0).astype(bool)
     slope_info = _land_slope_info(coarse, bed * scale, params)
+    del bed, land
     n_iter = max(int(params.erosion.iterations), 1)
     up = dh * scale * tp.uplift_scale / n_iter
+    del dh
     pos_up = up[up > 0]
     baseline = tp.uplift_baseline * float(np.percentile(pos_up, 99)) if pos_up.size else 0.0
+    del pos_up
     up = np.where(zone, np.maximum(up, 0.0), np.where(up < 0.0, up, np.maximum(up, baseline)))
     uplift = FaceField.from_interior(coarse, up.astype(np.float32), name="uplift")
+    del up
 
     # -- hardness --
     age_t = _smooth_field(grid, blend(seg.age), tp, cascade=False)
     den_t = _smooth_field(grid, blend(seg.density), tp, cascade=False)
     bd_t = FaceField.from_interior(grid, boundary_distance(tree, seg, grid, idx), exchange=True)
-    age_c = _resample(age_t).astype(np.float64)
-    den_c = _resample(den_t).astype(np.float64)
-    bd_c = _resample(bd_t, order=1).astype(np.float64)
+    age_c = _resample(age_t).astype(np.float64, copy=False)
+    den_c = _resample(den_t).astype(np.float64, copy=False)
+    bd_c = _resample(bd_t, order=1).astype(np.float64, copy=False)
     age_norm = np.clip(age_c / max(float(np.percentile(age_c, 99)), 1.0), 0.0, 1.0)
     d_lo, d_hi = np.percentile(den_c, [1, 99])
     den_norm = np.clip((den_c - d_lo) / max(d_hi - d_lo, 1e-6), 0.0, 1.0)
@@ -1114,8 +1168,10 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     if tp.strata_amp > 0.0 and tp.strata_period > 0.0:
         wave = np.sin(2.0 * np.pi * age_c / float(tp.strata_period))
         strata = np.tanh(2.5 * wave) / np.tanh(2.5)
+        del wave
     hard = np.clip(0.3 + 0.5 * age_norm + 0.3 * den_norm - 0.4 * prox + float(tp.strata_amp) * strata, 0.0, 1.0)
     hardness = FaceField.from_interior(coarse, hard.astype(np.float32), name="hardness")
+    del age_c, den_c, bd_c, age_norm, den_norm, prox, strata, hard
 
     # -- plate ids (compacted to 0..P'-1 in original order) and velocities --
     alive_ids = np.nonzero(plates.alive)[0]
@@ -1124,15 +1180,20 @@ def finalise(sim: TectonicSim) -> dict[str, FaceField]:
     pid_t = FaceField.from_interior(grid, splat(seg.plate_id, idx).astype(np.int32), exchange=True)
     pid_c = _resample(pid_t, order=0).astype(np.int64)
     plate_id = FaceField.from_interior(coarse, remap[pid_c].astype(np.int16), name="plate_id")
-    om = plates.omega[pid_c]  # (6, N, N, 3) rad/step of the owning plate
-    p3 = coarse.interior_centers
-    v3 = np.cross(om, p3)
+    # omega x p of the owning plate in each cell's own components, one face at a time: over the
+    # whole 1024^2 grid at once the (6, N, N, 3) float64 temporaries of the cross product and
+    # the jacobian were 1.8 GB, the largest allocation of the stage.  Per cell, so the same bits
     H, N = coarse.H, coarse.N
     ei, ej = np.meshgrid(np.arange(H, H + N), np.arange(H, H + N), indexing="ij")
     u, v = coarse.cell_uv(ei, ej)
-    faces = np.broadcast_to(np.arange(6)[:, None, None], (6, N, N))
-    comp = tangent_to_cell_components(coarse, faces, np.broadcast_to(u, (6, N, N)), np.broadcast_to(v, (6, N, N)), v3)
-    plate_vel = FaceField.from_interior(coarse, comp.astype(np.float32), is_vector=True, name="plate_vel")
+    vel = np.empty((6, N, N, 2), dtype=np.float32)
+    for f in range(6):
+        v3 = np.cross(plates.omega[pid_c[f]], coarse.interior_centers[f])  # rad/step of the owning plate
+        vel[f] = tangent_to_cell_components(coarse, np.full((N, N), f, dtype=np.int64), u, v, v3)
+        del v3
+    del pid_c
+    plate_vel = FaceField.from_interior(coarse, vel, is_vector=True, name="plate_vel")
+    del vel
 
     heat_c = FaceField.from_interior(coarse, _resample(sim.heat, order=1).astype(np.float32), name="heat")
     zone_f = FaceField.from_interior(coarse, zone.astype(np.uint8), name="collision_zone")
