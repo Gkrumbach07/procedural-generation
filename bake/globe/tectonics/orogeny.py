@@ -45,6 +45,7 @@ so the shape survives at any resolution that can hold the belt at all.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 
 import numpy as np
 
@@ -87,9 +88,16 @@ class Orogen:
         and out the far side. Outside the belt the profile is 0, so a
         segment beyond it is untouched.
         """
+        edges, heights = self._nodes
+        return np.interp(np.asarray(x_km, dtype=np.float64), edges, heights, left=0.0, right=0.0)
+
+    @cached_property
+    def _nodes(self) -> tuple[np.ndarray, np.ndarray]:
+        """The profile's (edge, height) nodes, built once per type rather than
+        once per collision (shape_belt profiles ~100 collisions a step)."""
         edges = np.cumsum([0.0] + [z[1] for z in self.zones]) - self.zones[0][1]
         heights = np.array([0.0] + [z[2] for z in self.zones], dtype=np.float64)
-        return np.interp(np.asarray(x_km, dtype=np.float64), edges, heights, left=0.0, right=0.0)
+        return edges, heights
 
 
 #: The reference profiles. Widths in km, heights in m relative to the
@@ -300,7 +308,9 @@ def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet
         if nd < 1e-12:
             continue
         d /= nd
-        t = np.cross(c, d)
+        # c x d written out: np.cross costs ~20 us a call on 3-vectors, a fifth of this
+        # loop's time per collision, for the same products and differences in the same order
+        t = np.array((c[1] * d[2] - c[2] * d[1], c[2] * d[0] - c[0] * d[2], c[0] * d[1] - c[1] * d[0]))
         flat = flat_slab_age > 0.0 and float(seg.age[lo]) < flat_slab_age
         name = classify(int(seg.kind[lo]), int(seg.kind[su]), flat, continental)
         typ = TYPES[name]

@@ -231,7 +231,7 @@ def rift(sim, rng, max_plates: int = 1) -> dict:
             "moved": sum(r.get("moved", 0) for r in out)}
 
 
-def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rng=None) -> dict:
+def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rng=None, tree=None) -> dict:
     """A plate that has been cut in two is two plates.
 
     Subduction eats a plate from its edges, and where a trench cuts right
@@ -252,16 +252,24 @@ def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rn
     motion and free to diverge from it under the forces afterwards.  Smaller
     fragments are welded onto whichever neighbouring plate surrounds them --
     a sliver of crust is part of the plate it is embedded in, not a plate.
+
+    ``tree`` is a KD-tree of the cloud as it is now, when the caller has one:
+    the step passes the tree it built after the collisions, since nothing
+    between there and here moves a segment.  Building it again here (twice:
+    the pairs and the orphan weld each built their own) was two of the four
+    tree builds a step made, ~3 ms each on the Earth preset.
     """
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
 
-    from .collision import build_tree
+    from .collision import build_tree, kd_workers
 
     seg, plates = sim.seg, sim.plates
     if seg.M < 2:
         return {"event": "split", "split": 0}
-    pairs = build_tree(seg).query_pairs(float(link_factor) * sim.spacing, output_type="ndarray")
+    if tree is None or tree.n != seg.M:
+        tree = build_tree(seg)
+    pairs = tree.query_pairs(float(link_factor) * sim.spacing, output_type="ndarray")
     if pairs.shape[0] == 0:
         return {"event": "split", "split": 0}
     e = pairs[seg.plate_id[pairs[:, 0]] == seg.plate_id[pairs[:, 1]]]
@@ -271,18 +279,29 @@ def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rn
     pid = seg.plate_id.copy()
     P = plates.P
     extra: list[np.ndarray] = []
-    orphans = np.zeros(seg.M, dtype=bool)
-    for p in np.unique(seg.plate_id):
-        cs = np.unique(comp[seg.plate_id == p])
-        if cs.size < 2:
-            continue
+    # Edges join same-plate segments only, so every component lies inside one plate.  Each
+    # plate's components are found from that table rather than by masking the whole cloud
+    # once per plate and once more per piece -- the same pieces in the same order (plates
+    # ascending, each plate's components ascending, then the same argsort by size), so the
+    # same new plate ids; it was most of this function's 5 ms a step on the Earth preset
+    plate_of = np.empty(sizes.size, dtype=np.int64)
+    plate_of[comp] = seg.plate_id
+    n_comp = np.bincount(plate_of)
+    by_plate = np.argsort(plate_of, kind="stable")
+    first = np.concatenate(([0], np.cumsum(n_comp)[:-1]))
+    new_of = np.full(sizes.size, -1, dtype=np.int64)       # component -> the plate it becomes
+    orphan_c = np.zeros(sizes.size, dtype=bool)
+    for p in np.flatnonzero(n_comp >= 2):
+        cs = by_plate[first[p]:first[p] + n_comp[p]]
         for c in cs[np.argsort(sizes[cs])[::-1]][1:]:      # every piece but the largest
-            m = comp == c
             if sizes[c] >= int(min_segments):
-                pid[m] = P + len(extra)
+                new_of[c] = P + len(extra)
                 extra.append(plates.omega[p].copy())
             else:
-                orphans |= m
+                orphan_c[c] = True
+    to = new_of[comp]
+    pid[to >= 0] = to[to >= 0]
+    orphans = orphan_c[comp]
     # a segment still welded from a continental collision keeps the plate it welded onto:
     # it lies inside the plate it came from, so the rule below would hand it straight back
     # and the same pair would collide again next step (globe/tectonics/collision.py)
@@ -293,7 +312,7 @@ def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rn
         # the nearest segments that are not part of the fragment itself
         idx = np.flatnonzero(orphans)
         k = min(9, seg.M)
-        _, nb = build_tree(seg).query(seg.pos[idx], k=k, workers=-1)
+        _, nb = tree.query(seg.pos[idx], k=k, workers=kd_workers(idx.size))
         nb = np.atleast_2d(nb).reshape(idx.size, k)
         near = np.where(orphans[nb], -1, pid[nb])
         for row, i in zip(near, idx):
