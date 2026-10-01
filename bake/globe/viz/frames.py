@@ -93,19 +93,30 @@ def tectonics_frame(sim, rec: FrameRecorder, index: int, total: int) -> None:
     """Sea-levelled bed (bedrock units), raw plate id + 1, and the crust's age
     and kind on the tect grid -- so the timeline can run the sea floor being
     made at the ridges and eaten at the trenches, not only what is left of it
-    at the end.  Age and kind take the nearest segment's, as the plate id
-    does: a frame is a segment's worth of detail, and the smooth blend is for
-    the finished map (``tectonics.run.finalise``)."""
+    at the end.  Age takes the nearest segment's, as the plate id does: a
+    frame is a segment's worth of detail.  Kind is the continent the bed was
+    cut with -- ``c > 0.5`` of the extent-weighted splat, the crust the
+    finished map's ``crust_kind`` and the shelf mask are (and what
+    scripts/tect_scorecard.py measures as the rendered continent) -- so the
+    timeline's last frame and the map agree.  The nearest segment's label
+    drew a Voronoi continent up to 0.005 of the planet off it (te/mass,
+    Earth seed 1, steps 0-2000).  Without the extent balance
+    (``tectonics.extent_split`` off: the classic dynamics, small and tiny)
+    the frames keep the nearest segment's label, as they always drew it."""
     from ..tectonics.collision import build_tree, label_map_fast, splat
     from ..tectonics.run import frame_bed, inherited_age
     from ..tectonics.segments import OCEANIC
 
     tree = build_tree(sim.seg)
-    bed = frame_bed(sim, tree)
+    shown = bool(getattr(sim.tp, "extent_split", False))
+    if shown:
+        bed, c = frame_bed(sim, tree, with_c=True)
+    else:
+        bed = frame_bed(sim, tree)
     idx, _ = label_map_fast(sim.seg, sim.grid, sim.r_cap, tree)
     pid = splat(sim.seg.plate_id, idx).astype(np.int32) + 1
     age = splat(sim.seg.age + inherited_age(sim), idx)
-    kind = splat((sim.seg.kind != OCEANIC).astype(np.int32), idx)
+    kind = (c > 0.5).astype(np.int32) if shown else splat((sim.seg.kind != OCEANIC).astype(np.int32), idx)
     alive = np.nonzero(sim.plates.alive)[0].tolist()
     rec.write(index, {"height": downsample(bed, rec.res).astype(np.float16),
                       "plate": downsample(pid, rec.res, "nearest").astype(np.int16),

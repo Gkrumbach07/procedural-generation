@@ -470,7 +470,11 @@ def test_a_rift_necks_slow_then_fast():
 
 
 def test_margin_test_needs_a_floor_and_feels_its_seed_slab():
-    sim = tect.initialise(_small_earth(), log=None)
+    # the extent balance off: the seed slab's net effect on a released floor depends on the
+    # margin's shape (its pulls along a curved margin partly cancel while its resistance adds
+    # up), and with te/mass's balance on, this toy geometry after 3 steps has the floor closing
+    # at 1.80 cm/yr without the seed slab and 1.55 with it (3.42 -> 3.77 with it off)
+    sim = tect.initialise(_small_earth(extent_split=False), log=None)
     for _ in range(3):
         sim.step()
     seg = sim.seg
@@ -635,8 +639,8 @@ def test_zipf_ocean_tiling_is_a_connected_power_law(preset):
             assert connected_components(g, directed=False)[0] == 1, (seed, q)
 
 
-def _dyn_events_run(steps):
-    sim = tect.initialise(_small_earth(seed=2, rift_deficit=0.4), log=None)
+def _dyn_events_run(steps, seed=2):
+    sim = tect.initialise(_small_earth(seed=seed, rift_deficit=0.4), log=None)
     kinds = set()
     for _ in range(steps):
         sim.step()
@@ -649,9 +653,11 @@ def test_earth_dynamics_are_deterministic_and_keep_the_books():
     """Two runs of the dynamics with the same seed end bit for bit alike -- the events draw
     their own rng streams (6 rift, 11 collapse, 12 micro, 13 heal, 14 weld) keyed on the step --
     and with the events firing every kind's books still close."""
-    # 150 steps: with the arc knobs on (te/arcs) seed 2's first micro-merge comes at step 141
-    a, kinds = _dyn_events_run(150)
-    b, _ = _dyn_events_run(150)
+    # seed 0, 250 steps: with the arc and mass knobs on (te/arcs, te/mass) the first micro-merge
+    # comes at step 221 on seed 0 and 281 on seed 2 (141 on seed 2 with the arcs alone, < 120
+    # with the dynamics alone)
+    a, kinds = _dyn_events_run(250, seed=0)
+    b, _ = _dyn_events_run(250, seed=0)
     assert {"rift", "micro_merge"} <= kinds
     assert _fingerprint(a) == _fingerprint(b)
     assert max(map(abs, a.books_residual())) < 1e-9

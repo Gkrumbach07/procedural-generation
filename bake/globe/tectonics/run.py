@@ -166,8 +166,12 @@ VOLCANO_FIELD = "volcano_active"
 #: * ``hotspot`` -- crust a hotspot track adds (``hotspots``; 0 by default).
 #: * ``residue`` -- the dense residue ``differentiation`` sends to the mantle, off the segments
 #:   that outlive the step's collisions (0 by default).
+#: * ``margin_eroded`` -- continental crust subduction erosion and sediment subduction take
+#:   from an overriding margin (``margin_erosion_km``; 0 by default).
+#: * ``overrun`` -- sea floor a continental margin grows over when the extent split places a
+#:   new continental segment where it was (``extent_split``; 0 by default).
 MASS_KEYS = ("initial", "spawned", "crystallised", "subducted", "delaminated", "orogen_decayed", "arc_mantle",
-             "extent_closed", "hotspot", "residue")
+             "extent_closed", "hotspot", "residue", "margin_eroded", "overrun")
 #: The two crust kinds the books are also kept for (`TectonicSim.books`).
 KINDS = ("continental", "oceanic")
 #: Moves between the two kinds' books: booked positive on the continental side and the same
@@ -196,8 +200,15 @@ COUNTER_KEYS = ("orogen_shaped", "differentiated",
                 # docked before (its weld wore off, or it was welded onto the plate around it),
                 # and how many terranes were stacked into another plate's (arc-arc collisions)
                 "arc_docked_cont", "arc_docked_cont_ext", "arc_docked_ocean", "arc_front_moved", "arc_foundered",
-                "terrane_relaxed", "arc_redocked", "arc_merged")
-SINK_KEYS = ("subducted", "delaminated", "orogen_decayed", "residue")
+                "terrane_relaxed", "arc_redocked", "arc_merged",
+                # continental crust by process (te/mass): volume (ext x thickness) `cv_*`
+                # and ground (steradians) `cg_*`, plus counts -- what the continents gained and lost
+                # where, so a drift can be read off instead of guessed at
+                "cv_arc", "cg_arc", "cv_collide", "cg_collide", "cv_margin", "cg_margin",
+                "cv_belt", "cv_relax", "cv_orogen_mantle", "cv_orogen_kept", "cg_orogen", "cv_spawn", "cg_spawn",
+                "cv_delam", "cv_delam_kept", "cg_delam", "cv_split", "cg_split", "n_split", "n_split_fail", "n_split_active", "n_merge_coast",
+                "split_ground", "split_dist", "n_undo", "n_undo_young", "cg_close", "cv_close", "ocean_relax", "rift_stretch")
+SINK_KEYS = ("subducted", "delaminated", "orogen_decayed", "residue", "margin_eroded", "overrun")
 #: What fills a void inside a continent that no shortening paid for, with variable_extent on
 #: (``collision.spawn_segments``, where the alternatives are measured; the fixed-area model
 #: keeps 'create').  'split' takes the ground and the crust on it from the neighbours, which
@@ -655,6 +666,23 @@ class TectonicSim:
             return now
 
         t_ = _thin()
+
+        def _cvg():
+            if not tp.variable_extent:
+                return 0.0, 0.0
+            m = seg.kind == CONTINENTAL
+            return float((seg.ext[m] * seg.thickness[m]).sum()), float(seg.ext[m].sum())
+
+        def _cbook(vkey, gkey, before):
+            """continental volume / ground counters by process (diagnostic, not mass)"""
+            if not tp.variable_extent:
+                return before
+            v, g = _cvg()
+            self.ledger[vkey] = self.ledger.get(vkey, 0.0) + (v - before[0])
+            if gkey:
+                self.ledger[gkey] = self.ledger.get(gkey, 0.0) + (g - before[1])
+            return v, g
+
         # 1. move
         tau_slab = None
         cc_pair_max = 0
@@ -686,6 +714,8 @@ class TectonicSim:
         books_out: list = []
         dock_out: list = []
         arc_dock = float(tp.arc_dock_km) / float(tp.crust_km) * float(tp.continental_thickness)
+        diag_out: list = []
+        cvg = _cvg()
         losers, survivors = collide(seg, tree, self.r_coll, plates.omega, alive, tp.overlap_fraction,
                                     float(tp.arc_accretion), float(tp.arc_birth), self.params.rng("tectonics", 7, k),
                                     shortening=float(tp.continental_shortening), weld_steps=int(tp.weld_steps),
@@ -695,7 +725,9 @@ class TectonicSim:
                                     arc_density=float(tp.continental_density), books_out=books_out,
                                     arc_dock=arc_dock, arc_keep=float(tp.arc_keep), ocean_base=float(tp.oceanic_thickness),
                                     rift_pairs=list(self.rift_pairs) if arc_dock > 0.0 else None, dock_out=dock_out,
-                                    dock_keep=float(tp.arc_dock_keep), frozen_ids=bool(tp.collide_frozen_ids))
+                                    dock_keep=float(tp.arc_dock_keep), frozen_ids=bool(tp.collide_frozen_ids),
+                                    margin_erosion=(float(tp.margin_erosion_km) / max(float(tp.crust_km), 1e-9) * float(tp.continental_thickness)) if tp.variable_extent else 0.0,
+                                    diag_out=diag_out)
         received = recv_out[0] if (recv_out and tp.variable_extent) else None
         # by column or by crust, whichever this mode's ledger is kept in
         u = 1 if tp.variable_extent else 0
@@ -714,6 +746,15 @@ class TectonicSim:
             self.ledger["arc_docked_cont_ext"] = self.ledger.get("arc_docked_cont_ext", 0.0) + docks[1]
             self.ledger["arc_docked_ocean"] = self.ledger.get("arc_docked_ocean", 0.0) + docks[2]
             self.ledger["arc_redocked"] = self.ledger.get("arc_redocked", 0.0) + docks[3]
+        if moved.get("margin_eroded", (0.0, 0.0))[u]:
+            self._book("margin_eroded", -moved["margin_eroded"][u], 0.0)
+        if diag_out:
+            dg = diag_out[0]
+            self.ledger["cv_arc"] = self.ledger.get("cv_arc", 0.0) + float(dg[16])
+            self.ledger["cg_arc"] = self.ledger.get("cg_arc", 0.0) + float(dg[17])
+            self.ledger["cv_margin"] = self.ledger.get("cv_margin", 0.0) - float(dg[18])
+            self.ledger["cg_margin"] = self.ledger.get("cg_margin", 0.0) - float(dg[20])
+        cvg = _cbook("cv_collide", "cg_collide", cvg)
         arc_now = float(arc_out[0][u]) if arc_out else 0.0
         if arc_now:
             self._book("arc_mantle", arc_now, 0.0)
@@ -738,11 +779,12 @@ class TectonicSim:
                     accretion=float(tp.arc_accretion), flat_slab_age=float(tp.flat_slab_age),
                     along_strike=float(tp.orogen_along_strike), census=self.belt_census,
                     shortening=float(tp.continental_shortening), width_scale=float(tp.orogen_width_scale), received=received,
-                    conserve_volume=bool(tp.variable_extent))
+                    conserve_volume=bool(tp.variable_extent), fold_cap=float(tp.orogen_fold_cap))
             else:
                 spread_collisions(seg, tree, losers, survivors, alive, tp.belt_width_factor * self.spacing,
                                   accretion=float(tp.arc_accretion), shortening=float(tp.continental_shortening), received=received,
                                   conserve_volume=bool(tp.variable_extent))
+            cvg = _cbook("cv_belt", None, cvg)       # zero: belts move volume, not column
             # crust that has been through a collision comes out lighter: the
             # light melt stays, the dense residue goes to the mantle.  This is
             # what separates continental from oceanic crust, and so what makes
@@ -818,6 +860,7 @@ class TectonicSim:
         if tp.relax_rate > 0:
             relax_segments(seg, tree, tp.relax_rate, tp.relax_threshold, self.spacing, int(tp.relax_knn),
                            conserve_volume=bool(tp.variable_extent))
+        cvg = _cbook("cv_relax", None, cvg)
 
         # two continents that have been grinding together long enough are one plate
         if tp.suture_collisions > 0.0 and self.suture_count:
@@ -862,13 +905,34 @@ class TectonicSim:
 
         # active orogens become former ones: what convergence stops feeding,
         # erosion and root delamination take back down
-        if tp.orogen_decay > 0.0:
+        collapse = tp.variable_extent and (float(tp.orogen_return) > 0.0 or float(tp.orogen_floor_cols) > 0.0
+                                            or float(tp.orogen_collapse_my) > 0.0)
+        if tp.orogen_decay > 0.0 or (collapse and float(tp.orogen_collapse_my) > 0.0):
             km = self.kind_mass()
-            orogeny.relax_orogens(
-                seg, float(tp.belt_thickness * (1.0 - tp.continental_density) * tp.height_scale_m),
-                float(tp.orogen_floor_m), float(tp.height_scale_m),
-                float(tp.orogen_decay), CONTINENTAL)
+            if collapse:
+                # Collapse, not a mantle sink: the height above the dead-belt floor comes off at
+                # one rate in physical units, and `orogen_return` of the crust it takes stays as
+                # ground at constant volume (gravitational collapse widens the orogen, erosion
+                # carries its top to the forelands and shelves); only the rest -- an
+                # eclogitised root, subducted sediment -- goes to the mantle.  In bedrock units:
+                # a floor in metres through height_scale_m made it 1.15 columns on Earth and
+                # 2.45 on small, so only Earth ever decayed (BRIEF section 3)
+                base_bu = float(tp.belt_thickness * (1.0 - tp.continental_density))
+                floor_bu = (float(tp.orogen_floor_cols) * float(tp.continental_thickness) * (1.0 - float(tp.continental_density))
+                            if float(tp.orogen_floor_cols) > 0.0 else float(tp.orogen_floor_m) / float(tp.height_scale_m))
+                rate = (1.0 - math.exp(-float(tp.myr_per_step) / float(tp.orogen_collapse_my))
+                        if float(tp.orogen_collapse_my) > 0.0 else float(tp.orogen_decay))
+                kept_v, kept_g = orogeny.collapse_orogens(seg, base_bu, floor_bu, rate, CONTINENTAL,
+                                                          float(tp.orogen_return))
+                self.ledger["cv_orogen_kept"] = self.ledger.get("cv_orogen_kept", 0.0) + kept_v
+                self.ledger["cg_orogen"] = self.ledger.get("cg_orogen", 0.0) + kept_g
+            else:
+                orogeny.relax_orogens(
+                    seg, float(tp.belt_thickness * (1.0 - tp.continental_density) * tp.height_scale_m),
+                    float(tp.orogen_floor_m), float(tp.height_scale_m),
+                    float(tp.orogen_decay), CONTINENTAL)
             self._book_change("orogen_decayed", km)
+            cvg = _cbook("cv_orogen_mantle", None, cvg)
 
         if tp.variable_extent:
             c1, o1 = _ext_by_kind()
@@ -889,8 +953,11 @@ class TectonicSim:
             idx, dist = label_map_fast(seg, grid, self.r_cap, tree)
             accumulate_area(seg, idx, self.area_sr, tp.area_blend)
             taken: list = []
+            stretched: list = []
             new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega, tree=tree, ext=self.spacing ** 2, stretch=stretch_budget, thin_floor=float(tp.extent_thin_floor) * float(tp.continental_thickness) if tp.variable_extent else 0.0,
-                                      void=VOID_FILL if tp.variable_extent else "create", taken_out=taken, net_outflow=str(tp.spawn_gate) == "outflow", pair_gate=str(tp.spawn_gate) == "pair")
+                                      void=VOID_FILL if tp.variable_extent else "create", taken_out=taken, net_outflow=str(tp.spawn_gate) == "outflow", pair_gate=str(tp.spawn_gate) == "pair",
+                                      margin_stretch=float(tp.margin_stretch) * float(tp.continental_thickness) if tp.variable_extent else 0.0,
+                                      stretched_out=stretched, margin_width=self.km(tp.margin_width_km))
             n_gap = int(gap.sum())
             n_new = new.M
             if tp.variable_extent and n_gap:
@@ -902,7 +969,10 @@ class TectonicSim:
                 # there is far more trench per continent than on `small` -- that alone drove
                 # them from 0.6 of the planet to 0.75
                 g = gap.ravel()
+                # (a rifted-margin segment is one of the new segments: its ground is counted there)
                 open_area = float(self.area_sr.ravel()[g].sum()) - n_new * self.spacing ** 2
+                if stretched:
+                    self.ledger["rift_stretch"] = self.ledger.get("rift_stretch", 0.0) + sum(stretched)
                 if open_area > 0.0:
                     share = np.bincount(idx.ravel()[g], weights=self.area_sr.ravel()[g], minlength=seg.M)
                     tot = float(share.sum())
@@ -929,6 +999,7 @@ class TectonicSim:
                 self._book("spawned", float(w[cn].sum()) - (taken[0][u] if taken else 0.0), float(w[~cn].sum()))
                 seg.append(new)
             self.idx, self.dist = idx, dist
+        cvg = _cbook("cv_spawn", "cg_spawn", cvg)
 
         t_ = _tick("thin_spawn", t_)
         # 4. crystallisation, then delamination of over-thickened roots
@@ -940,8 +1011,15 @@ class TectonicSim:
         crystallise(seg, T, tp.growth, tp.density_base, tp.deposit_density, tp.dissolution_factor, tp.max_thickness)
         km = self._book_change("crystallised", km)
         if tp.max_crust_thickness > 0 and tp.delamination > 0:
-            delaminate(seg, float(tp.max_crust_thickness), float(tp.delamination))
+            if float(tp.delamination_return) > 0.0 and tp.variable_extent:
+                kv, kg = orogeny.collapse_thick(seg, float(tp.max_crust_thickness), float(tp.delamination), CONTINENTAL,
+                                                float(tp.delamination_return))
+                self.ledger["cv_delam_kept"] = self.ledger.get("cv_delam_kept", 0.0) + kv
+                self.ledger["cg_delam"] = self.ledger.get("cg_delam", 0.0) + kg
+            else:
+                delaminate(seg, float(tp.max_crust_thickness), float(tp.delamination))
             km = self._book_change("delaminated", km)
+        cvg = _cbook("cv_delam", None, cvg)
         if float(tp.arc_max_km) > 0.0 and float(tp.arc_founder_my) > 0.0:
             # arc root foundering: an intra-oceanic arc does not thicken without limit either.
             # Its dense mafic-ultramafic cumulates founder once the crust passes ~35 km, which is
@@ -998,6 +1076,41 @@ class TectonicSim:
         self._diffuse_heat()
 
         t_ = _tick("thin_heat", t_)
+        # 5b. extent made visible (globe/tectonics/extent.py): continental ground the map does
+        #     not show becomes continental points at the plate's margin, and a coast whose ground
+        #     is gone retreats.  After everything that reads this step's label map, before the
+        #     forces, so the balance, the census and the slab contacts the step-start events
+        #     read (rift, collapse, micro, suture: they check balance.D.shape[0] == seg.M) are
+        #     the cloud's as it is after it
+        every = max(1, int(round(self.steps_of(tp.extent_every_my)))) if tp.extent_split else 1
+        if tp.extent_split and tp.variable_extent and k % every == 0:
+            if not tp.closure_ocean_only:
+                # measured (proto/mass-visible a_wclose): the whole-cloud closure's refund becomes
+                # geometry that overruns sea floor and deepens the deficit -- extent 0.40 -> 0.97 by
+                # step 4000
+                raise ValueError("tectonics.extent_split needs tectonics.closure_ocean_only")
+            from .extent import shed_extent
+            km = self.kind_mass()
+            per_step = max(1, int(math.ceil(float(tp.extent_split_rate_my) * float(tp.myr_per_step) * every)))
+            ev = shed_extent(seg, seg.area, self.spacing, float(tp.extent_max), self.params.rng("tectonics", 15, k),
+                             step=k, max_flips=per_step, band=float(tp.extent_band), split_at=float(tp.extent_split_at),
+                             residence=int(round(self.steps_of(tp.extent_residence_my))),
+                             active=bool(tp.extent_split_active), merge=bool(tp.extent_merge),
+                             ocean_th=float(tp.oceanic_thickness), ocean_rho=float(tp.oceanic_density),
+                             arc_min=volc.ARC_MIN_TH)
+            # continental crust only moves (parent -> child, retreating coast -> neighbour); a
+            # retreating coast's cell is new sea floor (booked with the ridges), the rest of the
+            # change is the sea floor the advancing margins covered
+            after = self.kind_mass()
+            self._book("spawned", 0.0, ev["flip_mass"])
+            self._book("overrun", after[0] - km[0], after[1] - km[1] - ev["flip_mass"])
+            for key, n in (("n_split", "split"), ("n_split_fail", "fail"), ("n_split_active", "active"),
+                           ("n_merge_coast", "merged"), ("split_ground", "ground_shown"), ("split_dist", "dist"),
+                           ("n_undo", "undo"), ("n_undo_young", "undo_young")):
+                self.ledger[key] = self.ledger.get(key, 0.0) + ev[n]
+            cvg = _cbook("cv_split", "cg_split", cvg)
+            if ev["split"] or ev["merged"]:
+                fuv = from_sphere_v(seg.pos)          # the children are appended, their slots gone
         # 6. forces
         self.heat.exchange_halos()
         grad3 = heat_gradient_3d(self.heat, seg.pos, fuv)
@@ -1039,8 +1152,22 @@ class TectonicSim:
             if tp.closure_ocean_only:
                 # the residual between trench and ridge ground is the sea floor's: the books
                 # track's ocean-only closure (te/books), here so a girdle that consumes floor
-                # faster than the ridges make it does not inflate the continents
+                # faster than the ridges make it does not inflate the continents -- and with the
+                # extent balance, so the continents keep exactly the ground local processes
+                # gave them (shortening, collapse, the cap, margin erosion, stretch)
                 c_ = seg.kind == CONTINENTAL
+                if float(tp.ocean_ext_relax_my) > 0.0:
+                    # ...but a uniform factor compounds on old sea floor: over 8000 Earth steps it
+                    # summed to +3.2, so a segment living 4000 steps gained e^1.6 x and one old
+                    # slab carried 6 design extents into a single accretion (critic, seed 4).  The
+                    # floor's ground relaxes toward its own cell first, so the factor only closes
+                    # what is left, and nothing carries more than extent_max
+                    o_ = ~c_
+                    r_ = 1.0 - math.exp(-float(tp.myr_per_step) / float(tp.ocean_ext_relax_my))
+                    eo0 = seg.ext[o_]
+                    eo1 = np.minimum(eo0 + r_ * (seg.area[o_] - eo0), float(tp.extent_max) * self.spacing ** 2)
+                    seg.ext[o_] = np.maximum(eo1, 1e-6 * self.spacing ** 2)
+                    self.ledger["ocean_relax"] = self.ledger.get("ocean_relax", 0.0) + float(np.abs(seg.ext[o_] - eo0).sum())
                 eo = float(seg.ext[~c_].sum())
                 s_ = (4.0 * math.pi - float(seg.ext[c_].sum())) / max(eo, 1e-12)
                 if s_ > 0:
@@ -1062,6 +1189,8 @@ class TectonicSim:
             self._book_change("extent_closed", km)
             self.ledger["extent_close"] = self.ledger.get("extent_close", 0.0) + abs(close - 1.0)
             self.ledger["extent_close_net"] = self.ledger.get("extent_close_net", 0.0) + (close - 1.0)
+        if tp.variable_extent:
+            cvg = _cbook("cv_close", "cg_close", cvg)
         t_ = _tick("thin_rest", t_)              # everything after the forces: events, closure
         cont = seg.kind == CONTINENTAL
         info = {
@@ -1522,6 +1651,20 @@ def splat_blends(tree, grid: Grid, tp, spacing: float, seg=None) -> tuple[Smooth
     weight_k = None
     if seg is not None and bool(getattr(tp, "variable_extent", False)) and seg.M:
         weight_k = seg.ext / (spacing ** 2)
+        if bool(getattr(tp, "extent_split", False)):
+            # With the extent split the cloud's geometry carries the extent: a segment's cell
+            # on the map is already about the ground it owns, so weighting by ext again
+            # counted it twice (the sea floor, sparser than design under the ocean-only
+            # closure, pulled every coast landward: c > 0.5 came out ~10 % under the
+            # nearest-segment share).  Weight by what the geometry has not caught up with --
+            # ext over the cell the label map gives the segment -- so the power-cell shift
+            # draws only the residual: a margin eroded to a sliver shrinks, a parent waiting
+            # to split widens
+            from .collision import label_map_fast
+            r_cap = max(float(tp.gap_radius_factor), float(tp.collision_radius_factor)) * spacing * 1.0001
+            idx, _ = label_map_fast(seg, grid, r_cap, tree)
+            meas = np.bincount(idx.ravel(), weights=cell_area_steradians(grid).ravel(), minlength=seg.M)[:seg.M]
+            weight_k = np.clip(seg.ext / np.maximum(meas, 0.25 * spacing ** 2), 0.5, 2.0)
     blend = SmoothSplat(tree, grid, sigma, knn, kernel, support(knn), weight_k)
     base_blend = SmoothSplat(tree, grid, sigma, kb, kernel, support(kb), weight_k) if kb > knn else None
     return blend, base_blend
