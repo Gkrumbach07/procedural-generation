@@ -402,6 +402,77 @@ def test_a_continental_rift_stretches_its_margins_at_constant_volume():
     assert np.allclose(new.age[rift], 50.0) and np.allclose(new.rework[rift], 20.0)   # not new rock
 
 
+def test_a_rifted_margin_carries_the_zones_terrane_flag_and_uplift_reference():
+    """The rifted margin is the zone's crust: it carries the zone's uplift reference (crust-
+    weighted h_ref, so finalise reads the margin's subsidence since the reference step) and,
+    where most of that crust docked as island arcs, the terrane flag (te/arcs + te/mass)."""
+    seg, tree, idx, dist, grid, s, c = _rift_cloud(1.0)
+    seg.terrane[:] = 1
+    seg.h_ref[:] = 0.0123
+    new, _, _ = _spawn_rift(seg, tree, idx, dist, grid, s)
+    rift = new.age > 0.0
+    assert rift.any()
+    assert (new.terrane[rift] == 1).all() and np.allclose(new.h_ref[rift], 0.0123)
+    assert (new.terrane[~rift] == 0).all()           # a void fill or new sea floor is no terrane
+    seg2, tree2, idx2, dist2, *_ = _rift_cloud(1.0)
+    new2, _, _ = _spawn_rift(seg2, tree2, idx2, dist2, grid, s)
+    assert (new2.terrane == 0).all()
+
+
+def test_the_extent_balance_leaves_island_arcs_and_terranes_alone():
+    """A split child covers plain sea floor only -- not arc crust at the volcanic front nor an
+    oceanic terrane, which the overrun would have booked lost -- and carries its parent's
+    terrane flag and uplift reference; a docked terrane on the coast never retreats into sea
+    floor (te/arcs + te/mass)."""
+    seg, sp = _patch()
+    tree = build_tree(seg)
+    centre = int(np.argmin(np.linalg.norm(seg.pos - np.array([1.0, 0, 0]), axis=1)))
+    seg.ext[centre] = 2.5 * sp * sp
+    seg.terrane[centre] = 1
+    seg.h_ref[centre] = 0.0456
+    # every sea-floor point of plate 0 within 6 spacings of the disc's centre is island-arc crust
+    # (0.35 = 0.2 of sea floor + 5 km of arc) or a docked oceanic terrane -- but one
+    oc = np.flatnonzero((seg.kind == OCEANIC) & (seg.plate_id == 0)
+                        & (np.linalg.norm(seg.pos - seg.pos[centre], axis=1) < 6.0 * sp))
+    cpos = seg.pos[seg.kind == CONTINENTAL]
+    near = np.array([np.min(np.linalg.norm(cpos - seg.pos[q], axis=1)) for q in oc])
+    plain = int(oc[np.argmin(near)])                               # one plain slot, on the coast
+    rest = oc[oc != plain]
+    arc = rest[0::2]
+    ter = rest[1::2]
+    seg.thickness[arc], seg.mass[arc] = 0.35, 0.35 * 0.88
+    seg.thickness[ter], seg.mass[ter] = 0.6, 0.6 * 0.88
+    seg.terrane[ter], seg.weld[ter] = 1, 60
+    p_plain = seg.pos[plain].copy()
+    n_arc, n_ter = int((seg.thickness == 0.35).sum()), int(((seg.terrane == 1) & (seg.kind == OCEANIC)).sum())
+    ev = _shed(seg, np.full(seg.M, sp * sp), sp, step=500, arc_min=0.1, ocean_th=0.2)
+    assert ev["split"] == 1
+    child = seg.M - 1
+    assert np.allclose(seg.pos[child], p_plain)                      # on the one plain slot
+    assert int((seg.thickness == 0.35).sum()) == n_arc                 # no arc crust overrun
+    assert int(((seg.terrane == 1) & (seg.kind == OCEANIC)).sum()) == n_ter
+    assert seg.terrane[child] == 1 and seg.h_ref[child] == 0.0456 and seg.kind[child] == CONTINENTAL
+    # without the exemption the child lands on arc crust or a terrane (the slot nearest the parent)
+    seg_b, _ = _patch()
+    seg_b.ext[centre] = 2.5 * sp * sp
+    seg_b.thickness[arc], seg_b.mass[arc] = 0.35, 0.35 * 0.88
+    seg_b.thickness[ter], seg_b.mass[ter] = 0.6, 0.6 * 0.88
+    seg_b.terrane[ter] = 1
+    _shed(seg_b, np.full(seg_b.M, sp * sp), sp, step=500)
+    assert int((seg_b.thickness == 0.35).sum()) + int(((seg_b.terrane == 1) & (seg_b.kind == OCEANIC)).sum()) \
+        == n_arc + n_ter - 1
+    # the coast: two coastal segments eroded to a fifth of their cells; the terrane stays
+    seg, sp = _patch()
+    ci = np.flatnonzero(seg.kind == CONTINENTAL)
+    _, nb = build_tree(seg).query(seg.pos[ci], k=7)
+    coast = ci[(seg.kind[nb[:, 1:]] != CONTINENTAL).any(axis=1)]
+    seg.ext[coast[:2]] = 0.2 * sp * sp
+    seg.terrane[coast[0]] = 1
+    ev = _shed(seg, np.full(seg.M, sp * sp), sp)
+    assert ev["merged"] == 1
+    assert seg.kind[coast[0]] == CONTINENTAL and seg.kind[coast[1]] == OCEANIC and seg.terrane[coast[1]] == 0
+
+
 def test_a_rift_whose_margins_are_at_the_floor_breaks_up_and_cratons_do_not_stretch():
     """Margins already stretched to the floor have nothing more to give: the rift has broken up
     and the gap is sea floor.  A craton beside the rift is never thinned."""
