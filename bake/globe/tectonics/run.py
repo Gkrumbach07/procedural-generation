@@ -282,6 +282,7 @@ class TectonicSim:
         self.census_last = None
         self.grad3 = None
         self.micro_passive: dict[int, int] = {}
+        self.suture_quiet: dict[tuple[int, int], int] = {}
 
     # -- helpers ------------------------------------------------------------
     def kind_mass(self, live: np.ndarray | None = None) -> tuple[float, float]:
@@ -473,6 +474,11 @@ class TectonicSim:
             plates = self.plates
             for a, b in ev.get("pairs", ()):
                 self.suture_block[(min(a, b), max(a, b))] = k + int(tp.suture_cooldown)
+        if tp.suture_time_my > 0 and k > 0 and k % max(1, int(tp.micro_every)) == 0:
+            ev = intraplate.suture_weld(self, self.params.rng("tectonics", 14, k))
+            if ev.get("welds"):
+                self.events.append(ev)
+                plates = self.plates
         if tp.micro_area > 0 and k > 0 and k % max(1, int(tp.micro_every)) == 0:
             ev = intraplate.micro_merge(self, self.params.rng("tectonics", 12, k))
             if ev.get("merges"):

@@ -250,7 +250,7 @@ class TectonicsParams:
     slab_detach_my: float = 20.0  # e-folding time of a slab that is no longer fed (detachment)
     slab_age_my: float = 80.0  # slab pull grows as sqrt(age / this), floored at slab_age_floor
     slab_age_floor: float = 0.3
-    slab_speed_cmyr: float = 7.0  # slab resistance (bending, interface) per unit trench length, set so an old saturated slab alone moves its trench at this speed: slab-attached plates saturate here whatever their size (Earth: 7.9-8.1 cm/yr median)
+    slab_speed_cmyr: float = 9.0  # (synth-dyn 9; dyn-minimal 7) slab resistance (bending, interface) per unit trench length, set so an old saturated slab alone moves its trench at this speed: slab-attached plates saturate here whatever their size (Earth: 7.9-8.1 cm/yr median)
     boundary_drag_km: float = 600.0  # plate boundaries drag like a strip this wide of oceanic lithosphere on its base (0 = off)
     collision_drag: float = 120.0  # converging continent-continent contacts resist the relative motion with this x the boundary drag per unit length (0 = off)
     basal_drag_continental: float = 2.0  # > 0: plates drag on the mantle like their lithosphere -- oceanic as its column, continental this x that (x1.5 under cratons) -- instead of in proportion to the crust's column mass (0 = the shipped I)
@@ -263,7 +263,7 @@ class TectonicsParams:
     rift_strength: float = 4.0  # a new rift couples its halves' normal motion with this x the smaller half's own drag (spread over the rift's contacts), holding the opening back to ~1/(1+G)...
     rift_weaken_km: float = 120.0  # (synth-dyn: with rift_neck_power 4 and rift_break_factor 2.5; dyn-minimal: power 2, factor 3) ...weakening as exp(-(opening / this)^2): necking -- slow phase, then fast (Brune 2016)
     rift_cut_zigzag: float = 0.06
-    margin_collapse_my: float = 150.0  # ocean floor riding a continental plate detaches as its own plate, with a seed slab under the margin, once the floor along the margin is this old (median, +-15 % per plate): the Wilson cycle's closing half (0 = off)
+    margin_collapse_my: float = 100.0  # (synth-dyn: 100 with the force test, margin_collapse_max_my 160 untested; dyn-minimal: 150, untested) ocean floor riding a continental plate detaches as its own plate, with a seed slab under the margin, once the floor along the margin is this old (median, +-15 % per plate): the Wilson cycle's closing half (0 = off)
     margin_collapse_every: int = 50
     margin_collapse_min: float = 0.005  # ... and only if the plate carries at least this much ocean floor (share of the sphere)
     margin_collapse_slab_km: float = 150.0  # the seed slab: ~the underthrusting that makes subduction self-sustaining (Gurnis 2004)
@@ -295,12 +295,15 @@ class TectonicsParams:
     rift_ocean_strength: float = 1.5
     margin_collapse_test: bool = True  # an old margin fails only if, released, its floor (with a seed slab's pull) closes on the continent: the forced part of initiation (Gurnis et al. 2004)
     margin_collapse_min_cmyr: float = 0.0  # ... at a mean approach above this
-    margin_collapse_max_my: float = 170.0  # ... or, untested, once the margin's floor is this old (spontaneous foundering of the oldest floor; Earth keeps almost none older than ~180-200 My)
+    margin_collapse_max_my: float = 160.0  # ... or, untested, once the margin's floor is this old (spontaneous foundering of the oldest floor; Earth keeps almost none older than ~180-200 My)
     # small plates live and die (dyn-events' merge_microplates)
     micro_area: float = 0.005  # a plate below this share of the sphere with no live slab of its own is passive... (0 = off)
     micro_life_my: float = 12.0  # ...and once passive this long is captured by the neighbour it shares most boundary with and is not converging on (Morra 2013: small plates live 10-20 My); remnants below plate_min_area are captured at once
     micro_conv_cmyr: float = 0.2
     micro_every: int = 10
+    suture_time_my: float = 20.0  # > 0: two plates meeting along >= suture_min_km of continent-continent contact with a median relative normal speed below suture_rate_cmyr for this long are welded into one (a finished collision; the next rift reopens the young suture); 0 = off
+    suture_min_km: float = 800.0
+    suture_rate_cmyr: float = 1.0
     orogen_push: float = 0.0  # > 0: thickened crust at a continent-continent contact pushes the plates apart, this much per unit contact length at full thickening (heat units, as slab_force): the orogen's gravitational potential energy balancing the collision (Tibet against India; Copley et al. 2010)
     orogen_push_th0: float = 1.2  # ...from this continental column (x continental_thickness)...
     orogen_push_dth: float = 0.8  # ...rising to full over this much more
@@ -317,7 +320,8 @@ class TectonicsParams:
 CLASSIC_DYNAMICS = dict(start_mode="classic", rift_mode="clock", continental_fraction=0.75, initial_plates=4,
                         rift_every=600, slab_force=0.0, boundary_drag_km=0.0, collision_drag=0.0,
                         basal_drag_continental=0.0, insulation_time_my=0.0, cc_heating=True, margin_collapse_my=0.0,
-                        spawn_gate="nearest", closure_ocean_only=False, micro_area=0.0, orogen_push=0.0)
+                        spawn_gate="nearest", closure_ocean_only=False, micro_area=0.0, orogen_push=0.0,
+                        suture_time_my=0.0)
 
 
 def classic_dynamics(tp: "TectonicsParams", **over) -> "TectonicsParams":

@@ -820,6 +820,87 @@ def heal_failed_rifts(sim, rng) -> dict:
     return {"event": "rift_fail", "healed": out, "plates": int(sim.plates.n_alive())}
 
 
+def suture_weld(sim, rng) -> dict:
+    """Two continents that have finished colliding are one plate (synth-dyn).
+
+    Plates that meet along at least ``suture_min_km`` of continent-continent contact
+    with a median relative normal speed below ``suture_rate_cmyr`` for
+    ``suture_time_my`` without a break are welded: the smaller joins the larger,
+    moving at their basal-drag weighted mean.  Assembled supercontinents were a few
+    plates, not dozens grinding at their sutures: without this the pieces of a
+    reassembled supercontinent kept 25-40k km of C-C contact sliding and creeping at
+    0.3-1.4 cm/yr -- most of all collisions, 140-280 a step -- for hundreds of My.
+    Welding a *finished* collision does not lock a live one (India-Asia, ~4 cm/yr,
+    never qualifies), and it does not stop breakup: a suture is crust assembled
+    recently, which the force rift's strength rates at ``rift_suture_strength``
+    (half a belt), so the next rift reopens it (the Wilson cycle; Buiter & Torsvik
+    2014).  The shipped suture_collisions welded *grinding* pairs, by collision count,
+    under a clock rift through the centre -- which is what killed breakup there."""
+    from .segments import CONTINENTAL
+
+    tp, seg, plates = sim.tp, sim.seg, sim.plates
+    cen = getattr(sim, "census_last", None)
+    k = int(sim.step_index)
+    if cen is None or cen["i"].size == 0 or int(max(cen["i"].max(), cen["j"].max())) >= seg.M:
+        return {"event": "suture", "welds": []}
+    pid = seg.plate_id.astype(np.int64)
+    i, j = cen["i"], cen["j"]
+    pi_, pj_ = pid[i], pid[j]
+    cc = (seg.kind[i] == CONTINENTAL) & (seg.kind[j] == CONTINENTAL) & (pi_ != pj_)
+    v = np.cross(plates.omega[pid], seg.pos)
+    appr = np.sum((v[i] - v[j]) * cen["dd"], axis=1)
+    busy = {a for pr in sim.rift_pairs for a in pr}
+    lim_len = sim.km(tp.suture_min_km)
+    lim_v = sim.cmyr(tp.suture_rate_cmyr)
+    keys = np.minimum(pi_, pj_) * 1000003 + np.maximum(pi_, pj_)
+    seen = set()
+    due = []
+    if cc.any():
+        for kk in np.unique(keys[cc]):
+            m = cc & (keys == kk)
+            a, b = int(kk // 1000003), int(kk % 1000003)
+            L = float(cen["w"][m].sum())
+            quiet = L >= lim_len and float(np.median(np.abs(appr[m]))) < lim_v and a not in busy and b not in busy
+            if quiet:
+                seen.add((a, b))
+                k0 = sim.suture_quiet.setdefault((a, b), k)
+                if k - k0 >= sim.steps_of(tp.suture_time_my):
+                    due.append((L, a, b))
+    for pr in list(sim.suture_quiet):
+        if pr not in seen:
+            sim.suture_quiet.pop(pr)
+    if not due:
+        return {"event": "suture", "welds": []}
+    due.sort(reverse=True)
+    basal = sim.basal_seg()
+    P = plates.P
+    A = np.bincount(pid, weights=seg.ext, minlength=P)[:P]
+    Ib = np.bincount(pid, weights=basal, minlength=P)[:P]
+    new_pid = pid.copy()
+    gone = set()
+    omega = plates.omega.copy()
+    welds = []
+    for L, a, b in due:
+        if a in gone or b in gone:
+            continue
+        keep, join = (a, b) if A[a] >= A[b] else (b, a)
+        omega[keep] = (Ib[keep] * omega[keep] + Ib[join] * omega[join]) / max(Ib[keep] + Ib[join], 1e-30)
+        new_pid[new_pid == join] = keep
+        Ib[keep] += Ib[join]
+        A[keep] += A[join]
+        gone.add(join)
+        welds.append({"kept": int(keep), "joined": int(join), "contact_km": round(L * sim.R_km)})
+    if welds:
+        sim.plates = _rebuild(seg, new_pid, P, rng, float(tp.initial_speed) * sim.spacing, keep=omega, snap=False)
+        for w in welds:
+            q = w["joined"]
+            sim.micro_passive.pop(q, None)
+            sim.last_rift.pop(q, None)
+            for pr in [pr for pr in sim.suture_quiet if q in pr]:
+                sim.suture_quiet.pop(pr)
+    return {"event": "suture", "welds": welds, "plates": int(sim.plates.n_alive())}
+
+
 def micro_merge(sim, rng) -> dict:
     """Small plates live and die (dyn-events' merge_microplates, on dyn-minimal's slab field).
 
