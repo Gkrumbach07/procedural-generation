@@ -347,7 +347,8 @@ class TectonicSim:
     # -- boundary forces (forces.py) ----------------------------------------
     def boundary_forces_on(self) -> bool:
         tp = self.tp
-        return bool(tp.slab_force > 0.0 or tp.boundary_drag_km > 0.0 or tp.collision_drag > 0.0 or self.rift_pairs)
+        return bool(tp.slab_force > 0.0 or tp.boundary_drag_km > 0.0 or tp.collision_drag > 0.0 or self.rift_pairs
+                    or tp.orogen_push > 0.0)
 
     # physical units (synth-dyn): every knob in km, cm/yr or My is converted through the
     # tectonic reference radius and myr_per_step, so the step and the resolution can change
@@ -407,7 +408,9 @@ class TectonicSim:
                               basal_seg=self.basal_seg(), drag_per_len=drag,
                               cc_per_len=float(tp.collision_drag) * drag, slab=sinfo, trench_per_len=trench,
                               rift_pairs=self.rift_pairs, rift_scale=1.0, rift_weaken=self.km(tp.rift_weaken_km),
-                              rift_power=float(tp.rift_neck_power), rift_strength=float(tp.rift_strength))
+                              rift_power=float(tp.rift_neck_power), rift_strength=float(tp.rift_strength),
+                              orogen_push=float(tp.orogen_push), push_th0=float(tp.orogen_push_th0),
+                              push_dth=float(tp.orogen_push_dth))
         wstar = forces.solve(bal, plates, seg.plate_id, extra_tau=None if extra_tau is None else self.gain * extra_tau)
         if sinfo is not None and grad3 is not None and sinfo["seg"].size:
             P = plates.P
@@ -473,6 +476,11 @@ class TectonicSim:
         if tp.micro_area > 0 and k > 0 and k % max(1, int(tp.micro_every)) == 0:
             ev = intraplate.micro_merge(self, self.params.rng("tectonics", 12, k))
             if ev.get("merges"):
+                self.events.append(ev)
+                plates = self.plates
+        if str(tp.rift_mode) == "force" and self.rift_pairs and float(tp.rift_abort_my) > 0 and k % max(1, int(tp.rift_check_every)) == 0:
+            ev = intraplate.heal_failed_rifts(self, self.params.rng("tectonics", 13, k))
+            if ev.get("healed"):
                 self.events.append(ev)
                 plates = self.plates
         if str(tp.rift_mode) in ("insulation", "force") and k > 0 and k % max(1, int(tp.rift_check_every)) == 0:

@@ -786,6 +786,40 @@ def _force_rift_one(sim, q: int, rng, D: np.ndarray) -> dict:
             "best_score": round(best["score"], 3)}
 
 
+def heal_failed_rifts(sim, rng) -> dict:
+    """A rift that has not opened ``rift_weaken_km / 2`` within ``rift_abort_my`` has
+    failed (an aulacogen): its halves are one plate again, moving at their basal-drag
+    weighted mean, and the plate may not rift again for ``rift_refractory_my``.
+    Without this, a stalled rift kept its coupling -- and its two plates -- for
+    hundreds of My (dyn-events' heal_failed_rifts)."""
+    tp, seg, plates = sim.tp, sim.seg, sim.plates
+    k = int(sim.step_index)
+    out = []
+    lim = sim.steps_of(tp.rift_abort_my)
+    for (a, b), st in list(sim.rift_pairs.items()):
+        if k - int(st.get("k0", k)) < lim or st["delta"] >= 0.5 * sim.km(tp.rift_weaken_km):
+            continue
+        P = plates.P
+        if a >= P or b >= P or not (plates.alive[a] and plates.alive[b]):
+            sim.rift_pairs.pop((a, b), None)
+            continue
+        pid = seg.plate_id.copy()
+        basal = sim.basal_seg()
+        Ia = float(basal[pid == a].sum())
+        Ib = float(basal[pid == b].sum())
+        w = (Ia * plates.omega[a] + Ib * plates.omega[b]) / max(Ia + Ib, 1e-30)
+        pid[pid == b] = a
+        new = _rebuild(seg, pid, P, rng, float(tp.initial_speed) * sim.spacing, keep=plates.omega, snap=False)
+        new.omega[a] = w
+        new.omega[~new.alive] = 0.0
+        sim.plates = plates = new
+        sim.rift_pairs.pop((a, b), None)
+        sim.last_rift[a] = k
+        out.append({"kept": int(a), "joined": int(b), "delta_km": round(float(st["delta"]) * sim.R_km, 1),
+                    "age_my": round((k - int(st.get("k0", k))) * float(tp.myr_per_step), 1)})
+    return {"event": "rift_fail", "healed": out, "plates": int(sim.plates.n_alive())}
+
+
 def micro_merge(sim, rng) -> dict:
     """Small plates live and die (dyn-events' merge_microplates, on dyn-minimal's slab field).
 
@@ -852,6 +886,7 @@ def micro_merge(sim, rng) -> dict:
         ww = np.concatenate([w[mi], w[mj]])
         qdown = np.concatenate([cen["down_i"][mi], cen["down_j"][mj]])
         best, best_w = None, 0.0
+        alt, alt_w = None, 0.0                 # a remnant diving under every neighbour still goes
         for o in np.unique(other):
             o = int(o)
             if o in gone or not plates.alive[o]:
@@ -862,10 +897,14 @@ def micro_merge(sim, rng) -> dict:
             if not is_rem:
                 if float(np.average(ap[m], weights=ww[m])) > thr or dives:
                     continue
-            elif dives and np.unique(other).size > 1:
+            elif dives:
+                if L > alt_w:
+                    alt, alt_w = o, L
                 continue
             if L > best_w:
                 best, best_w = o, L
+        if best is None:
+            best = alt
         if best is None:
             continue
         new_pid[new_pid == q] = best
@@ -985,8 +1024,22 @@ def margin_collapse(sim, rng) -> dict:
         test = None
         if tp.margin_collapse_test:
             test = _margin_test(sim, p, co, oc)
-            if test is None or test["approach_cmyr"] < float(tp.margin_collapse_min_cmyr) or test["conv_share"] < 0.5:
+            diag = getattr(sim, "collapse_diag", None)
+            if diag is not None:
+                diag.append((int(sim.step_index), p, round(float(np.median(seg.age[margin])) * myr, 1),
+                             None if test is None else round(test["approach_cmyr"], 2), None if test is None else round(test["conv_share"], 2),
+                             round(float(seg.ext[oc].sum()) / (4.0 * np.pi), 4)))
+            forced = test is not None and test["approach_cmyr"] >= float(tp.margin_collapse_min_cmyr) and test["conv_share"] >= 0.5
+            # floor this old founders whatever the forces (spontaneous initiation; Earth keeps
+            # almost no floor older than ~180-200 My in place): the released floor of an old
+            # passive margin mostly drifts off its continent here -- the insulation low under
+            # the continent repels it -- and without the backstop the aprons of the opened oceans
+            # only aged (150-210 My mean by 450 My on seeds 0-1)
+            old = float(np.median(seg.age[margin])) * myr >= float(tp.margin_collapse_max_my) * jit
+            if not (forced or old):
                 continue
+            if test is not None:
+                test["forced"] = bool(forced)
         Pn = plates.P
         new_pid = seg.plate_id.copy()
         new_pid[oc] = Pn

@@ -244,7 +244,8 @@ class Balance:
 def assemble(seg, plates, cen: dict, *, gain: float, damping: float, grad3: np.ndarray | None,
              basal_seg: np.ndarray, drag_per_len: float, cc_per_len: float, slab: dict | None,
              trench_per_len: float, rift_pairs: dict | None, rift_scale: float, rift_weaken: float,
-             rift_power: float = 2.0, rift_strength: float = 4.0) -> Balance:
+             rift_power: float = 2.0, rift_strength: float = 4.0, orogen_push: float = 0.0,
+             push_th0: float = 1.2, push_dth: float = 0.8) -> Balance:
     """Per-segment drag blocks, torques and coupling blocks (see `Balance`).
 
     ``basal_seg`` (M,) is each segment's basal drag before ``damping``;
@@ -285,6 +286,25 @@ def assemble(seg, plates, cen: dict, *, gain: float, damping: float, grad3: np.n
                 bal.add_coupling(cen["i"][cc], cen["j"][cc], _outer(ac, cc_per_len * cen["w"][cc]))
             bal.info["cc_pairs"] = int(cc.sum())
             bal.info["cc_len"] = float(cen["w"][cc].sum())
+        if orogen_push > 0.0:
+            # the orogen pushes back: thickened crust at a continent-continent contact stands
+            # high, and its gravitational potential energy pushes the two plates apart (Tibet
+            # balancing India's push; Copley et al. 2010) -- a force per unit contact length,
+            # equal and opposite on the two sides, growing with the crust's thickening, so a
+            # collision slows by the drag above at once and stops as its orogen thickens, while
+            # nothing holds the plates together (no weld)
+            ccall = (cen["ki"] == CONTINENTAL) & (cen["kj"] == CONTINENTAL)
+            if rift_pairs:
+                rk = np.array([a * KEY + b for a, b in rift_pairs] + [b * KEY + a for a, b in rift_pairs], np.int64)
+                ccall &= ~np.isin(cen["pi"] * KEY + cen["pj"], rk)
+            if ccall.any():
+                th = 0.5 * (seg.thickness[cen["i"][ccall]] + seg.thickness[cen["j"][ccall]])
+                x = np.clip((th - push_th0) / max(push_dth, 1e-9), 0.0, 1.0)
+                f = (gain * orogen_push * x * cen["w"][ccall])[:, None] * cen["dd"][ccall]
+                si, sj = cen["i"][ccall], cen["j"][ccall]
+                np.add.at(bal.t, si, np.cross(pos[si], -f))
+                np.add.at(bal.t, sj, np.cross(pos[sj], f))
+                bal.info["push_len"] = float(cen["w"][ccall][x > 0].sum())
         if rift_pairs:
             # the rift's strength G (G0 per rift, calibrated when it was cut, or rift_strength):
             # the coupling, summed over the rift's contacts, is G times the smaller half's basal

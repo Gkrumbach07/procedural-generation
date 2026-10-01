@@ -261,7 +261,7 @@ class TectonicsParams:
     rift_refractory_my: float = 45.0  # a plate born from a rift may not rift again for this long
     rift_check_every: int = 10
     rift_strength: float = 4.0  # a new rift couples its halves' normal motion with this x the smaller half's own drag (spread over the rift's contacts), holding the opening back to ~1/(1+G)...
-    rift_weaken_km: float = 150.0  # (synth-dyn: 150 with rift_neck_power 4; dyn-minimal 100 with 2) ...weakening as exp(-(opening / this)^2): necking -- slow phase, then fast (Brune 2016)
+    rift_weaken_km: float = 120.0  # (synth-dyn: with rift_neck_power 4 and rift_break_factor 2.5; dyn-minimal: power 2, factor 3) ...weakening as exp(-(opening / this)^2): necking -- slow phase, then fast (Brune 2016)
     rift_cut_zigzag: float = 0.06
     margin_collapse_my: float = 150.0  # ocean floor riding a continental plate detaches as its own plate, with a seed slab under the margin, once the floor along the margin is this old (median, +-15 % per plate): the Wilson cycle's closing half (0 = off)
     margin_collapse_every: int = 50
@@ -273,32 +273,37 @@ class TectonicsParams:
     tectonic_radius_km: float = 6371.0  # the sphere every physical tectonics knob (km, cm/yr) is converted on: Earth's, whatever the rendered planet's radius, so a toy body (small, tiny: 4 km) runs Earth's angular rates instead of freezing (dyn-minimal converted through R_planet).  0 = the planet's own radius
     slab_onset_km: float = 0.0  # > 0: slab pull switches on smoothly between 0.5x and 1.5x this much slab (Gurnis et al. 2004: ~100-150 km of underthrusting before a slab sustains itself); 0 = linear from zero (dyn-minimal)
     rift_neck_power: float = 4.0  # a rift's strength necks as exp(-(opening / rift_weaken_km)^power): 2 is dyn-minimal's Gaussian, higher is a sharper end to the slow phase
-    rift_break_factor: float = 2.0  # a rift's coupling is dropped (it is a ridge) once it has opened this x rift_weaken_km
+    rift_break_factor: float = 2.5  # a rift's coupling is dropped (it is a ridge) once it has opened this x rift_weaken_km
     # the force rift test (rift_mode 'force'): a cut is released in the force balance and fails if its tension beats its strength
     rift_deficit: float = 0.66  # the time gate: a continental plate is tested once the mean insulation deficit under its continent (0-1), x (its continental share / rift_size_ref)^rift_size_exponent, passes this (x +-15 % per plate).  0.66 at 0.4 of the sphere is dyn-minimal's 0.42 with sqrt
     rift_size_ref: float = 0.4
-    rift_size_exponent: float = 0.25  # dyn-minimal's sqrt (0.5) could never re-rift a 0.2 half (ceiling 0.44 against 0.42 +-15 %): dispersal stopped at 2-4 landmasses
+    rift_size_exponent: float = 0.0  # dyn-minimal's sqrt (0.5) could never re-rift a 0.2 half (ceiling 0.44 against 0.42 +-15 %): dispersal stopped at 2-4 landmasses
     rift_min_open_cmyr: float = 1.0  # a cut qualifies only if, released, its halves open at least this fast on average
     rift_candidates: int = 24  # candidate cuts per tested plate (half through its upwelling, half through points drawn by deficit / strength)
     rift_tension: float = 0.0  # optional floor on the chosen cut's tension -- free opening (cm/yr) x the halves' reduced drag (sr of oceanic lithosphere) / cut length (rad) / the cut's mean strength (2-9 at the start of every seed, flat in time: the girdle's pull, not the insulation, so it cannot be the clock); the best qualifying cut by this score is the one that rifts
     rift_max_angle: float = 80.0  # every crossing of the cut within this many degrees of the cut's centre (no far side)
     rift_max_conv: float = 0.02  # at most this share of the cut (by length) may converge when released
-    rift_end_open: float = 0.25  # the cut's 10th-percentile opening must be at least this x its mean (no hinge at one end)
+    rift_end_open: float = 0.4  # the cut's 10th-percentile opening must be at least this x its mean (no hinge at one end)
     rift_half_min: float = 0.2  # each half keeps this share of the plate's continent...
     rift_min_half: float = 0.012  # ...and at least this much continent (share of the sphere)
-    rift_slow_cmyr: float = 0.6  # a new rift's strength G0 is calibrated so it opens at this rate at first (Brune 2016: < 1 cm/yr for 20-25 My)
+    rift_slow_cmyr: float = 0.8  # a new rift's strength G0 is calibrated so it opens at this rate at first (Brune 2016: < 1 cm/yr for 20-25 My)
     rift_strength_max: float = 60.0  # cap on G0
+    rift_abort_my: float = 40.0  # a rift that has opened less than half of rift_weaken_km after this long has failed and heals (its halves are one plate again); 0 = never
     rift_craton_strength: float = 3.0  # lithospheric strength against a mobile belt's 1
     rift_suture_strength: float = 0.5  # crust assembled within rift_suture_my
     rift_suture_my: float = 150.0
     rift_ocean_strength: float = 1.5
     margin_collapse_test: bool = True  # an old margin fails only if, released, its floor (with a seed slab's pull) closes on the continent: the forced part of initiation (Gurnis et al. 2004)
     margin_collapse_min_cmyr: float = 0.0  # ... at a mean approach above this
+    margin_collapse_max_my: float = 170.0  # ... or, untested, once the margin's floor is this old (spontaneous foundering of the oldest floor; Earth keeps almost none older than ~180-200 My)
     # small plates live and die (dyn-events' merge_microplates)
     micro_area: float = 0.005  # a plate below this share of the sphere with no live slab of its own is passive... (0 = off)
     micro_life_my: float = 12.0  # ...and once passive this long is captured by the neighbour it shares most boundary with and is not converging on (Morra 2013: small plates live 10-20 My); remnants below plate_min_area are captured at once
     micro_conv_cmyr: float = 0.2
     micro_every: int = 10
+    orogen_push: float = 0.0  # > 0: thickened crust at a continent-continent contact pushes the plates apart, this much per unit contact length at full thickening (heat units, as slab_force): the orogen's gravitational potential energy balancing the collision (Tibet against India; Copley et al. 2010)
+    orogen_push_th0: float = 1.2  # ...from this continental column (x continental_thickness)...
+    orogen_push_dth: float = 0.8  # ...rising to full over this much more
     ocean_tiling: str = "zipf"  # 'zipf': the initial ocean plates get rank^-ocean_plate_alpha target sizes in [ocean_plate_min, ocean_plate_max] (dyn-forcebalance's power-law tiling: one Pacific-like plate, then a tail); 'cluster': dyn-minimal's redrawn cluster_plates
     ocean_plate_alpha: float = 1.0
     ocean_plate_min: float = 0.012
@@ -312,7 +317,7 @@ class TectonicsParams:
 CLASSIC_DYNAMICS = dict(start_mode="classic", rift_mode="clock", continental_fraction=0.75, initial_plates=4,
                         rift_every=600, slab_force=0.0, boundary_drag_km=0.0, collision_drag=0.0,
                         basal_drag_continental=0.0, insulation_time_my=0.0, cc_heating=True, margin_collapse_my=0.0,
-                        spawn_gate="nearest", closure_ocean_only=False, micro_area=0.0)
+                        spawn_gate="nearest", closure_ocean_only=False, micro_area=0.0, orogen_push=0.0)
 
 
 def classic_dynamics(tp: "TectonicsParams", **over) -> "TectonicsParams":
