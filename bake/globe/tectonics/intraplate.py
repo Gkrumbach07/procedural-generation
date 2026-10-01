@@ -578,8 +578,9 @@ def force_rifts(sim, rng) -> dict:
     The trigger is the force balance itself, released along a candidate cut
     (dyn-events' test, in dyn-minimal's balance): a plate carrying at least
     ``rift_min_cont`` of continent, insulated underneath (mean deficit >=
-    ``rift_deficit_min``: it has sat still long enough for the mantle under it
-    to well up) and not rifted within ``rift_refractory_my``, is cut along
+    ``rift_deficit`` x a +-15 % per-plate jitter: it has sat still long enough
+    for the mantle under it to well up) and not rifted within
+    ``rift_refractory_my``, is cut along
     ``rift_candidates`` great circles -- half through its insulation upwelling,
     half through points drawn by deficit / strength -- and each cut is released
     in the balance (:func:`forces.release`, every other plate held at its
@@ -600,8 +601,8 @@ def force_rifts(sim, rng) -> dict:
     Its tension is the force per unit cut length that would hold the halves
     together -- the free opening rate times the halves' reduced drag, over the
     cut length -- divided by the cut's mean strength (cratons strong, young
-    sutures weak).  The best cut rifts if its tension exceeds
-    ``rift_tension`` (x a +-15 % per-plate jitter).  No kick: both halves keep
+    sutures weak).  The best qualifying cut rifts if its tension exceeds
+    ``rift_tension`` (0: any qualifying cut).  No kick: both halves keep
     the plate's motion; the rift starts held by its own strength G0,
     calibrated so it opens at ``rift_slow_cmyr``, and necks with opening
     (forces.assemble), so it is slow first and fast after (Brune et al.
@@ -635,7 +636,12 @@ def force_rifts(sim, rng) -> dict:
         diag[q] = round(sigma, 3)
         if sigma < float(tp.rift_deficit) * jit:
             continue
-        r = _force_rift_one(sim, q, rng, D)
+        # the balance for the plates as they are now: a weld, a capture or the previous rift of
+        # this call has relabelled plates since the force phase took it (TectonicSim.force_state)
+        bal = _force_state(sim)
+        if bal is None:
+            break
+        r = _force_rift_one(sim, q, rng, D, bal)
         diag[q] = (round(sigma, 3), r.get("best_score"))
         if r.get("split", -1) >= 0:
             out.append(r)
@@ -646,14 +652,26 @@ def force_rifts(sim, rng) -> dict:
             "centre": out[0]["centre"] if out else None, "detail": out, "plates": int(sim.plates.n_alive())}
 
 
-def _force_rift_one(sim, q: int, rng, D: np.ndarray) -> dict:
+def _force_state(sim):
+    """The force balance for the current partition (TectonicSim.force_state), or, on an object
+    without it, the stored one if it still lines up with the cloud."""
+    fs = getattr(sim, "force_state", None)
+    if fs is not None:
+        return fs()
+    bal = getattr(sim, "balance", None)
+    if bal is None or bal.rc is None or bal.D.shape[0] != sim.seg.M:
+        return None
+    return bal
+
+
+def _force_rift_one(sim, q: int, rng, D: np.ndarray, bal=None) -> dict:
     from scipy.spatial import cKDTree
 
     from . import forces
     from .segments import CONTINENTAL
 
     seg, plates, tp = sim.seg, sim.plates, sim.tp
-    bal = sim.balance
+    bal = sim.balance if bal is None else bal
     sp = sim.spacing
     sel = np.flatnonzero(seg.plate_id == q)
     if sel.size < 40:
@@ -839,6 +857,7 @@ def suture_weld(sim, rng) -> dict:
     from .segments import CONTINENTAL
 
     tp, seg, plates = sim.tp, sim.seg, sim.plates
+    _force_state(sim)          # the census for the plates as they are now
     cen = getattr(sim, "census_last", None)
     k = int(sim.step_index)
     if cen is None or cen["i"].size == 0 or int(max(cen["i"].max(), cen["j"].max())) >= seg.M:
@@ -915,6 +934,7 @@ def micro_merge(sim, rng) -> dict:
     spun at the speed cap; the Monterey and Arguello remnants of the Farallon plate
     were captured by the Pacific).  Small plates on Earth live 10-20 My (Morra 2013)."""
     seg, plates, tp = sim.seg, sim.plates, sim.tp
+    _force_state(sim)          # the census for the plates as they are now (a weld this step relabelled)
     cen = getattr(sim, "census_last", None)
     if cen is None or cen["i"].size == 0 or int(max(cen["i"].max(), cen["j"].max())) >= seg.M:
         return {"event": "micro_merge", "merges": []}
@@ -1015,8 +1035,8 @@ def _margin_test(sim, p: int, co: np.ndarray, oc: np.ndarray) -> dict | None:
     from . import forces
 
     seg, tp = sim.seg, sim.tp
-    bal = getattr(sim, "balance", None)
-    if bal is None or bal.rc is None or bal.D.shape[0] != seg.M:
+    bal = _force_state(sim)          # the plates as they are now (an earlier collapse this step relabelled)
+    if bal is None:
         return None
     sel = np.concatenate([co, oc])
     side = np.zeros(sel.size, bool)
@@ -1143,7 +1163,7 @@ def margin_collapse(sim, rng) -> dict:
 
 
 def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rng=None, tree=None,
-                       min_area: float = 0.0) -> dict:
+                       min_area: float = 0.0, pairs_out: list | None = None) -> dict:
     """A plate that has been cut in two is two plates.
 
     Subduction eats a plate from its edges, and where a trench cuts right
@@ -1186,6 +1206,10 @@ def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rn
     if tree is None or tree.n != seg.M:
         tree = build_tree(seg)
     pairs = tree.query_pairs(float(link_factor) * sim.spacing, output_type="ndarray")
+    if pairs_out is not None:
+        # every pair of the cloud within link_factor spacings, any plate: the force census
+        # reads its own (narrower) pairs off these rather than query a tree of its own
+        pairs_out.append((float(link_factor) * sim.spacing, pairs))
     if pairs.shape[0] == 0:
         return {"event": "split", "split": 0}
     e = pairs[seg.plate_id[pairs[:, 0]] == seg.plate_id[pairs[:, 1]]]

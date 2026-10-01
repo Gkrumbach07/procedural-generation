@@ -720,11 +720,14 @@ def plate_pair_polarity(plate_id: np.ndarray, age: np.ndarray, kind: np.ndarray,
     lo, hi = np.where(swap, b, a), np.where(swap, a, b)
     age_i, age_j = age[pairs[sel, 0]], age[pairs[sel, 1]]
     key = lo * P + hi
-    cnt = np.bincount(key, minlength=P * P)
-    s_lo = np.bincount(key, weights=np.where(swap, age_j, age_i), minlength=P * P)
-    s_hi = np.bincount(key, weights=np.where(swap, age_i, age_j), minlength=P * P)
-    k = np.nonzero(cnt)[0]
-    older_lo = s_lo[k] > s_hi[k]
+    # summed per plate pair over the pairs that occur, not over all P x P: plate ids only grow,
+    # and with ~700 of them (an 8000-step Earth run) three P^2 bincounts cost 4.5 ms a call, twice
+    # a step.  bincount adds each bin's weights in input order either way, so the sums -- and
+    # the polarity -- are bit for bit the dense ones
+    k, inv = np.unique(key, return_inverse=True)
+    s_lo = np.bincount(inv, weights=np.where(swap, age_j, age_i), minlength=k.size)
+    s_hi = np.bincount(inv, weights=np.where(swap, age_i, age_j), minlength=k.size)
+    older_lo = s_lo > s_hi
     k_lo, k_hi = k // P, k % P
     pol[k_lo[older_lo], k_hi[older_lo]] = 1
     pol[k_hi[~older_lo], k_lo[~older_lo]] = 1

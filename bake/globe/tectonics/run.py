@@ -283,6 +283,14 @@ class TectonicSim:
         self.grad3 = None
         self.micro_passive: dict[int, int] = {}
         self.suture_quiet: dict[tuple[int, int], int] = {}
+        #: all segment pairs within some radius of the cloud as split_disconnected saw it this
+        #: step (radius, pairs, the KD tree, the positions it was built on): the census reads its
+        #: own pairs off them instead of a third tree and query a step (see _census_pairs)
+        self._pair_cache = None
+
+    #: the plate-id dictionaries of the dynamics, all keyed by plate id (or a pair of them);
+    #: anything that renumbers plates from scratch (reorganise) must empty them
+    DYN_BOOKS = ("rift_pairs", "last_rift", "rift_jitter", "collapse_jitter", "micro_passive", "suture_quiet")
 
     # -- helpers ------------------------------------------------------------
     def kind_mass(self, live: np.ndarray | None = None) -> tuple[float, float]:
@@ -390,7 +398,7 @@ class TectonicSim:
         strength (see forces.py).  Keeps the per-segment balance as ``self.balance`` for
         trial solves (rifts, failing margins) and the slab contacts as ``self.slab_info``."""
         tp, seg, plates = self.tp, self.seg, self.plates
-        cen = forces.census(seg, plates, self.spacing) if cen is None else cen
+        cen = forces.census(seg, plates, self.spacing, pairs=self._census_pairs()) if cen is None else cen
         info = {}
         sinfo = None
         if tp.slab_force > 0.0:
@@ -424,6 +432,60 @@ class TectonicSim:
         self.slab_info = sinfo
         self.census_last = cen
         return wstar, info, cen
+
+    def force_state(self):
+        """The force balance (``self.balance``, with ``census_last`` and ``slab_info``) for the
+        cloud and the plates as they are *now*, or None.
+
+        They are taken in the force phase (step section 6) and read by the events at the start
+        of the next step.  Every event that relabels plates -- a suture weld, a microplate
+        capture, a healed rift, a rift, a margin collapse -- leaves them describing the old
+        partition: a plate that has just absorbed a neighbour still carries, in its segments'
+        drag blocks and coupling terms, the boundary drag and collisional coupling to a plate
+        that is now itself, so a trial solve on it (a rift test, a margin test) was released
+        against a phantom.  So the first reader after a relabel re-solves on the same cloud and
+        heat gradient (the segments have not moved since the force phase; the slab field has
+        decayed one step).  None when the cloud itself has changed since (segments added or
+        removed): then no trial solve is made this step."""
+        bal = self.balance
+        seg = self.seg
+        if bal is None or bal.rc is None or bal.D.shape[0] != seg.M:
+            return None
+        if bal.pid is not None and np.array_equal(bal.pid, seg.plate_id):
+            return bal
+        if self.grad3 is None or self.grad3.shape[0] != seg.M:
+            return None
+        self.terminal_omega(self.grad3)
+        return self.balance
+
+    def _census_pairs(self) -> np.ndarray | None:
+        """All pairs of the cloud within the census radius, read off the pairs
+        split_disconnected queried this step when they are provably the same cloud's -- the
+        positions its tree was built on are the first ``tree.n`` segments now, unchanged, and
+        its radius is at least the census's -- with the pairs that involve the segments
+        spawned since found by a query of those alone.  None otherwise (the census then runs
+        its own query).  Either way the census filters to cross-plate pairs within its radius
+        and sorts them, so the two routes give the same census (tests/test_synth_dyn.py)."""
+        c, self._pair_cache = self._pair_cache, None
+        if c is None:
+            return None
+        r, pairs, tree, pos0 = c
+        seg = self.seg
+        rc = 1.25 * self.spacing
+        n = int(tree.n)
+        if r < rc or seg.M < n or pos0.shape[0] != n or not np.array_equal(pos0, seg.pos[:n]):
+            return None
+        if seg.M == n:
+            return pairs
+        from scipy.spatial import cKDTree
+
+        new_pos = seg.pos[n:]
+        lists = tree.query_ball_point(new_pos, rc)
+        lens = np.fromiter((len(l) for l in lists), dtype=np.int64, count=len(lists))
+        old = np.concatenate([np.asarray(l, dtype=np.int64) for l in lists]) if lens.sum() else np.zeros(0, np.int64)
+        nw = np.repeat(np.arange(n, seg.M, dtype=np.int64), lens)
+        nn = cKDTree(new_pos).query_pairs(rc, output_type="ndarray").astype(np.int64) + n
+        return np.concatenate([pairs.astype(np.int64, copy=False), np.stack([old, nw], axis=1), nn.reshape(-1, 2)])
 
     def force_update(self, grad3: np.ndarray | None, extra_tau: np.ndarray | None = None) -> float:
         """omega relaxes towards omega* at the damping rate: with every boundary term off this is
@@ -464,11 +526,19 @@ class TectonicSim:
         # Each draws its own rng stream keyed on the step, so enabling one
         # does not shift the others' randomness.
         self.events = []
+        self._pair_cache = None
         if tp.reorganise_every > 0 and k > 0 and k % int(tp.reorganise_every) == 0:
             n = int(tp.reorganise_plates) or int(tp.initial_plates)
             self.events.append(intraplate.reorganise(self, n, self.params.rng("tectonics", 5, k)))
             plates = self.plates
-        if tp.rift_every > 0 and k > 0 and k % int(tp.rift_every) == 0:
+            # every plate id is new (0..n-1, reused): a rift pair or a passive clock keyed on an
+            # old id would land on an unrelated plate
+            for name in self.DYN_BOOKS:
+                getattr(self, name).clear()
+        # the rift clock is the classic dynamics' (rift_mode 'clock'); `intraplate.rift` dispatches
+        # on rift_mode, so with a force or insulation rift a nonzero rift_every ran the same test
+        # twice on its steps, from the same rng stream
+        if tp.rift_every > 0 and k > 0 and k % int(tp.rift_every) == 0 and str(tp.rift_mode) == "clock":
             ev = intraplate.rift(self, self.params.rng("tectonics", 6, k), int(tp.rift_plates))
             self.events.append(ev)
             plates = self.plates
@@ -659,8 +729,13 @@ class TectonicSim:
         # a plate the trenches have just cut in two is two plates from here on
         if tp.plate_split_every > 0 and k % int(tp.plate_split_every) == 0:
             # `tree` is this cloud's: built after the collisions, and nothing since has moved a segment
+            pairs_out = [] if self.boundary_forces_on() else None
             ev = intraplate.split_disconnected(self, int(tp.plate_split_min), rng=self.params.rng("tectonics", 9, k),
-                                               tree=tree, min_area=float(tp.plate_min_area))
+                                               tree=tree, min_area=float(tp.plate_min_area), pairs_out=pairs_out)
+            if pairs_out and tree.n == seg.M and np.array_equal(tree.data, seg.pos):
+                # the census reads its pairs off these (TectonicSim._census_pairs), with a copy of
+                # the positions they were found on to check the cloud against when it does
+                self._pair_cache = (pairs_out[0][0], pairs_out[0][1], tree, seg.pos.copy())
             if ev["split"] or ev.get("welded"):
                 self.events.append(ev)
                 plates = self.plates
@@ -1142,7 +1217,8 @@ def initialise(params: WorldParams, log=print) -> TectonicSim:
                                          size_jitter=float(tp.plate_size_jitter))
     seg = Segments(pos, thickness, density, 0.0, plate_id, 4.0 * math.pi / M, kind=kind, craton=craton)
     snap_cratons(seg)          # a boundary goes around a craton, not through it
-    plates = Plates(int(tp.initial_plates))
+    # (the Pangaea tilings always make at least one ocean plate, so initial_plates 1 gives ids 0-1)
+    plates = Plates(max(int(tp.initial_plates), int(seg.plate_id.max()) + 1))
     plates.update_stats(seg)
     if pangaea:
         plates.omega[:] = 0.0

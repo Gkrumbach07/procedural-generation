@@ -44,7 +44,7 @@ over that plate's segments and a 6x6 solve, with every other plate held at
 its terminal velocity (:func:`release`).
 
 With every boundary term off the solve is exactly the shipped
-``omega = (1 - damping) omega + gain tau / I`` (tests/test_dyn_minimal.py).
+``omega = (1 - damping) omega + gain tau / I`` (tests/test_synth_dyn.py).
 """
 from __future__ import annotations
 
@@ -80,6 +80,19 @@ def all_pairs(seg, spacing: float, radius_factor: float = 1.25, tree: cKDTree | 
     return tree.query_pairs(radius_factor * spacing, output_type="ndarray")
 
 
+def pairs_within(pos: np.ndarray, pairs: np.ndarray, radius: float) -> np.ndarray:
+    """The rows of ``pairs`` no farther apart than ``radius`` (chord), by the
+    arithmetic cKDTree's own test uses -- ``((dx*dx + dy*dy) + dz*dz) <= r*r``
+    -- so a subset of a wider query is the narrower query's pair set."""
+    if pairs.shape[0] == 0:
+        return pairs
+    a, b = pos[pairs[:, 0]], pos[pairs[:, 1]]
+    dx = a[:, 0] - b[:, 0]
+    dy = a[:, 1] - b[:, 1]
+    dz = a[:, 2] - b[:, 2]
+    return pairs[(dx * dx + dy * dy) + dz * dz <= radius * radius]
+
+
 def census(seg, plates, spacing: float, radius_factor: float = 1.25, tree: cKDTree | None = None,
            pairs: np.ndarray | None = None, labels: np.ndarray | None = None) -> dict:
     """Every cross-plate pair within ``radius_factor`` spacings: who goes
@@ -88,14 +101,23 @@ def census(seg, plates, spacing: float, radius_factor: float = 1.25, tree: cKDTr
     ``i`` to ``j``, the approach rate (current omegas; > 0 converging) and a
     per-pair share of boundary length, so that summing ``w`` over a plate's
     pairs gives its boundary length (radians).  ``pairs`` (all pairs, any
-    plate) and ``labels`` (plate ids) may be given to reuse a query or to
-    take the census of a hypothetical partition."""
+    plate, ``i < j``; may hold pairs farther apart than the radius, which are
+    dropped) and ``labels`` (plate ids) may be given to reuse a query or to
+    take the census of a hypothetical partition.  The pairs are put in
+    (i, j) order, so the census does not depend on how they were found."""
     from .collision import plate_pair_polarity
 
-    pr = all_pairs(seg, spacing, radius_factor, tree) if pairs is None else pairs
     pid = (seg.plate_id if labels is None else labels).astype(np.int64)
+    if pairs is None:
+        pr = all_pairs(seg, spacing, radius_factor, tree)
+        if pr.shape[0]:
+            pr = pr[pid[pr[:, 0]] != pid[pr[:, 1]]]
+    else:
+        pr = pairs
+        if pr.shape[0]:
+            pr = pairs_within(seg.pos, pr[pid[pr[:, 0]] != pid[pr[:, 1]]], radius_factor * spacing)
     if pr.shape[0]:
-        pr = pr[pid[pr[:, 0]] != pid[pr[:, 1]]]
+        pr = pr[np.lexsort((pr[:, 1], pr[:, 0]))]
     i, j = (pr[:, 0], pr[:, 1]) if pr.shape[0] else (np.zeros(0, np.int64), np.zeros(0, np.int64))
     pos = seg.pos
     d = pos[j] - pos[i]
@@ -226,6 +248,11 @@ class Balance:
         self.rc = None
         self.extra = None
         self.info: dict = {}
+        # the plate ids the balance was assembled for: an event that relabels plates (a weld, a
+        # capture, a rift) leaves D, t and rc describing the old partition -- a coupling or a
+        # boundary drag between two plates it has since made one -- so a reader checks this
+        # against the cloud's ids before a trial solve (TectonicSim.force_state)
+        self.pid: np.ndarray | None = None
 
     def add_D(self, s: np.ndarray, blocks: np.ndarray) -> None:
         if s.size:
@@ -253,6 +280,7 @@ def assemble(seg, plates, cen: dict, *, gain: float, damping: float, grad3: np.n
     M = seg.M
     pos = seg.pos
     bal = Balance(M)
+    bal.pid = seg.plate_id.copy()
     I3 = np.eye(3)
     bal.D += (basal_seg * damping)[:, None, None] * I3[None, :, :]
     if grad3 is not None:
@@ -465,5 +493,5 @@ def rift_opening(cen: dict, rift_pairs: dict) -> dict:
     return out
 
 
-__all__ = ["census", "all_pairs", "slab_contrib", "slab_torques", "assemble", "solve", "release", "Balance",
+__all__ = ["census", "all_pairs", "pairs_within", "slab_contrib", "slab_torques", "assemble", "solve", "release", "Balance",
            "deposit_blobs", "rift_opening"]
