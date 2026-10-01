@@ -48,7 +48,8 @@ from ..stubs import fbm_at
 from .plates import Plates, cluster_plates, random_unit_vectors, snap_cratons
 
 
-def _rebuild(seg, plate_id: np.ndarray, n_plates: int, rng, speed: float, keep: np.ndarray | None = None) -> Plates:
+def _rebuild(seg, plate_id: np.ndarray, n_plates: int, rng, speed: float, keep: np.ndarray | None = None,
+             snap: bool = True) -> Plates:
     """A fresh :class:`Plates` for an existing crust.
 
     With `keep` given, those Euler poles carry over and only the plates
@@ -59,9 +60,23 @@ def _rebuild(seg, plate_id: np.ndarray, n_plates: int, rng, speed: float, keep: 
     event re-drew the pole of *every* plate on the planet, so a single split
     every `rift_every` steps scrambled all the plate motions with it: not a
     rift but a global reorganisation wearing one.
+
+    `snap` keeps every craton on one plate (:func:`snap_cratons`). That is a
+    rule for drawing a *new* boundary -- a boundary goes around a craton, not
+    through it -- and only :func:`reorganise` draws boundaries from nothing.
+    A rift keeps its cratons whole with its own vote, and a split or a suture
+    draws no boundary at all: the pieces are where the plates already put
+    them. Running it on every rebuild (88-91 % of steps at Earth scale, since
+    :func:`split_disconnected` rebuilds whenever anything moved) teleported
+    any craton that collisions or a trench had left across two plates onto
+    whichever held more of it, a piece of crust jumping to a plate it was not
+    touching -- which the next split then promoted to a plate of its own:
+    450-2100 plate births a run, half of them dead within 10 steps. The
+    fixed-area model (``variable_extent`` off) keeps the old rule, bit for bit.
     """
     seg.plate_id = np.ascontiguousarray(plate_id, dtype=np.int32)
-    snap_cratons(seg)          # a boundary goes around a craton, not through it
+    if snap:
+        snap_cratons(seg)      # a boundary goes around a craton, not through it
     plates = Plates(int(n_plates))
     plates.update_stats(seg)
     if keep is None:
@@ -166,7 +181,10 @@ def _rift_one(sim, target: int, rng) -> dict:
     pid = seg.plate_id.copy()
     idx = np.flatnonzero(sel)
     pid[idx[side]] = P  # the far half becomes a brand-new plate
-    new = _rebuild(seg, pid, P + 1, rng, float(tp.initial_speed) * sim.spacing, keep=plates.omega)
+    # the vote above is this rift's craton rule; a global snap here would move cratons on plates
+    # the cut never touched (the fixed-area model keeps it, bit for bit)
+    new = _rebuild(seg, pid, P + 1, rng, float(tp.initial_speed) * sim.spacing, keep=plates.omega,
+                   snap=not tp.variable_extent)
     # Open the cut.  The Euler pole of a spreading pair lies *on* the rift,
     # 90 degrees from its middle, so the halves turn about `com x n` in
     # opposite senses and separate along n.  Turning about n itself -- what
@@ -303,7 +321,8 @@ def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rn
     if not extra and not orphans.any():
         return {"event": "split", "split": 0}
     keep = np.vstack([plates.omega] + [np.asarray(o)[None, :] for o in extra]) if extra else plates.omega
-    sim.plates = _rebuild(seg, pid, P + len(extra), rng, float(sim.tp.initial_speed) * sim.spacing, keep=keep)
+    sim.plates = _rebuild(seg, pid, P + len(extra), rng, float(sim.tp.initial_speed) * sim.spacing, keep=keep,
+                          snap=not sim.tp.variable_extent)
     return {"event": "split", "split": len(extra), "welded": int(orphans.sum()),
             "plates": int(sim.plates.n_alive())}
 
@@ -323,7 +342,8 @@ def suture(sim, a: int, b: int, rng) -> dict:
     Ia, Ib = float(plates.inertia[a]), float(plates.inertia[b])
     om[a] = (Ia * om[a] + Ib * om[b]) / max(Ia + Ib, 1e-12)
     om[b] = 0.0
-    sim.plates = _rebuild(seg, pid, plates.P, rng, float(sim.tp.initial_speed) * sim.spacing, keep=om)
+    sim.plates = _rebuild(seg, pid, plates.P, rng, float(sim.tp.initial_speed) * sim.spacing, keep=om,
+                          snap=not sim.tp.variable_extent)
     return {"event": "suture", "kept": int(a), "joined": int(b), "plates": int(sim.plates.n_alive())}
 
 

@@ -411,13 +411,23 @@ def snap_cratons(seg) -> int:
     was leaving 11 of 24 straddling a boundary at step 0, which then breaks
     them up as the plates diverge.
 
+    A segment still welded (``seg.weld > 0``) neither votes nor moves. It is
+    there because a continent-on-continent collision shortened it onto the
+    other plate, and the weld says it stays there whatever the shape of the
+    cloud says -- which is the one thing this rule otherwise contradicts: a
+    craton half eaten by a collision is mostly on the plate it came from, so
+    the vote handed the shortened rim straight back, inside the plate it had
+    just collided with. Measured at Earth scale before this, 68-74 % of the
+    150k-320k segments snapped over a 4000-step run were such welds.
+
     Returns the number of cratons that had to be re-assigned. Mutates
     `seg.plate_id` in place.
     """
     cr, pid = seg.craton, seg.plate_id
+    free = seg.weld <= 0
     moved = 0
     for c in np.unique(cr[cr > 0]):
-        m = cr == c
+        m = (cr == c) & free
         ids, counts = np.unique(pid[m], return_counts=True)
         if ids.size > 1:
             pid[m] = ids[np.argmax(counts)]
