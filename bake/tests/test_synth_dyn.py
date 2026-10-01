@@ -656,8 +656,9 @@ def test_earth_dynamics_are_deterministic_and_keep_the_books():
     # seed 0, 250 steps: with the arc and mass knobs on (te/arcs, te/mass) the first micro-merge
     # comes at step 221 on seed 0 and 281 on seed 2 (141 on seed 2 with the arcs alone, < 120
     # with the dynamics alone)
-    a, kinds = _dyn_events_run(250, seed=0)
-    b, _ = _dyn_events_run(250, seed=0)
+    # (after margin erosion was re-balanced at 0.9 km per km of slab the first one moved past 250)
+    a, kinds = _dyn_events_run(400, seed=0)
+    b, _ = _dyn_events_run(400, seed=0)
     assert {"rift", "micro_merge"} <= kinds
     assert _fingerprint(a) == _fingerprint(b)
     assert max(map(abs, a.books_residual())) < 1e-9

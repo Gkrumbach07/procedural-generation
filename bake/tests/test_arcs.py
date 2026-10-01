@@ -54,7 +54,7 @@ def test_books_close_with_the_arcs_on(arc_sim):
     assert max(abs(r) for r in sim.books_residual()) < 1e-11
     assert L.get("arc_mantle", 0.0) == 0.0                # no coin-flip arc draws crust from the mantle
     for k in tect.SINK_KEYS:
-        assert L.get(k, 0.0) <= 0.0, k
+        assert L.get(k, 0.0) <= 1e-12, k                    # a sink, up to rounding
     # a dock onto a continent is a kind flip, booked on both sides
     for k in tect.CONVERSION_KEYS:
         assert sim.books["continental"][k] == -sim.books["oceanic"][k]
