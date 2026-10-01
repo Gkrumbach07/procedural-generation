@@ -269,6 +269,11 @@ class TectonicsParams:
     margin_collapse_slab_km: float = 150.0  # the seed slab: ~the underthrusting that makes subduction self-sustaining (Gurnis 2004)
     spawn_net_outflow: bool = True  # a gap between plates spawns only if the crust around it is leaving it (net outflow of its 6 nearest segments), not the nearest one: no new floor in the hole a slab leaves at a trench
     closure_ocean_only: bool = True  # the extent closure rescales only the sea floor (the books track's fix, te/books), so a girdle consuming floor faster than ridges make it does not inflate the continents
+    # --- synth-dyn (on top of dyn-minimal) ---
+    tectonic_radius_km: float = 6371.0  # the sphere every physical tectonics knob (km, cm/yr) is converted on: Earth's, whatever the rendered planet's radius, so a toy body (small, tiny: 4 km) runs Earth's angular rates instead of freezing (dyn-minimal converted through R_planet).  0 = the planet's own radius
+    slab_onset_km: float = 0.0  # > 0: slab pull switches on smoothly between 0.5x and 1.5x this much slab (Gurnis et al. 2004: ~100-150 km of underthrusting before a slab sustains itself); 0 = linear from zero (dyn-minimal)
+    rift_neck_power: float = 2.0  # a rift's strength necks as exp(-(opening / rift_weaken_km)^power): 2 is dyn-minimal's Gaussian, higher is a sharper end to the slow phase
+    rift_break_factor: float = 3.0  # a rift's coupling is dropped (it is a ridge) once it has opened this x rift_weaken_km
 
 
 @dataclass

@@ -272,8 +272,15 @@ class TectonicSim:
         self.last_rift: dict[int, int] = {}
         self.rift_jitter: dict[int, float] = {}
         self.collapse_jitter: dict[int, float] = {}
-        self.R_km = float(params.R_planet) / 1000.0
+        # the tectonic reference radius: physical knobs (km, cm/yr) convert through it, so a toy
+        # body (small, tiny: a 4 km planet) runs Earth's angular rates instead of freezing
+        self.R_km = float(self.tp.tectonic_radius_km) if float(self.tp.tectonic_radius_km) > 0 else float(params.R_planet) / 1000.0
         self.force_info: dict = {}
+        self.balance = None
+        self.slab_info = None
+        self.census_last = None
+        self.grad3 = None
+        self.micro_passive: dict[int, int] = {}
 
     # -- helpers ------------------------------------------------------------
     def kind_mass(self, live: np.ndarray | None = None) -> tuple[float, float]:
@@ -341,65 +348,101 @@ class TectonicSim:
         tp = self.tp
         return bool(tp.slab_force > 0.0 or tp.boundary_drag_km > 0.0 or tp.collision_drag > 0.0 or self.rift_pairs)
 
-    def terminal_omega(self, tau: np.ndarray, cen: dict | None = None) -> tuple[np.ndarray, dict, dict]:
-        """omega* (P, 3) the plates would settle at under the heat torque ``tau``, slab pull,
-        boundary drag, collisional resistance and rift strength (see forces.py)."""
+    # physical units (synth-dyn): every knob in km, cm/yr or My is converted through the
+    # tectonic reference radius and myr_per_step, so the step and the resolution can change
+    def km(self, x: float) -> float:
+        """km -> radians on the tectonic reference sphere."""
+        return float(x) / self.R_km
+
+    def cmyr(self, x: float) -> float:
+        """cm/yr -> radians per step (10 km/My per cm/yr)."""
+        return float(x) * 10.0 * float(self.tp.myr_per_step) / self.R_km
+
+    def steps_of(self, my: float) -> float:
+        """My -> steps."""
+        return float(my) / max(float(self.tp.myr_per_step), 1e-12)
+
+    def basal_seg(self) -> np.ndarray:
+        """Each segment's basal drag before the damping: the shipped I = area * column mass,
+        or (basal_drag_continental > 0) the lithosphere's: oceanic as its column,
+        continental basal_drag_continental x that (keels; Forsyth & Uyeda 1975), cratons 1.5x
+        more.  The shipped I made a continent 4-6x as sticky as ocean floor through its
+        crust's weight."""
+        tp, seg = self.tp, self.seg
+        if tp.basal_drag_continental > 0.0:
+            m_o = float(tp.oceanic_thickness) * float(tp.oceanic_density)
+            fac = np.where(seg.kind == CONTINENTAL, float(tp.basal_drag_continental) * np.where(seg.craton > 0, 1.5, 1.0), 1.0)
+            return seg.area * m_o * fac
+        return seg.area * seg.mass
+
+    def drag_per_len(self) -> float:
+        tp = self.tp
+        m_o = float(tp.oceanic_thickness) * float(tp.oceanic_density)
+        return float(tp.damping) * m_o * self.km(tp.boundary_drag_km)
+
+    def terminal_omega(self, grad3: np.ndarray | None, cen: dict | None = None,
+                       extra_tau: np.ndarray | None = None) -> tuple[np.ndarray, dict, dict]:
+        """omega* (P, 3) the plates would settle at under the heat torque (``grad3``, the heat
+        gradient at the segments), slab pull, boundary drag, collisional resistance and rift
+        strength (see forces.py).  Keeps the per-segment balance as ``self.balance`` for
+        trial solves (rifts, failing margins) and the slab contacts as ``self.slab_info``."""
         tp, seg, plates = self.tp, self.seg, self.plates
         cen = forces.census(seg, plates, self.spacing) if cen is None else cen
-        tau = np.array(tau, dtype=np.float64, copy=True)
         info = {}
         sinfo = None
         if tp.slab_force > 0.0:
             self.slab.exchange_halos()
             s_at = self.slab.sample_sphere(seg.pos).astype(np.float64)
-            ts, sinfo = forces.slab_torques(seg, cen, plates.P, s_at, float(tp.slab_force),
-                                            float(tp.slab_sat_km) / self.R_km,
-                                            float(tp.slab_age_my) / float(tp.myr_per_step), float(tp.slab_age_floor))
-            info["slab_over_heat"] = float(np.linalg.norm(ts, axis=1).sum()) / max(float(np.linalg.norm(tau, axis=1).sum()), 1e-30)
+            sinfo = forces.slab_contrib(seg, cen, s_at, float(tp.slab_force), self.km(tp.slab_sat_km),
+                                        self.steps_of(tp.slab_age_my), float(tp.slab_age_floor),
+                                        onset=self.km(tp.slab_onset_km))
             info["slab_len_km"] = sinfo["L"] * self.R_km
-            tau += ts
-        m_o = float(tp.oceanic_thickness) * float(tp.oceanic_density)
-        drag = float(tp.damping) * m_o * float(tp.boundary_drag_km) / self.R_km
         # slab resistance per unit trench length: a saturated, old slab alone moves its plate's
-        # trench at slab_speed_cmyr (rad/step = cm/yr * 10 km/My * My/step / R)
-        u = float(tp.slab_speed_cmyr) * 10.0 * float(tp.myr_per_step) / self.R_km
+        # trench at slab_speed_cmyr
+        u = self.cmyr(tp.slab_speed_cmyr)
         trench = self.gain * float(tp.slab_force) / u if (tp.slab_force > 0.0 and u > 0.0) else 0.0
-        basal = None
-        if tp.basal_drag_continental > 0.0:
-            # basal drag from the lithosphere, not the crust's column mass: oceanic lithosphere
-            # drags like its column, continental like basal_drag_continental times that (keels;
-            # Forsyth & Uyeda 1975), cratons twice that again.  The shipped I made a continent
-            # 4-6x as sticky as ocean floor through its crust's weight
-            fac = np.where(seg.kind == CONTINENTAL, float(tp.basal_drag_continental) * np.where(seg.craton > 0, 1.5, 1.0), 1.0)
-            basal = np.bincount(seg.plate_id, weights=seg.area * m_o * fac, minlength=plates.P)[:plates.P]
-        wstar, sol = forces.solve_omega(plates, self.gain * tau, float(tp.damping), seg, cen, drag,
-                                        float(tp.collision_drag) * drag, self.rift_pairs,
-                                        float(tp.rift_strength), float(tp.rift_weaken_km) / self.R_km,
-                                        slab=sinfo, trench_per_len=trench, basal=basal)
-        info.update(sol)
+        drag = self.drag_per_len()
+        bal = forces.assemble(seg, plates, cen, gain=self.gain, damping=float(tp.damping), grad3=grad3,
+                              basal_seg=self.basal_seg(), drag_per_len=drag,
+                              cc_per_len=float(tp.collision_drag) * drag, slab=sinfo, trench_per_len=trench,
+                              rift_pairs=self.rift_pairs, rift_scale=1.0, rift_weaken=self.km(tp.rift_weaken_km),
+                              rift_power=float(tp.rift_neck_power), rift_strength=float(tp.rift_strength))
+        wstar = forces.solve(bal, plates, seg.plate_id, extra_tau=None if extra_tau is None else self.gain * extra_tau)
+        if sinfo is not None and grad3 is not None and sinfo["seg"].size:
+            P = plates.P
+            th = np.cross(seg.pos, grad3 * seg.area[:, None])
+            hp = np.stack([np.bincount(seg.plate_id, weights=th[:, x], minlength=P)[:P] for x in range(3)], axis=1)
+            sp_ = np.stack([np.bincount(sinfo["plate"], weights=sinfo["tq"][:, x], minlength=P)[:P] for x in range(3)], axis=1)
+            info["slab_over_heat"] = float(np.linalg.norm(sp_, axis=1).sum()) / max(float(np.linalg.norm(hp, axis=1).sum()), 1e-30)
+        info.update({k: v for k, v in bal.info.items() if k != "Id_plate"})
+        self.balance = bal
+        self.slab_info = sinfo
+        self.census_last = cen
         return wstar, info, cen
 
-    def force_update(self, tau: np.ndarray) -> float:
+    def force_update(self, grad3: np.ndarray | None, extra_tau: np.ndarray | None = None) -> float:
         """omega relaxes towards omega* at the damping rate: with every boundary term off this is
         the shipped `update_omega` exactly.  Returns slab / heat torque."""
         tp, plates = self.tp, self.plates
-        wstar, info, cen = self.terminal_omega(tau)
+        wstar, info, cen = self.terminal_omega(grad3, extra_tau=extra_tau)
         om = plates.omega + float(tp.damping) * (wstar - plates.omega)
         if self.max_omega > 0:
             s = np.linalg.norm(om, axis=1, keepdims=True)
             om = np.where(s > self.max_omega, om * (self.max_omega / np.maximum(s, 1e-30)), om)
         om[~plates.alive] = 0.0
         plates.omega = om
-        # rifts weaken as they open (strain weakening); a rift that has opened is a ridge
+        # rifts weaken as they open (necking); a rift that has opened is a ridge
         if self.rift_pairs:
             opening = forces.rift_opening(cen, self.rift_pairs)
+            brk = float(tp.rift_break_factor) * self.km(tp.rift_weaken_km)
             for pr in list(self.rift_pairs):
                 a, b = pr
                 rate = opening.get(pr)
                 if rate is not None and rate > 0.0:
                     self.rift_pairs[pr]["delta"] += rate
+                    self.rift_pairs[pr].setdefault("trace", []).append((int(self.step_index), float(rate)))
                 dead = a >= plates.P or b >= plates.P or not plates.alive[a] or not plates.alive[b]
-                if dead or self.rift_pairs[pr]["delta"] > 3.0 * float(tp.rift_weaken_km) / self.R_km:
+                if dead or self.rift_pairs[pr]["delta"] > brk:
                     self.rift_pairs.pop(pr)
         self.force_info = info
         return float(info.get("slab_over_heat", 0.0))
@@ -731,6 +774,7 @@ class TectonicSim:
         plates.update_stats(seg)
         tau = plate_torques(seg, grad3, plates.P)
         slab_ratio = 0.0
+        ts = None
         if tau_slab is not None:
             # a split this step appended plates; they get no slab torque until next step
             ts = np.zeros_like(tau)
@@ -739,8 +783,9 @@ class TectonicSim:
             heat_mag = float(np.linalg.norm(tau, axis=1).sum())
             slab_ratio = float(np.linalg.norm(ts, axis=1).sum()) / max(heat_mag, 1e-30)
             tau = tau + ts
+        self.grad3 = grad3
         if self.boundary_forces_on():
-            slab_ratio = self.force_update(tau)
+            slab_ratio = self.force_update(grad3, extra_tau=ts if tau_slab is not None else None)
         else:
             update_omega(plates, tau, self.gain, tp.damping, self.max_omega)
         if tp.slab_force > 0.0:
@@ -1155,8 +1200,7 @@ def pangaea_start(sim: TectonicSim, log=print) -> dict:
         sim.heat.exchange_halos()
         g3 = heat_gradient_3d(sim.heat, seg.pos)
         plates.update_stats(seg)
-        tau = plate_torques(seg, g3, plates.P)
-        w, info, cen_ = sim.terminal_omega(tau)
+        w, info, cen_ = sim.terminal_omega(g3)
         s = np.linalg.norm(w, axis=1, keepdims=True)
         if sim.max_omega > 0:
             w = np.where(s > sim.max_omega, w * (sim.max_omega / np.maximum(s, 1e-30)), w)
