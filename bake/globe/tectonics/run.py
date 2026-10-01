@@ -83,6 +83,7 @@ from ..cubesphere import Grid, from_sphere_v
 from ..field import FaceField
 from ..io.world_store import WorldStore
 from ..stubs import fbm_at, fbm_noise
+from . import forces
 from . import intraplate
 from . import orogeny
 from .collision import (
@@ -118,6 +119,9 @@ from .plates import (
     rotate_segments,
     seed_supercontinent,
     snap_cratons,
+    superocean_plates,
+    zipf_ocean_plates,
+    ocean_age_from_ridges,
     supercontinent_plates,
     tangent_to_cell_components,
     update_omega,
@@ -260,6 +264,34 @@ class TectonicSim:
         self.suture_count: dict[tuple[int, int], float] = {}
         self.suture_block: dict[tuple[int, int], int] = {}   # pair -> step before which it may not weld
         self.sutures = 0
+        # dyn-minimal state: the neutral mantle the background relaxes to away from continents,
+        # the slab field (slab length hanging under each trench, radians, mantle frame), the
+        # rifts still holding their halves together, and when each plate last rifted
+        self.heat_neutral = heat.data.copy()
+        self.slab = FaceField(heat.grid, np.zeros_like(heat.data, dtype=np.float64), name="slab")
+        self.rift_pairs: dict[tuple[int, int], dict] = {}
+        self.last_rift: dict[int, int] = {}
+        self.rift_jitter: dict[int, float] = {}
+        self.collapse_jitter: dict[int, float] = {}
+        # the tectonic reference radius: physical knobs (km, cm/yr) convert through it, so a toy
+        # body (small, tiny: a 4 km planet) runs Earth's angular rates instead of freezing
+        self.R_km = float(self.tp.tectonic_radius_km) if float(self.tp.tectonic_radius_km) > 0 else float(params.R_planet) / 1000.0
+        self.force_info: dict = {}
+        self.balance = None
+        self.slab_info = None
+        self.census_last = None
+        self.grad3 = None
+        self.micro_passive: dict[int, int] = {}
+        self.suture_quiet: dict[tuple[int, int], int] = {}
+        self.suture_held: dict[tuple[int, int], int] = {}      # pair -> step its long C-C contact began (suture_persist_my)
+        #: all segment pairs within some radius of the cloud as split_disconnected saw it this
+        #: step (radius, pairs, the KD tree, the positions it was built on): the census reads its
+        #: own pairs off them instead of a third tree and query a step (see _census_pairs)
+        self._pair_cache = None
+
+    #: the plate-id dictionaries of the dynamics, all keyed by plate id (or a pair of them);
+    #: anything that renumbers plates from scratch (reorganise) must empty them
+    DYN_BOOKS = ("rift_pairs", "last_rift", "rift_jitter", "collapse_jitter", "micro_passive", "suture_quiet", "suture_held")
 
     # -- helpers ------------------------------------------------------------
     def kind_mass(self, live: np.ndarray | None = None) -> tuple[float, float]:
@@ -322,6 +354,167 @@ class TectonicSim:
             self.heat.data += k * lap
         np.clip(self.heat.data, 0.0, 1.0, out=self.heat.data)
 
+    # -- boundary forces (forces.py) ----------------------------------------
+    def boundary_forces_on(self) -> bool:
+        tp = self.tp
+        return bool(tp.slab_force > 0.0 or tp.boundary_drag_km > 0.0 or tp.collision_drag > 0.0 or self.rift_pairs
+                    or tp.orogen_push > 0.0)
+
+    # physical units (synth-dyn): every knob in km, cm/yr or My is converted through the
+    # tectonic reference radius and myr_per_step, so the step and the resolution can change
+    def km(self, x: float) -> float:
+        """km -> radians on the tectonic reference sphere."""
+        return float(x) / self.R_km
+
+    def cmyr(self, x: float) -> float:
+        """cm/yr -> radians per step (10 km/My per cm/yr)."""
+        return float(x) * 10.0 * float(self.tp.myr_per_step) / self.R_km
+
+    def steps_of(self, my: float) -> float:
+        """My -> steps."""
+        return float(my) / max(float(self.tp.myr_per_step), 1e-12)
+
+    def basal_seg(self) -> np.ndarray:
+        """Each segment's basal drag before the damping: the shipped I = area * column mass,
+        or (basal_drag_continental > 0) the lithosphere's: oceanic as its column,
+        continental basal_drag_continental x that (keels; Forsyth & Uyeda 1975), cratons 1.5x
+        more.  The shipped I made a continent 4-6x as sticky as ocean floor through its
+        crust's weight."""
+        tp, seg = self.tp, self.seg
+        if tp.basal_drag_continental > 0.0:
+            m_o = float(tp.oceanic_thickness) * float(tp.oceanic_density)
+            fac = np.where(seg.kind == CONTINENTAL, float(tp.basal_drag_continental) * np.where(seg.craton > 0, 1.5, 1.0), 1.0)
+            return seg.area * m_o * fac
+        return seg.area * seg.mass
+
+    def drag_per_len(self) -> float:
+        tp = self.tp
+        m_o = float(tp.oceanic_thickness) * float(tp.oceanic_density)
+        return float(tp.damping) * m_o * self.km(tp.boundary_drag_km)
+
+    def terminal_omega(self, grad3: np.ndarray | None, cen: dict | None = None,
+                       extra_tau: np.ndarray | None = None) -> tuple[np.ndarray, dict, dict]:
+        """omega* (P, 3) the plates would settle at under the heat torque (``grad3``, the heat
+        gradient at the segments), slab pull, boundary drag, collisional resistance and rift
+        strength (see forces.py).  Keeps the per-segment balance as ``self.balance`` for
+        trial solves (rifts, failing margins) and the slab contacts as ``self.slab_info``."""
+        tp, seg, plates = self.tp, self.seg, self.plates
+        cen = forces.census(seg, plates, self.spacing, pairs=self._census_pairs()) if cen is None else cen
+        info = {}
+        sinfo = None
+        if tp.slab_force > 0.0:
+            self.slab.exchange_halos()
+            s_at = self.slab.sample_sphere(seg.pos).astype(np.float64)
+            sinfo = forces.slab_contrib(seg, cen, s_at, float(tp.slab_force), self.km(tp.slab_sat_km),
+                                        self.steps_of(tp.slab_age_my), float(tp.slab_age_floor),
+                                        onset=self.km(tp.slab_onset_km))
+            info["slab_len_km"] = sinfo["L"] * self.R_km
+        # slab resistance per unit trench length: a saturated, old slab alone moves its plate's
+        # trench at slab_speed_cmyr
+        u = self.cmyr(tp.slab_speed_cmyr)
+        trench = self.gain * float(tp.slab_force) / u if (tp.slab_force > 0.0 and u > 0.0) else 0.0
+        drag = self.drag_per_len()
+        bal = forces.assemble(seg, plates, cen, gain=self.gain, damping=float(tp.damping), grad3=grad3,
+                              basal_seg=self.basal_seg(), drag_per_len=drag,
+                              cc_per_len=float(tp.collision_drag) * drag, slab=sinfo, trench_per_len=trench,
+                              rift_pairs=self.rift_pairs, rift_scale=1.0, rift_weaken=self.km(tp.rift_weaken_km),
+                              rift_power=float(tp.rift_neck_power), rift_strength=float(tp.rift_strength),
+                              orogen_push=float(tp.orogen_push), push_th0=float(tp.orogen_push_th0),
+                              push_dth=float(tp.orogen_push_dth))
+        wstar = forces.solve(bal, plates, seg.plate_id, extra_tau=None if extra_tau is None else self.gain * extra_tau)
+        if sinfo is not None and grad3 is not None and sinfo["seg"].size:
+            P = plates.P
+            th = np.cross(seg.pos, grad3 * seg.area[:, None])
+            hp = np.stack([np.bincount(seg.plate_id, weights=th[:, x], minlength=P)[:P] for x in range(3)], axis=1)
+            sp_ = np.stack([np.bincount(sinfo["plate"], weights=sinfo["tq"][:, x], minlength=P)[:P] for x in range(3)], axis=1)
+            info["slab_over_heat"] = float(np.linalg.norm(sp_, axis=1).sum()) / max(float(np.linalg.norm(hp, axis=1).sum()), 1e-30)
+        info.update({k: v for k, v in bal.info.items() if k != "Id_plate"})
+        self.balance = bal
+        self.slab_info = sinfo
+        self.census_last = cen
+        return wstar, info, cen
+
+    def force_state(self):
+        """The force balance (``self.balance``, with ``census_last`` and ``slab_info``) for the
+        cloud and the plates as they are *now*, or None.
+
+        They are taken in the force phase (step section 6) and read by the events at the start
+        of the next step.  Every event that relabels plates -- a suture weld, a microplate
+        capture, a healed rift, a rift, a margin collapse -- leaves them describing the old
+        partition: a plate that has just absorbed a neighbour still carries, in its segments'
+        drag blocks and coupling terms, the boundary drag and collisional coupling to a plate
+        that is now itself, so a trial solve on it (a rift test, a margin test) was released
+        against a phantom.  So the first reader after a relabel re-solves on the same cloud and
+        heat gradient (the segments have not moved since the force phase; the slab field has
+        decayed one step).  None when the cloud itself has changed since (segments added or
+        removed): then no trial solve is made this step."""
+        bal = self.balance
+        seg = self.seg
+        if bal is None or bal.rc is None or bal.D.shape[0] != seg.M:
+            return None
+        if bal.pid is not None and np.array_equal(bal.pid, seg.plate_id):
+            return bal
+        if self.grad3 is None or self.grad3.shape[0] != seg.M:
+            return None
+        self.terminal_omega(self.grad3)
+        return self.balance
+
+    def _census_pairs(self) -> np.ndarray | None:
+        """All pairs of the cloud within the census radius, read off the pairs
+        split_disconnected queried this step when they are provably the same cloud's -- the
+        positions its tree was built on are the first ``tree.n`` segments now, unchanged, and
+        its radius is at least the census's -- with the pairs that involve the segments
+        spawned since found by a query of those alone.  None otherwise (the census then runs
+        its own query).  Either way the census filters to cross-plate pairs within its radius
+        and sorts them, so the two routes give the same census (tests/test_synth_dyn.py)."""
+        c, self._pair_cache = self._pair_cache, None
+        if c is None:
+            return None
+        r, pairs, tree, pos0 = c
+        seg = self.seg
+        rc = 1.25 * self.spacing
+        n = int(tree.n)
+        if r < rc or seg.M < n or pos0.shape[0] != n or not np.array_equal(pos0, seg.pos[:n]):
+            return None
+        if seg.M == n:
+            return pairs
+        from scipy.spatial import cKDTree
+
+        new_pos = seg.pos[n:]
+        lists = tree.query_ball_point(new_pos, rc)
+        lens = np.fromiter((len(l) for l in lists), dtype=np.int64, count=len(lists))
+        old = np.concatenate([np.asarray(l, dtype=np.int64) for l in lists]) if lens.sum() else np.zeros(0, np.int64)
+        nw = np.repeat(np.arange(n, seg.M, dtype=np.int64), lens)
+        nn = cKDTree(new_pos).query_pairs(rc, output_type="ndarray").astype(np.int64) + n
+        return np.concatenate([pairs.astype(np.int64, copy=False), np.stack([old, nw], axis=1), nn.reshape(-1, 2)])
+
+    def force_update(self, grad3: np.ndarray | None, extra_tau: np.ndarray | None = None) -> float:
+        """omega relaxes towards omega* at the damping rate: with every boundary term off this is
+        the shipped `update_omega` exactly.  Returns slab / heat torque."""
+        tp, plates = self.tp, self.plates
+        wstar, info, cen = self.terminal_omega(grad3, extra_tau=extra_tau)
+        om = plates.omega + float(tp.damping) * (wstar - plates.omega)
+        if self.max_omega > 0:
+            s = np.linalg.norm(om, axis=1, keepdims=True)
+            om = np.where(s > self.max_omega, om * (self.max_omega / np.maximum(s, 1e-30)), om)
+        om[~plates.alive] = 0.0
+        plates.omega = om
+        # rifts weaken as they open (necking); a rift that has opened is a ridge
+        if self.rift_pairs:
+            opening = forces.rift_opening(cen, self.rift_pairs)
+            brk = float(tp.rift_break_factor) * self.km(tp.rift_weaken_km)
+            for pr in list(self.rift_pairs):
+                a, b = pr
+                rate = opening.get(pr)
+                if rate is not None and rate > 0.0:
+                    self.rift_pairs[pr]["delta"] += rate
+                    self.rift_pairs[pr].setdefault("trace", []).append((int(self.step_index), float(rate)))
+                dead = a >= plates.P or b >= plates.P or not plates.alive[a] or not plates.alive[b]
+                if dead or self.rift_pairs[pr]["delta"] > brk:
+                    self.rift_pairs.pop(pr)
+        self.force_info = info
+        return float(info.get("slab_over_heat", 0.0))
+
     # -- one step -------------------------------------------------------------
     def step(self) -> dict:
         tp = self.tp
@@ -334,16 +527,49 @@ class TectonicSim:
         # Each draws its own rng stream keyed on the step, so enabling one
         # does not shift the others' randomness.
         self.events = []
+        self._pair_cache = None
         if tp.reorganise_every > 0 and k > 0 and k % int(tp.reorganise_every) == 0:
             n = int(tp.reorganise_plates) or int(tp.initial_plates)
             self.events.append(intraplate.reorganise(self, n, self.params.rng("tectonics", 5, k)))
             plates = self.plates
-        if tp.rift_every > 0 and k > 0 and k % int(tp.rift_every) == 0:
+            # every plate id is new (0..n-1, reused): a rift pair or a passive clock keyed on an
+            # old id would land on an unrelated plate
+            for name in self.DYN_BOOKS:
+                getattr(self, name).clear()
+        # the rift clock is the classic dynamics' (rift_mode 'clock'); `intraplate.rift` dispatches
+        # on rift_mode, so with a force or insulation rift a nonzero rift_every ran the same test
+        # twice on its steps, from the same rng stream
+        if tp.rift_every > 0 and k > 0 and k % int(tp.rift_every) == 0 and str(tp.rift_mode) == "clock":
             ev = intraplate.rift(self, self.params.rng("tectonics", 6, k), int(tp.rift_plates))
             self.events.append(ev)
             plates = self.plates
             for a, b in ev.get("pairs", ()):
                 self.suture_block[(min(a, b), max(a, b))] = k + int(tp.suture_cooldown)
+        if (tp.suture_time_my > 0 or tp.suture_persist_my > 0) and k > 0 and k % max(1, int(tp.micro_every)) == 0:
+            ev = intraplate.suture_weld(self, self.params.rng("tectonics", 14, k))
+            if ev.get("welds"):
+                self.events.append(ev)
+                plates = self.plates
+        if tp.micro_area > 0 and k > 0 and k % max(1, int(tp.micro_every)) == 0:
+            ev = intraplate.micro_merge(self, self.params.rng("tectonics", 12, k))
+            if ev.get("merges"):
+                self.events.append(ev)
+                plates = self.plates
+        if str(tp.rift_mode) == "force" and self.rift_pairs and float(tp.rift_abort_my) > 0 and k % max(1, int(tp.rift_check_every)) == 0:
+            ev = intraplate.heal_failed_rifts(self, self.params.rng("tectonics", 13, k))
+            if ev.get("healed") or ev.get("released"):
+                self.events.append(ev)
+                plates = self.plates
+        if str(tp.rift_mode) in ("insulation", "force") and k > 0 and k % max(1, int(tp.rift_check_every)) == 0:
+            ev = intraplate.rift(self, self.params.rng("tectonics", 6, k), int(tp.rift_plates))
+            if ev.get("pairs"):
+                self.events.append(ev)
+                plates = self.plates
+        if tp.margin_collapse_my > 0 and k > 0 and k % max(1, int(tp.margin_collapse_every)) == 0:
+            ev = intraplate.margin_collapse(self, self.params.rng("tectonics", 11, k))
+            if ev.get("collapses"):
+                self.events.append(ev)
+                plates = self.plates
         if self.hotspot_pos.shape[0] and tp.hotspot_rate > 0:
             km = self.kind_mass()
             self.events.append(intraplate.apply_hotspots(
@@ -394,7 +620,8 @@ class TectonicSim:
                                     extent_min=(float(tp.extent_min) * self.spacing ** 2) if tp.variable_extent else 0.0,
                                     spent_out=spent_out, arc_out=arc_out, recv_out=recv_out,
                                     arc_thickness=float(tp.arc_thickness) * float(tp.continental_thickness),
-                                    arc_density=float(tp.continental_density), books_out=books_out)
+                                    arc_density=float(tp.continental_density), books_out=books_out,
+                                    frozen_ids=bool(tp.collide_frozen_ids))
         received = recv_out[0] if (recv_out and tp.variable_extent) else None
         # by column or by crust, whichever this mode's ledger is kept in
         u = 1 if tp.variable_extent else 0
@@ -456,8 +683,18 @@ class TectonicSim:
                                              survivors=survivors, suction=float(tp.trench_suction))
             if k >= self.ref_step:
                 self.subduction_pts.append(pts)
+            slab_pts = pts[seg.kind[losers] == OCEANIC]
             if tp.subduction_heating > 0:
-                self._heat_blobs(pts, tp.subduction_heating)
+                # a downwelling is a slab: a continent-continent collision has none (cc_heating off)
+                self._heat_blobs(pts if tp.cc_heating else slab_pts, tp.subduction_heating)
+            if tp.slab_force > 0.0 and slab_pts.shape[0]:
+                # the slab hanging under the trench grows by the length that went down: a line of
+                # blobs of peak ext / (sqrt(2 pi) sigma) adds that length to the ridge's crest
+                ext_lo = seg.ext[losers[seg.kind[losers] == OCEANIC]]
+                flat = self.slab.interior.reshape(-1).copy()
+                forces.deposit_blobs(flat, self.heat_tree, slab_pts, ext_lo / (math.sqrt(2.0 * math.pi) * self.spacing),
+                                     2.0 * self.spacing)
+                self.slab.interior[...] = flat.reshape(self.slab.interior.shape)
             seg.compress(alive)
             tree = build_tree(seg)
         if tp.relax_rate > 0:
@@ -494,8 +731,13 @@ class TectonicSim:
         # a plate the trenches have just cut in two is two plates from here on
         if tp.plate_split_every > 0 and k % int(tp.plate_split_every) == 0:
             # `tree` is this cloud's: built after the collisions, and nothing since has moved a segment
+            pairs_out = [] if self.boundary_forces_on() else None
             ev = intraplate.split_disconnected(self, int(tp.plate_split_min), rng=self.params.rng("tectonics", 9, k),
-                                               tree=tree, min_area=float(tp.plate_min_area))
+                                               tree=tree, min_area=float(tp.plate_min_area), pairs_out=pairs_out)
+            if pairs_out and tree.n == seg.M and np.array_equal(tree.data, seg.pos):
+                # the census reads its pairs off these (TectonicSim._census_pairs), with a copy of
+                # the positions they were found on to check the cloud against when it does
+                self._pair_cache = (pairs_out[0][0], pairs_out[0][1], tree, seg.pos.copy())
             if ev["split"] or ev.get("welded"):
                 self.events.append(ev)
                 plates = self.plates
@@ -530,7 +772,7 @@ class TectonicSim:
             accumulate_area(seg, idx, self.area_sr, tp.area_blend)
             taken: list = []
             new, gap = spawn_segments(seg, idx, dist, grid, self.r_gap, self.r_spawn, rng, self.heat, tp.oceanic_thickness, tp.oceanic_density, omega=plates.omega, tree=tree, ext=self.spacing ** 2, stretch=stretch_budget, thin_floor=float(tp.extent_thin_floor) * float(tp.continental_thickness) if tp.variable_extent else 0.0,
-                                      void=VOID_FILL if tp.variable_extent else "create", taken_out=taken)
+                                      void=VOID_FILL if tp.variable_extent else "create", taken_out=taken, net_outflow=str(tp.spawn_gate) == "outflow", pair_gate=str(tp.spawn_gate) == "pair")
             n_gap = int(gap.sum())
             n_new = new.M
             if tp.variable_extent and n_gap:
@@ -585,7 +827,26 @@ class TectonicSim:
 
         t_ = _tick("thin_delam", t_)
         # 5. heat diffusion + slow relaxation towards the background field
-        if tp.heat_insulation > 0 and self.idx is not None:
+        if tp.insulation_time_my > 0 and self.idx is not None:
+            # One-sided insulation.  Under a continent the mantle warms and wells up: in this
+            # field's sign (plates move towards high values, so high = downwelling) the
+            # background falls towards `insulation_floor`, a repeller.  Under ocean floor it
+            # relaxes back to the neutral mantle -- not to 1, which made the whole ocean an
+            # attractor and pulled every margin's sea floor away from its continent (the
+            # shipped rule: 86-95 % passive margins around the supercontinent, no girdle).
+            # The downwellings are the trenches' own (subduction heating, slab pull)
+            idx = self.idx
+            cont = (idx >= 0) & (seg.kind[np.maximum(idx, 0)] == CONTINENTAL)
+            Nh = self.heat.grid.N
+            r = idx.shape[1] // Nh
+            frac = cont.reshape(6, Nh, r, Nh, r).mean(axis=(2, 4))
+            H = self.heat.grid.H
+            bg = self.heat_bg[:, H:-H, H:-H]
+            neu = self.heat_neutral[:, H:-H, H:-H]
+            rate = float(tp.myr_per_step) / float(tp.insulation_time_my)
+            bg += rate * (frac * float(tp.insulation_floor) + (1.0 - frac) * neu - bg)
+            np.clip(bg, 0.0, 1.0, out=bg)
+        elif tp.heat_insulation > 0 and self.idx is not None:
             # the background itself moves: cold grows under continents, warm
             # under ocean floor, so the attractor the plates feel is not the
             # step-0 noise for the whole run (heat_insulation)
@@ -610,6 +871,7 @@ class TectonicSim:
         plates.update_stats(seg)
         tau = plate_torques(seg, grad3, plates.P)
         slab_ratio = 0.0
+        ts = None
         if tau_slab is not None:
             # a split this step appended plates; they get no slab torque until next step
             ts = np.zeros_like(tau)
@@ -618,7 +880,13 @@ class TectonicSim:
             heat_mag = float(np.linalg.norm(tau, axis=1).sum())
             slab_ratio = float(np.linalg.norm(ts, axis=1).sum()) / max(heat_mag, 1e-30)
             tau = tau + ts
-        update_omega(plates, tau, self.gain, tp.damping, self.max_omega)
+        self.grad3 = grad3
+        if self.boundary_forces_on():
+            slab_ratio = self.force_update(grad3, extra_tau=ts if tau_slab is not None else None)
+        else:
+            update_omega(plates, tau, self.gain, tp.damping, self.max_omega)
+        if tp.slab_force > 0.0:
+            self.slab.interior[...] *= math.exp(-float(tp.myr_per_step) / max(float(tp.slab_detach_my), 1e-9))
 
         self.step_index += 1
         spd = plates.speeds()[plates.alive]
@@ -635,7 +903,18 @@ class TectonicSim:
             tot = float(seg.ext.sum())
             close = (4.0 * math.pi) / max(tot, 1e-12)
             km = self.kind_mass()
-            seg.ext *= close
+            if tp.closure_ocean_only:
+                # the residual between trench and ridge ground is the sea floor's: the books
+                # track's ocean-only closure (te/books), here so a girdle that consumes floor
+                # faster than the ridges make it does not inflate the continents
+                c_ = seg.kind == CONTINENTAL
+                eo = float(seg.ext[~c_].sum())
+                s_ = (4.0 * math.pi - float(seg.ext[c_].sum())) / max(eo, 1e-12)
+                if s_ > 0:
+                    seg.ext[~c_] *= s_
+                close = s_
+            else:
+                seg.ext *= close
             # and the crust is not touched.  Thinning it by the same factor -- on the argument
             # that the volume on a segment is fixed -- was wrong twice over: the closure is a
             # change of units, not of ground (the splat reads extents only against each
@@ -902,7 +1181,12 @@ def initialise(params: WorldParams, log=print) -> TectonicSim:
     pos = best_candidate_sphere(M, rng)
     noise = fbm_noise(hgrid, rng, int(tp.heat_noise_octaves), float(tp.heat_noise_freq)).astype(np.float64)
     lo, hi = float(noise.min()), float(noise.max())
-    heat = FaceField(hgrid, (noise - lo) / max(hi - lo, 1e-9), name="heat")
+    pangaea = str(tp.start_mode) == "pangaea"
+    noise01 = (noise - lo) / max(hi - lo, 1e-9)
+    if pangaea:
+        # the neutral mantle: no structure but a little noise; the forces come from the crust
+        noise01 = 0.5 + float(tp.heat_noise_amp) * (2.0 * noise01 - 1.0)
+    heat = FaceField(hgrid, noise01, name="heat")
     heat.exchange_halos()
     kind, craton, taper = seed_supercontinent(
         pos, float(tp.continental_fraction), float(tp.craton_fraction), int(tp.cratons), rng,
@@ -923,14 +1207,28 @@ def initialise(params: WorldParams, log=print) -> TectonicSim:
     thickness = np.where(cont, cont_t, tp.oceanic_thickness * (1.0 + 0.2 * (rng.random(M) - 0.5)))
     cont_rho = np.where(is_cr, tp.craton_density, tp.continental_density)
     density = np.where(cont, cont_rho, tp.oceanic_density)
-    plate_id = supercontinent_plates(pos, kind, int(tp.initial_plates), rng,
-                                     size_jitter=float(tp.plate_size_jitter))
+    if pangaea:
+        if str(tp.ocean_tiling) == "zipf":
+            plate_id = zipf_ocean_plates(pos, kind, int(tp.initial_plates), rng, lo=float(tp.ocean_plate_min),
+                                         hi=float(tp.ocean_plate_max), alpha=float(tp.ocean_plate_alpha))
+        else:
+            plate_id = superocean_plates(pos, kind, int(tp.initial_plates), rng, size_jitter=float(tp.plate_size_jitter),
+                                         max_share=float(tp.ocean_plate_max))
+    else:
+        plate_id = supercontinent_plates(pos, kind, int(tp.initial_plates), rng,
+                                         size_jitter=float(tp.plate_size_jitter))
     seg = Segments(pos, thickness, density, 0.0, plate_id, 4.0 * math.pi / M, kind=kind, craton=craton)
     snap_cratons(seg)          # a boundary goes around a craton, not through it
-    plates = Plates(int(tp.initial_plates))
+    # (the Pangaea tilings always make at least one ocean plate, so initial_plates 1 gives ids 0-1)
+    plates = Plates(max(int(tp.initial_plates), int(seg.plate_id.max()) + 1))
     plates.update_stats(seg)
-    random_initial_omega(plates, rng, tp.initial_speed * spacing)
+    if pangaea:
+        plates.omega[:] = 0.0
+    else:
+        random_initial_omega(plates, rng, tp.initial_speed * spacing)
     sim = TectonicSim(params, grid, seg, plates, heat, spacing)
+    if pangaea:
+        pangaea_start(sim, log)
     if log is not None:
         log(
             f"[tectonics] crust: {int(cont.sum())} continental / {M} segments "
@@ -947,6 +1245,106 @@ def initialise(params: WorldParams, log=print) -> TectonicSim:
             f"r_coll={sim.r_coll:.4f}, r_gap={sim.r_gap:.4f}, diffusion substeps={sim.diff_substeps}"
         )
     return sim
+
+
+def pangaea_start(sim: TectonicSim, log=print) -> dict:
+    """The rest of a Pangaea-era start, once the crust and the plates exist.
+
+    * The mantle under the supercontinent has been insulated for a while:
+      the background there sits ``start_insulation`` of the way to the
+      insulation floor (an upwelling, a repeller); elsewhere it is the
+      neutral mantle.
+    * The supercontinent is ringed by a subduction girdle: every ocean
+      segment facing its margin goes down there, so a slab hangs under it
+      (the slab field at saturation) and the slabs' downwelling is a heat
+      ring of ``girdle_heat`` along the margin.
+    * The ocean plates move under the forces, not at random: omega is the
+      terminal velocity of the force balance (heat torque, slab pull, drag).
+    * The ocean floor has an age: the ocean-ocean boundaries that diverge
+      under those omegas are ridges, and floor is aged by its distance from
+      the nearest ridge at ``start_age_cmyr`` (capped at
+      ``start_age_max_my``), so the oldest floor is the floor about to go
+      down the girdle.  Ridges are cold (the gap-cooling troughs a running
+      model keeps there), and the omegas are solved again with them.
+    """
+    from scipy.spatial import cKDTree
+
+    tp, seg, plates = sim.tp, sim.seg, sim.plates
+    hg = sim.heat.grid
+    H, N = hg.H, hg.N
+    myr = float(tp.myr_per_step)
+    sim.heat_neutral = sim.heat.data.copy()
+    centers = hg.interior_centers.reshape(-1, 3)
+    _, nn = cKDTree(seg.pos).query(centers, k=4)
+    frac = (seg.kind[nn] == CONTINENTAL).mean(axis=1).reshape(6, N, N)
+    bg = sim.heat_neutral.copy()
+    bgi = bg[:, H:-H, H:-H]
+    bgi -= float(tp.start_insulation) * frac * (bgi - float(tp.insulation_floor))
+    sim.heat_bg = bg
+    sim.heat.data[...] = bg
+    # the girdle: ocean floor facing the continent's margin goes down under it
+    cen = forces.census(seg, plates, sim.spacing)
+    oc_down = np.concatenate([cen["i"][cen["down_i"] & (cen["kj"] == CONTINENTAL)],
+                              cen["j"][cen["down_j"] & (cen["ki"] == CONTINENTAL)]])
+    girdle = np.unique(oc_down)
+    sat = float(tp.slab_sat_km) / sim.R_km
+    flat = sim.slab.interior.reshape(-1).copy()
+    forces.deposit_blobs(flat, sim.heat_tree, seg.pos[girdle], np.full(girdle.size, 0.6 * sat), 2.0 * sim.spacing)
+    sim.slab.interior[...] = np.minimum(flat.reshape(sim.slab.interior.shape), 1.5 * sat)
+    flat = sim.heat.interior.reshape(-1).copy()
+    forces.deposit_blobs(flat, sim.heat_tree, seg.pos[girdle], np.full(girdle.size, float(tp.girdle_heat) / 5.0), 4.0 * sim.spacing)
+    sim.heat.interior[...] = np.clip(flat.reshape(sim.heat.interior.shape), 0.0, 1.0)
+    oc = seg.kind == OCEANIC
+    max_age = float(tp.start_age_max_my) / myr
+    seg.age[oc] = max_age
+
+    def settle():
+        sim.heat.exchange_halos()
+        g3 = heat_gradient_3d(sim.heat, seg.pos)
+        plates.update_stats(seg)
+        w, info, cen_ = sim.terminal_omega(g3)
+        s = np.linalg.norm(w, axis=1, keepdims=True)
+        if sim.max_omega > 0:
+            w = np.where(s > sim.max_omega, w * (sim.max_omega / np.maximum(s, 1e-30)), w)
+        w[~plates.alive] = 0.0
+        plates.omega = w
+        return info
+
+    settle()
+    cen = forces.census(seg, plates, sim.spacing)
+    o_o = (cen["ki"] == OCEANIC) & (cen["kj"] == OCEANIC)
+    oo = o_o & (cen["appr"] < -0.002 * sim.spacing)
+    if not oo.any():
+        # a coarse cloud can open no boundary that fast at step 0: any opening, else every
+        # ocean-ocean boundary, is a ridge
+        oo = o_o & (cen["appr"] < 0.0) if (o_o & (cen["appr"] < 0.0)).any() else o_o
+    ridge = np.zeros(seg.M, bool)
+    ridge[cen["i"][oo]] = True
+    ridge[cen["j"][oo]] = True
+    rate = float(tp.start_age_cmyr) * 10.0 * myr / sim.R_km          # half rate, radians per step
+    seg.age[:] = ocean_age_from_ridges(seg.pos, seg.kind, seg.plate_id, ridge, sim.spacing, rate, max_age)
+    seg.rework[oc] = seg.age[oc]
+    flat = sim.heat.interior.reshape(-1).copy()
+    forces.deposit_blobs(flat, sim.heat_tree, seg.pos[ridge], np.full(int(ridge.sum()), -0.4 / 3.76), 3.0 * sim.spacing)
+    sim.heat.interior[...] = np.clip(flat.reshape(sim.heat.interior.shape), 0.0, 1.0)
+    for _ in range(3):
+        sim._diffuse_heat()
+    info = settle()
+    R = sim.R_km
+    cm = R / myr * 0.1
+    v = np.linalg.norm(np.cross(plates.omega[seg.plate_id], seg.pos), axis=1)
+    pid = seg.plate_id
+    A = np.bincount(pid, weights=seg.ext, minlength=plates.P)
+    vm = np.bincount(pid, weights=v * seg.ext, minlength=plates.P) / np.maximum(A, 1e-30) * cm
+    age_my = seg.age[oc] * myr
+    out = dict(girdle_km=float(girdle.size * sim.spacing * R), ridge_km=float(ridge.sum() * sim.spacing * R / 2),
+               ocean_age_mean_my=float(np.average(age_my, weights=seg.ext[oc])),
+               plate_share=[round(float(x), 3) for x in A / (4 * math.pi)], speed_cmyr=[round(float(x), 2) for x in vm])
+    if log is not None:
+        log(f"[tectonics] pangaea start: girdle {out['girdle_km']:.0f} km, ridges {out['ridge_km']:.0f} km, "
+            f"ocean age mean {out['ocean_age_mean_my']:.0f} My; plates {out['plate_share']}; speeds cm/yr {out['speed_cmyr']}")
+    sim.start_info = out
+    return out
 
 
 def simulate(params: WorldParams, log=print, steps: int | None = None) -> TectonicSim:

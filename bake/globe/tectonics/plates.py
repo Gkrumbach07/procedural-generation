@@ -29,6 +29,8 @@ Units and force model
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from numba import njit
 
@@ -463,4 +465,129 @@ def supercontinent_plates(pos: np.ndarray, kind: np.ndarray, n_plates: int, rng,
     return pid
 
 
-__all__ = ["seed_supercontinent", "supercontinent_plates", "snap_cratons", "Plates", "cluster_plates", "random_initial_omega", "heat_gradient_3d", "plate_torques", "update_omega", "rotate_segments", "segment_velocities", "tangent_to_cell_components"]
+def superocean_plates(pos: np.ndarray, kind: np.ndarray, n_plates: int, rng, size_jitter: float = 0.6,
+                      max_share: float = 0.25, min_share: float = 0.005, tries: int = 24) -> np.ndarray:
+    """Plate 0 is the supercontinent; ``n_plates - 1`` ocean plates tile the
+    superocean with an Earth-like spread of sizes but no plate larger than
+    ``max_share`` of the sphere (Earth's largest, the Pacific, is ~0.20; at
+    ~200 Ma Panthalassa carried Farallon, Izanagi, Phoenix and the young
+    Pacific, Tethys its own).  `cluster_plates` with a size jitter draws one
+    tiling; it is redrawn until the largest fits, keeping the best draw."""
+    M = pos.shape[0]
+    sea = kind != CONTINENTAL
+    n_ocean = max(1, int(n_plates) - 1)
+    best, best_max = None, np.inf
+    for _ in range(max(1, int(tries))):
+        lab = cluster_plates(pos[sea], n_ocean, rng, size_jitter=size_jitter)
+        share = np.bincount(lab, minlength=n_ocean) / M
+        mx = float(share.max())
+        ok = mx <= max_share and float(share.min()) >= min_share
+        if mx < best_max or ok:
+            best, best_max = lab, mx
+        if ok:
+            break
+    pid = np.zeros(M, dtype=np.int32)
+    pid[sea] = best + 1
+    return pid
+
+
+def zipf_ocean_plates(pos: np.ndarray, kind: np.ndarray, n_plates: int, rng, lo: float = 0.012, hi: float = 0.22,
+                      alpha: float = 1.0) -> np.ndarray:
+    """Plate 0 is the supercontinent; ``n_plates - 1`` ocean plates tile the sea
+    floor with a power-law spread of sizes (dyn-forcebalance's tiling).
+
+    Today's plates follow a power law in area (Bird 2003); the largest run from the
+    Pacific's ~0.20 of the sphere down by roughly 1/rank.  So the target shares are
+    ``rank^-alpha`` scaled to the sea floor and clipped to ``[lo, hi]`` of the sphere,
+    handed to spherical k-means centres in a random order, and met by an additively
+    weighted Voronoi assignment (hyperbolic boundaries; multiplicative weights made the
+    small plates round discs inside the big ones) whose weights are fitted to them,
+    with low-frequency noise on the distances so the boundaries are not polygons.  A
+    stray piece of a cell joins the plate owning most of its neighbourhood."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    from scipy.spatial import cKDTree
+
+    M = pos.shape[0]
+    sea = kind != CONTINENTAL
+    ps = pos[sea]
+    m = ps.shape[0]
+    n = int(max(1, min(int(n_plates) - 1, m)))
+    centres = np.empty((n, 3))
+    centres[0] = ps[int(rng.integers(m))]
+    dmin = np.full(m, np.inf)
+    for k in range(1, n):
+        dmin = np.minimum(dmin, np.linalg.norm(ps - centres[k - 1], axis=1))
+        centres[k] = ps[int(np.argmax(dmin))]
+    for _ in range(12):
+        lab = np.argmin(2.0 - 2.0 * ps @ centres.T, axis=1)
+        for k in range(n):
+            sel = lab == k
+            if sel.any():
+                c = ps[sel].mean(axis=0)
+                centres[k] = c / max(np.linalg.norm(c), 1e-12)
+    share_sea = m / float(M)
+    t = np.arange(1, n + 1, dtype=np.float64) ** (-float(alpha))
+    t = np.clip(t / t.sum() * share_sea, lo, hi)
+    t = t / t.sum() * share_sea
+    target = t[rng.permutation(n)] * M
+    d0 = np.sqrt(np.maximum(2.0 - 2.0 * ps @ centres.T, 0.0))
+    for k in range(n):
+        d0[:, k] *= 1.0 + 0.2 * _value_noise_points(ps, rng)
+    w = np.zeros(n)
+    for _ in range(80):
+        lab = np.argmin(d0 - w[None, :], axis=1)
+        cnt = np.bincount(lab, minlength=n).astype(np.float64)
+        w += 0.15 * (np.sqrt(np.maximum(target, 1.0) / float(M)) - np.sqrt(np.maximum(cnt, 1.0) / float(M)))
+    lab = np.argmin(d0 - w[None, :], axis=1)
+    sp = math.sqrt(4.0 * math.pi / M)
+    pr = cKDTree(ps).query_pairs(1.6 * sp, output_type="ndarray")
+    for _ in range(3):
+        e = pr[lab[pr[:, 0]] == lab[pr[:, 1]]]
+        g = coo_matrix((np.ones(e.shape[0]), (e[:, 0], e[:, 1])), shape=(m, m))
+        nc, comp = connected_components(g, directed=False)
+        size = np.bincount(comp, minlength=nc)
+        main = np.full(n, -1, np.int64)
+        best = np.zeros(n)
+        first = np.zeros(nc, np.int64)
+        first[comp[::-1]] = np.arange(m)[::-1]
+        for c in range(nc):
+            q = int(lab[first[c]])
+            if size[c] > best[q]:
+                best[q] = size[c]
+                main[q] = c
+        stray = ~np.isin(comp, main)
+        if not stray.any():
+            break
+        x = pr[stray[pr[:, 0]] != stray[pr[:, 1]]]
+        a = np.where(stray[x[:, 0]], x[:, 0], x[:, 1])
+        b = np.where(stray[x[:, 0]], x[:, 1], x[:, 0])
+        for c in np.unique(comp[stray]):
+            mm = comp[a] == c
+            if mm.any():
+                lab[comp == c] = np.bincount(lab[b[mm]], minlength=n).argmax()
+    pid = np.zeros(M, dtype=np.int32)
+    pid[sea] = lab + 1
+    return pid
+
+
+def ocean_age_from_ridges(pos: np.ndarray, kind: np.ndarray, plate_id: np.ndarray, ridge: np.ndarray,
+                          spacing: float, rate_rad_per_step: float, max_age: float) -> np.ndarray:
+    """Age (steps) of the initial ocean floor: distance to the nearest ridge
+    segment (``ridge`` mask) over the half spreading rate, capped at
+    ``max_age``; continental crust gets 0.  Ridge-adjacent floor is young,
+    floor far from every ridge -- along the supercontinent's margin, where it
+    is about to go down the girdle trenches -- is the oldest."""
+    from scipy.spatial import cKDTree
+
+    age = np.zeros(pos.shape[0])
+    oc = kind != CONTINENTAL
+    if not ridge.any() or not oc.any():
+        age[oc] = max_age
+        return age
+    d, _ = cKDTree(pos[ridge]).query(pos[oc], k=1)
+    age[oc] = np.minimum(d / max(rate_rad_per_step, 1e-12), max_age)
+    return age
+
+
+__all__ = ["seed_supercontinent", "supercontinent_plates", "superocean_plates", "zipf_ocean_plates", "ocean_age_from_ridges", "snap_cratons", "Plates", "cluster_plates", "random_initial_omega", "heat_gradient_3d", "plate_torques", "update_omega", "rotate_segments", "segment_velocities", "tangent_to_cell_components"]

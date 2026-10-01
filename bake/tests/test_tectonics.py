@@ -1422,10 +1422,11 @@ def test_scorecard_observer_is_bit_identical():
     summ = D.summarise([rep])
     assert list(summ["checkpoints"]) == [str(steps)]
     assert summ["checkpoints"][str(steps)]["books.cont_extent_share"]["n"] == 1
-    # the time unit it reports in is not a parameter of the world
+    # the time unit is a parameter of the world now: the force balance, the rifts and the
+    # insulation read their My, cm/yr and km through it (synth-dyn), so it is hashed
     q = WorldParams.tiny_world()
     q.tectonics.myr_per_step = 0.3
-    assert q.content_hash() == p.content_hash()
+    assert q.content_hash() != p.content_hash()
 
 
 def test_determinism():

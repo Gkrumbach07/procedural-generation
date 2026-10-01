@@ -365,7 +365,7 @@ def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float
 # gaps -> new crust (PLAN 6.2.4)
 # --------------------------------------------------------------------------
 def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, oceanic_density: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None, tree: cKDTree | None = None, ext: float | None = None, stretch: float = 0.0, thin_floor: float = 0.0,
-                   void: str = "create", taken_out: list | None = None) -> tuple[Segments, np.ndarray]:
+                   void: str = "create", taken_out: list | None = None, net_outflow: bool = False, pair_gate: bool = False) -> tuple[Segments, np.ndarray]:
     """Cells farther than ``gap_radius`` from every segment are divergent
     boundaries — provided the nearest segment is moving *away* from the
     cell (``omega`` (P, 3) rad/step given; holes left by subduction at a
@@ -432,6 +432,57 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
         v = np.cross(omega[seg.plate_id[near]], ps)
         away = ps - interior_centers_flat(grid)[cells]
         div = np.sum(v * away, axis=1) > 0.0
+        if net_outflow and tree is not None and seg.M > 6:
+            # A gap between plates is a ridge only if the crust around it is leaving it.  The
+            # hole a slab leaves at a trench has the incoming plate's crust closing on it and the
+            # overriding plate's next to it, nearly still: the nearest-segment test above read
+            # that as divergent whenever the overriding plate drifted the wrong way by a hair,
+            # and filled the trench with new floor on the *overriding* plate (32 % of all new
+            # sea floor was born within a spacing of a slab that had just gone down), which
+            # grew an oceanic apron on the supercontinent and stepped the girdle off its margin.
+            # So where the neighbours belong to more than one plate, the net outflow decides
+            cen_ = interior_centers_flat(grid)[cells]
+            _, nb6 = tree.query(cen_, k=6)
+            pnb = seg.plate_id[nb6]
+            mixed = (pnb != pnb[:, :1]).any(axis=1)
+            if mixed.any():
+                pk = seg.pos[nb6[mixed]]                                   # (m, 6, 3)
+                vk = np.cross(omega[pnb[mixed]], pk)
+                ok = pk - cen_[mixed][:, None, :]
+                ok /= np.maximum(np.linalg.norm(ok, axis=2, keepdims=True), 1e-12)
+                div[mixed] = np.sum(vk * ok, axis=2).mean(axis=1) > 0.0
+        if pair_gate and tree is not None and seg.M > 8:
+            # The arcs track's gate (proto/arcs spawn_relative + spawn_normal), the one rule all
+            # three dynamics prototypes converged on: a gap with two plates around it is a ridge
+            # only if the two plates separate there.  Both plates' velocities are taken at the
+            # cell itself and compared across the boundary normal (the line from the nearest
+            # plate's neighbours' centroid to the other plate's).  The nearest segment moving
+            # away from the cell is not that: behind a slab the overriding plate often moves the
+            # same way as the down-going one, only slower, and the hole the slab left was filled
+            # with age-0 crust on the overrider -- trench froth, and on a nearly still
+            # supercontinent an oceanic apron that stepped the girdle off its margin.  A gap with
+            # one plate around it keeps the nearest-segment test
+            x_all = interior_centers_flat(grid)[cells]
+            kq = min(8, seg.M)
+            _, nb = tree.query(x_all, k=kq, workers=kd_workers(cells.size))
+            nb = np.atleast_2d(nb).reshape(cells.size, kq)
+            pl = seg.plate_id[nb]
+            other = pl != pl[:, :1]
+            two = other.any(axis=1)
+            if two.any():
+                r = np.flatnonzero(two)
+                a = nb[r, 0]
+                b = nb[r, np.argmax(other[r], axis=1)]
+                x = x_all[r]
+                pa, pb = seg.plate_id[a], seg.plate_id[b]
+                inA = (pl[r] == pa[:, None]).astype(np.float64)
+                inB = (pl[r] == pb[:, None]).astype(np.float64)
+                P3 = seg.pos[nb[r]]
+                ca = np.einsum("nk,nkc->nc", inA, P3) / np.maximum(inA.sum(axis=1), 1.0)[:, None]
+                cb = np.einsum("nk,nkc->nc", inB, P3) / np.maximum(inB.sum(axis=1), 1.0)[:, None]
+                va = np.cross(omega[pa], x)
+                vb = np.cross(omega[pb], x)
+                div[r] = np.sum((vb - va) * (cb - ca), axis=1) > 0.0
         gap.ravel()[cells[~div]] = False
     n = int(gap.sum())
     if n == 0:
@@ -669,11 +720,14 @@ def plate_pair_polarity(plate_id: np.ndarray, age: np.ndarray, kind: np.ndarray,
     lo, hi = np.where(swap, b, a), np.where(swap, a, b)
     age_i, age_j = age[pairs[sel, 0]], age[pairs[sel, 1]]
     key = lo * P + hi
-    cnt = np.bincount(key, minlength=P * P)
-    s_lo = np.bincount(key, weights=np.where(swap, age_j, age_i), minlength=P * P)
-    s_hi = np.bincount(key, weights=np.where(swap, age_i, age_j), minlength=P * P)
-    k = np.nonzero(cnt)[0]
-    older_lo = s_lo[k] > s_hi[k]
+    # summed per plate pair over the pairs that occur, not over all P x P: plate ids only grow,
+    # and with ~700 of them (an 8000-step Earth run) three P^2 bincounts cost 4.5 ms a call, twice
+    # a step.  bincount adds each bin's weights in input order either way, so the sums -- and
+    # the polarity -- are bit for bit the dense ones
+    k, inv = np.unique(key, return_inverse=True)
+    s_lo = np.bincount(inv, weights=np.where(swap, age_j, age_i), minlength=k.size)
+    s_hi = np.bincount(inv, weights=np.where(swap, age_i, age_j), minlength=k.size)
+    older_lo = s_lo > s_hi
     k_lo, k_hi = k // P, k % P
     pol[k_lo[older_lo], k_hi[older_lo]] = 1
     pol[k_hi[~older_lo], k_lo[~older_lo]] = 1
@@ -687,7 +741,7 @@ CONTINENTAL_K = np.int8(CONTINENTAL)
 
 
 @njit(cache=True)
-def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, rework, kind, craton, weld, ext, spent, polarity, alive, overlap2, accretion, arc_birth, birth_draw, shortening, radius, weld_steps, extent_min, arc_thickness, arc_density):
+def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, rework, kind, craton, weld, ext, spent, polarity, alive, overlap2, accretion, arc_birth, birth_draw, shortening, radius, weld_steps, extent_min, arc_thickness, arc_density, pid_read):
     n = pairs.shape[0]
     losers = np.empty(n, dtype=np.int64)
     survivors = np.empty(n, dtype=np.int64)
@@ -704,8 +758,11 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
         j = pairs[e, 1]
         if not alive[i] or not alive[j]:
             continue
-        pi = plate_id[i]
-        pj = plate_id[j]
+        # which plate each side is on, for the same-plate test, the velocities and the
+        # polarity: ``pid_read`` is ``plate_id`` itself (the shipped rule: a loser relabelled
+        # earlier in this call collides again as the survivor's), or the ids at the call's start
+        pi = pid_read[i]
+        pj = pid_read[j]
         if pi == pj:
             continue
         # approaching?  (v_i - v_j) . (p_j - p_i) > 0 with v = (omega dt) x p
@@ -968,7 +1025,7 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
 
 def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, alive: np.ndarray, overlap_fraction: float = 0.5, accretion: float = 1.0, arc_birth: float = 0.0, rng: np.random.Generator | None = None, shortening: float = 0.0, weld_steps: int = 0, extent_min: float = 0.0, spent_out: list | None = None,
             arc_thickness: float = 0.0, arc_density: float = 0.804, arc_out: list | None = None, recv_out: list | None = None,
-            books_out: list | None = None):
+            books_out: list | None = None, frozen_ids: bool = False):
     """Subduction: for every pair of segments of different plates within
     chord ``radius`` (KD-tree pair query, applied in sorted order) that are
     *approaching* — or closer than ``overlap_fraction * radius`` whatever
@@ -1016,7 +1073,8 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     #  then the same two for slab lost to the mantle, slab accreted to a continent, and
     #  oceanic columns an arc birth relabelled]
     spent = np.zeros(9, dtype=np.float64)
-    out = _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.rework, seg.kind, seg.craton, seg.weld, seg.ext, spent, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw), float(shortening), float(radius), int(weld_steps), float(extent_min), float(arc_thickness), float(arc_density))
+    out = _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.rework, seg.kind, seg.craton, seg.weld, seg.ext, spent, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw), float(shortening), float(radius), int(weld_steps), float(extent_min), float(arc_thickness), float(arc_density),
+                             seg.plate_id.copy() if frozen_ids else seg.plate_id)
     if spent_out is not None:
         spent_out.append(float(spent[0]))
     if arc_out is not None:
