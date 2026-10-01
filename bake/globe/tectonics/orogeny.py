@@ -228,7 +228,8 @@ def relax_orogens(seg, baseline_m: float, floor_m: float, height_unit_m: float,
 def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet_m: float,
                height_unit_m: float, strength: float, continental: int, accretion: float = 1.0,
                flat_slab_age: float = 0.0, along_strike: float = 1.5, census: dict | None = None,
-               shortening: float = 0.0, width_scale: float = 1.0, received=None) -> float:
+               shortening: float = 0.0, width_scale: float = 1.0, received=None,
+               conserve_volume: bool = False) -> float:
     """Build each collision belt with a cross-section. Returns thickness moved.
 
     This *replaces* :func:`~globe.tectonics.collision.spread_collisions` for
@@ -278,6 +279,15 @@ def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet
     and a 230 m crest against an intended 1500 and 5500. Rescaling the two
     sides to balance only moved that to 1066 and 271. The height has to come
     from the accreted crust, which is where it comes from on Earth.
+
+    **Volume, not column** (``conserve_volume``, on with
+    ``tectonics.variable_extent``). Every segment stands on its own extent,
+    so a thickness taken off a column of ``ext[a]`` and laid on one of
+    ``ext[b]`` is ``ext[a] / ext[b]`` of it there. Moved column for column, as
+    the fixed-area model does, the belts made continental crust: +11.0 to
+    +11.7 units of volume over 8000 Earth steps (1 unit = 1.42e9 km3), the
+    largest of the terms that hid two thirds of the orogen and delamination
+    sinks. Off, it is the fixed-area model bit for bit.
     """
     if losers.size == 0:
         return 0.0
@@ -360,10 +370,13 @@ def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet
         else:
             f = float(accretion)
         th_in, m_in = f * float(seg.thickness[lo]), f * float(seg.mass[lo])
-        if received is not None and received[0][e] >= 0.0:
+        if received is not None and not np.isnan(received[0][e]):
             # the extent model says what the survivor was handed -- a sliver of the loser's
-            # column, not the whole of it; laying out the whole took winners down to 1e-3
+            # column, not the whole of it; laying out the whole took winners down to 1e-3.
+            # Only a gain is laid out: a merge with a thinner remnant leaves less
             th_in, m_in = float(received[0][e]), float(received[1][e])
+            if th_in <= 0.0 or m_in <= 0.0:
+                th_in, m_in = 0.0, 0.0
         # never hand out more than the survivor is holding: clamping the
         # thickness afterwards would conjure the shortfall out of nothing
         if th_in > float(seg.thickness[su]) - 1e-3:
@@ -372,8 +385,13 @@ def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet
         if th_in > 0.0:
             seg.thickness[su] -= th_in
             seg.mass[su] -= m_in
-            np.add.at(seg.thickness, idx[up], th_in * share)
-            np.add.at(seg.mass, idx[up], m_in * share)
+            if conserve_volume:
+                r = float(seg.ext[su]) / np.maximum(seg.ext[idx[up]], 1e-12)
+                np.add.at(seg.thickness, idx[up], th_in * share * r)
+                np.add.at(seg.mass, idx[up], m_in * share * r)
+            else:
+                np.add.at(seg.thickness, idx[up], th_in * share)
+                np.add.at(seg.mass, idx[up], m_in * share)
             moved += th_in
 
         # 2. fold and thrust: peel the foreland into the range, zero sum
@@ -391,10 +409,20 @@ def shape_belt(seg, tree, losers, survivors, alive, spacing_rad: float, R_planet
             take = np.clip(take, 0.0, 0.4 * seg.thickness[idx])
             pot = float((take * seg.density[idx]).sum())
             if pot > 0.0:
-                seg.thickness[idx] -= take
-                seg.mass[idx] -= take * seg.density[idx]
-                np.add.at(seg.thickness, idx[up], take.sum() * share)
-                np.add.at(seg.mass, idx[up], pot * share)
+                if conserve_volume:
+                    # the foreland's crust by volume, laid on the range by volume
+                    e_up = np.maximum(seg.ext[idx[up]], 1e-12)
+                    vol = float((take * seg.ext[idx]).sum())
+                    vm = float((take * seg.density[idx] * seg.ext[idx]).sum())
+                    seg.thickness[idx] -= take
+                    seg.mass[idx] -= take * seg.density[idx]
+                    np.add.at(seg.thickness, idx[up], vol * share / e_up)
+                    np.add.at(seg.mass, idx[up], vm * share / e_up)
+                else:
+                    seg.thickness[idx] -= take
+                    seg.mass[idx] -= take * seg.density[idx]
+                    np.add.at(seg.thickness, idx[up], take.sum() * share)
+                    np.add.at(seg.mass, idx[up], pot * share)
                 moved += float(take.sum())
         seg.density[idx] = seg.mass[idx] / np.maximum(seg.thickness[idx], 1e-9)
         seg.density[su] = seg.mass[su] / max(seg.thickness[su], 1e-9)

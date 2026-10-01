@@ -346,7 +346,8 @@ def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float
 # --------------------------------------------------------------------------
 # gaps -> new crust (PLAN 6.2.4)
 # --------------------------------------------------------------------------
-def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, oceanic_density: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None, tree: cKDTree | None = None, ext: float | None = None, stretch: float = 0.0, thin_floor: float = 0.0) -> tuple[Segments, np.ndarray]:
+def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, oceanic_density: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None, tree: cKDTree | None = None, ext: float | None = None, stretch: float = 0.0, thin_floor: float = 0.0,
+                   void: str = "create", taken_out: list | None = None) -> tuple[Segments, np.ndarray]:
     """Cells farther than ``gap_radius`` from every segment are divergent
     boundaries — provided the nearest segment is moving *away* from the
     cell (``omega`` (P, 3) rad/step given; holes left by subduction at a
@@ -374,8 +375,37 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
     therefore buoyant.  That is backwards, and it meant the model had no way
     to make ocean floor at all.
 
+    ``void`` says what fills a void inside a continent when there is no
+    ``stretch`` to pay for it:
+
+    * ``'create'`` -- new continental crust at its neighbours' column, from
+      nothing.  The fixed-area model, where nothing else can fill it, and bit
+      for bit what this always did.
+    * ``'split'`` -- the continental neighbours hand the new segment ground in
+      proportion to their extent and the crust standing on it, so their
+      columns, the crust and the planet's ground all stay as they were and the
+      new column is their extent-weighted mean (the opposite of the
+      ``extent_min`` merge).  ``variable_extent``'s choice.
+    * ``'stretch'`` -- the neighbours keep their ground, take on the new
+      segment's as well and thin to cover it, as extension does.
+    * ``'ocean'`` -- sea floor.
+
+    Measured on Earth seeds 0 / 1 over the first 600 steps (all with the
+    crust books balanced), sea enclosed by land: 'create' 5 / 3 pits, 0.39 /
+    0.13 % of the sphere; 'split' 5 / 5, 0.63 / 0.23 %; 'stretch' 78 / 82,
+    4.5 / 5.6 %; 'ocean' 81 / 92, 4.9 / 5.8 %.  There are 130-150 such voids
+    in a run, almost all before step 150, and a column thinned by a seventh
+    (stretch) or replaced by sea floor (ocean) drowns in the middle of the
+    supercontinent.  ``taken_out`` receives the crust taken from existing
+    segments, ``(column units, crust units)``, so the caller can book what
+    the new segments hold less what they took.
+
     Returns ``(new_segments, gap_mask)``; the caller appends the segments
     and cools the heat field under ``gap_mask``."""
+    if void not in ("create", "split", "stretch", "ocean"):
+        raise ValueError(f"spawn_segments: void must be 'create', 'split', 'stretch' or 'ocean' (got {void!r})")
+    if taken_out is not None:
+        taken_out.append((0.0, 0.0))
     gap = dist > gap_radius
     if omega is not None and gap.any():
         cells = np.nonzero(gap.ravel())[0]
@@ -452,6 +482,62 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
             cr = np.where(filled, cr, 0).astype(np.int8)
             pos, plate, th, de, cr = (x[~filled] for x in (pos, plate, th, de, cr))
             kind = kind[~filled]
+        elif void != "create" and interior_cont.any():
+            # No shortening this step to pay for the ground, and a void all the same -- 130-150
+            # of them a run at Earth scale, nearly all in the first 150 steps.  Filling one with
+            # new continental crust at its neighbours' column made crust from nothing (+0.09
+            # units of volume a run: small, but the one continental source with no process
+            # behind it)
+            e_new = float(ext) if ext is not None else mean_area
+            rift = np.zeros(pos.shape[0], dtype=bool)
+            took = [0.0, 0.0]
+            for v in np.nonzero(interior_cont)[0]:
+                if void == "ocean":
+                    rift[v] = True
+                    continue
+                js = nb[v][seg.kind[nb[v]] == CONTINENTAL]
+                ej = seg.ext[js]
+                e_sum = float(ej.sum())
+                vol = float((ej * seg.thickness[js]).sum())
+                vm = float((ej * seg.mass[js]).sum())
+                if void == "split":
+                    # the continental neighbours hand over ground, in proportion to what they
+                    # hold, and the crust standing on it: their columns do not change, the new
+                    # segment's is their extent-weighted mean, and the planet's ground total
+                    # does not move either
+                    if e_sum <= 0.0 or vol <= 0.0:
+                        rift[v] = True
+                        continue
+                    d = e_new * ej / e_sum
+                    if (ej - d).min() <= 0.0:
+                        rift[v] = True
+                        continue
+                    v_new = float((d * seg.thickness[js]).sum())
+                    m_new = float((d * seg.mass[js]).sum())
+                    seg.ext[js] -= d
+                    th[v] = v_new / e_new
+                    de[v] = m_new / v_new
+                    took[0] += m_new / e_new                                    # its column
+                    took[1] += m_new                                            # crust units
+                    continue
+                # the continental neighbours stretch over the new ground: each thins by the
+                # same factor, and what they lose is the new segment's column
+                keep = e_sum / max(e_sum + e_new, 1e-12)
+                if e_sum <= 0.0 or vol <= 0.0 or (thin_floor > 0.0 and keep * vol / e_sum < thin_floor):
+                    rift[v] = True        # crust at its floor breaks: that is a rift
+                    continue
+                took[0] += (1.0 - keep) * float(seg.mass[js].sum())          # column units
+                took[1] += (1.0 - keep) * vm                                 # crust units
+                seg.thickness[js] *= keep
+                seg.mass[js] *= keep
+                th[v] = (1.0 - keep) * vol / e_new
+                de[v] = vm / vol
+            kind = np.where(rift, OCEANIC, kind).astype(np.int8)
+            th = np.where(rift, new_thickness, th)
+            de = np.where(rift, oceanic_density, de)
+            cr = np.where(rift, 0, cr).astype(np.int8)
+            if taken_out is not None:
+                taken_out[-1] = (took[0], took[1])
         new = Segments(pos, th, de, 0.0, plate, mean_area, kind=kind, craton=cr, ext=ext if ext is not None else mean_area)
     else:
         new = Segments(pos, new_thickness, oceanic_density, 0.0, plate, mean_area, kind=OCEANIC, ext=ext if ext is not None else mean_area)
@@ -587,10 +673,13 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
     n = pairs.shape[0]
     losers = np.empty(n, dtype=np.int64)
     survivors = np.empty(n, dtype=np.int64)
-    # what the survivor was actually handed, thickness and mass, where the extent model
-    # decided it (-1: the fixed-area rule, `_received_fraction` of the loser's column)
-    recv_th = np.full(n, -1.0)
-    recv_m = np.full(n, -1.0)
+    # what the survivor was actually handed, thickness and mass -- the change in its column,
+    # new minus old, which a merge that thins the survivor makes negative -- where the extent
+    # model decided it (NaN: the fixed-area rule, `_received_fraction` of the loser's column)
+    recv_th = np.full(n, np.nan)
+    recv_m = np.full(n, np.nan)
+    # every event is a fixed-area one or an extent one for the whole run
+    var_ext = extent_min > 0.0
     k = 0
     for e in range(n):
         i = pairs[e, 0]
@@ -667,6 +756,8 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
             # continental crust every 1500 steps).  The crust that was standing on the
             # consumed ground goes into the survivor as volume, so sum(ext * thickness) does
             # not move: the belt thickens by exactly what the margin lost
+            th_was = thickness[su]
+            m_was = mass[su]
             dn2 = dx * dx + dy * dy + dz * dz
             dn = np.sqrt(dn2)
             r_lo = np.sqrt(ext[lo] / np.pi)
@@ -697,31 +788,40 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
                     thickness[su] += vol / max(ext[su], 1e-12)
                     mass[su] += mvol / max(ext[su], 1e-12)
                     density[su] = mass[su] / max(thickness[su], 1e-12)
-                    recv_th[k] = vol / max(ext[su], 1e-12)
-                    recv_m[k] = mvol / max(ext[su], 1e-12)
                     # The belt is new crust.  The column now holds its own protolith and
                     # what has just been stacked into it, so the age it would be *mapped*
                     # at -- when this crust was last assembled -- is the two mixed by mass.
                     # `age` does not move: the rock is as old as it ever was
-                    rework[su] *= 1.0 - min(recv_m[k] / max(mass[su], 1e-12), 1.0)
-                else:
-                    recv_th[k] = 0.0
-                    recv_m[k] = 0.0
+                    rework[su] *= 1.0 - min((mvol / max(ext[su], 1e-12)) / max(mass[su], 1e-12), 1.0)
             plate_id[lo] = plate_id[su]
             weld[lo] = weld_steps
             if ext[lo] <= extent_min:
-                # nothing left to shorten: what remains joins the belt and the point goes
-                vol = ext[lo] * thickness[lo]
-                mvol = ext[lo] * mass[lo]
-                thickness[su] += vol / max(ext[su], 1e-12)
-                mass[su] += mvol / max(ext[su], 1e-12)
+                # Nothing left to shorten: what remains joins the belt and the point goes.  The
+                # survivor's column becomes the extent-weighted mean of the two, and only then
+                # does its extent grow by the loser's.  Raising the survivor's column by the
+                # remnant's volume over its *old* extent and then adding the remnant's extent as
+                # well -- which is what this did -- counted the remnant's ground twice and made
+                # ext[lo] * th[su] of crust per merge: +19.4 % of the pair's crust in one
+                # merge, +3.6 to +4.0 units of continental volume over 8000 Earth steps
+                # (1 unit = 1.42e9 km3), about a fifth of what orogen decay takes
+                e_su = ext[su]
+                e_lo = ext[lo]
+                e_new = max(e_su + e_lo, 1e-12)
+                m_lo = e_lo * mass[lo]
+                m_all = e_su * mass[su] + m_lo
+                thickness[su] = (e_su * thickness[su] + e_lo * thickness[lo]) / e_new
+                mass[su] = m_all / e_new
                 density[su] = mass[su] / max(thickness[su], 1e-12)
-                rework[su] *= 1.0 - min((mvol / max(ext[su], 1e-12)) / max(mass[su], 1e-12), 1.0)
-                recv_th[k] = max(recv_th[k], 0.0) + vol / max(ext[su], 1e-12)
-                recv_m[k] = max(recv_m[k], 0.0) + mvol / max(ext[su], 1e-12)
-                ext[su] += ext[lo]
+                rework[su] *= 1.0 - min(m_lo / max(m_all, 1e-12), 1.0)
+                ext[su] = e_su + e_lo
                 ext[lo] = 0.0
                 alive[lo] = False
+            # what the survivor's column holds now against what it held: the belt lays out a
+            # positive change and nothing else (a merge with a thinner remnant thins it, and a
+            # pair too far apart to overlap changes nothing -- where the -1 this used to leave
+            # sent the whole of the loser's column to the belt, out of the survivor)
+            recv_th[k] = thickness[su] - th_was
+            recv_m[k] = mass[su] - m_was
             losers[k] = lo
             survivors[k] = su
             k += 1
@@ -763,8 +863,33 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
             survivors[k] = su
             k += 1
             continue
-        mass[su] += f * mass[lo]
-        thickness[su] += f * thickness[lo]
+        # The books (column units, then crust units -- column x extent): what the slab sends
+        # to the mantle, and what of it an ocean-going-under-continent contact turns into
+        # continental crust.  Exact amounts, so the per-kind ledger can be checked against the
+        # state rather than read off it (run.py, KIND_KEYS)
+        if kind[lo] == OCEANIC_K:
+            spent[3] += (1.0 - f) * mass[lo]
+            spent[4] += (1.0 - f) * ext[lo] * mass[lo]
+            if kind[su] == CONTINENTAL_K:
+                spent[5] += f * mass[lo]
+                spent[6] += f * ext[lo] * mass[lo]
+        if var_ext:
+            # The accreted crust stood on the slab's ground and is spread over the survivor's,
+            # so the survivor's column rises by the ratio of the two.  Column for column, as
+            # the fixed-area rule does, overcounted it by ext[su] / ext[lo] -- 1.15 on average
+            # at Earth scale and 1.22 after step 4000, ~0.55 of the +4.3 units of continental
+            # volume accretion books over 8000 steps
+            g = f * ext[lo] / max(ext[su], 1e-12)
+            dm = g * mass[lo]
+            dth = g * thickness[lo]
+            mass[su] += dm
+            thickness[su] += dth
+            recv_th[k] = dth
+            recv_m[k] = dm
+        else:
+            dm = f * mass[lo]
+            mass[su] += f * mass[lo]
+            thickness[su] += f * thickness[lo]
         density[su] = mass[su] / thickness[su]
         # the survivor's age is the older of the two only when it keeps the
         # whole slab; an arc is new crust welded to old, not old crust
@@ -772,7 +897,7 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
             age[su] = age[lo]
         # ...and whatever was stacked into it, of either kind, is new crust in the column:
         # the accreted fraction of a slab is what builds an accretionary margin
-        rework[su] *= 1.0 - min(f * mass[lo] / max(mass[su], 1e-12), 1.0)
+        rework[su] *= 1.0 - min(dm / max(mass[su], 1e-12), 1.0)
         # Island arcs: repeated ocean-on-ocean subduction is how continental
         # crust is *born* (the Japans, the Aleutians, the Andean margin before
         # it was a margin).  Without a birth channel the continental area can
@@ -781,6 +906,9 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
         if kind[su] == OCEANIC_K and kind[lo] == OCEANIC_K and birth_draw[e] < arc_birth:
             kind[su] = CONTINENTAL_K            # island arc -> new continental crust, not craton
             rework[su] = 0.0                    # juvenile: the crust is being made right now
+            # the column it had, slab accretion and all, changes kind with it
+            spent[7] += mass[su]
+            spent[8] += ext[su] * mass[su]
             if arc_thickness > 0.0:
                 # born as arc crust, not as a relabelled slab: the column an arc has and the
                 # belt's composition, the extra drawn from the mantle (spent[1] keeps the sum)
@@ -798,7 +926,8 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
 
 
 def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, alive: np.ndarray, overlap_fraction: float = 0.5, accretion: float = 1.0, arc_birth: float = 0.0, rng: np.random.Generator | None = None, shortening: float = 0.0, weld_steps: int = 0, extent_min: float = 0.0, spent_out: list | None = None,
-            arc_thickness: float = 0.0, arc_density: float = 0.804, arc_out: list | None = None, recv_out: list | None = None):
+            arc_thickness: float = 0.0, arc_density: float = 0.804, arc_out: list | None = None, recv_out: list | None = None,
+            books_out: list | None = None):
     """Subduction: for every pair of segments of different plates within
     chord ``radius`` (KD-tree pair query, applied in sorted order) that are
     *approaching* — or closer than ``overlap_fraction * radius`` whatever
@@ -818,13 +947,23 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     arrays (into the current arrays; a survivor may appear several times).
     With ``shortening > 0`` a continental loser is not killed: that fraction
     of it goes to the survivor, it keeps the rest and joins the survivor's
-    plate (``plate_id`` is updated in place)."""
+    plate (``plate_id`` is updated in place).
+
+    ``books_out`` receives the crust the step moved between the books, each as
+    ``(column units, crust units)`` -- crust being column x extent, the
+    quantity ``variable_extent`` conserves: ``subducted`` (oceanic slab sent
+    to the mantle, positive), ``accreted`` (oceanic slab welded onto a
+    continent, which becomes continental crust) and ``arc_born`` (an oceanic
+    column relabelled continental by ``arc_birth``, before its extra arc crust
+    is drawn from the mantle; that draw is ``arc_out``)."""
     pairs = tree.query_pairs(radius, output_type="ndarray")
     if pairs.shape[0] == 0:
         if spent_out is not None:
             spent_out.append(0.0)
         if recv_out is not None:
             recv_out.append((np.zeros(0), np.zeros(0)))
+        if books_out is not None:
+            books_out.append({"subducted": (0.0, 0.0), "accreted": (0.0, 0.0), "arc_born": (0.0, 0.0)})
         return np.zeros(0, np.int64), np.zeros(0, np.int64)
     pairs = np.sort(pairs, axis=1)
     pairs = pairs[np.lexsort((pairs[:, 1], pairs[:, 0]))]
@@ -832,16 +971,21 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     P = int(seg.plate_id.max()) + 1 if seg.M else 1
     pol = plate_pair_polarity(seg.plate_id, seg.age, seg.kind, pairs, P)
     # [ground crustal shortening consumed, mass arcs drew from the mantle by column and
-    #  by crust (column x extent) -- the ledger is kept in whichever its mode conserves]
-    spent = np.zeros(3, dtype=np.float64)
+    #  by crust (column x extent) -- the ledger is kept in whichever its mode conserves --
+    #  then the same two for slab lost to the mantle, slab accreted to a continent, and
+    #  oceanic columns an arc birth relabelled]
+    spent = np.zeros(9, dtype=np.float64)
     out = _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.rework, seg.kind, seg.craton, seg.weld, seg.ext, spent, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw), float(shortening), float(radius), int(weld_steps), float(extent_min), float(arc_thickness), float(arc_density))
     if spent_out is not None:
         spent_out.append(float(spent[0]))
     if arc_out is not None:
         arc_out.append((float(spent[1]), float(spent[2])))
+    if books_out is not None:
+        books_out.append({"subducted": (float(spent[3]), float(spent[4])), "accreted": (float(spent[5]), float(spent[6])),
+                          "arc_born": (float(spent[7]), float(spent[8]))})
     losers, survivors, recv_th, recv_m = out
     if recv_out is not None:
-        recv_out.append((recv_th, recv_m))     # what each survivor was handed (-1: fixed-area rule)
+        recv_out.append((recv_th, recv_m))     # what each survivor was handed (NaN: fixed-area rule)
     return losers, survivors
 
 
@@ -859,7 +1003,7 @@ def _received_fraction(kind_lo, alive_lo, accretion, shortening):
 
 
 @njit(cache=True)
-def _spread_kernel(losers, survivors, nbrs, pos, plate_id, kind, mass, thickness, density, alive, inv2s2, accretion, shortening, recv_th, recv_m):
+def _spread_kernel(losers, survivors, nbrs, pos, plate_id, kind, mass, thickness, density, alive, inv2s2, accretion, shortening, recv_th, recv_m, ext, use_ext):
     K = nbrs.shape[1]
     w = np.empty(K, dtype=np.float64)
     for e in range(losers.shape[0]):
@@ -870,11 +1014,14 @@ def _spread_kernel(losers, survivors, nbrs, pos, plate_id, kind, mass, thickness
         # only what the survivor actually received: an oceanic slab hands over
         # `accretion` of itself and the rest goes to the mantle, so spreading
         # the whole slab would create mass that was never accreted
-        if recv_th[e] >= 0.0:
+        if not np.isnan(recv_th[e]):
             # the extent model said exactly what moved: a sliver of the loser's column, not
-            # the whole of it -- spreading the whole stripped the survivor to nothing
+            # the whole of it -- spreading the whole stripped the survivor to nothing.  And
+            # only a gain: a merge that thinned the survivor handed it nothing to spread
             m = recv_m[e]
             th = recv_th[e]
+            if th <= 0.0 or m <= 0.0:
+                continue
         else:
             f = _received_fraction(kind[lo], alive[lo], accretion, shortening)
             m = f * mass[lo]
@@ -902,28 +1049,42 @@ def _spread_kernel(losers, survivors, nbrs, pos, plate_id, kind, mass, thickness
             f = w[q] / tot
             mass[su] -= f * m
             thickness[su] -= f * th
-            mass[n] += f * m
-            thickness[n] += f * th
+            if use_ext:
+                # the crust left a column of ext[su] and lands on one of ext[n]
+                r = ext[su] / max(ext[n], 1e-12)
+                mass[n] += f * m * r
+                thickness[n] += f * th * r
+            else:
+                mass[n] += f * m
+                thickness[n] += f * th
             density[n] = mass[n] / thickness[n]
         density[su] = mass[su] / thickness[su]
 
 
-def spread_collisions(seg: Segments, tree: cKDTree, losers: np.ndarray, survivors: np.ndarray, alive: np.ndarray, sigma: float, knn: int = 12, accretion: float = 1.0, shortening: float = 0.0, received=None) -> None:
+def spread_collisions(seg: Segments, tree: cKDTree, losers: np.ndarray, survivors: np.ndarray, alive: np.ndarray, sigma: float, knn: int = 12, accretion: float = 1.0, shortening: float = 0.0, received=None,
+                      conserve_volume: bool = False) -> None:
     """Belt formation: the mass and thickness a survivor just received from
     a subducted segment are shared, with Gaussian weights ``exp(-d²/2σ²)``,
     among the survivor and its ``knn`` nearest *live, same-plate, same-kind* segments
     (the survivor itself is among them with weight 1), so repeated
     collisions along a boundary build a belt ~2σ wide instead of isolated
     peaks.  Mass conserving.  Must run before ``seg.compress`` (the dead
-    losers' arrays still hold the transferred amounts)."""
+    losers' arrays still hold the transferred amounts).
+
+    ``conserve_volume`` (``tectonics.variable_extent``): a neighbour receives
+    the column scaled by ``ext[su] / ext[n]``, so ``sum(ext * thickness)``
+    and ``sum(ext * mass)`` do not move.  Off, a column moves column for
+    column, which conserves only the plain sums -- right when every extent is
+    the same, and the fixed-area model bit for bit."""
     if losers.size == 0:
         return
     kk = min(int(knn), tree.n)
     _, nb = tree.query(seg.pos[survivors], k=kk, workers=-1)
     nb = np.atleast_2d(nb).reshape(survivors.size, kk).astype(np.int64)
-    rt = np.ascontiguousarray(received[0], dtype=np.float64) if received is not None else np.full(len(losers), -1.0)
-    rm = np.ascontiguousarray(received[1], dtype=np.float64) if received is not None else np.full(len(losers), -1.0)
-    _spread_kernel(np.ascontiguousarray(losers), np.ascontiguousarray(survivors), np.ascontiguousarray(nb), seg.pos, seg.plate_id, seg.kind, seg.mass, seg.thickness, seg.density, alive, 1.0 / (2.0 * float(sigma) ** 2), float(accretion), float(shortening), rt, rm)
+    rt = np.ascontiguousarray(received[0], dtype=np.float64) if received is not None else np.full(len(losers), np.nan)
+    rm = np.ascontiguousarray(received[1], dtype=np.float64) if received is not None else np.full(len(losers), np.nan)
+    _spread_kernel(np.ascontiguousarray(losers), np.ascontiguousarray(survivors), np.ascontiguousarray(nb), seg.pos, seg.plate_id, seg.kind, seg.mass, seg.thickness, seg.density, alive, 1.0 / (2.0 * float(sigma) ** 2), float(accretion), float(shortening), rt, rm,
+                   seg.ext, bool(conserve_volume))
 
 
 @njit(cache=True)
@@ -969,7 +1130,7 @@ def segment_cascade(seg: Segments, tree: cKDTree, survivors: np.ndarray, alive: 
 
 
 @njit(cache=True)
-def _relax_kernel(nbrs, pos, kind, thickness, mass, density, rate, thr_per_rad):
+def _relax_kernel(nbrs, pos, kind, thickness, mass, density, rate, thr_per_rad, ext, use_ext):
     M, K = nbrs.shape
     for s in range(M):
         for q in range(K):
@@ -994,13 +1155,21 @@ def _relax_kernel(nbrs, pos, kind, thickness, mass, density, rate, thr_per_rad):
                 dth = 0.5 * thickness[s]
             thickness[s] -= dth
             mass[s] -= dth * ds
-            thickness[n] += dth
-            mass[n] += dth * ds
+            if use_ext:
+                # the crust left a column of ext[s] and lands on one of ext[n]: column for
+                # column lost 2.3-2.8 units of continental volume per 8000 Earth steps
+                r = ext[s] / max(ext[n], 1e-12)
+                thickness[n] += dth * r
+                mass[n] += dth * ds * r
+            else:
+                thickness[n] += dth
+                mass[n] += dth * ds
             density[s] = mass[s] / thickness[s]
             density[n] = mass[n] / thickness[n]
 
 
-def relax_segments(seg: Segments, tree: cKDTree, rate: float, threshold_per_spacing: float, spacing: float, knn: int = 8) -> None:
+def relax_segments(seg: Segments, tree: cKDTree, rate: float, threshold_per_spacing: float, spacing: float, knn: int = 8,
+                   conserve_volume: bool = False) -> None:
     """PLAN 6.4 cascade applied to the segment cloud every step: for every
     segment (index order) and each of its ``knn`` nearest *same-kind*
     neighbours whose bedrock height is lower by more than
@@ -1014,13 +1183,19 @@ def relax_segments(seg: Segments, tree: cKDTree, rate: float, threshold_per_spac
     ~4 km step in bedrock height, far above any plausible threshold, so an
     unrestricted cascade drains every coastal continental segment into the
     seafloor beside it -- exactly the leak that closes the gap the crust
-    types exist to open."""
+    types exist to open.
+
+    ``conserve_volume`` (``tectonics.variable_extent``): what leaves a column
+    of extent ``ext[s]`` arrives on one of ``ext[n]`` scaled by their ratio,
+    so ``sum(ext * thickness)`` does not move; off, the plain sum is what is
+    conserved (the fixed-area model, bit for bit)."""
     if seg.M < 2:
         return
     kk = min(int(knn) + 1, tree.n)
     _, nb = tree.query(seg.pos, k=kk, workers=-1)
     nb = np.atleast_2d(nb).reshape(seg.M, kk).astype(np.int64)
-    _relax_kernel(np.ascontiguousarray(nb), seg.pos, seg.kind, seg.thickness, seg.mass, seg.density, float(rate), float(threshold_per_spacing) / float(spacing))
+    _relax_kernel(np.ascontiguousarray(nb), seg.pos, seg.kind, seg.thickness, seg.mass, seg.density, float(rate), float(threshold_per_spacing) / float(spacing),
+                  seg.ext, bool(conserve_volume))
 
 
 def delaminate(seg: Segments, limit: float, rate: float) -> float:
