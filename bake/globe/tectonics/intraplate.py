@@ -325,6 +325,9 @@ def rift(sim, rng, max_plates: int = 1) -> dict:
     is not always the same size either.
     """
     plates, tp = sim.plates, sim.tp
+    if str(tp.rift_mode) == "insulation":
+        # one entry point for both modes, so whatever wraps `rift` sees every rift
+        return insulation_rifts(sim, rng)
     big = (plate_ground(sim) >= min_ground(sim, tp.rift_min_area, RIFT_MIN_SEGMENTS) if tp.variable_extent
            else plates.count >= RIFT_MIN_SEGMENTS)
     alive = np.flatnonzero(plates.alive & big)
@@ -344,6 +347,252 @@ def rift(sim, rng, max_plates: int = 1) -> dict:
     return {"event": "rift", "split": split, "plates": int(sim.plates.n_alive()),
             "pairs": [(r["split"], r["new"]) for r in out if r["split"] >= 0],
             "moved": sum(r.get("moved", 0) for r in out)}
+
+
+def insulation_deficit(sim) -> tuple[np.ndarray, np.ndarray]:
+    """Per segment, how far the mantle under it has been insulated towards
+    `insulation_floor`, as a share of the full deficit (0 neutral mantle, 1
+    fully insulated), and the plate's continental share of the sphere."""
+    from ..field import FaceField
+    from .segments import CONTINENTAL
+
+    seg, tp = sim.seg, sim.tp
+    H = sim.heat.grid.H
+    neu = sim.heat_neutral[:, H:-H, H:-H]
+    bg = sim.heat_bg[:, H:-H, H:-H]
+    full = np.maximum(neu - float(tp.insulation_floor), 1e-6)
+    f = FaceField.from_interior(sim.heat.grid, np.clip((neu - bg) / full, 0.0, 1.0), exchange=True)
+    D = np.clip(f.sample_sphere(seg.pos).astype(np.float64), 0.0, 1.0)
+    cont = seg.kind == CONTINENTAL
+    P = sim.plates.P
+    Ac = np.bincount(seg.plate_id[cont], weights=seg.ext[cont], minlength=P)[:P] / (4.0 * np.pi)
+    return D, Ac
+
+
+def insulation_rifts(sim, rng) -> dict:
+    """Rift every continental plate whose insulation stress is past its strength.
+
+    A supercontinent insulates the mantle under it; the mantle warms, wells
+    up and puts the lithosphere above it in tension, while the circum-
+    supercontinent trenches pull its margins outwards.  The stress grows with
+    the deficit (how long the continent has sat still) and with the size of
+    the continent, so a supercontinent that has sat for ~100 My breaks and a
+    small, moving continent does not.  ``sigma = mean deficit under the
+    plate's continental crust * sqrt(continental share)``; a plate rifts when
+    sigma exceeds ``rift_stress`` (times a per-plate strength jitter of
+    +-15 %), and not again for ``rift_refractory_my``.  Ocean plates do not
+    rift this way."""
+    from .segments import CONTINENTAL
+
+    seg, plates, tp = sim.seg, sim.plates, sim.tp
+    k = int(sim.step_index)
+    D, Ac = insulation_deficit(sim)
+    cont = seg.kind == CONTINENTAL
+    P = plates.P
+    w = seg.ext * cont
+    Dp = np.bincount(seg.plate_id, weights=D * w, minlength=P)[:P] / np.maximum(np.bincount(seg.plate_id, weights=w, minlength=P)[:P], 1e-30)
+    refr = float(tp.rift_refractory_my) / max(float(tp.myr_per_step), 1e-9)
+    out = []
+    for p in np.flatnonzero(plates.alive & (Ac >= float(tp.rift_min_cont))):
+        p = int(p)
+        if k - sim.last_rift.get(p, -10 ** 9) < refr:
+            continue
+        sigma = float(Dp[p] * np.sqrt(Ac[p]))
+        jit = sim.rift_jitter.setdefault(p, 1.0 + 0.15 * (2.0 * float(rng.random()) - 1.0))
+        if sigma < float(tp.rift_stress) * jit:
+            continue
+        r = _rift_insulated(sim, p, rng, D)
+        if r["split"] >= 0:
+            r["trigger"] = sigma
+            out.append(r)
+    pairs = [(r["split"], r["new"]) for r in out]
+    return {"event": "rift", "split": [r["split"] for r in out], "pairs": pairs,
+            "centre": out[0]["centre"] if out else None, "trigger": [r["trigger"] for r in out],
+            "plates": int(sim.plates.n_alive())}
+
+
+def _rift_insulated(sim, target: int, rng, D: np.ndarray, candidates: int = 32) -> dict:
+    """Cut plate `target` along the weakest line through its upwelling.
+
+    The cut is a great circle through the deficit-weighted centre of the
+    plate's continent (where the insulation upwelling is), chosen among
+    `candidates` orientations for the lowest cost: every crossing of the
+    cut costs its length, four times that through a craton (cratons are
+    strong), scaled by the crust's assembly age (`rework`, low on a young
+    suture or belt: rifts reopen sutures, Buiter & Torsvik 2014).  Both
+    halves must keep a quarter of the plate's continent, and the cut must
+    stay within 80 degrees of its centre: the normal component of any
+    relative rotation along a great circle goes as cos(theta - theta0), so
+    a cut longer than ~180 degrees must converge somewhere (the shipped
+    rift's far side).  Cratons go whole to the side holding most of them,
+    and any piece of a half that is not connected to the rest of it joins
+    the other half, so the cut leaves no stranded slivers.
+
+    No kick: the halves keep the plate's motion.  What opens the rift is the
+    forces -- the cut lies on the insulation low, the halves' outer margins
+    on the girdle -- held back at first by the rift's own strength
+    (`rift_strength`, weakening with opening; see forces.py).
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    from scipy.spatial import cKDTree
+
+    from .segments import CONTINENTAL
+
+    seg, plates, tp = sim.seg, sim.plates, sim.tp
+    sel = np.flatnonzero(seg.plate_id == target)
+    if sel.size < 16:
+        return {"event": "rift", "split": -1}
+    pos = seg.pos[sel]
+    cont = seg.kind[sel] == CONTINENTAL
+    ext = seg.ext[sel]
+    wc = ext * cont * (0.05 + D[sel])
+    c = (pos * wc[:, None]).sum(axis=0)
+    if np.linalg.norm(c) < 1e-9:
+        return {"event": "rift", "split": -1}
+    c /= np.linalg.norm(c)
+    sp = sim.spacing
+    pairs = cKDTree(pos).query_pairs(1.3 * sp, output_type="ndarray")
+    if pairs.shape[0] == 0:
+        return {"event": "rift", "split": -1}
+    a, b = pairs[:, 0], pairs[:, 1]
+    cr = seg.craton[sel] > 0
+    rw = seg.rework[sel]
+    mrw = float(rw[cont].mean()) if cont.any() else 1.0
+    wseg = np.where(cont, (np.where(cr, 4.0, 1.0)) * (0.5 + rw / max(mrw, 1e-9)), 0.3)
+    wpair = 0.5 * (wseg[a] + wseg[b])
+    mid = pos[a] + pos[b]
+    mid /= np.linalg.norm(mid, axis=1, keepdims=True)
+    ang_mid = np.degrees(np.arccos(np.clip(mid @ c, -1.0, 1.0)))
+    zig = float(tp.rift_cut_zigzag)
+    noise = zig * fbm_at(pos, rng, octaves=3, base_freq=float(tp.rift_zigzag_freq)) if zig > 0.0 else 0.0
+    Ctot = float((ext * cont).sum())
+    best = None
+    for _ in range(int(candidates)):
+        v = random_unit_vectors(rng, (1,))[0]
+        n = v - c * float(v @ c)
+        ln = float(np.linalg.norm(n))
+        if ln < 1e-9:
+            continue
+        n /= ln
+        side = (pos @ n + noise) > 0.0
+        cross = side[a] != side[b]
+        if not cross.any():
+            continue
+        ca = float((ext * cont * side).sum())
+        if min(ca, Ctot - ca) < 0.25 * Ctot:
+            continue
+        if float(ang_mid[cross].max()) > 80.0:
+            continue
+        cost = float(wpair[cross].sum())
+        if best is None or cost < best[0]:
+            best = (cost, n, side.copy())
+    if best is None:
+        return {"event": "rift", "split": -1}
+    _, n, side = best
+    # cratons whole
+    crs = seg.craton[sel]
+    for q in np.unique(crs[crs > 0]):
+        m = crs == q
+        side[m] = bool(side[m].mean() > 0.5)
+    # no stranded pieces: a half keeps only its largest connected piece
+    for s_val in (True, False):
+        m = side == s_val
+        idx = np.flatnonzero(m)
+        if idx.size < 2:
+            continue
+        loc = np.full(sel.size, -1)
+        loc[idx] = np.arange(idx.size)
+        e = (side[a] == s_val) & (side[b] == s_val)
+        g = coo_matrix((np.ones(int(e.sum()), np.int8), (loc[a[e]], loc[b[e]])), shape=(idx.size, idx.size))
+        _, comp = connected_components(g, directed=False)
+        sizes = np.bincount(comp)
+        if sizes.size > 1:
+            side[idx[comp != int(np.argmax(sizes))]] = not s_val
+    if side.all() or not side.any():
+        return {"event": "rift", "split": -1}
+    P = plates.P
+    pid = seg.plate_id.copy()
+    pid[sel[side]] = P
+    new = _rebuild(seg, pid, P + 1, rng, float(tp.initial_speed) * sim.spacing, keep=plates.omega,
+                   snap=not tp.variable_extent)
+    new.omega[P] = plates.omega[target]
+    new.omega[~new.alive] = 0.0
+    sim.plates = new
+    k = int(sim.step_index)
+    sim.rift_pairs[(int(target), int(P))] = {"k0": k, "delta": 0.0}
+    sim.last_rift[int(target)] = k
+    sim.last_rift[int(P)] = k
+    sim.rift_jitter.pop(int(target), None)
+    return {"event": "rift", "split": int(target), "new": int(P), "moved": int(side.sum()), "centre": c.tolist(),
+            "plates": int(new.n_alive())}
+
+
+def margin_collapse(sim, rng) -> dict:
+    """Old passive margins fail: the closing half of the Wilson cycle.
+
+    Ocean floor that a rift left attached to its continent (an Atlantic) rides
+    the continent's plate and, with nothing to subduct it, only ages -- in this
+    model indefinitely, since trenches start nowhere else: the floor's mean age
+    climbed 39 -> 179 My over 4000 steps and every continent ended ringed by
+    passive margins.  On Earth such floor is the densest lithosphere there is,
+    and margins this old (the oldest Atlantic floor is ~180 My, anything much
+    older is gone) are where subduction starts or invades (the Lesser Antilles,
+    Scotia, Gibraltar; Stern 2004).
+
+    So every `margin_collapse_every` steps, a plate that is mostly continent
+    (>= 30 % of its area) and carries ocean floor (>= `margin_collapse_min` of
+    the sphere) whose floor along its own continental margin has a median age
+    past `margin_collapse_my` (x a per-plate jitter of +-15 %) loses that ocean
+    floor to a plate of its own, and a slab of `margin_collapse_slab_km` is put
+    under the margin -- about what underthrusting needs before it sustains
+    itself (Gurnis 2004).  No kick: the new plate starts with its old motion and
+    goes down only if the forces (slab pull, the heat field) take it there.
+    """
+    from scipy.spatial import cKDTree
+
+    from . import forces
+    from .segments import CONTINENTAL
+
+    seg, plates, tp = sim.seg, sim.plates, sim.tp
+    myr = float(tp.myr_per_step)
+    P = plates.P
+    pid = seg.plate_id
+    cont = seg.kind == CONTINENTAL
+    A = np.bincount(pid, weights=seg.ext, minlength=P)[:P]
+    C = np.bincount(pid[cont], weights=seg.ext[cont], minlength=P)[:P]
+    out = []
+    for p in np.flatnonzero(plates.alive & (C >= 0.3 * np.maximum(A, 1e-30))):
+        p = int(p)
+        oc = np.flatnonzero((pid == p) & ~cont)
+        if oc.size == 0 or float(seg.ext[oc].sum()) < float(tp.margin_collapse_min) * 4.0 * np.pi:
+            continue
+        co = np.flatnonzero((pid == p) & cont)
+        d, _ = cKDTree(seg.pos[co]).query(seg.pos[oc], k=1)
+        margin = oc[d < 1.5 * sim.spacing]
+        if margin.size < 8:
+            continue
+        jit = sim.collapse_jitter.setdefault(p, 1.0 + 0.15 * (2.0 * float(rng.random()) - 1.0))
+        if float(np.median(seg.age[margin])) * myr < float(tp.margin_collapse_my) * jit:
+            continue
+        Pn = plates.P
+        new_pid = seg.plate_id.copy()
+        new_pid[oc] = Pn
+        new = _rebuild(seg, new_pid, Pn + 1, rng, float(tp.initial_speed) * sim.spacing, keep=plates.omega,
+                       snap=not tp.variable_extent)
+        new.omega[Pn] = plates.omega[p]
+        new.omega[~new.alive] = 0.0
+        sim.plates = plates = new
+        sim.collapse_jitter.pop(p, None)
+        if tp.slab_force > 0.0 and float(tp.margin_collapse_slab_km) > 0.0:
+            s0 = float(tp.margin_collapse_slab_km) / sim.R_km
+            flat = sim.slab.interior.reshape(-1).copy()
+            forces.deposit_blobs(flat, sim.heat_tree, seg.pos[margin], np.full(margin.size, 0.4 * s0), 2.0 * sim.spacing)
+            sim.slab.interior[...] = np.maximum(sim.slab.interior, np.minimum(flat.reshape(sim.slab.interior.shape), s0))
+        out.append({"plate": p, "new": int(Pn), "moved": int(oc.size), "margin_age_my": float(np.median(seg.age[margin]) * myr)})
+        P = plates.P
+        pid = seg.plate_id
+    return {"event": "collapse", "collapses": out, "plates": int(sim.plates.n_alive())}
 
 
 def split_disconnected(sim, min_segments: int = 16, link_factor: float = 1.6, rng=None, tree=None,

@@ -365,7 +365,7 @@ def crystallise(seg: Segments, T: np.ndarray, growth: float, density_base: float
 # gaps -> new crust (PLAN 6.2.4)
 # --------------------------------------------------------------------------
 def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid, gap_radius: float, r_min: float, rng: np.random.Generator, heat: FaceField, new_thickness: float, oceanic_density: float, jitter_cells: float = 0.5, omega: np.ndarray | None = None, tree: cKDTree | None = None, ext: float | None = None, stretch: float = 0.0, thin_floor: float = 0.0,
-                   void: str = "create", taken_out: list | None = None) -> tuple[Segments, np.ndarray]:
+                   void: str = "create", taken_out: list | None = None, net_outflow: bool = False) -> tuple[Segments, np.ndarray]:
     """Cells farther than ``gap_radius`` from every segment are divergent
     boundaries — provided the nearest segment is moving *away* from the
     cell (``omega`` (P, 3) rad/step given; holes left by subduction at a
@@ -432,6 +432,25 @@ def spawn_segments(seg: Segments, idx: np.ndarray, dist: np.ndarray, grid: Grid,
         v = np.cross(omega[seg.plate_id[near]], ps)
         away = ps - interior_centers_flat(grid)[cells]
         div = np.sum(v * away, axis=1) > 0.0
+        if net_outflow and tree is not None and seg.M > 6:
+            # A gap between plates is a ridge only if the crust around it is leaving it.  The
+            # hole a slab leaves at a trench has the incoming plate's crust closing on it and the
+            # overriding plate's next to it, nearly still: the nearest-segment test above read
+            # that as divergent whenever the overriding plate drifted the wrong way by a hair,
+            # and filled the trench with new floor on the *overriding* plate (32 % of all new
+            # sea floor was born within a spacing of a slab that had just gone down), which
+            # grew an oceanic apron on the supercontinent and stepped the girdle off its margin.
+            # So where the neighbours belong to more than one plate, the net outflow decides
+            cen_ = interior_centers_flat(grid)[cells]
+            _, nb6 = tree.query(cen_, k=6)
+            pnb = seg.plate_id[nb6]
+            mixed = (pnb != pnb[:, :1]).any(axis=1)
+            if mixed.any():
+                pk = seg.pos[nb6[mixed]]                                   # (m, 6, 3)
+                vk = np.cross(omega[pnb[mixed]], pk)
+                ok = pk - cen_[mixed][:, None, :]
+                ok /= np.maximum(np.linalg.norm(ok, axis=2, keepdims=True), 1e-12)
+                div[mixed] = np.sum(vk * ok, axis=2).mean(axis=1) > 0.0
         gap.ravel()[cells[~div]] = False
     n = int(gap.sum())
     if n == 0:

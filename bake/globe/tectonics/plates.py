@@ -463,4 +463,49 @@ def supercontinent_plates(pos: np.ndarray, kind: np.ndarray, n_plates: int, rng,
     return pid
 
 
-__all__ = ["seed_supercontinent", "supercontinent_plates", "snap_cratons", "Plates", "cluster_plates", "random_initial_omega", "heat_gradient_3d", "plate_torques", "update_omega", "rotate_segments", "segment_velocities", "tangent_to_cell_components"]
+def superocean_plates(pos: np.ndarray, kind: np.ndarray, n_plates: int, rng, size_jitter: float = 0.6,
+                      max_share: float = 0.25, min_share: float = 0.005, tries: int = 24) -> np.ndarray:
+    """Plate 0 is the supercontinent; ``n_plates - 1`` ocean plates tile the
+    superocean with an Earth-like spread of sizes but no plate larger than
+    ``max_share`` of the sphere (Earth's largest, the Pacific, is ~0.20; at
+    ~200 Ma Panthalassa carried Farallon, Izanagi, Phoenix and the young
+    Pacific, Tethys its own).  `cluster_plates` with a size jitter draws one
+    tiling; it is redrawn until the largest fits, keeping the best draw."""
+    M = pos.shape[0]
+    sea = kind != CONTINENTAL
+    n_ocean = max(1, int(n_plates) - 1)
+    best, best_max = None, np.inf
+    for _ in range(max(1, int(tries))):
+        lab = cluster_plates(pos[sea], n_ocean, rng, size_jitter=size_jitter)
+        share = np.bincount(lab, minlength=n_ocean) / M
+        mx = float(share.max())
+        ok = mx <= max_share and float(share.min()) >= min_share
+        if mx < best_max or ok:
+            best, best_max = lab, mx
+        if ok:
+            break
+    pid = np.zeros(M, dtype=np.int32)
+    pid[sea] = best + 1
+    return pid
+
+
+def ocean_age_from_ridges(pos: np.ndarray, kind: np.ndarray, plate_id: np.ndarray, ridge: np.ndarray,
+                          spacing: float, rate_rad_per_step: float, max_age: float) -> np.ndarray:
+    """Age (steps) of the initial ocean floor: distance to the nearest ridge
+    segment (``ridge`` mask) over the half spreading rate, capped at
+    ``max_age``; continental crust gets 0.  Ridge-adjacent floor is young,
+    floor far from every ridge -- along the supercontinent's margin, where it
+    is about to go down the girdle trenches -- is the oldest."""
+    from scipy.spatial import cKDTree
+
+    age = np.zeros(pos.shape[0])
+    oc = kind != CONTINENTAL
+    if not ridge.any() or not oc.any():
+        age[oc] = max_age
+        return age
+    d, _ = cKDTree(pos[ridge]).query(pos[oc], k=1)
+    age[oc] = np.minimum(d / max(rate_rad_per_step, 1e-12), max_age)
+    return age
+
+
+__all__ = ["seed_supercontinent", "supercontinent_plates", "superocean_plates", "ocean_age_from_ridges", "snap_cratons", "Plates", "cluster_plates", "random_initial_omega", "heat_gradient_3d", "plate_torques", "update_omega", "rotate_segments", "segment_velocities", "tangent_to_cell_components"]

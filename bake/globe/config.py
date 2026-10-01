@@ -59,9 +59,7 @@ RUNTIME_KNOBS: dict[str, Any] = {
     # whole world (``bake`` refuses without ``--force``, and ``--force``
     # without ``--from`` reruns from tectonics).
     "erosion": {"checkpoint_every", "quicklook_every", "resume"},
-    # a reporting unit (scripts/tect_scorecard.py converts steps to My with it); the
-    # simulation never reads it, so it must not invalidate a baked world either
-    "tectonics": {"myr_per_step"},
+    # (dyn-minimal: tectonics.myr_per_step converts the physical parameters, so it is hashed)
     "render": ALL,
 }
 
@@ -94,7 +92,7 @@ class TectonicsParams:
 
     N_tect: int = 256
     segments: int = 20000
-    initial_plates: int = 4  # plates at step 0: ONE for the assembled supercontinent, the rest tiling the ocean. A supercontinent is a single rigid block -- nothing inside it collides until it breaks up -- so rifting is what raises this count, which is the right causal order
+    initial_plates: int = 9  # (dyn-minimal: 1 supercontinent + 8 ocean plates -- 10 smaller ones had their ridges reach the girdle in 30-40 My; shipped 4) plates at step 0: ONE for the assembled supercontinent, the rest tiling the ocean. A supercontinent is a single rigid block -- nothing inside it collides until it breaks up -- so rifting is what raises this count, which is the right causal order
     steps: int = 4000  # 1500 ended the bake mid-dispersal with no belt younger than the breakup; 3000 is past the first reassembly (docs/plate-forces.md section 7), and 4000 is where `variable_extent` leaves the best hypsometry Earth scale has measured (band error 12.7, section 4d).  Not higher: at 8000 the continents drain to 25 % of the crust and 12000 to 22 %, an Earth-scale divergence `small` does not show (section 4e)
     convection: float = 10.0  # ★
     myr_per_step: float = 0.15  # REPORTING ONLY: million years per tectonic step, for turning speeds into cm/yr and steps into My (scripts/tect_scorecard.py, globe/tectonics/diagnostics.py). Nothing in the simulation reads it -- it is hash-exempt (RUNTIME_KNOBS) -- because the model has no time unit of its own: speeds are in segment spacings per step, so the step's length in years is a calibration, not a parameter. Three independent readings of the shipped Earth preset (20000 segments, spacing ~160 km) agree on it: plate speeds against Earth's (slab-attached ~8 cm/yr, continents ~3), the mean age of the ocean floor against Earth's 64 My, and ridge_age (400 steps, subsidence done) against the ~80 My half-space cooling takes -- each gives 0.09-0.25 My/step, centred near 0.15, so 4000 steps are ~600 My. A run at another segment count has another spacing and so another calibration (speeds scale with the spacing)
@@ -105,7 +103,7 @@ class TectonicsParams:
     # --- intraplate relief (globe/tectonics/intraplate.py) ---------------
     reorganise_every: int = 0  # steps between plate reorganisations (0 = never). Earth's interiors are former boundaries; with a fixed configuration an interior is never a boundary and so is never uplifted (measured: 6 m of local relief over 107 km across 88 % of land)
     reorganise_plates: int = 0  # plate count to re-cluster into (0 = keep initial_plates)
-    rift_every: int = 600  # steps between rifting one plate in two (0 = never); opens new boundaries inside old interiors.  600 over 4000 steps with 4 initial plates is the combination earth-v13 through v16 were baked with
+    rift_every: int = 0  # (dyn-minimal: rifts are triggered by insulation, see rift_mode; shipped 600) steps between rifting one plate in two (0 = never); opens new boundaries inside old interiors.  600 over 4000 steps with 4 initial plates is the combination earth-v13 through v16 were baked with
     rift_plates: int = 2  # at most this many plates rift per event; the actual number is 1..this, and the targets are drawn at random weighted by area rather than always being the largest. Deterministic argmax targeting sliced the same supercontinent every event, which reads as the whole map coming apart on a schedule
     rift_zigzag: float = 0.35  # spherical-noise perturbation of the rift plane. A spreading centre is a staircase of ridge segments offset by transforms, not a smooth arc; 0 gives the old straight cut
     rift_zigzag_freq: float = 6.0  # lattice frequency of that perturbation: higher = shorter ridge segments between offsets
@@ -133,7 +131,7 @@ class TectonicsParams:
     # thickening.  Measured with one crust type, our height distribution was
     # a single broad hump (thickness a continuum 0.18-8.3, density 0.20-0.96)
     # and the ocean spanned 1846 m against Earth's ~3000.
-    continental_fraction: float = 0.75  # fraction of the initial crust seeded continental, as one assembled supercontinent. Earth's continental crust including shelves is ~40 % of the surface; this starts a little above it because collision thickening consumes area (measured over 1500 steps: 0.70 -> 0.60, 0.55 -> 0.36 -- the loss scales with the perimeter-to-area ratio, so a smaller continent loses proportionally more).  0.75 with `variable_extent` settles at 40.5 % of cells continental at 4000 steps, which is Earth's number
+    continental_fraction: float = 0.40  # (dyn-minimal: Pangaea-sized; shipped 0.75) fraction of the initial crust seeded continental, as one assembled supercontinent. Earth's continental crust including shelves is ~40 % of the surface; this starts a little above it because collision thickening consumes area (measured over 1500 steps: 0.70 -> 0.60, 0.55 -> 0.36 -- the loss scales with the perimeter-to-area ratio, so a smaller continent loses proportionally more).  0.75 with `variable_extent` settles at 40.5 % of cells continental at 4000 steps, which is Earth's number
     craton_roughness: float = 0.80  # relative noise on each craton's own distance field, so nuclei are ragged rather than discs. Measured as the coefficient of variation of the centroid-to-edge radius (a disc is 0, real cratons 0.25-0.45): 0.152 at 0, with 13 of 22 nuclei under 0.15; 0.321 here, with 1. Higher fragments them -- at 1.2 the largest connected component falls to 73 % of a craton
     margin_taper: float = 0.35  # outermost fraction of the continent whose crust is stretched thin -- the continental shelf and slope. Earth's drowned margin is ~29 % of the continental crust
     margin_thinning: float = 0.45  # crustal thickness at the very edge of that taper, x normal. Earth's rifted margins run 35 km -> 10 km
@@ -234,6 +232,43 @@ class TectonicsParams:
     collision_zone_factor: float = 2.0  # uplift clamped >= 0 within this × spacing of a subduction of the uplift window
     area_blend: float = 0.05  # rolling blend of the measured Voronoi area per step (PLAN: 0.99 rolling == 0.01)
     label_every: int = 1  # rebuild the label map (gaps, areas) every n steps; collisions and forces run every step
+    # --- dyn-minimal: an Earth-like start, one-sided insulation, boundary forces, force-driven rifts ---
+    # (globe/tectonics/forces.py).  Every new parameter is in physical units, converted with
+    # myr_per_step, so the time step can change later.
+    # (myr_per_step is defined above; with dyn-minimal the simulation reads it, so it is no longer reporting-only)
+    start_mode: str = "pangaea"  # 'pangaea': supercontinent on one plate in a superocean of `initial_plates - 1` ocean plates, an ocean-floor age structure, a circum-supercontinent subduction girdle and force-balanced omegas; 'classic': the shipped random-pole start
+    ocean_plate_max: float = 0.25  # largest initial ocean plate, share of the sphere (Pacific today ~0.20); the tiling is redrawn until it fits
+    start_age_cmyr: float = 3.0  # half spreading rate that ages the initial ocean floor: age = distance to the nearest ridge / this
+    start_age_max_my: float = 180.0  # oldest initial ocean floor (Jurassic Pacific ~180 My)
+    start_insulation: float = 0.35  # share of the full insulation deficit already under the supercontinent at step 0 (it has been assembled for a while)
+    girdle_heat: float = 0.25  # initial heat ring (a downwelling) along the supercontinent's margin: the slabs of the subduction girdle
+    heat_noise_amp: float = 0.15  # amplitude of the fbm in the neutral mantle (the shipped start was all fbm, amplitude 0.5)
+    insulation_time_my: float = 100.0  # > 0: one-sided insulation -- under continents the background relaxes to `insulation_floor` (an upwelling, a repeller) with this time constant, under ocean back to the neutral mantle.  0: the shipped rule (ocean -> 1, an attractor everywhere)
+    insulation_floor: float = 0.0
+    slab_force: float = 0.6  # slab pull per unit trench length at a saturated, old slab, in heat units (Stokes: the same torque as a heat step this size across the trench); 0 = off
+    slab_sat_km: float = 400.0  # slab length at which the pull saturates (the upper-mantle slab)
+    slab_detach_my: float = 20.0  # e-folding time of a slab that is no longer fed (detachment)
+    slab_age_my: float = 80.0  # slab pull grows as sqrt(age / this), floored at slab_age_floor
+    slab_age_floor: float = 0.3
+    slab_speed_cmyr: float = 7.0  # slab resistance (bending, interface) per unit trench length, set so an old saturated slab alone moves its trench at this speed: slab-attached plates saturate here whatever their size (Earth: 7.9-8.1 cm/yr median)
+    boundary_drag_km: float = 600.0  # plate boundaries drag like a strip this wide of oceanic lithosphere on its base (0 = off)
+    collision_drag: float = 120.0  # converging continent-continent contacts resist the relative motion with this x the boundary drag per unit length (0 = off)
+    basal_drag_continental: float = 2.0  # > 0: plates drag on the mantle like their lithosphere -- oceanic as its column, continental this x that (x1.5 under cratons) -- instead of in proportion to the crust's column mass (0 = the shipped I)
+    cc_heating: bool = False  # continental losers also heat the field (shipped True): a collision has no slab and makes no downwelling
+    rift_mode: str = "insulation"  # 'insulation': a continental plate rifts when the insulation deficit under it, times sqrt(its continental share), exceeds rift_stress; 'clock': the shipped rift_every
+    rift_stress: float = 0.42
+    rift_min_cont: float = 0.06  # continental area (share of the sphere) below which a plate never rifts by insulation
+    rift_refractory_my: float = 45.0  # a plate born from a rift may not rift again for this long
+    rift_check_every: int = 10
+    rift_strength: float = 4.0  # a new rift couples its halves' normal motion with this x the smaller half's own drag (spread over the rift's contacts), holding the opening back to ~1/(1+G)...
+    rift_weaken_km: float = 100.0  # ...weakening as exp(-(opening / this)^2): necking -- slow phase, then fast (Brune 2016)
+    rift_cut_zigzag: float = 0.06
+    margin_collapse_my: float = 150.0  # ocean floor riding a continental plate detaches as its own plate, with a seed slab under the margin, once the floor along the margin is this old (median, +-15 % per plate): the Wilson cycle's closing half (0 = off)
+    margin_collapse_every: int = 50
+    margin_collapse_min: float = 0.005  # ... and only if the plate carries at least this much ocean floor (share of the sphere)
+    margin_collapse_slab_km: float = 150.0  # the seed slab: ~the underthrusting that makes subduction self-sustaining (Gurnis 2004)
+    spawn_net_outflow: bool = True  # a gap between plates spawns only if the crust around it is leaving it (net outflow of its 6 nearest segments), not the nearest one: no new floor in the hole a slab leaves at a trench
+    closure_ocean_only: bool = True  # the extent closure rescales only the sea floor (the books track's fix, te/books), so a girdle consuming floor faster than ridges make it does not inflate the continents
 
 
 @dataclass
