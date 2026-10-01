@@ -661,6 +661,11 @@ def test_scorecard_observer_stays_pure_on_the_earth_dynamics():
               "slab_ocean_speed_cmyr", "plate_rows"):
         assert k in last["dyn"], k
     assert "cc_noarc_share" in last["window"] and "ev_micro" in last["window"]
+    # convergence by ground: the census's length x rate, and what the kernel took of it
+    for k in ("cc_kin_share", "cc_kernel_share", "cc_take", "sub_take"):
+        assert k in last["window"], k
+    ws = [s["window"] for s in rep["samples"][1:]]
+    assert all(w["kin_all"] > 0.0 and 0.0 <= w["cc_kin_share"] <= 1.0 for w in ws)
     rifts = [r for r in rep["final"]["rift_list"] if r.get("G0") is not None]
     assert rifts and all("peak_open_cmyr" in r for r in rifts)
     import json
@@ -797,3 +802,30 @@ def test_frozen_ids_stop_a_collision_chain_within_one_step():
         assert cc.sum() > 0
         same[frozen] = int((pid0[lo] == pid0[su]).sum())
     assert same[False] > 0 and same[True] == 0
+
+
+def test_cc_shortening_takes_what_the_plates_close():
+    """The collision kernel's continental shortening against the plates' own convergence --
+    the census's boundary length x closing rate over the C-C contacts, the yardstick the
+    scorecard's window cc_take uses: on two halves closing at 1, 3 or 8 cm/yr the shipped rule
+    (live ids) spends 1.08x of it, rate-independently; frozen ids 0.90x (and 0.64-0.68x on
+    real assembled contacts at 225-525 My, against 0.84-0.92x live -- why it is off)."""
+    takes = {}
+    for rate in (1.0, 8.0):
+        for frozen in (False, True):
+            sim, a, b = _converging_halves(rate)
+            seg, tp = sim.seg, sim.tp
+            tree = collision.build_tree(seg)
+            cen = forces.census(seg, sim.plates, sim.spacing, tree=tree)
+            m = (cen["ki"] == CONTINENTAL) & (cen["kj"] == CONTINENTAL) & (cen["appr"] > 0)
+            kin = float((cen["w"][m] * cen["appr"][m]).sum())
+            sp = []
+            tect.collide(seg, tree, sim.r_coll, sim.plates.omega, np.ones(seg.M, bool), tp.overlap_fraction,
+                         float(tp.arc_accretion), 0.0, None, shortening=float(tp.continental_shortening),
+                         weld_steps=int(tp.weld_steps), extent_min=float(tp.extent_min) * sim.spacing ** 2,
+                         spent_out=sp, arc_out=[], recv_out=[], books_out=[], frozen_ids=frozen)
+            takes[rate, frozen] = sp[0] / kin
+    for rate in (1.0, 8.0):
+        assert 0.95 <= takes[rate, False] <= 1.2, takes
+        assert takes[rate, True] < takes[rate, False], takes
+    assert abs(takes[1.0, False] - takes[8.0, False]) < 0.02 * takes[8.0, False]

@@ -72,6 +72,11 @@ them):
 * in the window: the continent-continent collisions between non-arc crust,
   and the events of the dynamics (margin collapses, microplate captures,
   suture welds, healed rifts);
+* in the window, convergence by ground rather than by count: the C-C share
+  of the plates' converging boundary flux (the census's length x closing
+  rate, ``cc_kin_share``), and how much of that flux the collision kernel
+  actually consumed -- C-C shortening (``cc_take``) and subducted sea floor
+  (``sub_take``), 1 being exactly what the plates closed;
 * in ``final``: every force rift's detail (free opening, G0, the cut) and its
   opening trace -- how long it stayed slow, how fast it opened.
 
@@ -214,10 +219,12 @@ class Observer:
             if seg is not obs.sim.seg:
                 return orig_collide(seg, tree, radius, omega_dt, alive, *a, **kw)
             pid0, kind0, pos0, ext0 = seg.plate_id.copy(), seg.kind.copy(), seg.pos.copy(), seg.ext.copy()
+            obs._on_convergence(seg, tree)
             out = orig_collide(seg, tree, radius, omega_dt, alive, *a, **kw)
             obs._on_collide(seg, pid0, kind0, pos0, np.asarray(out[0]), np.asarray(out[1]))
-            # the ground the step's convergence consumed: crustal shortening (collide's own sum,
-            # the list run.py hands it) against the sea floor that went down
+            # the ground the kernel consumed: crustal shortening (collide's own sum, the list
+            # run.py hands it) and the sea floor that went down -- the kernel's bookkeeping,
+            # set against the plates' own convergence (_on_convergence) in the window
             lo = np.asarray(out[0])
             sub = lo[(kind0[lo] == OCEANIC) & ~np.asarray(alive)[lo]] if lo.size else lo
             obs.win["ground_sub"] += float(ext0[sub].sum())
@@ -280,7 +287,24 @@ class Observer:
         self.win = {"steps": 0, "coll_cc": 0, "coll_oc": 0, "coll_oo": 0, "arc_births": 0, "births_rift": 0,
                     "births_split": 0, "births_other": 0, "deaths": 0, "rifts": 0, "spawned": 0, "gap_cells": 0,
                     "coll_cc_arc": 0, "ev_collapse": 0, "ev_micro": 0, "ev_suture": 0, "ev_heal": 0, "ev_release": 0,
-                    "ground_cc": 0.0, "ground_sub": 0.0}
+                    "ground_cc": 0.0, "ground_sub": 0.0, "kin_cc": 0.0, "kin_all": 0.0}
+
+    def _on_convergence(self, seg, tree) -> None:
+        """The plates' own convergence this step, before the kernel runs: the census's
+        sum of boundary length x closing rate (``w * appr``, sr a step -- what forces.py
+        builds the boundary drag from) over the converging cross-plate pairs, all of them
+        and continent-continent.  The census reads the step's tree and the omegas the
+        kernel is handed; it writes nothing."""
+        from . import forces
+
+        cen = forces.census(seg, self.sim.plates, self.spacing, tree=tree)
+        conv = cen["appr"] > 0.0
+        if not conv.any():
+            return
+        wa = cen["w"][conv] * cen["appr"][conv]
+        cc = (cen["ki"][conv] == CONTINENTAL) & (cen["kj"][conv] == CONTINENTAL)
+        self.win["kin_all"] += float(wa.sum())
+        self.win["kin_cc"] += float(wa[cc].sum())
 
     def _on_collide(self, seg, pid0, kind0, pos0, losers, survivors) -> None:
         lk, sk = kind0[losers], kind0[survivors]
@@ -560,11 +584,20 @@ class Observer:
             "coll_per_step": _f(n_c / st),
             "cc_share": _f(w["coll_cc"] / n_c) if n_c else None,
             "cc_noarc_share": _f((w["coll_cc"] - w["coll_cc_arc"]) / n_c) if n_c else None,
-            # collisions are counted per contact and step: a C-C contact closing at 0.8 cm/yr counts
+            # Collisions are counted per contact and step: a C-C contact closing at 0.8 cm/yr counts
             # every step, a trench segment once when it goes down, so the count's C-C share is not
-            # the convergence's.  This is: shortened ground against subducted ground
-            "cc_ground_share": _f(w["ground_cc"] / (w["ground_cc"] + w["ground_sub"]))
+            # the convergence's.  The convergence's is cc_kin_share: the census's boundary length
+            # x closing rate, C-C over all converging pairs (9-12 % on seeds 2/4/1423 at 225-525
+            # My, where the count says ~0.70).  cc_kernel_share is the C-C share of the ground
+            # the *kernel* consumed (shortened against subducted) -- its bookkeeping, not the
+            # convergence: it read 1.8-2.2 % on those states, because the subduction kernel
+            # takes ~4x the O-C/O-O convergence (sub_take) and C-C shortening ~0.65-0.9x the
+            # C-C convergence (cc_take; 1 = the kernel spends exactly what the plates close)
+            "cc_kin_share": _f(w["kin_cc"] / w["kin_all"]) if w["kin_all"] > 0 else None,
+            "cc_kernel_share": _f(w["ground_cc"] / (w["ground_cc"] + w["ground_sub"]))
             if (w["ground_cc"] + w["ground_sub"]) > 0 else None,
+            "cc_take": _f(w["ground_cc"] / w["kin_cc"]) if w["kin_cc"] > 0 else None,
+            "sub_take": _f(w["ground_sub"] / (w["kin_all"] - w["kin_cc"])) if w["kin_all"] > w["kin_cc"] else None,
             "oc_share": _f(w["coll_oc"] / n_c) if n_c else None,
             "oo_share": _f(w["coll_oo"] / n_c) if n_c else None,
             "births": w["births_rift"] + w["births_split"] + w["births_other"],
