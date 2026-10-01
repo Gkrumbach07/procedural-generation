@@ -747,7 +747,7 @@ def _is_rift_pair(a, b, rift_a, rift_b):
 
 @njit(cache=True)
 def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, age, rework, kind, craton, weld, ext, spent, polarity, alive, overlap2, accretion, arc_birth, birth_draw, shortening, radius, weld_steps, extent_min, arc_thickness, arc_density,
-                      arc_dock, arc_keep, ocean_base, rift_a, rift_b):
+                      arc_dock, arc_keep, ocean_base, rift_a, rift_b, dock_keep, terrane):
     n = pairs.shape[0]
     losers = np.empty(n, dtype=np.int64)
     survivors = np.empty(n, dtype=np.int64)
@@ -859,12 +859,29 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
             # same contact is a continental collision that shortens it into the margin
             # (arc-continent collision thickens the margin, Taiwan, rather than leaving a low
             # terrane).  A rift's two halves never dock onto each other
+            if dock_keep < 1.0:
+                # A colliding arc does not accrete whole: its forearc, its dense lower crust and
+                # the slab under it go down the trench (the Luzon arc under Taiwan, the Halmahera
+                # arc under the Sangihe in the Molucca Sea), and only the rest is scraped onto
+                # the overriding plate.  Whole, the docked arcs were 12 % of the planet's ground
+                # and +27 % of the continental crust over 600 My on the first Earth seed
+                # (continents 0.40 -> 0.48), and arcs docked onto ocean plates piled up into
+                # plateaus no trench could take
+                lost = 1.0 - dock_keep
+                spent[3] += lost * mass[lo]
+                spent[4] += lost * ext[lo] * mass[lo]
+                if extent_min > 0.0:
+                    ext[lo] *= dock_keep
+                else:
+                    thickness[lo] *= dock_keep
+                    mass[lo] *= dock_keep
             if kind[su] == CONTINENTAL_K:
                 spent[9] += mass[lo]
                 spent[10] += ext[lo] * mass[lo]
                 spent[11] += 1.0
                 spent[12] += ext[lo]
                 kind[lo] = CONTINENTAL_K
+                terrane[lo] = 1
                 rework[lo] = 0.0                     # juvenile crust, assembled now
                 # ...and falls through to the continental shortening below
             else:
@@ -1084,7 +1101,7 @@ def _apply_collisions(pairs, plate_id, omega_dt, pos, mass, thickness, density, 
 def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, alive: np.ndarray, overlap_fraction: float = 0.5, accretion: float = 1.0, arc_birth: float = 0.0, rng: np.random.Generator | None = None, shortening: float = 0.0, weld_steps: int = 0, extent_min: float = 0.0, spent_out: list | None = None,
             arc_thickness: float = 0.0, arc_density: float = 0.804, arc_out: list | None = None, recv_out: list | None = None,
             books_out: list | None = None, arc_dock: float = 0.0, arc_keep: float = -1.0, ocean_base: float = 0.2,
-            rift_pairs=None, dock_out: list | None = None):
+            rift_pairs=None, dock_out: list | None = None, dock_keep: float = 1.0):
     """Subduction: for every pair of segments of different plates within
     chord ``radius`` (KD-tree pair query, applied in sorted order) that are
     *approaching* — or closer than ``overlap_fraction * radius`` whatever
@@ -1122,8 +1139,11 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
     turns continental and shortens into the margin), a welded terrane is never
     the loser of an ocean-ocean pair and stays welded while it is in contact,
     and the two halves of a rift (``rift_pairs``, plate id pairs) never dock
-    onto each other.  ``dock_out`` receives ``(docked onto continents, the
-    ground they held, docked onto ocean plates)``.  With ``arc_keep >= 0`` a
+    onto each other.  Of a docking arc only ``dock_keep`` accretes -- of its
+    ground with variable extent, of its column without -- and the rest goes
+    down with its slab (booked ``subducted``).  ``dock_out``
+    receives ``(docked onto continents, the ground they kept, docked onto ocean
+    plates)``.  With ``arc_keep >= 0`` a
     thinner arc going down hands the overriding plate ``arc_keep`` of its crust
     above ``ocean_base`` and ``accretion`` of the sea floor under it."""
     pairs = tree.query_pairs(radius, output_type="ndarray")
@@ -1155,7 +1175,7 @@ def collide(seg: Segments, tree: cKDTree, radius: float, omega_dt: np.ndarray, a
         ra = np.asarray([int(a) for a, _ in rift_pairs], np.int64)
         rb = np.asarray([int(b) for _, b in rift_pairs], np.int64)
     out = _apply_collisions(np.ascontiguousarray(pairs), seg.plate_id, np.ascontiguousarray(omega_dt), seg.pos, seg.mass, seg.thickness, seg.density, seg.age, seg.rework, seg.kind, seg.craton, seg.weld, seg.ext, spent, pol, alive, (float(overlap_fraction) * float(radius)) ** 2, float(accretion), float(arc_birth), np.ascontiguousarray(draw), float(shortening), float(radius), int(weld_steps), float(extent_min), float(arc_thickness), float(arc_density),
-                            float(arc_dock), float(arc_keep), float(ocean_base), ra, rb)
+                            float(arc_dock), float(arc_keep), float(ocean_base), ra, rb, float(dock_keep), seg.terrane)
     if spent_out is not None:
         spent_out.append(float(spent[0]))
     if arc_out is not None:

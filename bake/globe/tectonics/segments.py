@@ -12,6 +12,7 @@ A :class:`Segments` object holds parallel arrays, one entry per segment::
     h_ref      (M,)   float64  bedrock height at the uplift reference step
     kind       (M,)   int8     OCEANIC or CONTINENTAL (see below)
     craton     (M,)   int8     1 inside an Archean craton, 0 otherwise
+    terrane    (M,)   int8     1 on continental crust that docked as an island arc (te/arcs)
 
 Crust type
 ----------
@@ -232,9 +233,9 @@ class Segments:
     """Structure-of-arrays segment store (see module docstring).  All
     mutating methods keep the parallel arrays aligned."""
 
-    FIELDS = ("pos", "mass", "thickness", "density", "age", "plate_id", "area", "h_ref", "kind", "craton", "weld", "ext", "rework")
+    FIELDS = ("pos", "mass", "thickness", "density", "age", "plate_id", "area", "h_ref", "kind", "craton", "weld", "ext", "rework", "terrane")
 
-    def __init__(self, pos, thickness, density, age, plate_id, area, h_ref=None, mass=None, kind=OCEANIC, craton=0, weld=0, ext=None, rework=None):
+    def __init__(self, pos, thickness, density, age, plate_id, area, h_ref=None, mass=None, kind=OCEANIC, craton=0, weld=0, ext=None, rework=None, terrane=0):
         self.pos = np.ascontiguousarray(pos, dtype=np.float64).reshape(-1, 3)
         M = self.pos.shape[0]
         self.thickness = np.array(np.broadcast_to(np.asarray(thickness, dtype=np.float64), (M,)), dtype=np.float64)
@@ -267,6 +268,10 @@ class Segments:
         #: force, height or plate in the simulation moves because it exists
         self.rework = (self.age.copy() if rework is None
                        else np.array(np.broadcast_to(np.asarray(rework, dtype=np.float64), (M,)), dtype=np.float64))
+        #: 1 on continental crust that docked as an island arc (collision.collide, arc_dock_km):
+        #: arc crust at slab density, which loses its dense root over terrane_relax_my (run.py).
+        #: Nothing else reads it; 0 everywhere unless arcs dock
+        self.terrane = np.array(np.broadcast_to(np.asarray(terrane, dtype=np.int8), (M,)), dtype=np.int8)
 
     @property
     def M(self) -> int:
@@ -319,7 +324,7 @@ class Segments:
             setattr(self, name, np.ascontiguousarray(np.concatenate([getattr(self, name), getattr(other, name)])))
 
     def copy(self) -> "Segments":
-        return Segments(self.pos.copy(), self.thickness.copy(), self.density.copy(), self.age.copy(), self.plate_id.copy(), self.area.copy(), self.h_ref.copy(), self.mass.copy(), self.kind.copy(), self.craton.copy(), self.weld.copy(), self.ext.copy(), self.rework.copy())
+        return Segments(self.pos.copy(), self.thickness.copy(), self.density.copy(), self.age.copy(), self.plate_id.copy(), self.area.copy(), self.h_ref.copy(), self.mass.copy(), self.kind.copy(), self.craton.copy(), self.weld.copy(), self.ext.copy(), self.rework.copy(), self.terrane.copy())
 
     def renormalise(self) -> None:
         self.pos /= np.linalg.norm(self.pos, axis=1, keepdims=True)

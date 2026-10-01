@@ -314,6 +314,28 @@ class TectonicSim:
             for pr in [pr for pr in d if pr[0] in ids or pr[1] in ids]:
                 d.pop(pr)
 
+    def relax_terranes(self, km: tuple[float, float] | None = None) -> tuple[float, float]:
+        """One step of ``terrane_relax_my``: a docked arc is continental crust at slab density
+        (0.88), which stood 1-2 km below the shelves and, being in the shelf mask, pulled sea
+        level down.  Accreted arcs on Earth become andesitic continental crust by losing their
+        dense mafic roots to the mantle, so a docked terrane (``Segments.terrane``) relaxes
+        towards the belts' density at constant thickness, the mass it loses booked as residue.
+        Gated on density alone (continental crust denser than a craton) the relaxation stopped
+        at the craton's 0.856, a kilometre below the belts, and the terranes still pulled the
+        shelf-mode sea level down by 230-370 m at 600 My; gated on less, it would lighten every
+        orogen that took in craton-derived crust.  Returns the kind masses after."""
+        tp, seg = self.tp, self.seg
+        km = self.kind_mass() if km is None else km
+        dense = (seg.terrane > 0) & (seg.kind == CONTINENTAL) & (seg.density > float(tp.continental_density))
+        if not dense.any():
+            return km
+        rate = min(1.0, float(tp.myr_per_step) / float(tp.terrane_relax_my))
+        seg.density[dense] += rate * (float(tp.continental_density) - seg.density[dense])
+        seg.mass[dense] = seg.thickness[dense] * seg.density[dense]
+        after = self._book_change("residue", km)
+        self.ledger["terrane_relaxed"] = self.ledger.get("terrane_relaxed", 0.0) + (after[0] - km[0])
+        return after
+
     def slab_g(self, pos: np.ndarray) -> np.ndarray:
         """The slab field's ``g = min(S / slab_sat_km, 1)`` at ``pos`` (the slab hanging there,
         the same g `forces.slab_contrib` and so ``slab_info`` carry): how persistent the
@@ -598,7 +620,8 @@ class TectonicSim:
                                     arc_thickness=float(tp.arc_thickness) * float(tp.continental_thickness),
                                     arc_density=float(tp.continental_density), books_out=books_out,
                                     arc_dock=arc_dock, arc_keep=float(tp.arc_keep), ocean_base=float(tp.oceanic_thickness),
-                                    rift_pairs=list(self.rift_pairs) if arc_dock > 0.0 else None, dock_out=dock_out)
+                                    rift_pairs=list(self.rift_pairs) if arc_dock > 0.0 else None, dock_out=dock_out,
+                                    dock_keep=float(tp.arc_dock_keep))
         received = recv_out[0] if (recv_out and tp.variable_extent) else None
         # by column or by crust, whichever this mode's ledger is kept in
         u = 1 if tp.variable_extent else 0
@@ -843,19 +866,7 @@ class TectonicSim:
                 self.ledger["arc_foundered"] = self.ledger.get("arc_foundered", 0.0) + (after[1] - km[1])
                 km = after
         if float(tp.terrane_relax_my) > 0.0:
-            # A docked arc is continental crust at slab density (0.88): it stood 1-2 km below the
-            # shelves and, being in the shelf mask, pulled sea level down.  Accreted arcs on Earth
-            # become andesitic continental crust by losing their dense mafic roots to the mantle,
-            # so continental crust denser than a craton relaxes towards the belts' density at
-            # constant thickness, the mass it loses booked as residue
-            dense = (seg.kind == CONTINENTAL) & (seg.craton == 0) & (seg.density > float(tp.craton_density))
-            if dense.any():
-                rate = min(1.0, float(tp.myr_per_step) / float(tp.terrane_relax_my))
-                seg.density[dense] += rate * (float(tp.continental_density) - seg.density[dense])
-                seg.mass[dense] = seg.thickness[dense] * seg.density[dense]
-                after = self._book_change("residue", km)
-                self.ledger["terrane_relaxed"] = self.ledger.get("terrane_relaxed", 0.0) + (after[0] - km[0])
-                km = after
+            km = self.relax_terranes(km)
 
         t_ = _tick("thin_delam", t_)
         # 5. heat diffusion + slow relaxation towards the background field
@@ -1721,6 +1732,11 @@ def finalise(sim: TectonicSim, bed_only: bool = False) -> dict:
                       "ridge_water_loading": wl, "ridge_crest_max_m": rinfo.get("crest_max_m", 0.0),
                       "ridge_wide_max_m": float(wide.max())})
         bed += narrow - wide
+        # the loading is the sea's: where the ridge comes out of it, what stands above sea level
+        # is relief in air, and only (1 - 1/loading) of it is taken back off
+        if wl > 1.0:
+            up_ = (narrow > 0.0) & (bed > 0.0)
+            bed[up_] -= np.minimum(bed[up_], narrow[up_]) * (1.0 - 1.0 / wl)
         del narrow, wide
     cone = cone_act = who = None
     if getattr(sim, "volc", None) is not None:

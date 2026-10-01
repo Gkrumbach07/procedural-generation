@@ -91,10 +91,25 @@ def test_a_thick_arc_docks_onto_a_continent_and_is_booked():
     books, docks = [], []
     collide(seg, build_tree(seg), s, omega, alive, accretion=0.15, weld_steps=60, extent_min=0.25 * s * s,
             books_out=books, dock_out=docks, arc_dock=0.5, arc_keep=0.5, ocean_base=0.2)
-    assert seg.kind[0] == CONTINENTAL                     # docked, not subducted
+    assert seg.kind[0] == CONTINENTAL and seg.terrane[0] == 1   # docked, not subducted, and marked
     assert docks[0][0] == 1.0 and books[0]["docked"][1] > 0.0
     assert books[0]["subducted"] == (0.0, 0.0)
     assert float((seg.ext * seg.mass)[alive].sum()) == pytest.approx(m0, rel=1e-12)   # shortened into the margin
+
+
+def test_a_docking_arc_accretes_only_part_of_itself():
+    """Of an arc docking onto a continent, arc_dock_keep of its ground accretes and the rest goes
+    down with its slab: booked as subducted, the books closing over the pair."""
+    s = 0.05
+    seg, omega = _pair(OCEANIC, 0.7, CONTINENTAL, 1.0, s)
+    w0 = seg.ext * seg.mass
+    alive = np.ones(2, bool)
+    books = []
+    collide(seg, build_tree(seg), s, omega, alive, accretion=0.15, weld_steps=60, extent_min=0.25 * s * s,
+            books_out=books, arc_dock=0.5, arc_keep=0.25, ocean_base=0.2, dock_keep=0.5)
+    assert books[0]["subducted"][1] == pytest.approx(0.5 * w0[0], rel=1e-12)
+    assert books[0]["docked"][1] == pytest.approx(0.5 * w0[0], rel=1e-12)
+    assert float((seg.ext * seg.mass)[alive].sum()) == pytest.approx(w0.sum() - 0.5 * w0[0], rel=1e-12)
 
 
 def test_a_thin_arc_goes_down_and_leaves_arc_keep_of_its_arc_crust():
@@ -277,3 +292,42 @@ def test_observer_reports_the_arcs(arc_sim):
     isl = row["islands"]
     for k in ("crest_p50_m", "n_arc", "n_hotspot", "oo_trench_km", "vents_standing"):
         assert k in isl
+
+
+def test_the_coarse_block_is_a_pure_observer():
+    """The scorecard's coarse block runs finalise_bed mid-run: the run must end bit for bit
+    where a plain one does (the vents, the books and the cloud)."""
+    from globe.tectonics import diagnostics as D
+    from globe.tectonics.segments import Segments as S
+
+    a = tect.initialise(_small_earth(4), log=None)
+    for _ in range(30):
+        a.step()
+    b = tect.initialise(_small_earth(4), log=None)
+    D.observe(b, 30, 10, coarse_at=[10, 20])
+    for f in S.FIELDS:
+        assert np.array_equal(getattr(a.seg, f), getattr(b.seg, f)), f
+    assert np.array_equal(a.plates.omega, b.plates.omega) and a.ledger == b.ledger
+    for f in volc.Volcanoes.FIELDS:
+        assert np.array_equal(getattr(a.volc, f), getattr(b.volc, f)), f
+
+
+def test_docked_terranes_relax_to_the_belts_density():
+    """A docked terrane loses its dense root at constant thickness until it is as light as the
+    belts (the mass booked as residue); unmarked continental crust is left alone."""
+    sim = tect.initialise(_small_earth(0), log=None)
+    seg = sim.seg
+    c = np.flatnonzero((seg.kind == CONTINENTAL) & (seg.craton == 0))[:2]
+    seg.density[c] = 0.88
+    seg.mass[c] = seg.thickness[c] * 0.88
+    seg.terrane[c[0]] = 1
+    sim.books = {kd: {k: 0.0 for k in tect.KIND_KEYS} for kd in tect.KINDS}
+    sim.ledger = {k: 0.0 for k in tect.MASS_KEYS}
+    sim._book("initial", *sim.kind_mass())
+    th = seg.thickness[c].copy()
+    for _ in range(int(8 * sim.steps_of(sim.tp.terrane_relax_my))):
+        sim.relax_terranes()
+    assert seg.density[c[0]] == pytest.approx(sim.tp.continental_density, abs=2e-3)
+    assert seg.density[c[1]] == 0.88 and np.array_equal(seg.thickness[c], th)
+    assert sim.ledger["terrane_relaxed"] < 0.0
+    assert max(abs(r) for r in sim.books_residual()) < 1e-11
