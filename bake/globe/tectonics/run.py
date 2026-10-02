@@ -494,7 +494,8 @@ class TectonicSim:
                               rift_pairs=self.rift_pairs, rift_scale=1.0, rift_weaken=self.km(tp.rift_weaken_km),
                               rift_power=float(tp.rift_neck_power), rift_strength=float(tp.rift_strength),
                               orogen_push=float(tp.orogen_push), push_th0=float(tp.orogen_push_th0),
-                              push_dth=float(tp.orogen_push_dth))
+                              push_dth=float(tp.orogen_push_dth), shear=float(tp.boundary_shear),
+                              shear_k=float(tp.boundary_shear_k))
         wstar = forces.solve(bal, plates, seg.plate_id, extra_tau=None if extra_tau is None else self.gain * extra_tau)
         if sinfo is not None and grad3 is not None and sinfo["seg"].size:
             P = plates.P

@@ -272,7 +272,7 @@ def assemble(seg, plates, cen: dict, *, gain: float, damping: float, grad3: np.n
              basal_seg: np.ndarray, drag_per_len: float, cc_per_len: float, slab: dict | None,
              trench_per_len: float, rift_pairs: dict | None, rift_scale: float, rift_weaken: float,
              rift_power: float = 2.0, rift_strength: float = 4.0, orogen_push: float = 0.0,
-             push_th0: float = 1.2, push_dth: float = 0.8) -> Balance:
+             push_th0: float = 1.2, push_dth: float = 0.8, shear: float = 0.0, shear_k: float = 1.0) -> Balance:
     """Per-segment drag blocks, torques and coupling blocks (see `Balance`).
 
     ``basal_seg`` (M,) is each segment's basal drag before ``damping``;
@@ -298,11 +298,21 @@ def assemble(seg, plates, cen: dict, *, gain: float, damping: float, grad3: np.n
     if cen is not None and cen["i"].size:
         if drag_per_len > 0.0:
             # boundary drag: len * (I - r r^T) on each side of every boundary contact
+            # A share ``shear`` of it is fault friction: it resists the two plates sliding past
+            # each other along the boundary (a coupling on the relative along-strike motion),
+            # not either plate's motion over the mantle.  That is what makes a microplate drift
+            # with the plates around it instead of racing off on its own slab: on Earth a small
+            # plate between two large ones is carried by their shear (Juan de Fuca, Easter,
+            # the Caribbean), and an absolute drag cannot do that
             for side in ("i", "j"):
                 s = cen[side]
                 r = pos[s]
                 proj = I3[None, :, :] - r[:, :, None] * r[:, None, :]
-                bal.add_D(s, (drag_per_len * cen["l" + side])[:, None, None] * proj)
+                bal.add_D(s, ((1.0 - shear) * drag_per_len * cen["l" + side])[:, None, None] * proj)
+            if shear > 0.0:
+                # along-strike direction e = rm x dd; its torque arm rm x e = -dd, so the
+                # block is k dd dd^T on the relative omega
+                bal.add_coupling(cen["i"], cen["j"], _outer(cen["dd"], shear * shear_k * drag_per_len * cen["w"]))
         if cc_per_len > 0.0:
             cc = (cen["ki"] == CONTINENTAL) & (cen["kj"] == CONTINENTAL) & (cen["appr"] > 0.0)
             if rift_pairs:

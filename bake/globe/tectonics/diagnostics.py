@@ -1159,6 +1159,8 @@ class Observer:
                                                      if isinstance(v, (int, float, np.integer, np.floating))}}
         # arc crests
         arc = np.flatnonzero((seg.kind == OCEANIC) & (seg.thickness >= ARC_COLUMN))
+        out.update({k: None for k in ("crest_p10_m", "crest_p50_m", "crest_p90_m", "crest_1_3km_share",
+                                      "crest_above_sea_share")})      # no arc crust yet: reported, as nothing
         if arc.size:
             gz = ground[volc.cell_index(coarse, seg.pos[arc])]
             out.update({"crest_p10_m": _f(np.percentile(gz, 10)), "crest_p50_m": _f(np.median(gz)),

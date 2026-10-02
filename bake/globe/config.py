@@ -245,13 +245,15 @@ class TectonicsParams:
     heat_noise_amp: float = 0.15  # amplitude of the fbm in the neutral mantle (the shipped start was all fbm, amplitude 0.5)
     insulation_time_my: float = 100.0  # > 0: one-sided insulation -- under continents the background relaxes to `insulation_floor` (an upwelling, a repeller) with this time constant, under ocean back to the neutral mantle.  0: the shipped rule (ocean -> 1, an attractor everywhere)
     insulation_floor: float = 0.0
-    slab_force: float = 0.6  # slab pull per unit trench length at a saturated, old slab, in heat units (Stokes: the same torque as a heat step this size across the trench); 0 = off
+    slab_force: float = 1.5  # (2026-10-02: 1.5 with boundary_shear -- the fault friction holds every plate to its neighbours, and at 0.6 slab-attached plates fell to 3.5-5.5 cm/yr; 1.5 gives 6-8, Earth ~8) slab pull per unit trench length at a saturated, old slab, in heat units (Stokes: the same torque as a heat step this size across the trench); 0 = off
     slab_sat_km: float = 400.0  # slab length at which the pull saturates (the upper-mantle slab)
     slab_detach_my: float = 20.0  # e-folding time of a slab that is no longer fed (detachment)
     slab_age_my: float = 80.0  # slab pull grows as sqrt(age / this), floored at slab_age_floor
     slab_age_floor: float = 0.3
-    slab_speed_cmyr: float = 9.0  # (synth-dyn 9; dyn-minimal 7) slab resistance (bending, interface) per unit trench length, set so an old saturated slab alone moves its trench at this speed: slab-attached plates saturate here whatever their size (Earth: 7.9-8.1 cm/yr median)
+    slab_speed_cmyr: float = 18.0  # (2026-10-02: 18 with slab_force 1.5 and boundary_shear; the fault friction, not this, now sets the speeds) (synth-dyn 9; dyn-minimal 7) slab resistance (bending, interface) per unit trench length, set so an old saturated slab alone moves its trench at this speed: slab-attached plates saturate here whatever their size (Earth: 7.9-8.1 cm/yr median)
     boundary_drag_km: float = 600.0  # plate boundaries drag like a strip this wide of oceanic lithosphere on its base (0 = off)
+    boundary_shear: float = 1.0  # (2026-10-02: 1.0 with k 15 -- small plates had moved 7-11 cm/yr against their neighbours, 120-134 deg off their heading; now 4-5 cm/yr and 21-71 deg, and plate-pair boundaries flip converging/spreading 1-3 % of 0.75 My frames instead of 3-8 %) share of the boundary drag that is fault friction between the two plates (a coupling on their relative along-strike motion) rather than drag on the mantle; 0 = the old absolute drag
+    boundary_shear_k: float = 15.0  # ...and its strength, x the boundary drag per unit length
     collision_drag: float = 120.0  # converging continent-continent contacts resist the relative motion with this x the boundary drag per unit length (0 = off)
     basal_drag_continental: float = 2.0  # > 0: plates drag on the mantle like their lithosphere -- oceanic as its column, continental this x that (x1.5 under cratons) -- instead of in proportion to the crust's column mass (0 = the shipped I)
     cc_heating: bool = False  # continental losers also heat the field (shipped True): a collision has no slab and makes no downwelling
