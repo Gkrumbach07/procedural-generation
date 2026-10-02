@@ -568,7 +568,11 @@ class TectonicSim:
         the shipped `update_omega` exactly.  Returns slab / heat torque."""
         tp, plates = self.tp, self.plates
         wstar, info, cen = self.terminal_omega(grad3, extra_tau=extra_tau)
-        om = plates.omega + float(tp.damping) * (wstar - plates.omega)
+        # how fast a plate takes up the motion the forces ask of it: the damping rate (a 3 My
+        # e-fold at the shipped values) unless `plate_response_my` sets a time of its own -- a
+        # plate with momentum, whose velocity changes over millions of years, not every step
+        rate = float(tp.damping) if float(tp.plate_response_my) <= 0.0 else min(1.0, float(tp.myr_per_step) / float(tp.plate_response_my))
+        om = plates.omega + rate * (wstar - plates.omega)
         if self.max_omega > 0:
             s = np.linalg.norm(om, axis=1, keepdims=True)
             om = np.where(s > self.max_omega, om * (self.max_omega / np.maximum(s, 1e-30)), om)
