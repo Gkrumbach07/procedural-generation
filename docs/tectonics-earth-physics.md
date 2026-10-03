@@ -134,3 +134,63 @@ Scratchpad of session 226075d6 (not in the repo):
 - `tune/` (the collapse sweep).
 
 The scorecard reproduces any row above: `python bake/scripts/tect_scorecard.py --preset earth --seeds 0 1 2 3 --steps 4000`.
+
+## 4. Calm plates (2026-10-02/03)
+
+Rendering the run as a movie (`bake/scripts/plate_movie.py`: trenches with teeth, ridges,
+collisions, velocity arrows) showed what the statistics hid: **small plates racing off in their
+own directions** and boundaries flickering between converging and spreading.
+
+**Measured, seeds 0/2/1423, with `plate_movie`-cadence frames (0.75 My).**
+- Small plates moved 7-11 cm/yr *relative to their neighbours*, 120-134° off their heading.
+- 3-8 % of plate-pair boundaries flipped between converging and spreading every frame.
+- Of those flips, 70 % involved a plate under 1 % of the sphere, and 67-78 % came within 10 steps of a
+  plate event (rift, split, merge, weld, collapse).
+- Clean reversals on big, established plates were 1 %.
+
+**What the community does.** Smooth generators on r/proceduralgeneration do not recompute plate
+motion from forces every step.
+- Gleba, Experilous and Red Blob use kinematic snapshots.
+- GPlates worldbuilders hold stage poles for ~50 My.
+- Inadara and thomastc give plates momentum that only collisions change, and merge slivers.
+- Gleba's author abandoned long time-evolving simulations for "stability issues".
+
+Ours (descended from weigert's clustered convection) was the force-driven family that wobbles.
+
+**What changed, all knobs in `TectonicsParams`.**
+- **Fault friction between plates** (`boundary_shear` 1, `boundary_shear_k` 15). The boundary drag
+  acted against the mantle, so nothing tied a small plate to its neighbours. It is now a coupling on
+  the two plates' relative along-strike motion. `slab_force` 0.6 → 1.5 and `slab_speed_cmyr` 9 → 18
+  restore the speeds the friction took: slab-attached plates 6-8 cm/yr (Earth ~8).
+  Spearman(speed, continental share) -0.64..-0.79 (Earth -0.77); (speed, trench share) +0.38..+0.71.
+- **Plate momentum** (`plate_response_my` 15). Motion follows the force balance over 15 My, not 3 My.
+- **No sliver plates** (`plate_min_area` 0.08 % → 0.5 %, ~2.5 Mkm²). Smaller severed pieces weld to
+  the plate around them. Cocos-sized plates (0.6 %) still exist.
+- **Rifts answer fast** (`rift_response_my` 3 for the halves of an active rift and `rift_free_my` 20 My
+  after breakthrough). Slow phase 25-28 My (Brune 2016: 20-25), peak opening 1.7-2.6 cm/yr
+  contact-projected (~2.2-3.4 normal).
+- **The supercontinent starts at 0.49.** It begins at a mean of 1.01 columns (35 km) of crust, and
+  collisions thicken it toward the dead-belt floor's ~1.28 columns (45 km; Earth's continental crust
+  averages 38-41 km) at constant volume. A 0.40 start therefore settled at 0.32 of the sphere; 0.49
+  settles at 0.39-0.40 by 600 My (land 26 %). This is a start sized for the settled state, not a
+  drain: volume holds at 1.01-1.03×.
+
+**Result, seeds 0-2/1423.**
+
+| | before | after |
+|---|---|---|
+| big plates turning per 0.75 My | 0.9° | 0.3-0.4° |
+| big plates turning per 10 My, p90 | 16-22° | 6-11° |
+| new plates per 10 My | 3-5 | 0.3-0.6 |
+| small plates on screen | 2-12 | 0-0.7 |
+| boundary flips per frame | 3-8 % | 0.4-1.5 % |
+| plates at 600 My | 19-55 | 10-18 |
+
+Still true after all of this: rifts never converge on their far side, the supercontinent cycle
+disperses and reassembles, and the crust books close.
+
+**Tests loosened, with reasons in the code.**
+- Earth-gate bounds were re-measured for the 0.49 start: girdle ≥ 50k km, largest plate ≤ 0.52,
+  extent at 45 My 0.44-0.50, rendered continent at 300 My ≤ 0.48, ocean age at 300 My ≥ 35 My.
+- Dead-plate life has no upper bound; the gate guards against flicker only.
+- The toy-geometry tests keep a 0.40 continent.
