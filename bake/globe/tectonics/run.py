@@ -297,6 +297,8 @@ class TectonicSim:
         self.heat_neutral = heat.data.copy()
         self.slab = FaceField(heat.grid, np.zeros_like(heat.data, dtype=np.float64), name="slab")
         self.rift_pairs: dict[tuple[int, int], dict] = {}
+        #: plate -> the step its rift broke through (the fast response's clock; see force_update)
+        self.rift_free: dict[int, int] = {}
         self.last_rift: dict[int, int] = {}
         self.rift_jitter: dict[int, float] = {}
         self.collapse_jitter: dict[int, float] = {}
@@ -321,7 +323,7 @@ class TectonicSim:
     #: the plate-id dictionaries of the dynamics, all keyed by plate id (or a pair of them);
     #: anything that renumbers plates from scratch (reorganise) must empty them, and anything
     #: that empties a plate (a dock, a terrane stack) must drop it from them (forget_plates)
-    DYN_BOOKS = ("rift_pairs", "last_rift", "rift_jitter", "collapse_jitter", "micro_passive", "suture_quiet", "suture_held")
+    DYN_BOOKS = ("rift_pairs", "rift_free", "last_rift", "rift_jitter", "collapse_jitter", "micro_passive", "suture_quiet", "suture_held")
 
     # -- helpers ------------------------------------------------------------
     def forget_plates(self, ids) -> None:
@@ -572,7 +574,21 @@ class TectonicSim:
         # e-fold at the shipped values) unless `plate_response_my` sets a time of its own -- a
         # plate with momentum, whose velocity changes over millions of years, not every step
         rate = float(tp.damping) if float(tp.plate_response_my) <= 0.0 else min(1.0, float(tp.myr_per_step) / float(tp.plate_response_my))
-        om = plates.omega + rate * (wstar - plates.omega)
+        rate = np.full(plates.P, rate)
+        if float(tp.plate_response_my) > 0.0 and float(tp.rift_response_my) > 0.0:
+            # ...except a rift's two halves, from the cut until `rift_free_my` after it broke
+            # through: losing the rift's strength is a real, sudden change in the forces, and the
+            # momentum is there to smooth the noise in them, not to hold an ocean shut.  At 15 My
+            # the halves of a broken rift took ~15 My to pick up the speed the forces gave them
+            # (peak opening 1.4-1.6 cm/yr against Brune et al. 2016's > 3.5 within ~6 My)
+            fast = min(1.0, float(tp.myr_per_step) / float(tp.rift_response_my))
+            k_now, win = self.step_index, self.steps_of(tp.rift_free_my)
+            young = [q for pr in self.rift_pairs for q in pr]
+            young += [q for q, k_free in self.rift_free.items() if k_now - k_free <= win]
+            young = np.array([q for q in young if 0 <= q < plates.P], dtype=np.int64)
+            if young.size:
+                rate[young] = fast
+        om = plates.omega + rate[:, None] * (wstar - plates.omega)
         if self.max_omega > 0:
             s = np.linalg.norm(om, axis=1, keepdims=True)
             om = np.where(s > self.max_omega, om * (self.max_omega / np.maximum(s, 1e-30)), om)
@@ -591,6 +607,10 @@ class TectonicSim:
                 dead = a >= plates.P or b >= plates.P or not plates.alive[a] or not plates.alive[b]
                 if dead or self.rift_pairs[pr]["delta"] > brk:
                     self.rift_pairs.pop(pr)
+                    if not dead:
+                        # broken through: a ridge from here on, and both halves keep the fast
+                        # response for `rift_free_my`
+                        self.rift_free[a] = self.rift_free[b] = int(self.step_index)
         self.force_info = info
         return float(info.get("slab_over_heat", 0.0))
 
