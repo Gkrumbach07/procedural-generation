@@ -1407,3 +1407,31 @@ def test_zoom_textures_for_every_baked_level(world, zoom):
         assert abs(tex["h0"] + code * step - float(surf[c, c])) <= step * 1.01
     js = (world["root"] / "viewer" / "zooms.js").read_text()
     assert all("tex" in lv for lv in json.loads(js[len("GLOBE_VIEWER.setZooms("):-3])[0]["levels"])
+
+
+def test_a_planet_level_keeps_only_the_lakes_the_planet_has():
+    """``planet_finish.lakes_as_the_planet_has_them``: of the water a level's
+    own flood leaves, a lake is what stands deeper than the marsh line where
+    the coarse grid has a lake too, or as a pond of a few coarse cells where
+    it has none; the rest is ground, and the sea is at 0."""
+    from globe.zoom import planet_finish as pf
+    R, N = 4, 24
+    n = N * R
+    surf = np.full((n, n), 100.0, np.float32)
+    ws = surf.copy()
+    ocean = np.zeros((n, n), bool)
+    ocean[:, :8] = True
+    surf[:, :8] = -50.0
+    coarse = np.zeros((N, N), bool)
+    coarse[4:8, 6:10] = True                                    # the planet's lake
+    ws[16:32, 24:40] = 110.0                                    # the level's water over it: 10 m
+    ws[48:90, 40:90] = 108.0                                    # a basin the planet's balance left dry, flooded 8 m
+    ws[4:8, 60:66] = 106.0                                      # a pond below the coarse grid
+    ws[40:44, 20:30] = 102.0                                    # 2 m of water: marsh
+    out = pf.lakes_as_the_planet_has_them(ws, surf, ocean, coarse, R, 3.0, 4.0)
+    assert out.dtype == np.float32 and (out[ocean] == 0.0).all()
+    assert (out[16:32, 24:40] == 110.0).all()
+    assert (out[48:90, 40:90] == 100.0).all()
+    assert (out[4:8, 60:66] == 106.0).all()
+    assert (out[40:44, 20:30] == 100.0).all()
+    assert (out[~ocean] >= surf[~ocean]).all()

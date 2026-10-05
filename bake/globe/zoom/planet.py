@@ -709,7 +709,13 @@ def finish_face(root: Path, out: Path, level: PlanetLevel, face: int, strip: int
     del fr
     lake_c = plain_ws > surf + 1e-3                     # the planet's lakes, upsampled
     ws = np.where(lake_c, np.maximum(surf, np.minimum(ws, plain_ws)), ws)
-    ws = np.where(ocean, 0.0, ws)
+    # ...and only those: water under the marsh line, or standing where the planet's balance has
+    # no lake, is ground (planet_finish.lakes_as_the_planet_has_them)
+    from . import planet_finish as pf
+
+    lake_depth = max(float(params.hydro.lake_min_depth), float(getattr(params.hydro, "marsh_depth", 0.0)))
+    coarse_lake = ((fields["water_surface"].interior[face].astype(np.float32) - derived["surface"].interior[face].astype(np.float32)) > lake_depth) & ~ocean_c
+    ws = pf.lakes_as_the_planet_has_them(ws, surf, ocean, coarse_lake, R, lake_depth, float(getattr(params.derive, "lake_agree_cells", 0.0)))
     arrays["water_surface"] = ws.astype(np.float32)
     for k, a in arrays.items():
         np.save(out_path(out, R, face, k), a)
