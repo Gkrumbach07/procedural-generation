@@ -58,14 +58,19 @@ from ..erosion.maps import ErosionState, step
 from ..hydro.priority_flood import priority_flood_flat
 from ..io.world_store import WorldStore
 from ..refine import basin_job as bj
-from ..refine.upsample import FineWindow, Window, detail_noise, ridged_fbm, sample, upsample_window
-from ..refine.zoom import ZOOM_REFINE, drain_noise, smooth_drift, zoom_params
+from ..refine.upsample import FineWindow, Window, detail_amplitude, detail_noise, ridged_fbm, sample, upsample_window
+from ..refine.zoom import DETAIL_HEIGHT_SHARE, ZOOM_REFINE, cone_shield, drain_noise, smooth_drift, zoom_params
 from . import progress
 
 #: D8 offsets of the hydro stage's ``flow_dir`` codes (0..7; 8 and above = sink)
 D8 = np.array([(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)], dtype=np.int64)
 #: rng sub-key of zoom bakes: ``params.rng("refine", ZOOM_KEY, face, i, j, R)``
 ZOOM_KEY = 7_700_001
+#: what a level is made from, in a level's resume key beside the kernel's
+#: version: bumped when the inputs or the hold change, so a zoom baked before
+#: is baked again.  2: the detail noise within a share of the ground's height,
+#: islands held on their own, active cones as fresh lava
+INPUTS_VERSION = 2
 #: a tile spawns at most this many times the particles its rain alone would
 #: get when inflow adds to the spawn weight (beyond it the spawn volume grows)
 MAX_INFLOW_PARTICLES = 3.0
@@ -503,6 +508,24 @@ def climate_inputs(root: Path, params: WorldParams, win, grid) -> dict:
     return {"forest": forest.astype(np.float32), "temp0": temp0.astype(np.float32)}
 
 
+#: the coarse active-cone field, per world root (None where the world has none)
+_CONES: dict = {}
+
+
+def active_cones(root: Path, win, grid) -> np.ndarray | None:
+    """Thickness (metres) of the active volcanic edifices over a level's work
+    array -- the coarse ``volcano_active`` (erosion/run.py), bilinear -- or
+    None where the world has no such field."""
+    from ..erosion.run import active_volcanoes
+
+    key = str(Path(root).resolve())
+    if key not in _CONES:
+        _CONES.clear()
+        _CONES[key] = active_volcanoes(WorldStore(root), grid)
+    f = _CONES[key]
+    return None if f is None else np.maximum(sample(f, win, order=1), 0.0)
+
+
 def temperature_at(params: WorldParams, temp0: np.ndarray, surface_m: np.ndarray) -> np.ndarray:
     return temp0 - float(params.climate.lapse) * np.maximum(surface_m, 0.0) / 1000.0
 
@@ -530,6 +553,10 @@ def level_inputs(root: Path, params: WorldParams, geo: Geometry, level: ZoomLeve
     clim = climate_inputs(root, params, win, grid)
     assert up["height0"].shape == (geo.NE, geo.NE), (up["height0"].shape, geo)
     coast_taper = float(params.refine.coast_taper_m)
+    cone = active_cones(root, win, grid)
+    quiet = 1.0
+    if cone is not None:
+        up["hardness"], quiet = cone_shield(cone, up["hardness"])
     if parent is None:
         plain = (up["height0"] + up["sediment0"]).astype(np.float64)
         sed0 = up["sediment0"].astype(np.float64)
@@ -537,8 +564,8 @@ def level_inputs(root: Path, params: WorldParams, geo: Geometry, level: ZoomLeve
         depth = up["depth"].astype(np.float64)
         ocean = _ocean(plain, up["basin_id"] < 0)
         momentum = up["momentum"].astype(np.float64)
-        noise = detail_noise(win, up["slope"], up["relief"], up["hardness"], float(ZOOM_REFINE["detail_amp"]), grid.cell_size_m, gen,
-                             surface=plain, coast_taper_m=coast_taper).astype(np.float64)
+        noise = quiet * detail_noise(win, up["slope"], up["relief"], up["hardness"], float(ZOOM_REFINE["detail_amp"]), grid.cell_size_m, gen,
+                                     surface=plain, coast_taper_m=coast_taper, height_share=DETAIL_HEIGHT_SHARE).astype(np.float64)
         inflow = planet_inflow(root, geo, plain)
         f = geo.R
     else:
@@ -562,11 +589,8 @@ def level_inputs(root: Path, params: WorldParams, geo: Geometry, level: ZoomLeve
         gy, gx = np.gradient(psurf, parent_cell)
         slope = map_coordinates(np.hypot(gx, gy), [I, J], order=1, mode="nearest")
         relief = map_coordinates(_relief3(psurf), [I, J], order=1, mode="nearest")
-        amp = float(level.chain_detail) * np.minimum(np.maximum(slope, 0.0) * parent_cell, np.maximum(relief, 0.0)) * (0.5 + 0.5 * np.clip(up["hardness"], 0.0, 1.0))
-        if coast_taper > 0.0:
-            t = np.clip(np.abs(plain) / coast_taper, 0.0, 1.0)
-            amp = amp * t * t * (3.0 - 2.0 * t)
-        noise = amp * ridged_fbm((geo.NE, geo.NE), 2.0 * f, gen)
+        amp = detail_amplitude(slope, relief, up["hardness"], float(level.chain_detail), parent_cell, plain, coast_taper, DETAIL_HEIGHT_SHARE)
+        noise = quiet * amp * ridged_fbm((geo.NE, geo.NE), 2.0 * f, gen)
         del I, J, gy, gx, slope, relief, amp
         recv, _ = drainage(psurf, pa["ocean"], np.zeros(psurf.shape))
         inflow = level_inflow(parent, recv, geo, plain)
@@ -1262,7 +1286,7 @@ def _run_zoom_levels(root, store, params, spot, levels, out, name, log, erosion,
         pdir = planet_dir(root, level.R) if parent is None and planet is not False else None
         if planet is True and parent is None and pdir is None:
             raise FileNotFoundError(f"no finished planet level at R={level.R} under {root / 'zoom'}")
-        key = {"spot": [face, ci, cj], "level": level_key(level), "erosion": erosion or {}, "kernel": pk.KERNEL_VERSION}
+        key = {"spot": [face, ci, cj], "level": level_key(level), "erosion": erosion or {}, "kernel": pk.KERNEL_VERSION, "inputs": INPUTS_VERSION}
         if pdir is not None:
             key["planet"] = [pdir.name, (pdir / "planet.json").stat().st_mtime_ns]
         meta = out / f"L{level.R}.json"

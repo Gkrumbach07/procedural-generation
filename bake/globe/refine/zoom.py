@@ -152,6 +152,38 @@ ZOOM_REFINE = {
     "hardness_smooth_cells": HARDNESS_SMOOTH_CELLS,
     "hardness_max": HARDNESS_MAX,
 }
+#: the detail noise of a zoom is at most this share of the ground's own
+#: height above the sea (:func:`refine.upsample.detail_amplitude`): noise of
+#: unit maximum at 3x the drop across a cell is the cell's whole drop several
+#: times over, which only ground wider than the cell can carry.  At 0.5 no
+#: land cell is taken below half its height and none under the sea
+DETAIL_HEIGHT_SHARE = 0.5
+
+#: the active volcanic cones (``volcano_active``, metres of edifice) below the
+#: coarse grid.  The coarse erosion takes them out of its input and puts them
+#: back on top (erosion/run.py): a cone being built is younger than the
+#: erosion.  A zoom level erodes what it is handed, and a level's hold lifts
+#: its ground back over four parent cells at once, wider than a cone -- so 200
+#: iterations at 1.2 km wore a 4.4 km cone into a 3.3 km pyramid of one slope
+#: with straight ridges along the grid axes, which every finer level kept.
+#: Where a level's ground is cone its rock is fresh lava instead: hardness
+#: CONE_HARDNESS (the kernel's bedrock erodibility is 1 - hardness) and the
+#: detail noise down to CONE_NOISE of its amplitude, both reached where the
+#: edifice is CONE_FULL_M thick
+CONE_HARDNESS = 0.97
+CONE_NOISE = 0.25
+CONE_FULL_M = 300.0
+
+
+def cone_shield(cone_m: np.ndarray, hardness: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(hardness, noise factor)`` over a level's array with the active
+    cones' fresh lava in them: ``cone_m`` is the edifice thickness (metres,
+    the coarse ``volcano_active`` sampled on the array)."""
+    t = np.clip(np.asarray(cone_m, np.float64) / CONE_FULL_M, 0.0, 1.0)
+    young = t * t * (3.0 - 2.0 * t)
+    hard = np.asarray(hardness, np.float64)
+    hard = np.where(hard < CONE_HARDNESS, hard + (CONE_HARDNESS - hard) * young, hard)
+    return hard.astype(np.asarray(hardness).dtype), 1.0 - (1.0 - CONE_NOISE) * young
 
 
 def zoom_params(params, R: int, **erosion):
@@ -207,12 +239,35 @@ def smooth_drift(delta: np.ndarray, cells: np.ndarray, R: int, tol: float = 0.05
     mean over a coarse block of ``cells`` is below ``tol`` or ``max_passes``.
     Same signature and meaning as ``basin_job.block_drift`` (subtract ``F``),
     but ``F`` has no block structure, so it neither prints the coarse grid
-    nor bends a channel at a block line.  float64, ``delta.shape``."""
-    d0 = np.where(cells, delta, 0.0).astype(np.float64)
-    w = cells.astype(np.float64)
+    nor bends a channel at a block line.  float64, ``delta.shape``.
+
+    A piece of ``cells`` under ``R x R`` of them (8-connected: an island, a
+    stack off a coast) is narrower than the low-pass, and is held as one
+    piece instead: ``F`` is its own mean ``delta``, and it stays out of the
+    low-pass of the rest.  The low-pass reaches across water, so an island
+    took the correction of the coast beside it and none for itself: off a
+    coast that was eroding, the uplift the coast needed raised a shoal of
+    0-30 m into a 1-2 km tower over a level's 200 iterations (and the ground
+    around the tower was lowered under the sea to pay for it), while a
+    650 km2 volcano with no coast near it was not held at all (mean change
+    -903 m at 1.2 km cells)."""
+    cells = np.asarray(cells, bool)
     F = np.zeros(delta.shape, dtype=np.float64)
     if not cells.any():
         return F
+    lab, n = ndimage.label(cells, structure=np.ones((3, 3), bool))
+    size = np.bincount(lab.ravel(), minlength=n + 1)
+    piece = size < R * R
+    piece[0] = False
+    own = piece[lab]
+    held = (np.bincount(lab.ravel(), weights=np.where(cells, delta, 0.0).ravel(), minlength=n + 1) / np.maximum(size, 1))[lab[own]]
+    del lab
+    cells = cells & ~own
+    if not cells.any():
+        F[own] = held
+        return F
+    d0 = np.where(cells, delta, 0.0).astype(np.float64)
+    w = cells.astype(np.float64)
     sig = float(max(R, 1))
     norm = ndimage.gaussian_filter(w, sig, mode="nearest")
     n0, n1 = (delta.shape[0] // R) * R, (delta.shape[1] // R) * R
@@ -224,8 +279,9 @@ def smooth_drift(delta: np.ndarray, cells: np.ndarray, R: int, tol: float = 0.05
         if not full.any() or float(np.abs(blk[full] / cnt[full]).max()) < tol:
             break
         F += ndimage.gaussian_filter(res, sig, mode="nearest") / np.maximum(norm, 1e-6)
+    F[own] = held
     return F
 
 
-__all__ = ["ZOOM_EROSION", "ZOOM_REFINE", "COARSE_ZOOM_EROSION", "COARSE_ZOOM_CELL_M", "WIDE_SLOPE_LIMIT_CELL_M", "WIDE_SLOPE_LIMIT_ERODE", "FINE_THERMAL_CELL_M", "FINE_THERMAL_RATE", "DISC_SATURATION_KM2", "MOMENTUM_SATURATION_KM2",
-           "drain_noise", "smooth_drift", "zoom_params"]
+__all__ = ["ZOOM_EROSION", "ZOOM_REFINE", "COARSE_ZOOM_EROSION", "COARSE_ZOOM_CELL_M", "WIDE_SLOPE_LIMIT_CELL_M", "WIDE_SLOPE_LIMIT_ERODE", "FINE_THERMAL_CELL_M", "FINE_THERMAL_RATE", "DISC_SATURATION_KM2", "MOMENTUM_SATURATION_KM2", "DETAIL_HEIGHT_SHARE", "CONE_HARDNESS", "CONE_NOISE", "CONE_FULL_M",
+           "cone_shield", "drain_noise", "smooth_drift", "zoom_params"]

@@ -28,6 +28,8 @@ from scipy.ndimage import map_coordinates
 
 from ..cubesphere import from_sphere_v, to_sphere_v
 from ..hydro.priority_flood import priority_flood_flat
+from ..refine.upsample import detail_amplitude
+from ..refine.zoom import DETAIL_HEIGHT_SHARE
 from . import bake as zb
 
 
@@ -129,11 +131,8 @@ def chained_inputs(pdir: Path, parent_level, level, N: int, face: int, ta0: int,
     gy, gx = np.gradient(psurf, pcell)
     slope = map_coordinates(np.hypot(gx, gy), [I, J], order=1, mode="nearest")
     relief = map_coordinates(zb._relief3(psurf), [I, J], order=1, mode="nearest")
-    amp = float(level.chain_detail) * np.minimum(np.maximum(slope, 0.0) * pcell, np.maximum(relief, 0.0)) * (0.5 + 0.5 * np.clip(tr["hardness"], 0.0, 1.0))
-    if coast_taper_m > 0.0:
-        t = np.clip(np.abs(plain) / coast_taper_m, 0.0, 1.0)
-        amp = amp * t * t * (3.0 - 2.0 * t)
-    noise = np.where(ocean | ~done, 0.0, amp * zp.hashed_ridged(seed, face, ta0 * Rc - 1, tb0 * Rc - 1, n, n, 2.0 * f))
+    amp = detail_amplitude(slope, relief, tr["hardness"], float(level.chain_detail), pcell, plain, coast_taper_m, DETAIL_HEIGHT_SHARE)
+    noise = np.where(ocean | ~done, 0.0, tr.get("quiet", 1.0) * amp * zp.hashed_ridged(seed, face, ta0 * Rc - 1, tb0 * Rc - 1, n, n, 2.0 * f))
     # inflow: parent cells outside the array's inner cells whose receiver is inside
     recv = np.asarray(np.load(flow_path(pdir, face, "recv"), mmap_mode="r")[r0:r1, c0:c1]).astype(np.int64)
     flux = np.asarray(np.load(flow_path(pdir, face, "flux"), mmap_mode="r")[r0:r1, c0:c1]).astype(np.float64)

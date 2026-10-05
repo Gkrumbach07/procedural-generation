@@ -867,3 +867,67 @@ gradients, some lakes but not a lake plain, and a temperate wet forested
 climate. 2 minutes for the planet; the best 24, at least 150 km apart, go
 to `<world>/zoom/scout/` with thumbnails and to the globe viewer as
 numbered markers (click one for its measures and the zoom-bake button).
+
+## Volcanic islands: blocks at the fine levels
+
+A zoom on a volcanic island (earth-v18, face 4 cell 851 1003: an active cone
+4.5 km tall on a 1.7 km sea floor, 2.8 km above the sea, three coarse cells
+across) came out at 76 m to 5 m as square mesas and rectangular lakes with
+one-cell walls, each one a 1.2 km cell of the first level. Three things did
+it, each measured on that window or on a second one off a coast (face 0
+cell 690 640):
+
+* **The detail noise was the cone's whole height several times over.** Its
+  amplitude is 3 x the drop across a coarse cell, and the noise has unit
+  maximum: on ground wider than a cell that is relief a valley can use, on a
+  cone that drops its whole height in one cell it was -2.2 to +4.1 km on a
+  2.8 km island. 158 of the island's 354 land cells were under the sea before
+  a particle had moved, and the surface was single-cell spikes and pits
+  (cell-to-cell |Laplacian| 69 -> 431 m) that every finer level upsampled
+  into squares. The amplitude is now at most half the ground's own height
+  above the sea (`refine.upsample.detail_amplitude`, `height_share`;
+  `refine.zoom.DETAIL_HEIGHT_SHARE`), in the window levels and the planet
+  levels alike.
+* **An island was held to the coast beside it, or not at all.** The hold
+  judges blocks of `hold_scale` parent cells that are at least half land. An
+  island alone in its tile filled none, the loop stopped before its first
+  pass and the island was never held (mean change -903 m). Beside a coast the
+  low-pass reached across the water: a shoal of 0-31 m took the uplift the
+  eroding coast needed and stood 1.0-2.0 km tall after 200 iterations, and
+  the ground around it was lowered under the sea to pay for it, a ring of
+  lakes. A piece of land under `R x R` cells is now held as one piece, to its
+  own mean, and stays out of the low-pass of the rest
+  (`refine.zoom.smooth_drift`).
+* **A level's erosion wore a cone into a pyramid.** The hold lifts ground
+  back over four parent cells at once, wider than a cone, so the cone erodes
+  toward one slope everywhere: a 4.39 km cone was a 3.25 km pyramid at
+  1.2 km, with a straight ridge along the grid axis 400-600 m above the cells
+  beside it, and the finer levels kept the cross. The coarse erosion leaves
+  active cones out for the same reason (they are younger than the erosion);
+  a level now treats ground that is active cone as fresh lava -- hardness
+  0.97 and a quarter of the noise where the edifice is 300 m thick
+  (`refine.zoom.cone_shield`, from the coarse `volcano_active`).
+
+| window f4_851_1003, 1.2 km level | before | after |
+|---|---|---|
+| noise, largest | 4,114 m | 177 m |
+| island cells under the sea | 164 of 354 | 2 |
+| mean change of the island | -903 m | 0 m |
+| change from the upsample, std | 808 m | 116 m |
+| summit (upsample 2,791 m) | 2,913 m | 2,956 m |
+
+At 76 m, 19 m and 5 m the island is a cone with branching radial valleys.
+The five levels take 792 s where they took 207 s: the island is land at
+every level now (the 5 m level is 2048² cells of it, 547 s).
+
+`bake.INPUTS_VERSION` is in a level's resume key, so a zoom baked before
+this is baked again.
+
+Left:
+* ground within a few metres of sea level off a coast (the coarse world's
+  flats at 0-30 m) still prints the 1.2 km cells as beaded arcs of land at
+  76 m, with lakes on the pads;
+* the hold still lifts every cell within four parent cells by the same
+  amount, so the foot of a mountain that erodes fast rises with it;
+* the refine stage's own noise (`refine.detail_amp` 0.3) has no height
+  share: a tenth of the amplitude, and its bakes stay as they are.

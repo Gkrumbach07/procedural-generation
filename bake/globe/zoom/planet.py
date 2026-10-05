@@ -48,8 +48,8 @@ from ..cubesphere import from_sphere_v, project_to_face_v, to_sphere_v
 from ..hydro.priority_flood import priority_flood_flat
 from ..io.world_store import WorldStore
 from ..refine import basin_job as bj
-from ..refine.upsample import COARSE_INPUTS, Window, upsample_window
-from ..refine.zoom import ZOOM_REFINE, drain_noise, zoom_params
+from ..refine.upsample import COARSE_INPUTS, Window, detail_amplitude, upsample_window
+from ..refine.zoom import DETAIL_HEIGHT_SHARE, ZOOM_REFINE, cone_shield, drain_noise, zoom_params
 from . import bake as zb
 
 #: rng / hash sub-key of planet bakes
@@ -332,16 +332,17 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
     N = grid.N
     win = Window(face, ta0, ta1, tb0, tb1, R)
     up = upsample_window(fields, derived, win, grid)
+    cone = zb.active_cones(root, win, grid)
+    if cone is not None:
+        up["hardness"], up["quiet"] = cone_shield(cone, up["hardness"])     # active cones are fresh lava (refine.zoom.cone_shield)
     t = slice(R - 1, win.NE - (R - 1))                          # the window plus one fine cell
     tr = {k: v[t, t] for k, v in up.items()}
+    quiet = tr.get("quiet", 1.0)
     n = tr["height0"].shape[0]
     plain = (tr["height0"] + tr["sediment0"]).astype(np.float64)
     ocean = zb._ocean(plain, tr["basin_id"] < 0)
     coast_taper = float(lp.refine.coast_taper_m)
-    amp = float(ZOOM_REFINE["detail_amp"]) * np.minimum(np.maximum(tr["slope"], 0.0) * grid.cell_size_m, np.maximum(tr["relief"], 0.0)) * (0.5 + 0.5 * np.clip(tr["hardness"], 0.0, 1.0))
-    if coast_taper > 0.0:
-        tt = np.clip(np.abs(plain) / coast_taper, 0.0, 1.0)
-        amp = amp * tt * tt * (3.0 - 2.0 * tt)
+    amp = detail_amplitude(tr["slope"], tr["relief"], tr["hardness"], float(ZOOM_REFINE["detail_amp"]), grid.cell_size_m, plain, coast_taper, DETAIL_HEIGHT_SHARE)
     noise = None
     base = {k: tr[k] for k in ("height0", "sediment0", "discharge", "momentum")}
     f_hold = R
@@ -358,7 +359,7 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
         base = {k: chained[k] for k in base}
         f_hold = chained["f"]
     if noise is None:
-        noise = np.where(ocean, 0.0, amp * hashed_ridged(int(params.world.seed) + PLANET_KEY, face, ta0 * R - 1, tb0 * R - 1, n, n, 2.0 * R))
+        noise = np.where(ocean, 0.0, quiet * amp * hashed_ridged(int(params.world.seed) + PLANET_KEY, face, ta0 * R - 1, tb0 * R - 1, n, n, 2.0 * R))
     # the noise's own basins (chained or not), filled before anything erodes
     noise = noise + drain_noise(base["height0"] + noise + base["sediment0"], ocean)
     NF = (N + 2 * level.guard) * R

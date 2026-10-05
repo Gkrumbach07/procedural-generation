@@ -913,6 +913,64 @@ def test_detail_noise_fades_out_at_sea_level():
     assert np.array_equal(n1[far], n0[far])
 
 
+def test_detail_noise_keeps_to_a_share_of_the_ground():
+    """A volcanic island two coarse cells across drops its whole height in
+    one cell, so noise scaled by that drop is its whole height several times
+    over.  With ``height_share`` no land cell loses more than that share of
+    its height and none ends under the sea; without it a third of the island
+    did (the square mesas and lakes of earth-v18's zoom f4_851_1003)."""
+    win = Window(0, 4, 20, 4, 20, 8)
+    NE = win.NE
+    y, x = np.meshgrid(np.arange(NE), np.arange(NE), indexing="ij")
+    r = np.hypot(y - NE / 2, x - NE / 2) * (9770.0 / 8)
+    surface = (4500.0 * np.exp(-0.5 * (r / 9000.0) ** 2) - 1700.0).astype(np.float32)      # a 4.5 km cone on a 1.7 km sea floor
+    gy, gx = np.gradient(surface, 9770.0 / 8)
+    slope = np.hypot(gx, gy).astype(np.float32)
+    relief = (slope * 9770.0).astype(np.float32)
+    hard = np.full((NE, NE), 0.7, np.float32)
+    p = WorldParams.tiny_world()
+    land = surface > 0.0
+    free = detail_noise(win, slope, relief, hard, 3.0, 9770.0, p.rng("refine", 7), surface=surface, coast_taper_m=40.0)
+    kept = detail_noise(win, slope, relief, hard, 3.0, 9770.0, p.rng("refine", 7), surface=surface, coast_taper_m=40.0, height_share=0.5)
+    assert ((surface + free)[land] < 0.0).mean() > 0.1
+    assert not ((surface + kept)[land] < 0.0).any()
+    assert np.all(np.abs(kept) <= 0.5 * np.abs(surface) + 1e-3)
+    assert kept.std() > 0.0 and np.array_equal(np.sign(kept), np.sign(free))               # the same noise, quieter
+
+
+def test_smooth_drift_holds_an_island_on_its_own():
+    """Land narrower than the hold is held to its own mean: an island beside
+    a coast that sank does not take the coast's correction (the 1-2 km towers
+    on shoals of docs/zoom-windows.md), an island alone in its array is held
+    at all, and the coast's own correction does not see the island."""
+    from globe.refine.zoom import smooth_drift
+    R, n = 16, 160
+    cells = np.zeros((n, n), bool)
+    cells[:, :80] = True                                 # the mainland
+    isle = np.zeros((n, n), bool)
+    isle[70:78, 86:94] = True                            # six cells off its coast, under R x R cells
+    delta = np.where(isle, 40.0, -300.0)
+    F = smooth_drift(delta, cells | isle, R)
+    assert np.allclose(F[isle], 40.0)
+    assert np.allclose(F[cells], smooth_drift(delta, cells, R)[cells])
+    alone = smooth_drift(delta, isle, R)
+    assert np.allclose(alone[isle], 40.0) and not alone[~isle].any()
+
+
+def test_cone_shield_is_fresh_lava():
+    """Where a zoom level's ground is an active cone the rock is fresh lava:
+    hardness ``CONE_HARDNESS`` and the detail noise at ``CONE_NOISE``, both
+    reached where the edifice is ``CONE_FULL_M`` thick; off the cone nothing
+    changes, and rock already harder stays as it is."""
+    from globe.refine import zoom as rz
+    cone = np.array([0.0, 0.5 * rz.CONE_FULL_M, rz.CONE_FULL_M, 4000.0, 4000.0])
+    hard = np.array([0.6, 0.6, 0.6, 0.6, 0.99], np.float32)
+    h, quiet = rz.cone_shield(cone, hard)
+    assert h.dtype == np.float32
+    assert np.allclose(h, [0.6, 0.5 * (0.6 + rz.CONE_HARDNESS), rz.CONE_HARDNESS, rz.CONE_HARDNESS, 0.99])
+    assert np.allclose(quiet, [1.0, 0.5 * (1.0 + rz.CONE_NOISE), rz.CONE_NOISE, rz.CONE_NOISE, rz.CONE_NOISE])
+
+
 def test_seam_strip_is_sampled_where_the_neighbour_face_is(world):
     """The seam blend resamples a piece's refined off-face strip onto the
     neighbouring face (`rasterize.strip_window_coords` + bilinear).  Checked

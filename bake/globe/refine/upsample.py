@@ -320,23 +320,45 @@ def ridged_fbm(shape: tuple[int, int], base_wavelength: float, rng: np.random.Ge
     return out.astype(np.float32)
 
 
-def detail_noise(win: Window | FineWindow, slope: np.ndarray, relief: np.ndarray, hardness: np.ndarray, detail_amp: float, cell_size_m: float, rng: np.random.Generator,
-                 surface: np.ndarray | None = None, coast_taper_m: float = 0.0) -> np.ndarray:
-    """Detail noise in metres on the extended window (``NE x NE``):
-    ``detail_amp * min(slope * cell_size_m, relief) * (0.5 + 0.5 hardness)
-    * ridged_fbm``.  ``slope`` (rise/run), ``relief`` (m) and ``hardness``
-    are the bilinearly upsampled coarse fields on the same array.  With
-    ``surface`` (metres, sea level 0) and ``coast_taper_m > 0`` the
-    amplitude fades smoothly to zero at sea level, full again
-    ``coast_taper_m`` above or below it, so the noise cannot move the
-    coastline: the shelf step is the steepest slope on the map and the
-    ridged creases it earned were crossing zero as a fringe of inlets."""
+def detail_amplitude(slope: np.ndarray, relief: np.ndarray, hardness: np.ndarray, detail_amp: float, cell_size_m: float,
+                     surface: np.ndarray | None = None, coast_taper_m: float = 0.0, height_share: float = 0.0) -> np.ndarray:
+    """Amplitude of the detail noise in metres: ``detail_amp * min(slope *
+    cell_size_m, relief) * (0.5 + 0.5 hardness)`` -- the drop across one cell
+    of the grid the slope was measured on.  With ``surface`` (metres, sea
+    level 0):
+
+    * ``coast_taper_m > 0`` fades it smoothly to zero at sea level, full
+      again ``coast_taper_m`` above or below it, so the noise cannot move the
+      coastline: the shelf step is the steepest slope on the map and the
+      ridged creases it earned were crossing zero as a fringe of inlets;
+    * ``height_share > 0`` keeps it to that share of the surface's own height
+      above the sea (depth below it).  The drop across a cell says how rough
+      the ground under it may be only where the ground is wider than the
+      cell: a volcanic island two cells across drops its whole height in one,
+      and at ``detail_amp`` 3 the noise (unit maximum) was -2.2 to +4.1 km on
+      a 2.8 km cone -- 158 of its 354 land cells under the sea before a
+      particle had moved, and a surface of single-cell spikes and pits that
+      every finer level then upsampled into square mesas and square lakes.
+    """
     amp = float(detail_amp) * np.minimum(np.maximum(slope, 0.0) * float(cell_size_m), np.maximum(relief, 0.0)) * (0.5 + 0.5 * np.clip(hardness, 0.0, 1.0))
-    if detail_amp <= 0.0:
-        return np.zeros((win.NE, win.NE), dtype=np.float32)
     if surface is not None and coast_taper_m > 0.0:
         t = np.clip(np.abs(np.asarray(surface, np.float32)) / np.float32(coast_taper_m), 0.0, 1.0)
         amp = amp * (t * t * (3.0 - 2.0 * t))
+    if surface is not None and height_share > 0.0:
+        amp = np.minimum(amp, float(height_share) * np.abs(surface))
+    return amp
+
+
+def detail_noise(win: Window | FineWindow, slope: np.ndarray, relief: np.ndarray, hardness: np.ndarray, detail_amp: float, cell_size_m: float, rng: np.random.Generator,
+                 surface: np.ndarray | None = None, coast_taper_m: float = 0.0, height_share: float = 0.0) -> np.ndarray:
+    """Detail noise in metres on the extended window (``NE x NE``):
+    :func:`detail_amplitude` ``* ridged_fbm``.  ``slope`` (rise/run),
+    ``relief`` (m) and ``hardness`` are the bilinearly upsampled coarse
+    fields on the same array; ``surface`` (metres, sea level 0),
+    ``coast_taper_m`` and ``height_share`` are the amplitude's."""
+    if detail_amp <= 0.0:
+        return np.zeros((win.NE, win.NE), dtype=np.float32)
+    amp = detail_amplitude(slope, relief, hardness, detail_amp, cell_size_m, surface, coast_taper_m, height_share)
     noise = ridged_fbm((win.NE, win.NE), 2.0 * win.R, rng)  # octaves 2R, R, R/2 ... 2 cells: what survives the coarse-cell drift removal of the job
     return (amp * noise).astype(np.float32)
 
@@ -400,5 +422,5 @@ def upsample_face(fields: dict[str, FaceField], derived: dict[str, FaceField], f
 
 __all__ = [
     "COARSE_INPUTS", "Window", "FineWindow", "basin_window", "sample", "window_metric", "coarse_derived",
-    "value_noise_2d", "ridged_fbm", "detail_noise", "upsample_window", "upsample_face",
+    "value_noise_2d", "ridged_fbm", "detail_amplitude", "detail_noise", "upsample_window", "upsample_face",
 ]
