@@ -43,7 +43,7 @@ import numpy as np
 from ..climate.temperature import retarget
 from ..field import FaceField
 from ..hydro.d8 import OCEAN
-from . import biomes, soil
+from . import biomes, geology, soil
 from . import lakes as lakes_mod
 from . import rivers as rivers_mod
 from .fine import coarse_face_array, face_pads, has_fine, load_face, slope_magnitude, upsample_face, upsample_nearest, write_face
@@ -198,6 +198,11 @@ def run(store, params, log=print) -> dict:
     store.save_field(FaceField.from_interior(grid, biome_c, name="biome", exchange=False))
     hist = np.bincount(biome_c.ravel(), minlength=biomes.N_BIOMES)
     info["coarse_biome_hist"] = {biomes.NAMES[k]: int(hist[k]) for k in range(biomes.N_BIOMES) if hist[k]}
+    # the geologic map (coarse ``rock`` and ``basement``): read off tectonics' diagnostics, so not
+    # in OUTPUTS -- a world baked before them has none, and its stage hash stays what it was
+    geo = geology.run(store, params, grid, surface_c, sed.interior, ocean_c, lake_c, T_c, Pcm_c, log)
+    if geo is not None:
+        info["geology"] = geo
     info["coarse_channel_fraction"] = chan_frac
     info["coarse_lakes"] = int(n_coarse_lakes)
     info["closed_basin_cells"] = int(((surface_c < 0.0) & land_c).sum())

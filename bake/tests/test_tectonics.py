@@ -764,6 +764,27 @@ def test_a_shortened_continent_keeps_the_plate_it_welded_onto():
     assert float((seg.kind == CONTINENTAL).mean()) > share_off
 
 
+def test_crust_thickness_and_province_are_what_the_segments_carry(tiny_sim, tiny_out):
+    """``crust_thickness`` (km) and ``crust_province`` (craton / docked arc / arc at sea), the
+    diagnostics the geology map and the cross-sections read: each kind of crust keeps its own
+    thickness -- a continent's does not bleed into the floor beside it -- and a province is one
+    its own kind of crust can be."""
+    th = tiny_out["crust_thickness"].interior
+    prov = tiny_out["crust_province"].interior
+    cont = tiny_out["crust_kind"].interior.astype(bool)
+    seg, tp = tiny_sim.seg, tiny_sim.tp
+    assert tiny_out["crust_thickness"].dtype == np.float32 and tiny_out["crust_province"].dtype == np.uint8
+    assert np.isfinite(th).all() and th.min() > 0.0
+    floor = tect.CRUST_KM * float(tp.oceanic_thickness)
+    assert abs(float(np.median(th[~cont])) - floor) < 0.5 * floor              # the sea floor is the sea floor's ~7 km
+    assert float(np.median(th[cont])) > 3.0 * float(np.median(th[~cont]))
+    assert th.max() <= tect.CRUST_KM * float(seg.thickness.max()) + 1e-3
+    assert set(np.unique(prov)) <= {0, tect.PROVINCE_CRATON, tect.PROVINCE_TERRANE, tect.PROVINCE_ARC}
+    assert not (prov[~cont] == tect.PROVINCE_CRATON).any() and not (prov[cont] == tect.PROVINCE_ARC).any()
+    if (seg.craton > 0).any():
+        assert (prov == tect.PROVINCE_CRATON).any()
+
+
 def test_crust_age_says_how_old_the_crust_under_a_cell_is(tiny_sim, tiny_out, monkeypatch):
     """``crust_age`` (a diagnostic, like ``crust_kind``): steps since the crust
     under a cell formed.  The ocean floor is born at a rift and dies at a

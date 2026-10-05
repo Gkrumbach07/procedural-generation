@@ -562,6 +562,10 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
         sediment=ds(sed),
         crust=ds(up(crust), "nearest") if crust is not None else None,
         crust_age=ds(up(crust_age), "nearest") if crust_age is not None and crust is not None else None,
+        # the geologic map (derive/geology.py) and the crust under it, for the cross-sections
+        rock=ds(up(_load_faces(root, "rock")), "nearest"),
+        basement=ds(up(_load_faces(root, "basement")), "nearest"),
+        crust_thickness=ds(up(_load_faces(root, "crust_thickness", "diagnostics"))),
     ))
     frames[-1].river_scale = fine.get("river_scale") if fine is not None else None
     src = (f"planet level {planet}" if planet else f"refined grid, R={R}") if fine is not None else "coarse grid"
@@ -653,6 +657,14 @@ def channel_specs(final: _Frame, river_threshold: float | None = None) -> dict:
         specs["crust_age"] = {"label": "Crust age", "kind": "log", "lo": o_lo, "hi": o_hi, "unit": "steps",
                               "cont_lo": c_lo, "cont_hi": c_hi, "cmap": "age", "bits": [0, 127],
                               "lo_label": "new", "hi_label": f"{o_hi:.0f} / {c_hi:.0f} steps"}
+    if "rock" in final.ch:
+        from ..derive import geology
+        specs["rock"] = {"label": "Geology", "kind": "category", "cmap": "rock", "names": list(geology.NAMES), "families": list(geology.FAMILY)}
+        if "basement" in final.ch:
+            specs["basement"] = {"label": "Basement rock", "kind": "category", "cmap": "rock", "names": list(geology.NAMES),
+                                 "families": list(geology.FAMILY)}
+    if "crust_thickness" in final.ch:
+        specs["crust_thickness"] = {"label": "Crust thickness", "kind": "linear", "lo": 0.0, "hi": CRUST_THICKNESS_KM, "unit": "km", "cmap": "viridis"}
     if "water" in final.ch:
         specs["water"] = {"label": "Water", "kind": "category", "cmap": "plates", "names": ["land", "lake", "ocean"]}
     # read by the shader to place shores between cells, not offered as layers
@@ -689,7 +701,9 @@ def _byte(name: str, a: np.ndarray, specs: dict, ch: dict | None = None) -> np.n
 # textures beyond texture 0 on the final frame: (R, G, B) channel names
 # (short tuples are padded with zero channels)
 FINAL_TEXTURES = (("temperature", "precip", "biome"), ("plate", "sediment", "crust"), ("water", "order", "basin"),
-                  ("flow", "lake_depth", "ocean"))
+                  ("flow", "lake_depth", "ocean"), ("rock", "basement", "crust_thickness"))
+#: top of the crust-thickness byte (km): Earth's thickest crust is ~75 km, under Tibet
+CRUST_THICKNESS_KM = 80.0
 
 
 def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
@@ -972,6 +986,7 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
         "channels": specs,
         "biome_palette": _biome_palette() if "biome" in specs else [],
         "satellite_palette": SATELLITE_PALETTE if "satellite" in specs else [],
+        "rock_palette": _rock_palette() if "rock" in specs else [],
         "biome_vegetation": _biome_vegetation() if "satellite" in specs else [],
         "biome_tree_kinds": _biome_tree_kinds() if "satellite" in specs else [],
         "stage_seconds": {s: round(v.get("seconds", 0.0), 1) for s, v in manifest.get("stages", {}).items()},
@@ -1033,6 +1048,11 @@ def _biome_tree_kinds() -> list:
     from ..derive.biomes import TREE_KIND
 
     return [int(v) for v in TREE_KIND]
+
+
+def _rock_palette() -> list:
+    from ..derive import geology
+    return [list(c) for c in geology.PALETTE]
 
 
 def _biome_palette() -> list:

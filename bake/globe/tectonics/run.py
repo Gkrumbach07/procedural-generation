@@ -134,6 +134,11 @@ OUTPUTS = ["bedrock", "uplift", "hardness", "plate_id", "plate_vel"]
 #: the cones of the edifices active at the last step (m), with tectonics.volcanoes on: in
 #: ``bedrock``, not in ``uplift``; the erosion stage takes them off and puts them back on top
 VOLCANO_FIELD = "volcano_active"
+#: thickness unit -> km (``continental_thickness`` 1.0 is ~35 km, config.py): the
+#: ``crust_thickness`` diagnostic's
+CRUST_KM = 35.0
+#: codes of the ``crust_province`` diagnostic (uint8; 0 = none of them)
+PROVINCE_CRATON, PROVINCE_TERRANE, PROVINCE_ARC = 1, 2, 3
 
 
 # --------------------------------------------------------------------------
@@ -2138,7 +2143,36 @@ def finalise(sim: TectonicSim, bed_only: bool = False) -> dict:
     take_c |= ~cont_c & (w_o <= 1e-6)                   # crust near it falls back to the other
     crust_age = FaceField.from_interior(coarse, np.maximum(np.where(take_c, age_c, age_o), 0.0).astype(np.float32),
                                         name="crust_age")
-    extra = {}
+    # How thick the crust under a cell is (km), and what it is made of beyond its kind: each
+    # kind's own splat again, so a continent's 35 km does not bleed into the 7 km floor beside
+    # it.  The geology map and the viewer's cross-sections read them (derive/geology.py);
+    # diagnostics, like crust_kind: not in OUTPUTS, so no stage hash and no baked world changes
+
+    def kind_mean(values, mask):
+        w = _resample(FaceField.from_interior(grid, blend(mask), exchange=True), order=1)
+        a = _resample(FaceField.from_interior(grid, blend(values * mask), exchange=True), order=1)
+        return a / np.maximum(w, 1e-9)
+
+    th_km = seg.thickness.astype(np.float64) * CRUST_KM
+    thick = np.where(take_c, kind_mean(th_km, 1.0 - ocean_m), kind_mean(th_km, ocean_m))
+    crust_thickness = FaceField.from_interior(coarse, np.maximum(thick, 0.0).astype(np.float32), name="crust_thickness")
+    # the province: a craton, an island arc that docked onto a continent, an island arc still at
+    # sea (oceanic crust thickened at a trench: volcanoes.arc_crust), else 0 -- whichever holds
+    # most of the cell's kind of crust, where that is at least half of it
+    arc = volc.arc_crust(seg, float(tp.oceanic_thickness)) >= volc.ARC_MIN_TH
+    share = {
+        PROVINCE_CRATON: np.where(take_c, kind_mean((seg.craton > 0).astype(np.float64), 1.0 - ocean_m), 0.0),
+        PROVINCE_TERRANE: np.where(take_c, kind_mean((seg.terrane > 0).astype(np.float64), 1.0 - ocean_m), 0.0),
+        PROVINCE_ARC: np.where(take_c, 0.0, kind_mean(arc.astype(np.float64), ocean_m)),
+    }
+    prov = np.zeros(thick.shape, np.uint8)
+    best = np.full(thick.shape, 0.5)
+    for code, sh in share.items():
+        take = sh >= best
+        prov[take] = code
+        best = np.where(take, sh, best)
+    crust_province = FaceField.from_interior(coarse, prov, name="crust_province")
+    extra = {"crust_thickness": crust_thickness, "crust_province": crust_province}
     if cone is not None:
         extra["volcano_active"] = FaceField.from_interior(coarse, cone_act.astype(np.float32), name="volcano_active")
         # every edifice, active and extinct (m above the ground it stands on): a diagnostic
@@ -2243,6 +2277,8 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     out["collision_zone"].save(diag_dir)
     out["crust_kind"].save(diag_dir)
     out["crust_age"].save(diag_dir)
+    out["crust_thickness"].save(diag_dir)
+    out["crust_province"].save(diag_dir)
     if "volcano_cone" in out:
         out["volcano_cone"].save(diag_dir)
     last = sim.stats[-1] if sim.stats else {}
