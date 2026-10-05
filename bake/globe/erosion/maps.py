@@ -513,11 +513,21 @@ class ErosionState:
             w64 = np.asarray(water, np.float64).reshape(-1)
             plain = _lake_plain_kernel(w64, lab, flood.parent, flood.pop_seq, float(grade))
             room = np.maximum(np.minimum(plain[cells], w64[cells] + float(rise)) - s64[cells], 0.0)
-            # farthest from the outlet first (the plain is highest there): a delta builds out
-            # from where the rivers come in towards the outlet, which stays open at the level
-            # it had.  Filled from the outlet side the new plain is a dam, each refresh a
-            # little higher (a 119,000 km2 lake at 4.5 m became 244,000 km2 at 20.9 m)
-            order = np.lexsort((-plain[cells], lab[cells]))
+            # farthest from the outlet first: a delta builds out from where the rivers come in
+            # towards the outlet, which stays open at the level it had.  Filled from the outlet
+            # side the new plain is a dam, each refresh a little higher (a 119,000 km2 lake at
+            # 4.5 m became 244,000 km2 at 20.9 m).  Far as the crow flies, not in the flood
+            # tree's steps: across flat water those count cells along the grid, and what was
+            # left of a half-filled lake had straight sides (earth-v22)
+            order_f = np.asarray(flood.order).reshape(-1)[cells]
+            first = np.full(n, np.iinfo(np.int64).max, dtype=np.int64)
+            np.minimum.at(first, lab[cells], order_f)
+            outlet = np.zeros(n, dtype=np.int64)
+            at = order_f == first[lab[cells]]
+            outlet[lab[cells][at]] = cells[at]
+            centres = self.grid.interior_centers.reshape(-1, 3)
+            far = np.linalg.norm(centres[cells] - centres[outlet[lab[cells]]], axis=1)
+            order = np.lexsort((-far, lab[cells]))
             cells, room = cells[order], room[order]
             L = lab[cells].astype(np.int64)
             ptr = np.searchsorted(L, np.arange(n))
