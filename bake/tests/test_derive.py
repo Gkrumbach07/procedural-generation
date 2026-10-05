@@ -237,7 +237,9 @@ def build_lake_graph_world(path, params):
 
 @pytest.fixture(scope="module")
 def tiny(scratch):
-    params = WorldParams.tiny_world(seed=3)
+    # marsh_depth 0: the synthetic lake is 3 m deep at its shallowest cell, and these tests are of
+    # derive's lakes, rivers and biomes as such (the marsh line has its own test, tests/test_hydro.py)
+    params = WorldParams.tiny_world(seed=3).with_overrides(hydro={"marsh_depth": 0.0})
     store = build_world(scratch / "derive_tiny", params)
     info = derive_run.run(store, params, _log)
     return store, params, info

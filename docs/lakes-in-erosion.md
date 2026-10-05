@@ -164,6 +164,13 @@ coarse `marsh` field, wetland in derive's biomes; the flood's routing does
 not change. Earth's own are the Pantanal, the Sudd, the West Siberian and
 Hudson Bay lowlands.
 
+The refine pass floods the same shallow ground again at its own cells, so
+the line is drawn on the refined grid too: derive's lakes, its wetland and
+the viewer's water take water deeper than `marsh_depth` for a lake. On the
+refined grid, which is what the viewer draws, earth-v19 had 3.76 % of its
+land under lakes, four of them over 100,000 km2 (the largest 485,000);
+earth-v21 has 2.29 %, three over 100,000 km2 (163,000, 136,000 and 119,000).
+
 **`erosion.lake_fill` (off).** A particle entering a lake drops what the shore
 has room for -- on a plain, a metre a visit -- and carries the rest across
 and out, so a lake on flat ground never silts up. With the fill a lake that

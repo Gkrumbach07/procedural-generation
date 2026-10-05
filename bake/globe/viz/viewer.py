@@ -334,7 +334,8 @@ def _fine_final(root: Path, manifest: dict, surf_c: np.ndarray, flow_dir_c: np.n
         return None
     R = Nf // N
     params = manifest.get("params", {}) or {}
-    depth = float((params.get("hydro", {}) or {}).get("lake_min_depth", 0.5))
+    hp = params.get("hydro", {}) or {}
+    depth = max(float(hp.get("lake_min_depth", 0.5)), float(hp.get("marsh_depth", 0.0)))   # derive's line between lake and marsh
     min_cells = max(1, int(round(float((params.get("derive", {}) or {}).get("lake_min_cells", 1.0)) * R * R)))
     ocean_c = (np.asarray(flow_dir_c) == 255) if flow_dir_c is not None else (surf_c < 0.0)
     sea_near = _dilate_max(ocean_c.astype(np.float32), 0.0) > 0.0

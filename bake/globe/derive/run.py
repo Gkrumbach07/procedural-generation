@@ -142,7 +142,11 @@ def run(store, params, log=print) -> dict:
     Nf = params.N_fine
     dp = params.derive
     cs_f = params.fine_cell_size_m
-    depth = float(params.hydro.lake_min_depth)
+    # a lake is water deeper than the marsh line (hydro.marsh_depth), on the refined grid as on
+    # the coarse one: the refine pass floods the shallow sheets again at its own cells, and a
+    # cell 5 km across under a metre of water is no more a lake than one of 10 km
+    pond = float(params.hydro.lake_min_depth)
+    depth = max(pond, float(getattr(params.hydro, "marsh_depth", 0.0)))
     info: dict = {}
 
     # ---- coarse inputs -------------------------------------------------
@@ -355,6 +359,7 @@ def run(store, params, log=print) -> dict:
         ws_f = _fine_optional(store, "water_surface", f, Nf, 0.0)
         ocean_f = fine_ocean(surface_f, sea_near_c, f, R)
         lake_f = lakes_mod.lake_mask(surface_f, ws_f, depth, ocean=ocean_f)
+        marsh_f = lakes_mod.lake_mask(surface_f, ws_f, pond, ocean=ocean_f) & ~lake_f if depth > pond else None   # standing water under the marsh line
         river_mask = np.asarray(load_face(store, "river_mask", f))
         T_f = retarget(upsample_face(T0_field, f, R, order=1), 0.0, surface_f, params.climate)
         Pcm_f = np.maximum(upsample_face(Pcm_field, f, R, order=1), 0.0)
@@ -373,6 +378,8 @@ def run(store, params, log=print) -> dict:
         lake_near_f = biomes.near_padded(lake_f, lake_pads, d_wet)
         if marsh_c is not None:
             lake_near_f = lake_near_f | np.repeat(np.repeat(marsh_c[f], R, axis=0), R, axis=1)
+        if marsh_f is not None:
+            lake_near_f = lake_near_f | marsh_f
         biome_f = biomes.classify(T_f, Pcm_f, surface_f, slope_f, lake_f, river_near_f, lake_near_f, dp, cliff_slope, alpine_min, ocean=ocean_f)
         if gfx is not None:
             # the geologic map on the refined grid: its own ground, water and climate, and the
