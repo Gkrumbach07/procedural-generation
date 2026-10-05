@@ -171,35 +171,73 @@ refined grid, which is what the viewer draws, earth-v19 had 3.76 % of its
 land under lakes, four of them over 100,000 km2 (the largest 485,000);
 earth-v21 has 2.29 %, three over 100,000 km2 (163,000, 136,000 and 119,000).
 
-**`erosion.lake_fill` (off).** A particle entering a lake drops what the shore
+**`erosion.lake_fill`.** A particle entering a lake drops what the shore
 has room for -- on a plain, a metre a visit -- and carries the rest across
 and out, so a lake on flat ground never silts up. With the fill a lake that
 has room keeps that load (`lake_load`, at most `lake_room`) and each refresh
-lays it towards a plain graded from the outlet, far side first; a frozen lake
-takes nothing. It is off because it did not survive full resolution:
+lays it over the floor, the side far from the outlet first, up to a plain a
+metre over the water (`lake_fill_rise_m`); a frozen lake takes nothing.
 
 | seed 1423, same tectonics | lakes, % of land | marsh | over 100,000 km2 | largest | deeper than 10 m |
 |---|---|---|---|---|---|
-| earth-v19 (neither) | 3.13 | -- | 4 | 322k | 1.36 % |
-| earth-v21 (marsh) | **2.20** | 0.93 | **2** | 212k (frozen), 192k | |
-| earth-v20 (marsh and fill) | 2.98 | 0.78 | 6 | 280k (frozen), 231k, 198k | 1.89 % |
-| quarter resolution, neither | 0.88 | | 1 | 300k | 0.30 % |
-| quarter resolution, marsh and fill | 0.50 | | 0 | 86k | 0.15 % |
+| **refined grid, as the viewer draws them** | | | | | |
+| earth-v19 (neither) | 3.76 | | 4 | 485k | |
+| earth-v21 (marsh) | 2.29 | | 3 | 163k | |
+| earth-v22 (marsh and fill) | **2.26** | | **1** | 117k | |
+| **coarse grid** | | | | | |
+| earth-v19 | 3.13 | -- | 4 | 322k | 1.36 % |
+| earth-v21 | 2.20 | 0.93 | 2 | 212k (frozen), 192k | 1.36 % |
+| earth-v22 | 2.03 | 0.74 | 3 | 122k, 121k, 106k | 1.16 % |
+| earth-v20 (the fill's first form) | 2.98 | 0.78 | 6 | 280k (frozen), 231k | 1.89 % |
 
-At a quarter of the resolution the fill halved the deep water; at full
-resolution it added to it. What the sediment laid in a lake does next is the
-difference: it is a load, the crust under it subsides by 0.8 of it over the
-flexural width, and the lake it was laid in is deeper for it; and a lake that
-is gone no longer evaporates its inflow, so the closed basin downstream
-stands higher (a plateau lake of 33,000 km2 at 1,544 m in earth-v19 is
-231,000 km2 at 1,644 m in earth-v20). The quarter-resolution world is not a
-test of lakes: it has predicted a larger gain than the full bake twice.
+The fill takes the giants more than the area: one seed, and a frozen lake of
+212,000 km2 that the fill never touches came out as two of 53,000 km2, so
+part of the difference is the run's own scatter.
 
-Three forms of the fill were worse still on the small world and are not in
-the code: filling to the waterline (ground dead flat at the spill level
-floods again with the next tilt); sending a full lake's surplus on as one
-`pending` particle (it dams the outlet); filling from the outlet side (the
-new plain is the dam: 119,000 km2 at 4.5 m became 244,000 km2 at 20.9 m).
+**What the first form got wrong (earth-v20).** Around earth-v19's largest
+lakes it had dried half the cells of the 322,000 km2 one -- whose level then
+stood 4 m higher, with 99,000 km2 of new water round it; the frozen
+233,000 km2 one stood 36 m higher with 171,000 km2 more. Two things raised
+them:
+
+* the plain a lake filled towards rose at `basin_fill_grade` from the outlet
+  without limit, 292 m above the water at the far side of a long lake, across
+  the mouth of every river entering there -- which is the outlet of the next
+  lake up;
+* a load a full lake refused became the particle's surplus, which its next
+  deposits placed on the cells it crossed in the lake, up to a metre above the
+  one before, the outlet among them.
+
+The plain is capped a metre over the water (the marsh rule is what makes that
+enough: ground that floods again by less than 3 m is marsh), and a refused
+load goes where the particle ends. The deposit loads the crust by 0.55 of its
+thickness (`lake_fill_load`): it stands where water stood.
+
+What was left of a half-filled lake in earth-v22 had straight sides, the fill
+having gone farthest-first in the flood tree's steps, which across flat water
+count cells along the grid; it goes by distance from the outlet now
+(earth-v23).
+
+**The quarter-resolution world is not a test of lakes.** It had the first
+form halving the deep water (0.88 -> 0.50 % with the marsh rule) where the
+full bake doubled the giants.
+
+Three earlier forms were worse still on the small world and are not in the
+code: filling to the waterline before there was a marsh rule (ground dead
+flat at the spill level floods again with the next tilt); sending a full
+lake's surplus on as one `pending` particle (it dams the outlet); filling
+from the outlet side (the new plain is the dam: 119,000 km2 at 4.5 m became
+244,000 km2 at 20.9 m).
+
+**`hydro.land_evap` (off).** The balance evaporates water off lakes only, and
+all the rain a catchment receives arrives at its lake. With `land_evap` the
+land evaporates too: a cell's rain runs off in the share Budyko's curve
+leaves, and a lake loses the potential evaporation less what the ground
+under it would have lost. On finished surfaces, hydro stage alone: earth-v21
+2.20 -> 2.05 % of land at 2.5 and 1.93 % at 3.0; earth-v22 2.03 -> 1.90 %
+(giants of 170k and 141k) and 1.69 % with no lake over 100,000 km2 at 3.0.
+Not monotonic and not baked: erosion solves the same balance every ten
+iterations, so a world wants it from the start of the stage.
 
 What is left in earth-v21: one frozen lake of 212,000 km2 averaging 52 m (the
 Great Lakes together are 244,000 km2); a tropical one of 192,000 km2
