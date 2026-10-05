@@ -167,7 +167,7 @@ def run(store, params, log=print) -> dict:
     topo = flood.pop_seq[::-1]
     topo = topo[~ocean.reshape(-1)[topo]]
     water, acc, bal = balance_lakes(surface, filled, ocean, flood.order, down, topo,
-                                    precip.interior, evap.interior, grid, hp.lake_evap)
+                                    precip.interior, evap.interior, grid, hp.lake_evap, float(getattr(hp, "land_evap", 0.0)))
     info["t_balance_s"] = time.time() - t
     info["lake_balance"] = bal
     depth = water - surface
@@ -182,7 +182,7 @@ def run(store, params, log=print) -> dict:
     info["marsh_cells"] = int(np.count_nonzero(marsh))
     acc[ocean.reshape(-1)] = 0.0
     acc = acc.astype(np.float32).reshape(6, N, N)
-    if hp.lake_evap > 0:
+    if hp.lake_evap > 0 or float(getattr(hp, "land_evap", 0.0)) > 0:
         log(f"[hydro] endorheic balance: {bal['depressions']:,} depressions -> "
             f"{bal['overflowing']:,} overflowing, {bal['closed']:,} closed, {bal['dry']:,} dry; "
             f"cells under water {bal['cells_spill']:,} -> {bal['cells_balanced']:,}; "

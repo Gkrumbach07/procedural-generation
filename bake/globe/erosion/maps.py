@@ -357,7 +357,7 @@ class ErosionState:
         self.sea = sea
         return info
 
-    def refresh_lakes(self, lake_evap: float, min_depth: float, min_fraction: float, fill: tuple | None = None) -> dict:
+    def refresh_lakes(self, lake_evap: float, min_depth: float, min_fraction: float, fill: tuple | None = None, land_evap: float = 0.0) -> dict:
         """Solve every depression's water level on the current surface and
         hand it to the kernel (``erosion.lake_balance``).
 
@@ -396,13 +396,13 @@ class ErosionState:
         topo = topo[~ocean.reshape(-1)[topo]]
         water, _acc, bal = balance_lakes(surf, flood.filled, ocean, flood.order, down, topo,
                                          np.ascontiguousarray(self.precip[inter]), np.ascontiguousarray(self.evap[inter]),
-                                         self.grid, float(lake_evap))
+                                         self.grid, float(lake_evap), float(land_evap))
         lake = ((water - surf) > min_depth) & ~ocean
         closed = lake & (water < flood.filled - 1e-4)
         flag = np.zeros(self.height.shape, dtype=np.uint8)
         settled = {}
         if fill is not None:
-            settled, takes = self.settle_lake_loads(lake & ~closed, water, surf, flood, float(fill[0]), float(fill[1]))
+            settled, takes = self.settle_lake_loads(lake & ~closed, water, surf, flood, *(float(v) for v in fill))
             surf = np.ascontiguousarray(self.surface()[inter], dtype=np.float32)
             lake &= (water - surf) > min_depth          # what the load raised to its plain is ground again
             flag[inter] = (lake & ~closed).astype(np.uint8) + (takes & lake & ~closed)
@@ -420,7 +420,8 @@ class ErosionState:
                 "depressions": int(bal.get("depressions", 0)), "overflowing": int(bal.get("overflowing", 0)),
                 "closed": int(bal.get("closed", 0)), "dry": int(bal.get("dry", 0)), **{f"load_{k}": v for k, v in settled.items()}}
 
-    def settle_lake_loads(self, lake: np.ndarray, water: np.ndarray, surf: np.ndarray, flood, grade: float, ice_evap: float):
+    def settle_lake_loads(self, lake: np.ndarray, water: np.ndarray, surf: np.ndarray, flood, grade: float, ice_evap: float,
+                          rise: float = 0.0, load_share: float = 1.0):
         """Lay the sediment the lakes kept (``lake_load``) over their floors,
         and say what each lake has room for until the next refresh.
 
@@ -435,6 +436,18 @@ class ErosionState:
         water.  Its room is what that plain would take; it fills from the far
         side towards the outlet, as a delta does, so what is left of the lake
         is by its outlet at the level it had.
+
+        The plain stands at most ``rise`` (cell units) above the water.  At
+        the grade alone the far side of a lake 300 cells long was laid 290 m
+        above its water, across the mouth of every river that came in there:
+        the lake upstream of it, whose outlet that mouth was, rose with the
+        wedge (36 m in earth-v20, over 171,000 km2 of new water).  A metre is
+        enough to keep the ground from flooding again, now that standing
+        water under ``hydro.marsh_depth`` is marsh.
+
+        ``load_share`` of the deposit is load for the isostasy: sediment laid
+        in a lake stands where water stood, and only the difference of their
+        densities is new weight on the crust (about 0.55 of the sediment's).
 
         Then the lakes are numbered for the kernel: ``lake_id`` per cell and
         ``lake_room`` per lake, the room still left, which
@@ -497,8 +510,9 @@ class ErosionState:
         cells = np.flatnonzero(lab >= 0)
         if cells.size:
             s64 = np.asarray(surf, np.float64).reshape(-1)
-            plain = _lake_plain_kernel(np.asarray(water, np.float64).reshape(-1), lab, flood.parent, flood.pop_seq, float(grade))
-            room = np.maximum(plain[cells] - s64[cells], 0.0)
+            w64 = np.asarray(water, np.float64).reshape(-1)
+            plain = _lake_plain_kernel(w64, lab, flood.parent, flood.pop_seq, float(grade))
+            room = np.maximum(np.minimum(plain[cells], w64[cells] + float(rise)) - s64[cells], 0.0)
             # farthest from the outlet first (the plain is highest there): a delta builds out
             # from where the rivers come in towards the outlet, which stays open at the level
             # it had.  Filled from the outlet side the new plain is a dam, each refresh a
@@ -512,7 +526,7 @@ class ErosionState:
             lay = np.clip(have[L] - before, 0.0, room)
             add(self.sediment, cells, lay.astype(self.sediment.dtype))
             if getattr(self, "iso_acc", None) is not None:
-                add(self.iso_acc, cells, lay)
+                add(self.iso_acc, cells, float(load_share) * lay)
             left = np.bincount(L, weights=room - lay, minlength=n)
             over = have - np.bincount(L, weights=lay, minlength=n)    # rounding only: apply_changes holds a lake to its room
             spill = over > 1e-9
@@ -1156,12 +1170,15 @@ def _lake_plain_kernel(water, lab, parent, pop_seq, grade):
 
 def lake_fill_args(state: ErosionState, params):
     """``refresh_lakes``' ``fill`` for this state: ``(grade in cell units per
-    cell, ice_evap)`` with ``erosion.lake_fill`` on the planet, else None."""
+    cell, ice_evap, the plain's rise above the water in cell units, the share
+    of the fill that is load)`` with ``erosion.lake_fill`` on the planet, else
+    None."""
     ep = _eparams(params)
     if not (state.spherical and bool(getattr(ep, "lake_fill", False)) and bool(getattr(ep, "lake_balance", False))):
         return None
     cell_km = float(state.grid.cell_size_m) / 1000.0
-    return float(getattr(ep, "basin_fill_grade", 0.0)) * cell_km / state.height_unit_m, float(getattr(ep, "ice_evap", 0.0))
+    return (float(getattr(ep, "basin_fill_grade", 0.0)) * cell_km / state.height_unit_m, float(getattr(ep, "ice_evap", 0.0)),
+            float(getattr(ep, "lake_fill_rise_m", 1.0)) / state.height_unit_m, float(getattr(ep, "lake_fill_load", 0.55)))
 
 
 def settle_lakes(state: ErosionState, params) -> dict | None:
@@ -1176,7 +1193,7 @@ def settle_lakes(state: ErosionState, params) -> dict | None:
         state.refresh_base(_ocean_min_fraction(params))
     state.refresh_route(cell_units(ep, "route_eps", state.height_unit_m))
     st = state.refresh_lakes(float(params.hydro.lake_evap), float(params.hydro.lake_min_depth) / float(state.height_unit_m),
-                             _ocean_min_fraction(params), fill)
+                             _ocean_min_fraction(params), fill, float(getattr(params.hydro, "land_evap", 0.0)))
     state.exchange_halos()
     return st
 
@@ -1428,7 +1445,8 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
         # after base (rebuilt from scratch) and route (seeded on base)
         st_lake = state.refresh_lakes(float(params.hydro.lake_evap),
                                       float(params.hydro.lake_min_depth) / float(state.height_unit_m),
-                                      _ocean_min_fraction(params), lake_fill_args(state, params))
+                                      _ocean_min_fraction(params), lake_fill_args(state, params),
+                                      float(getattr(params.hydro, "land_evap", 0.0)))
     elif not state.spherical and bool(getattr(ep, "window_lakes", False)) and ep.flood_every > 0 and \
             (state.lake_flag is None or state.iteration % ep.flood_every == 0):
         min_depth = float(params.hydro.lake_min_depth) if isinstance(params, WorldParams) else 0.5

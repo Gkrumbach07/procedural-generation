@@ -904,6 +904,7 @@ def apply_changes(
         cnt = cl_count[p]
         deficit = 0.0
         surplus = 0.0
+        refused = 0.0  # loads its lakes had no room for
         prev = -1  # previous step cell
         death = -1  # first final-deposit cell
         for k in range(cnt):
@@ -912,8 +913,10 @@ def apply_changes(
                 # a load for a lake to keep (trace_particles): the lake takes what it still
                 # has room for (`lake_room`, counted down here so the particles of a refresh
                 # cannot bring more than the lake holds) and the ground does not change until
-                # its refresh lays that down.  The rest stays with the particle, as a
-                # surplus its next deposits place: the delta at the inlet of a full lake
+                # its refresh lays that down.  The rest goes where the particle ends, with
+                # whatever else it could not place -- not onto the cells it crosses next:
+                # laid along its path through the lake it raised the outlet a metre a
+                # refresh, and earth-v20's lakes stood 4 and 36 m higher for it
                 take = cl_delta[base + k]
                 rest = 0.0
                 lk = idflat[c]
@@ -926,7 +929,7 @@ def apply_changes(
                 if take > 0.0:
                     lkflat[c] += take
                     lake_room[lk] -= take
-                surplus += rest
+                refused += rest
                 continue
             if kflat[c] != MASK_ACTIVE:
                 continue
@@ -1013,6 +1016,7 @@ def apply_changes(
                     mflat[c, 0] += cl_mom[base + k, 0]
                     mflat[c, 1] += cl_mom[base + k, 1]
                 prev = c
+        surplus += refused
         if surplus > 0.0:
             if death >= 0:
                 if hflat[death] + sflat[death] + aflat[death] < pflat[death, S_BASE]:

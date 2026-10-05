@@ -61,15 +61,21 @@ from .lakes import label_components
 
 
 @njit(cache=True)
-def _accumulate_endorheic(w, down, topo, outlet_lake, lake_ptr, lake_z, lake_cum, spill, lake_evap, level, outflow):
+def _accumulate_endorheic(w, down, topo, outlet_lake, lake_ptr, lake_z, lake_cum, spill, lake_evap, level, outflow, wr, runoff):
     """Flow accumulation that solves each depression's balance as it passes
-    its outlet.  Fills ``level``/``outflow`` per lake; returns ``acc``."""
+    its outlet.  Fills ``level``/``outflow`` per lake; returns ``acc``.
+
+    ``wr`` is what of ``w`` runs off (``w`` itself without land
+    evaporation): the balance is solved on the accumulation of ``wr``, and
+    ``acc`` -- the rain upstream, which the rivers are drawn from -- passes a
+    lake in the share of its inflow the lake lets through."""
     acc = w.copy()
+    run = wr.copy()
     for k in range(topo.size):
         c = topo[k]
         L = outlet_lake[c]
         if L >= 0:
-            inflow = acc[c]
+            inflow = run[c]
             lo = lake_ptr[L]
             hi = lake_ptr[L + 1]
             if inflow <= 0.0:
@@ -85,14 +91,28 @@ def _accumulate_endorheic(w, down, topo, outlet_lake, lake_ptr, lake_z, lake_cum
                 else:
                     level[L] = lake_z[lo + i]
                     outflow[L] = 0.0
-            acc[c] = outflow[L]
+            if runoff:
+                acc[c] = acc[c] * (outflow[L] / inflow) if inflow > 0.0 else 0.0
+            else:
+                acc[c] = outflow[L]            # wr is w: the outflow itself, to the bit
+            run[c] = outflow[L]
         d = down[c]
         if d >= 0:
             acc[d] += acc[c]
+            run[d] += run[c]
     return acc
 
 
-def balance_lakes(surface, filled, ocean, order, down, topo, precip, evap, grid, lake_evap):
+def budyko_evaporation(aridity: np.ndarray) -> np.ndarray:
+    """Share of the rain a land surface evaporates, by its aridity index
+    (potential evaporation over rain): Budyko's (1974) curve, ``sqrt(a
+    tanh(1 / a) (1 - exp(-a)))``.  0 where nothing can evaporate, 0.57 at an
+    index of 0.7 (a rainforest), 0.93 at 2.5, 1 in a desert."""
+    a = np.maximum(np.asarray(aridity, np.float64), 1e-9)
+    return np.sqrt(a * np.tanh(1.0 / a) * (1.0 - np.exp(-a)))
+
+
+def balance_lakes(surface, filled, ocean, order, down, topo, precip, evap, grid, lake_evap, land_evap=0.0):
     """Lower every closed depression to the level where inflow = evaporation.
 
     ``surface``/``filled``/``ocean``/``precip``/``evap`` are ``(6, N, N)``;
@@ -102,6 +122,19 @@ def balance_lakes(surface, filled, ocean, order, down, topo, precip, evap, grid,
     ``acc`` the flow accumulation of the same pass and ``info`` a dict of
     counts.  ``lake_evap <= 0`` keeps the spill-point fill and just runs the
     ordinary accumulation.
+
+    ``land_evap`` > 0 (``hydro.land_evap``): the land evaporates too.  Until
+    it did, all the rain a catchment received arrived at its lake, and the
+    only water ever lost was off a lake's surface at ``lake_evap`` -- so a
+    lake that silted up handed its whole inflow to the next basin down, and a
+    plateau with a twentieth of the land's mean rain kept a lake of
+    30,000 km2.  With it the potential evaporation is ``land_evap * evap``
+    (the land-mean rain's depth at ``evap`` 1, a 28 C cell), a cell's rain
+    runs off in the share Budyko's curve leaves (:func:`budyko_evaporation`),
+    and open water loses the potential evaporation less what the land under
+    it would have evaporated anyway.  ``lake_evap`` is not read then.  The
+    returned ``acc`` stays the rain upstream, which the rivers are scaled to,
+    less the share each lake keeps.
     """
     N, H = grid.N, grid.H
     M = 6 * N * N
@@ -117,7 +150,7 @@ def balance_lakes(surface, filled, ocean, order, down, topo, precip, evap, grid,
     info = {"lake_evap": float(lake_evap), "depressions": 0, "overflowing": 0, "closed": 0, "dry": 0,
             "drawdown_m_median": 0.0, "drawdown_m_max": 0.0,
             "cells_spill": int(np.count_nonzero(dep)), "cells_balanced": int(np.count_nonzero(dep))}
-    if float(lake_evap) <= 0.0 or not dep.any():
+    if (float(lake_evap) <= 0.0 and float(land_evap) <= 0.0) or not dep.any():
         from .routing import accumulate
         return fill.reshape(6, N, N).copy(), accumulate(w, down, topo), info
 
@@ -134,7 +167,18 @@ def balance_lakes(surface, filled, ocean, order, down, topo, precip, evap, grid,
     ev = np.ascontiguousarray(evap, dtype=np.float64).reshape(-1)
     # evaporative demand of one cell, in the same volume units as `precip`
     # (which climate normalises as depth x cell_area / cell_size_m**2)
-    per = ev[cells] * area[cells] / (float(grid.cell_size_m) ** 2)
+    af = area / (float(grid.cell_size_m) ** 2)
+    wr = w
+    k_lake = float(lake_evap)
+    if float(land_evap) > 0.0:
+        rain = w / af                                  # depth, in the land-mean rain's
+        pet = float(land_evap) * ev
+        et = rain * budyko_evaporation(pet / np.maximum(rain, 1e-9))
+        wr = np.ascontiguousarray((rain - et) * af)    # what runs off
+        per = (pet[cells] - et[cells]) * af[cells]     # open water over what the land would have lost
+        k_lake = 1.0
+    else:
+        per = ev[cells] * af[cells]
     csum = np.cumsum(per)
     before = np.zeros(n, dtype=np.float64)
     before[1:] = csum[lake_ptr[1:n] - 1]
@@ -155,7 +199,7 @@ def balance_lakes(surface, filled, ocean, order, down, topo, precip, evap, grid,
     level = np.zeros(n, dtype=np.float64)
     outflow = np.zeros(n, dtype=np.float64)
     acc = _accumulate_endorheic(w, down, topo, outlet_lake, lake_ptr, lake_z, lake_cum,
-                                spill, float(lake_evap), level, outflow)
+                                spill, k_lake, level, outflow, wr, float(land_evap) > 0.0)
 
     ws = surf.astype(np.float32).copy()
     lv = level[lab_s].astype(np.float32)
@@ -176,4 +220,4 @@ def balance_lakes(surface, filled, ocean, order, down, topo, precip, evap, grid,
     return ws.reshape(6, N, N), acc, info
 
 
-__all__ = ["balance_lakes"]
+__all__ = ["balance_lakes", "budyko_evaporation"]
