@@ -561,7 +561,7 @@ def _bowl_world(N=64, floor=-30.0, rim=40.0, radius=0.30):
     return grid, surface, ocean
 
 
-def _solve_bowl(lake_evap, precip_scale=1.0, evap_scale=1.0, **kw):
+def _solve_bowl(lake_evap, precip_scale=1.0, evap_scale=1.0, land_evap=0.0, **kw):
     from globe.hydro.balance import balance_lakes
     grid, surface, ocean = _bowl_world(**kw)
     flood = priority_flood_sphere(surface, ocean, grid)
@@ -572,7 +572,7 @@ def _solve_bowl(lake_evap, precip_scale=1.0, evap_scale=1.0, **kw):
     precip = np.full((6, grid.N, grid.N), precip_scale, dtype=np.float32)
     evap = np.full((6, grid.N, grid.N), evap_scale, dtype=np.float32)
     water, acc, info = balance_lakes(surface, flood.filled, ocean, flood.order, down, topo,
-                                     precip, evap, grid, lake_evap)
+                                     precip, evap, grid, lake_evap, land_evap)
     return surface, flood.filled, water, acc, info
 
 
@@ -600,6 +600,36 @@ def test_a_basin_settles_below_its_rim_when_evaporation_can_take_the_inflow():
     assert levels == sorted(levels, reverse=True), levels
     assert levels[0] >= spill - 1e-3, "a weakly evaporating lake still overflows"
     assert levels[-1] < spill, "a strongly evaporating one does not"
+
+
+def test_the_land_evaporates_too():
+    """``hydro.land_evap``: Budyko's share of the rain goes back to the air
+    from the land, so a lake is fed by what runs off, and it loses the
+    potential evaporation less what the ground under it would have lost
+    anyway.  A wet cool bowl overflows, a dry warm one settles lower the
+    drier it is, and where nothing can evaporate nothing changes."""
+    from globe.hydro.balance import budyko_evaporation
+    b = budyko_evaporation(np.array([0.0, 0.7, 2.5, 50.0]))
+    assert b[0] < 1e-3 and 0.5 < b[1] < 0.65 and 0.9 < b[2] < 0.97 and b[3] > 0.999
+    assert (np.diff(budyko_evaporation(np.linspace(0.01, 10, 200))) > 0).all()
+    surface, filled, _, _, _ = _solve_bowl(0.0)
+    wet = filled[0] > surface[0]
+    spill = float(filled[0][wet].max())
+    floor = float(surface[0].min())
+
+    def level(**kw):
+        _, _, water, acc, info = _solve_bowl(6.0, land_evap=2.5, **kw)
+        on = water[0] > surface[0]
+        return (float(water[0][on].max()) if on.any() else floor), acc, info
+
+    cold, acc_cold, _ = level(evap_scale=0.0)                 # frozen: all the rain runs off, the lake loses nothing
+    assert cold >= spill - 1e-3
+    levels = [level(precip_scale=pr, evap_scale=1.0)[0] for pr in (8.0, 2.0, 0.5, 0.1)]
+    assert levels == sorted(levels, reverse=True) and levels[0] >= spill - 1e-3 and levels[-1] < spill - 1.0, levels
+    # the rivers stay scaled to the rain upstream: with nothing evaporating the accumulation is
+    # what it is without the land's evaporation
+    _, _, _, acc0, _ = _solve_bowl(6.0, evap_scale=0.0)
+    assert np.allclose(acc_cold, acc0, rtol=1e-9)
 
 
 def test_a_closed_lake_passes_no_water_downstream():
