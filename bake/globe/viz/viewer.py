@@ -348,7 +348,9 @@ def _fine_final(root: Path, manifest: dict, surf_c: np.ndarray, flow_dir_c: np.n
             water[f][lake] = WATER_LAKE
     return {"surf": surf, "sed": sed, "ws": ws, "water": water,
             "discharge": _load_faces(root, "discharge", "fine"), "biome": _load_faces(root, "biome", "fine"),
-            "basin": _load_faces(root, "basin_id", "fine")}
+            "basin": _load_faces(root, "basin_id", "fine"),
+            # the geologic map classified on the refined grid (derive/geology.classify_at): contacts as lines
+            "rock": _load_faces(root, "rock", "fine"), "basement": _load_faces(root, "basement", "fine")}
 
 
 def _planet_final(root: Path, manifest: dict, surf_c: np.ndarray, flow_dir_c: np.ndarray | None, planet: str | Path, res: int = 2048, log=print) -> dict | None:
@@ -546,6 +548,10 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
                            float((manifest.get("params", {}).get("hydro", {}) or {}).get("lake_min_depth", 0.5)))
         discharge, biome, basin = _load_faces(root, "discharge"), _load_faces(root, "biome"), _load_faces(root, "basin_id")
     ldepth = lake_depth(surf, ws, water)
+    fine_rock = fine.get("rock") if fine is not None else None
+    fine_base = fine.get("basement") if fine is not None else None
+    if fine_rock is not None and fine_rock.shape != surf.shape:
+        fine_rock = fine_base = None
     frames.append(_Frame(
         "final", Nsrc, label, ds(surf),
         water=ds(water, "nearest"),
@@ -563,8 +569,8 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
         crust=ds(up(crust), "nearest") if crust is not None else None,
         crust_age=ds(up(crust_age), "nearest") if crust_age is not None and crust is not None else None,
         # the geologic map (derive/geology.py) and the crust under it, for the cross-sections
-        rock=ds(up(_load_faces(root, "rock")), "nearest"),
-        basement=ds(up(_load_faces(root, "basement")), "nearest"),
+        rock=ds(fine_rock if fine_rock is not None else up(_load_faces(root, "rock")), "nearest"),
+        basement=ds(fine_base if fine_base is not None else up(_load_faces(root, "basement")), "nearest"),
         crust_thickness=ds(up(_load_faces(root, "crust_thickness", "diagnostics"))),
     ))
     frames[-1].river_scale = fine.get("river_scale") if fine is not None else None

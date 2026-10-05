@@ -49,7 +49,7 @@ from ..hydro.priority_flood import priority_flood_flat
 from ..io.world_store import WorldStore
 from ..refine import basin_job as bj
 from ..refine.upsample import COARSE_INPUTS, Window, detail_amplitude, upsample_window
-from ..refine.zoom import DETAIL_HEIGHT_SHARE, ZOOM_REFINE, cone_shield, drain_noise, zoom_params
+from ..refine.zoom import DETAIL_HEIGHT_SHARE, ROCK_HARDNESS, ZOOM_REFINE, cone_shield, drain_noise, zoom_params
 from . import bake as zb
 
 #: rng / hash sub-key of planet bakes
@@ -332,6 +332,12 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
     N = grid.N
     win = Window(face, ta0, ta1, tb0, tb1, R)
     up = upsample_window(fields, derived, win, grid)
+    if ROCK_HARDNESS:
+        # the bedrock is as hard as the rock it is (zoom.bake.rock_hardness), as in a zoom window
+        rock_h = zb.rock_hardness(Path(root), lp, win, grid)
+        if rock_h is not None:
+            up["hardness"] = rock_h
+        del rock_h
     cone = zb.active_cones(root, win, grid)
     if cone is not None:
         up["hardness"], up["quiet"] = cone_shield(cone, up["hardness"])     # active cones are fresh lava (refine.zoom.cone_shield)

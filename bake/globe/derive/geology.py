@@ -40,7 +40,10 @@ and nothing more.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
+from numba import njit, prange
 
 NAMES = ["none", "basalt", "andesite", "granite", "gneiss", "schist", "greenstone",
          "sandstone", "shale", "limestone", "alluvium", "evaporite", "glacial till", "pelagic sediment"]
@@ -141,6 +144,198 @@ def classify(surface: np.ndarray, sediment: np.ndarray, exhumed: np.ndarray, con
     return rock, base
 
 
+# --------------------------------------------------------------------------
+# below the coarse grid: contacts that are not cell edges
+# --------------------------------------------------------------------------
+#: A contact between two kinds of crust is known to one coarse cell.  Below
+#: the coarse grid a point reads the tectonic classes -- kind, belt, province
+#: -- of the coarse cell at a place *near* it: its own position moved by a
+#: smooth vector field, WARP_CELLS coarse cells at the longest wavelength
+#: (WARP_WAVELENGTH cells) and half as far with each halving of it, down to
+#: two cells of whatever grid is asking.  The field is noise on the sphere
+#: itself, so a contact crosses a cube edge as it crosses anywhere else, and
+#: it is the same line at every refinement (a finer level adds only the
+#: wiggle below its parent's cell).
+WARP_CELLS = 0.6
+WARP_WAVELENGTH = 4.0
+WARP_KEY = 5_150_123
+
+
+@njit(cache=True, inline="always")
+def _lattice(ix, iy, iz, seed):
+    """A number in [-1, 1) for a lattice point: a 64-bit mix of its integers."""
+    h = np.uint64(ix & 0xFFFFFFFF) * np.uint64(0x9E3779B97F4A7C15)
+    h ^= np.uint64(iy & 0xFFFFFFFF) * np.uint64(0xC2B2AE3D27D4EB4F)
+    h ^= np.uint64(iz & 0xFFFFFFFF) * np.uint64(0x165667B19E3779F9)
+    h ^= np.uint64(seed & 0xFFFFFFFF) * np.uint64(0xD6E8FEB86659FD93)
+    h ^= h >> np.uint64(32)
+    h *= np.uint64(0xD6E8FEB86659FD93)
+    h ^= h >> np.uint64(29)
+    h *= np.uint64(0x9E3779B97F4A7C15)
+    h ^= h >> np.uint64(32)
+    return float(h >> np.uint64(11)) * (2.0 / 9007199254740992.0) - 1.0
+
+
+@njit(cache=True, inline="always")
+def _noise3(x, y, z, seed):
+    """Value noise in [-1, 1] at a point of space, smooth across lattice planes."""
+    x0, y0, z0 = math.floor(x), math.floor(y), math.floor(z)
+    fx, fy, fz = x - x0, y - y0, z - z0
+    fx = fx * fx * (3.0 - 2.0 * fx)
+    fy = fy * fy * (3.0 - 2.0 * fy)
+    fz = fz * fz * (3.0 - 2.0 * fz)
+    ix, iy, iz = int(x0), int(y0), int(z0)
+    v = 0.0
+    for dx in range(2):
+        wx = fx if dx else 1.0 - fx
+        for dy in range(2):
+            wy = fy if dy else 1.0 - fy
+            for dz in range(2):
+                wz = fz if dz else 1.0 - fz
+                v += wx * wy * wz * _lattice(ix + dx, iy + dy, iz + dz, seed)
+    return v
+
+
+@njit(cache=True, parallel=True)
+def _warp_kernel(p, cell_rad, amp, wavelength, octaves, seed):
+    out = np.empty_like(p)
+    for k in prange(p.shape[0]):
+        x, y, z = p[k, 0], p[k, 1], p[k, 2]
+        dx = dy = dz = 0.0
+        a = amp * cell_rad
+        lam = wavelength * cell_rad
+        for o in range(octaves):
+            f = 1.0 / lam
+            dx += a * _noise3(x * f, y * f, z * f, seed + 3 * o)
+            dy += a * _noise3(x * f, y * f, z * f, seed + 3 * o + 1)
+            dz += a * _noise3(x * f, y * f, z * f, seed + 3 * o + 2)
+            a *= 0.5
+            lam *= 0.5
+        r = dx * x + dy * y + dz * z                 # keep the tangent part: the point moves on the sphere
+        qx, qy, qz = x + dx - r * x, y + dy - r * y, z + dz - r * z
+        n = math.sqrt(qx * qx + qy * qy + qz * qz)
+        out[k, 0], out[k, 1], out[k, 2] = qx / n, qy / n, qz / n
+    return out
+
+
+def warp_octaves(R: int) -> int:
+    """Octaves of the warp a grid ``R`` times the coarse one resolves: from
+    WARP_WAVELENGTH coarse cells down to two of its own."""
+    return max(1, int(math.ceil(math.log2(max(WARP_WAVELENGTH * R / 2.0, 1.0)))) + 1)
+
+
+def warped_cells(p: np.ndarray, N: int, seed: int, R: int = 1) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The coarse cell ``(face, i, j)`` whose tectonic classes each point of
+    ``p`` (..., 3 unit vectors) reads: the cell at its warped position.  ``N``
+    is the coarse grid's cells per face, ``R`` the refinement of the grid
+    asking (it sets how fine the warp's last octave is), ``seed`` the
+    world's."""
+    from ..cubesphere import from_sphere_v
+
+    shape = p.shape[:-1]
+    flat = np.ascontiguousarray(np.asarray(p, np.float64).reshape(-1, 3))
+    q = _warp_kernel(flat, 0.5 * math.pi / N, WARP_CELLS, WARP_WAVELENGTH, warp_octaves(R), int(seed) + WARP_KEY)
+    f, u, v = from_sphere_v(q)
+    i = np.minimum((u * N).astype(np.int64), N - 1)
+    j = np.minimum((v * N).astype(np.int64), N - 1)
+    return f.reshape(shape), i.reshape(shape), j.reshape(shape)
+
+
+#: the tectonic diagnostics the map reads, per world root (None where the world has none)
+_FACTS: dict = {}
+
+
+def facts(root, grid) -> dict | None:
+    """The coarse fields the map reads from a baked world, interiors
+    ``(6, N, N)``: ``continental`` (bool), ``age`` (steps), ``belt`` (bool),
+    ``province`` and ``cone`` (None where tectonics saved none), ``exhumed``
+    (m, a FaceField: it is read bilinearly).  None where the world has no
+    crust diagnostics."""
+    from pathlib import Path
+
+    from ..field import FaceField
+    from ..io.world_store import WorldStore
+
+    key = str(Path(root).resolve())
+    if key not in _FACTS:
+        _FACTS.clear()
+        store = WorldStore(root)
+        diag = store.root / "diagnostics"
+        get = lambda n: FaceField.load(diag, n, grid) if FaceField.exists(diag, n) else None
+        kind, age = get("crust_kind"), get("crust_age")
+        if kind is None or age is None or not store.has_field("height"):
+            _FACTS[key] = None
+        else:
+            belt, prov, cone = get("collision_zone"), get("crust_province"), get("volcano_cone")
+            ex = FaceField.from_interior(grid, (store.load_field("bedrock", grid).interior.astype(np.float32)
+                                                - store.load_field("height", grid).interior.astype(np.float32)), name="exhumed")
+            _FACTS[key] = {"continental": kind.interior > 0, "age": age, "belt": None if belt is None else belt.interior > 0,
+                           "province": None if prov is None else prov.interior, "cone": cone, "exhumed": ex}
+    return _FACTS[key]
+
+
+def classify_at(fx: dict, p: np.ndarray, grid, seed: int, R: int, myr_per_step: float, surface: np.ndarray, sediment: np.ndarray, ocean: np.ndarray,
+                lake: np.ndarray, temperature: np.ndarray, precip_cm: np.ndarray, exhumed: np.ndarray, age: np.ndarray,
+                cone: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+    """:func:`classify` on a grid ``R`` times the coarse one.  ``fx`` is
+    :func:`facts`; ``p`` (..., 3) the cells' places on the sphere.  The
+    tectonic classes come from the warped coarse cell (:func:`warped_cells`);
+    ``exhumed`` (m), ``age`` (steps) and ``cone`` (m) are the coarse fields
+    the caller sampled on its own cells, smooth fields whose contours are
+    contacts already; the rest is the caller's own surface, water and
+    climate."""
+    f, i, j = warped_cells(p, grid.N, seed, R)
+    cont = fx["continental"][f, i, j]
+    belt = fx["belt"][f, i, j] if fx["belt"] is not None else np.zeros(cont.shape, bool)
+    prov = fx["province"][f, i, j] if fx["province"] is not None else None
+    return classify(surface, sediment, exhumed, cont, np.asarray(age, np.float64) * float(myr_per_step), belt, ocean, lake,
+                    temperature, precip_cm, cone, prov)
+
+
+#: hardness of the sedimentary cover a continent carries where erosion has not cut through it
+COVER_HARDNESS = 0.5
+#: the cover gives way to the basement over this much more exhumation (m), centred on EXHUMED_M
+COVER_FADE_M = 200.0
+
+
+def bed_hardness(basement: np.ndarray, continental: np.ndarray, exhumed: np.ndarray, cone: np.ndarray | None = None, top: float = 1.0) -> np.ndarray:
+    """Resistance to erosion (0..1, float32) of the bedrock under a cell,
+    for the kernel (its bedrock erodibility is 1 - hardness): the basement's
+    (:data:`HARDNESS`) where erosion has cut through the cover -- ``exhumed``
+    (m) past :data:`EXHUMED_M` -- or a volcano stands, or the crust is
+    oceanic and never had one; :data:`COVER_HARDNESS` where the cover is
+    still there; capped at ``top``.
+
+    Only what tectonics and the erosion's own depth say goes into it.  The
+    map's cover classes turn on the ground's height and the climate
+    (limestone below 500 m where it is warm, shale below 200 m), which is how
+    a map is drawn and not where beds lie: a hardness read off them would
+    step along those contours and the erosion would cut a terrace at 200 m
+    and at 500 m around the whole planet."""
+    hard = np.asarray(HARDNESS, np.float32)[np.asarray(basement)]
+    t = np.clip((np.asarray(exhumed, np.float32) - (EXHUMED_M - 0.5 * COVER_FADE_M)) / COVER_FADE_M, 0.0, 1.0)
+    t = t * t * (3.0 - 2.0 * t)
+    t = np.where(np.asarray(continental, bool), t, 1.0)
+    if cone is not None:
+        t = np.where(np.asarray(cone) >= CONE_M, 1.0, t)
+    return np.minimum(COVER_HARDNESS + (hard - COVER_HARDNESS) * t, np.float32(top)).astype(np.float32)
+
+
+def bed_hardness_at(fx: dict, p: np.ndarray, grid, seed: int, R: int, exhumed: np.ndarray, cone: np.ndarray | None, top: float = 1.0) -> np.ndarray:
+    """:func:`bed_hardness` on a grid ``R`` times the coarse one: the
+    basement of the warped coarse cell (:func:`warped_cells`) under each
+    place ``p``, with ``exhumed`` and ``cone`` (m) as the caller sampled
+    them."""
+    f, i, j = warped_cells(p, grid.N, seed, R)
+    cont = fx["continental"][f, i, j]
+    belt = fx["belt"][f, i, j] if fx["belt"] is not None else np.zeros(cont.shape, bool)
+    prov = fx["province"][f, i, j] if fx["province"] is not None else None
+    z = np.zeros(cont.shape)
+    age = np.zeros(cont.shape) if prov is not None else fx["age"].interior[f, i, j].astype(np.float64)
+    _, base = classify(z, z, z, cont, age, belt, np.zeros(cont.shape, bool), np.zeros(cont.shape, bool), z, z, cone, prov)
+    return bed_hardness(base, cont, exhumed, cone, top)
+
+
 def shares(rock: np.ndarray, area: np.ndarray, where: np.ndarray) -> dict:
     """Share of ``where``'s area under each rock (names of :data:`NAMES`, those present)."""
     w = np.where(where, area, 0.0).astype(np.float64)
@@ -179,4 +374,4 @@ def run(store, params, grid, surface: np.ndarray, sediment: np.ndarray, ocean: n
     return info
 
 
-__all__ = ["NAMES", "FAMILY", "PALETTE", "HARDNESS", "N_ROCKS", "classify", "shares", "run"]
+__all__ = ["NAMES", "FAMILY", "PALETTE", "HARDNESS", "N_ROCKS", "classify", "classify_at", "warped_cells", "warp_octaves", "facts", "bed_hardness", "bed_hardness_at", "shares", "run"]

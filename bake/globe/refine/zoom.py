@@ -159,6 +159,13 @@ ZOOM_REFINE = {
 #: land cell is taken below half its height and none under the sea
 DETAIL_HEIGHT_SHARE = 0.5
 
+#: a zoom level's bedrock is as hard as the rock it is (derive/geology.py
+#: HARDNESS, classified on the level's own cells with warped contacts,
+#: capped at ``hardness_max`` like the field it replaces), where the world
+#: has the tectonic diagnostics the map reads; False keeps tectonics' own
+#: hardness field, low-passed (``hardness_smooth_cells``)
+ROCK_HARDNESS = True
+
 #: the active volcanic cones (``volcano_active``, metres of edifice) below the
 #: coarse grid.  The coarse erosion takes them out of its input and puts them
 #: back on top (erosion/run.py): a cone being built is younger than the
@@ -283,5 +290,5 @@ def smooth_drift(delta: np.ndarray, cells: np.ndarray, R: int, tol: float = 0.05
     return F
 
 
-__all__ = ["ZOOM_EROSION", "ZOOM_REFINE", "COARSE_ZOOM_EROSION", "COARSE_ZOOM_CELL_M", "WIDE_SLOPE_LIMIT_CELL_M", "WIDE_SLOPE_LIMIT_ERODE", "FINE_THERMAL_CELL_M", "FINE_THERMAL_RATE", "DISC_SATURATION_KM2", "MOMENTUM_SATURATION_KM2", "DETAIL_HEIGHT_SHARE", "CONE_HARDNESS", "CONE_NOISE", "CONE_FULL_M",
+__all__ = ["ZOOM_EROSION", "ZOOM_REFINE", "COARSE_ZOOM_EROSION", "COARSE_ZOOM_CELL_M", "WIDE_SLOPE_LIMIT_CELL_M", "WIDE_SLOPE_LIMIT_ERODE", "FINE_THERMAL_CELL_M", "FINE_THERMAL_RATE", "DISC_SATURATION_KM2", "MOMENTUM_SATURATION_KM2", "DETAIL_HEIGHT_SHARE", "CONE_HARDNESS", "CONE_NOISE", "CONE_FULL_M", "ROCK_HARDNESS",
            "cone_shield", "drain_noise", "smooth_drift", "zoom_params"]

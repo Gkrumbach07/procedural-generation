@@ -46,6 +46,7 @@ from ..hydro.d8 import OCEAN
 from . import biomes, geology, soil
 from . import lakes as lakes_mod
 from . import rivers as rivers_mod
+from ..cubesphere import to_sphere_v
 from .fine import coarse_face_array, face_pads, has_fine, load_face, slope_magnitude, upsample_face, upsample_nearest, write_face
 
 FINE_OUTPUTS = ("biome", "vegetation", "river_mask")
@@ -347,6 +348,7 @@ def run(store, params, log=print) -> dict:
         pads beyond a face edge get the same sea mask as the face itself."""
         return sea_near_c[f2, i2 // R, j2 // R].astype(np.float32)
 
+    gfx = geology.facts(store.root, grid) if geo is not None else None
     for f in range(6):
         t = time.time()
         surface_f = _fine_surface(store, f, Nf)
@@ -372,6 +374,20 @@ def run(store, params, log=print) -> dict:
         if marsh_c is not None:
             lake_near_f = lake_near_f | np.repeat(np.repeat(marsh_c[f], R, axis=0), R, axis=1)
         biome_f = biomes.classify(T_f, Pcm_f, surface_f, slope_f, lake_f, river_near_f, lake_near_f, dp, cliff_slope, alpine_min, ocean=ocean_f)
+        if gfx is not None:
+            # the geologic map on the refined grid: its own ground, water and climate, and the
+            # tectonic classes of the warped coarse cell, so a contact is a line and not a cell
+            # edge (geology.classify_at).  Unhashed, like the coarse map
+            e = (np.arange(Nf) + 0.5) / Nf
+            U, V = np.meshgrid(e, e, indexing="ij")
+            rock_f, base_f = geology.classify_at(
+                gfx, to_sphere_v(np.full(U.shape, f), U, V), grid, int(params.world.seed), R, float(params.tectonics.myr_per_step),
+                surface_f, _fine_optional(store, "sediment", f, Nf, 0.0), ocean_f, lake_f, T_f, Pcm_f,
+                upsample_face(gfx["exhumed"], f, R, order=1), upsample_face(gfx["age"], f, R, order=1),
+                None if gfx["cone"] is None else upsample_face(gfx["cone"], f, R, order=1))
+            write_face(store, "rock", f, rock_f)
+            write_face(store, "basement", f, base_f)
+            del U, V, rock_f, base_f
         land_mask_f = ~ocean_f
         face_info[f]["T_land_mean"] = float(T_f[land_mask_f].mean()) if land_mask_f.any() else None
         del T_f, land_mask_f, river_near_f, lake_near_f, river_mask, pads, lake_pads, ws_f, lake_f, ocean_f

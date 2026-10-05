@@ -59,7 +59,7 @@ from ..hydro.priority_flood import priority_flood_flat
 from ..io.world_store import WorldStore
 from ..refine import basin_job as bj
 from ..refine.upsample import FineWindow, Window, detail_amplitude, detail_noise, ridged_fbm, sample, upsample_window
-from ..refine.zoom import DETAIL_HEIGHT_SHARE, ZOOM_REFINE, cone_shield, drain_noise, smooth_drift, zoom_params
+from ..refine.zoom import DETAIL_HEIGHT_SHARE, ROCK_HARDNESS, ZOOM_REFINE, cone_shield, drain_noise, smooth_drift, zoom_params
 from . import progress
 
 #: D8 offsets of the hydro stage's ``flow_dir`` codes (0..7; 8 and above = sink)
@@ -69,8 +69,9 @@ ZOOM_KEY = 7_700_001
 #: what a level is made from, in a level's resume key beside the kernel's
 #: version: bumped when the inputs or the hold change, so a zoom baked before
 #: is baked again.  2: the detail noise within a share of the ground's height,
-#: islands held on their own, active cones as fresh lava
-INPUTS_VERSION = 2
+#: islands held on their own, active cones as fresh lava.  3: the bedrock's
+#: hardness from the geologic map (refine.zoom.ROCK_HARDNESS)
+INPUTS_VERSION = 3
 #: a tile spawns at most this many times the particles its rain alone would
 #: get when inflow adds to the spawn weight (beyond it the spawn volume grows)
 MAX_INFLOW_PARTICLES = 3.0
@@ -526,6 +527,51 @@ def active_cones(root: Path, win, grid) -> np.ndarray | None:
     return None if f is None else np.maximum(sample(f, win, order=1), 0.0)
 
 
+def window_dirs(win, grid) -> np.ndarray:
+    """Unit vectors ``(NE, NE, 3)`` of a level's work-array cell centres
+    (valid beyond the face edge, as :func:`refine.upsample.window_metric`)."""
+    from ..cubesphere import to_sphere_v
+
+    Nf = grid.N * win.R
+    a0, a1, b0, b1 = win.fine_ext()
+    U, V = np.meshgrid((np.arange(a0, a1) + 0.5) / Nf, (np.arange(b0, b1) + 0.5) / Nf, indexing="ij")
+    return to_sphere_v(np.full(U.shape, win.face), U, V)
+
+
+def rock_hardness(root: Path, params: WorldParams, win, grid) -> np.ndarray | None:
+    """Hardness of the bedrock on a level's work array, from the geologic
+    map's basement and how far erosion cut into it (derive/geology.py
+    ``bed_hardness_at``: the tectonic classes read through warped contacts),
+    capped at ``refine.hardness_max``.  None where the world has no crust
+    diagnostics."""
+    from ..derive import geology
+
+    fx = geology.facts(root, grid)
+    if fx is None:
+        return None
+    cone = None if fx["cone"] is None else sample(fx["cone"], win, order=1)
+    return geology.bed_hardness_at(fx, window_dirs(win, grid), grid, int(params.world.seed), int(win.R), sample(fx["exhumed"], win, order=1),
+                                   cone, float(params.refine.hardness_max))
+
+
+def rock_map(root: Path, params: WorldParams, win, grid, surface: np.ndarray, sediment: np.ndarray, ocean: np.ndarray, lake: np.ndarray,
+             temp0: np.ndarray | None) -> tuple[np.ndarray, np.ndarray] | None:
+    """``(rock, basement)``: the geologic map of a finished level, on its own
+    ground, sediment and water (derive/geology.py ``classify_at``).  Drawn as
+    under a humid sky -- a level has the planet's temperature, not its rain --
+    so it has no evaporite.  None where the world has no crust diagnostics."""
+    from ..derive import geology
+
+    fx = geology.facts(root, grid)
+    if fx is None:
+        return None
+    cone = None if fx["cone"] is None else sample(fx["cone"], win, order=1)
+    temp = temperature_at(params, temp0, surface) if temp0 is not None else np.full(surface.shape, 10.0)
+    return geology.classify_at(fx, window_dirs(win, grid), grid, int(params.world.seed), int(win.R), float(params.tectonics.myr_per_step),
+                               surface, sediment, ocean, lake, temp, np.full(surface.shape, 100.0), sample(fx["exhumed"], win, order=1),
+                               sample(fx["age"], win, order=1), cone)
+
+
 def temperature_at(params: WorldParams, temp0: np.ndarray, surface_m: np.ndarray) -> np.ndarray:
     return temp0 - float(params.climate.lapse) * np.maximum(surface_m, 0.0) / 1000.0
 
@@ -597,6 +643,10 @@ def level_inputs(root: Path, params: WorldParams, geo: Geometry, level: ZoomLeve
         del recv
     height0 = plain - sed0
     noise = np.where(ocean, 0.0, noise)
+    rock_h = rock_hardness(root, params, win, grid) if ROCK_HARDNESS else None
+    if rock_h is not None:
+        # the bedrock is as hard as the rock it is; the active cones stay fresh lava on top of that
+        up["hardness"] = rock_h if cone is None else cone_shield(cone, rock_h)[0]
     noise = noise + drain_noise(height0 + noise + sed0, ocean)      # the noise's own basins, filled before anything erodes
     precip = np.where(ocean, 0.0, np.maximum(up["precip"], 0.0)).astype(np.float64)
     return {
@@ -1028,6 +1078,11 @@ def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level
     }
     if "vegetation" in cur:
         arrays["vegetation"] = np.where(inp["ocean"], 0.0, cur["vegetation"]).astype(np.float32)
+    # the geologic map of the level as it came out: its own valley fills and lake floors
+    gm = rock_map(root, lp, geo.win, params.coarse_grid(), surface, sediment, inp["ocean"], (ws - surface > float(params.hydro.lake_min_depth)) & ~inp["ocean"],
+                  inp.get("temp0"))
+    if gm is not None:
+        arrays["rock"], arrays["basement"] = gm
     rain_cell = float(inp["precip"][~inp["ocean"]].mean()) if (~inp["ocean"]).any() else 0.0
     _classify(root, lp, geo, arrays, params.coarse_grid().cell_size_m / geo.R, rain_cell)
     prod = geo.product()

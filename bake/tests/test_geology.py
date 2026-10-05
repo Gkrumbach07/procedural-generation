@@ -96,3 +96,78 @@ def test_a_bake_draws_the_map_and_the_viewer_carries_it(tmp_path):
     assert meta["channels"]["rock"]["names"] == g.NAMES and meta["channels"]["rock"]["cmap"] == "rock"
     assert meta["rock_palette"] == [list(c) for c in g.PALETTE]
     assert meta["channels"]["crust_thickness"]["unit"] == "km"
+
+
+def test_contacts_below_the_coarse_grid_are_warped_and_seamless():
+    """A point below the coarse grid reads the tectonic classes of the coarse
+    cell at its warped place: near its own (well under two cells off), the
+    same from either side of a cube edge, the same at every refinement up to
+    the wiggle a finer grid adds, and not simply the cell it stands in."""
+    from globe.cubesphere import to_sphere_v
+    N = 32
+    e = (np.arange(4 * N) + 0.5) / (4 * N)
+    U, V = np.meshgrid(e, e, indexing="ij")
+    p = to_sphere_v(np.full(U.shape, 1), U, V)
+    f, i, j = g.warped_cells(p, N, 7, 4)
+    own_i, own_j = (U * N).astype(int), (V * N).astype(int)
+    inside = f == 1
+    assert inside.mean() > 0.9
+    off = np.hypot(i - own_i, j - own_j)[inside]
+    assert off.max() <= 2.0 and 0.2 < (off > 0).mean() < 0.8        # moved, but not far
+    f2, i2, j2 = g.warped_cells(p, N, 7, 4)
+    assert np.array_equal(i, i2) and np.array_equal(f, f2)          # a function of the place and the seed
+    assert not np.array_equal(i, g.warped_cells(p, N, 8, 4)[1])
+    # the same line at a finer refinement: a few cells along the contact differ, no more
+    fa, ia, ja = g.warped_cells(p, N, 7, 64)
+    assert ((fa != f) | (ia != i) | (ja != j)).mean() < 0.1
+    # across a cube edge: two points a hair apart, one on each face, read the same cell
+    u = np.array([1.0 - 1e-9, 1.0 + 1e-9])
+    for v in (0.13, 0.5, 0.82):
+        q = to_sphere_v(np.zeros(2, int), u, np.full(2, v))
+        fq, iq, jq = g.warped_cells(q, N, 7, 4)
+        assert fq[0] == fq[1] and iq[0] == iq[1] and jq[0] == jq[1]
+
+
+def test_classify_at_draws_a_contact_as_a_line(tmp_path):
+    """On a finer grid the map is :func:`classify` on that grid's own ground
+    with the warped tectonic classes: a contact between a craton and younger
+    crust keeps its place and its two rocks, and is no longer the edge of the
+    coarse cells."""
+    from globe.cubesphere import to_sphere_v
+    from globe.field import FaceField
+    p0 = WorldParams.tiny_world(seed=5)
+    grid = p0.coarse_grid()
+    N, R = grid.N, 4
+    cont = np.ones((6, N, N), bool)
+    prov = np.zeros((6, N, N), np.uint8)
+    prov[:, : N // 2] = g.PROVINCE_CRATON                    # the contact: the line i = N / 2 on every face
+    zero = FaceField.from_interior(grid, np.zeros((6, N, N), np.float32))
+    fx = {"continental": cont, "age": zero, "belt": np.zeros((6, N, N), bool), "province": prov, "cone": None, "exhumed": zero}
+    e = (np.arange(N * R) + 0.5) / (N * R)
+    U, V = np.meshgrid(e, e, indexing="ij")
+    shape = U.shape
+    rock, base = g.classify_at(fx, to_sphere_v(np.full(shape, 2), U, V), grid, 5, R, 0.15, np.full(shape, 600.0), np.zeros(shape),
+                               np.zeros(shape, bool), np.zeros(shape, bool), np.full(shape, 8.0), np.full(shape, 80.0),
+                               np.full(shape, 800.0), np.zeros(shape), None)
+    assert set(np.unique(rock)) == {g.GNEISS, g.GRANITE} and np.array_equal(rock, base)
+    block = np.repeat(np.repeat(prov[2] == g.PROVINCE_CRATON, R, 0), R, 1)        # the coarse cells' own answer
+    gneiss = rock == g.GNEISS
+    assert 0.45 < gneiss.mean() < 0.55
+    differ = (gneiss != block)[2 * R:-2 * R, 2 * R:-2 * R]     # off the face's rim, where the warp reads the next face's pattern
+    assert 0.003 < differ.mean() < 0.15
+    rows = np.flatnonzero(differ.any(axis=1)) + 2 * R
+    assert rows.min() >= (N // 2 - 2) * R and rows.max() < (N // 2 + 2) * R       # only along the contact
+    edge = np.array([np.flatnonzero(~gneiss[:, c])[0] for c in range(shape[1])])   # where the contact runs, column by column
+    assert edge.std() > 0.5                                                      # a line that wanders, not a cell edge
+    # the bedrock's hardness: the basement's where erosion cut through the cover, the cover's where
+    # it did not, a smooth step between; oceanic crust and volcanoes have no cover; capped
+    cont = np.ones(shape, bool)
+    cut = g.bed_hardness(base, cont, np.full(shape, 2000.0), None, 0.85)
+    assert np.array_equal(cut, np.minimum(np.asarray(g.HARDNESS, np.float32)[base], np.float32(0.85)))
+    kept = g.bed_hardness(base, cont, np.zeros(shape), None, 0.85)
+    assert np.allclose(kept, g.COVER_HARDNESS)
+    mid = g.bed_hardness(base, cont, np.full(shape, g.EXHUMED_M), None, 0.85)
+    assert (mid > kept).all() and (mid < cut).all()
+    assert np.array_equal(g.bed_hardness(base, ~cont, np.zeros(shape), None, 0.85), cut)
+    assert np.array_equal(g.bed_hardness(base, cont, np.zeros(shape), np.full(shape, 500.0), 0.85), cut)
+    assert np.array_equal(g.bed_hardness_at(fx, to_sphere_v(np.full(shape, 2), U, V), grid, 5, R, np.full(shape, 2000.0), None, 0.85), cut)

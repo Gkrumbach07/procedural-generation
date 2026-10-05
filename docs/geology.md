@@ -59,6 +59,53 @@ about two thirds sedimentary. Crust thickness: continents 27.9 / 44.5 / 60.9 km
 at the 5th percentile / median / 95th, 76 km at the thickest; sea floor 7 km,
 arcs to 31 km. The median continent is about 8 km thicker than Earth's.
 
+## Below the coarse grid
+
+A contact between two kinds of crust is known to one coarse cell, 9.8 km on
+the earth preset. Below that the map is drawn again on the finer grid's own
+ground, sediment, water and climate, with the tectonic classes (kind, belt,
+province) read from the coarse cell at a *warped* place: the point's own
+position moved by a smooth vector field, 0.3 coarse cells at the median and
+1.2 at the most, with detail down to two cells of whatever grid is asking
+(`geology.warped_cells`, `classify_at`). The field is noise on the sphere
+itself, so a contact crosses a cube edge as it crosses anywhere else, and it
+is the same line at every refinement: the 1.2 km and the 305 m readings of it
+differ by 0.07 of a 1.2 km cell at the median.
+
+* The derive stage writes `fine/rock` and `fine/basement` on the refined grid
+  (4.9 km), and the viewer's Geology layer draws those.
+* A zoom level saves its own `rock` and `basement` in its `.npz`, mapped
+  after it eroded, so its valley fills and lake floors are on it. The viewer
+  does not draw a level's own map yet: inside a zoom window the Geology layer
+  is still the planet's.
+
+## Hardness for the zoom levels
+
+A zoom level's bedrock is as hard as the rock it is
+(`refine.zoom.ROCK_HARDNESS`, `geology.bed_hardness_at`): the basement's
+hardness where erosion has cut through the cover (300 m, fading in over
+200 m), where a volcano stands and on oceanic crust; 0.5 where the cover is
+still there; capped at 0.85 as the field it replaces was. The active cones
+stay fresh lava on top of that.
+
+Only tectonics' classes and the erosion's own depth go into it. The map's
+cover classes turn on the ground's height and the climate -- limestone below
+500 m where it is warm, shale below 200 m -- which is how a map is drawn and
+not where beds lie: a hardness read off them would step along those contours
+and cut a terrace at 200 m and at 500 m around the whole planet.
+
+| land of earth-v19 | tectonics' field (low-passed) | from the rock |
+|---|---|---|
+| mean | 0.74 | 0.67 |
+| 10th / 50th / 90th percentile | 0.58 / 0.77 / 0.85 | 0.50 / 0.62 / 0.85 |
+
+Two windows of earth-v19 baked both ways (a schist belt, face 2 cell 255 225;
+gneiss against cover across a 3.9 km range, face 1 cell 488 165): no step,
+terrace or cell edge along a contact at 1.2 km, 305 m or 76 m, and the relief
+is of the same kind. The lake share moved both ways with it (1.2 km: 0.85 ->
+0.33 % and 0.16 -> 0.14 %; 305 m: 3.1 -> 4.0 % and 1.5 -> 2.2 %; 76 m: 1.6 ->
+2.6 %), which two windows cannot tell from noise.
+
 ## Using it
 
 * A bake writes the map in its derive stage and the viewer carries a
@@ -68,8 +115,9 @@ arcs to 31 km. The median continent is about 8 km thicker than Earth's.
   tectonics, four minutes on the earth preset, checks the bedrock comes out
   bit for bit and saves the two new diagnostics), then
   `python bake/scripts/geology.py --world worlds/X` (the map and the viewer).
-* `geology.HARDNESS` gives each rock a resistance to erosion. Nothing reads
-  it yet.
+* `geology.HARDNESS` gives each rock a resistance to erosion; the zoom
+  levels read it (above). The coarse erosion and the refine stage still use
+  tectonics' field: the map is drawn after them.
 
 ## In the viewer
 
@@ -98,6 +146,6 @@ arcs to 31 km. The median continent is about 8 km thicker than Earth's.
   thickness in the model at all.
 * Not history. Limestone is where it is warm and low now, not where a
   shallow sea once stood.
-* At the coarse grid: 9.8 km cells on the earth preset, so contacts are
-  blocky when zoomed in.
+* The contacts are warped, not mapped: a line bent by noise, with no fold,
+  fault or dip behind its shape.
 * Volcanic rock is 0.01 % of the land: the edifices are a few cells each.
