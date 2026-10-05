@@ -57,7 +57,7 @@ import numpy as np
 from ..config import WorldParams
 from ..field import FaceField
 from ..io.world_store import WorldStore
-from .maps import ErosionState, datum_land_fraction, start_replay, step, uplift_cap
+from .maps import ErosionState, datum_land_fraction, fill_basins, start_replay, step, uplift_cap
 from .particle import KERNEL_VERSION, MASK_ACTIVE
 
 OUTPUTS = ["height", "sediment", "discharge", "momentum"]
@@ -266,6 +266,9 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     # uplift_mode 'replay': lower the start to the reference-step crust (None
     # in 'stack').  A resume overwrites the height with the checkpoint's.
     rep = start_replay(state, params)
+    # the basins the bedrock arrives with become sedimentary plains (maps.fill_basins); a
+    # resume overwrites this with the checkpoint's sediment, which already carries it
+    fill = fill_basins(state, params)
     ck = find_checkpoint(store, params, max_iteration=n_iter) if ep.resume else None
     if ck is not None:
         load_checkpoint(state, *ck)
@@ -278,6 +281,9 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     n_capped = int(np.sum(state.uplift[state.interior][iact] > cap)) if cap is not None else 0
     log(f"[erosion] uplift cap {0.0 if cap is None else ep.uplift_max_m:g} m/iteration"
         f" ({n_capped} of {int(iact.sum())} active cells above it; field max {state.uplift[state.interior][iact].max() * state.height_unit_m:.2f} m/iteration)")
+    if fill is not None and ck is None:
+        log(f"[erosion] basin fill: {fill['basin_area_km2'] / 1e6:.2f} Mkm2 of closed basins laid with {fill['fill_km3'] / 1e6:.2f} Mkm3 of sediment"
+            f" (mean {fill['fill_mean_m']:.0f} m, max {fill['fill_max_m']:.0f} m)")
     if rep is not None:
         log(f"[erosion] uplift replay: start lowered by up to {rep['replay_max'] * state.height_unit_m:.1f} m"
             f" and raised by up to {-rep['replay_min'] * state.height_unit_m:.1f} m to the reference-step crust"

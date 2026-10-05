@@ -1223,6 +1223,47 @@ def test_hold_datum_carries_the_base_level_with_it(scratch):
     assert abs(float(surf[basin].min()) - float(b1[basin].min())) < 1e-9
 
 
+def test_basin_fill_turns_a_dug_basin_into_a_graded_plain(scratch):
+    """`fill_basins` (erosion.basin_fill_grade) lays sediment into a closed basin up to a
+    plain rising from its outlet: afterwards the flood finds no basin there, only sediment
+    was added (the bed is untouched), and the plain stands between the old floor and a
+    little above the old rim.  Off (0, the toy presets' value) it changes nothing."""
+    from globe.erosion.maps import fill_basins
+    from globe.hydro.priority_flood import priority_flood_sphere
+    from globe.hydro.run import open_ocean
+
+    p, st = _land_world(scratch, "basin_fill")
+    face, i0, j0 = _dry_site(st, 6)
+    H = st.H
+    around = st.surface()[face, H + i0 - 2:H + i0 + 8, H + j0 - 2:H + j0 + 8]
+    floor = 0.3 * float(around.min())
+    basin = _dig_basin(st, face, i0, j0, 5, floor)
+    inter = st.interior
+    h0, s0 = st.height[inter].copy(), st.sediment[inter].copy()
+    assert p.erosion.basin_fill_grade == 0.0 and fill_basins(st, p) is None       # off on the toy presets
+    assert np.array_equal(st.sediment[inter], s0)
+
+    def depth_in_basin():
+        surf = np.ascontiguousarray(st.surface()[inter], dtype=np.float32)
+        oc = np.asarray(open_ocean(surf, st.grid, p.hydro.ocean_min_fraction), bool).reshape(surf.shape)
+        fl = priority_flood_sphere(surf, oc, st.grid)
+        return (fl.filled - surf).reshape(-1)[basin] * st.height_unit_m, fl.filled.reshape(-1)[basin]
+
+    d0, rim = depth_in_basin()
+    assert d0.max() > 5.0                                    # metres of closed basin before
+    p.erosion.basin_fill_grade = 0.1
+    info = fill_basins(st, p)
+    assert info["fill_km3"] > 0.0 and info["basin_cells"] >= int((d0 > p.erosion.basin_fill_min_m).sum())
+    assert np.array_equal(st.height[inter], h0)              # the bed is not touched
+    add = (st.sediment[inter] - s0).reshape(-1)
+    assert add.min() >= 0.0 and add[basin].max() > 0.0
+    d1, _ = depth_in_basin()
+    assert d1.max() <= p.erosion.basin_fill_min_m + 1e-3     # no basin left to hold a lake
+    top = st.surface()[inter].reshape(-1)[basin]
+    # at most the grade times the basin's width above its old rim
+    assert np.all(top <= rim + 0.1 * (st.grid.cell_size_m / 1000.0) * 40 / st.height_unit_m + 1e-6)
+
+
 def test_lake_balance_makes_a_dug_basin_water_the_kernel_respects(scratch):
     """`refresh_lakes` finds a basin dug above sea level, flags it (an
     overflowing lake, `S_RFLAG == 2`) or sinks its level into `base` (a

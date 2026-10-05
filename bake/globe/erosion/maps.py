@@ -41,7 +41,7 @@ import time
 from dataclasses import dataclass, field
 
 import numpy as np
-from numba import get_num_threads, parallel_chunksize
+from numba import get_num_threads, njit, parallel_chunksize
 
 from ..config import cell_units, ErosionParams, WorldParams
 from ..cubesphere import Grid
@@ -980,6 +980,73 @@ def start_replay(state: ErosionState, params) -> dict | None:
     if isinstance(params, WorldParams):
         info["datum_shift"] = hold_datum(state, held_land_fraction(state, params))
     return info
+
+
+@njit(cache=True)
+def _graded_fill_kernel(s, parent, pop_seq, grade):
+    """The flood's surface with a slope on it: every cell stands at least
+    ``grade`` above the cell that flooded it (``parent``), walked in pop order
+    so a parent is always done before its children."""
+    g = s.copy()
+    for k in range(pop_seq.size):
+        c = pop_seq[k]
+        q = parent[c]
+        if q >= 0:
+            v = g[q] + grade
+            if v > g[c]:
+                g[c] = v
+    return g
+
+
+def fill_basins(state: ErosionState, params) -> dict | None:
+    """``erosion.basin_fill_grade`` > 0: lay sediment into the closed basins the
+    tectonic bedrock arrives with, up to a plain that rises ``basin_fill_grade``
+    (metres per km) from each basin's outlet.
+
+    Tectonics runs its whole history with no surface process: nothing fills a
+    basin and nothing grades it to an outlet, so the bedrock reaches erosion
+    with a fifth of its land inside closed depressions (earth-v18: 31 Mkm2 --
+    a 5.3 Mkm2 interior 117 m below its rim, a stretched-crust hole 1 km deep,
+    plateau basins of 0.6-0.7 Mkm2), and the stage's few hundred iterations
+    cannot fill them: they came out as lakes of up to 1.2 Mkm2, eight above
+    100,000 km2 where Earth has one.  On Earth those basins are what the
+    continental interiors are made of -- the West Siberian plain, the Congo and
+    Amazon basins, the Great Plains: kilometres of sediment under a plain that
+    rivers cross.  This is that sediment, laid at the hand-off.
+
+    A basin still subsiding is not lost by it: in ``uplift_mode`` 'replay' the
+    start has the last tectonic window's motion taken out, the fill is laid on
+    that surface, and the subsidence replayed during the run re-opens the
+    basin under it, where a lake belongs (Baikal, Tanganyika).
+
+    Call once on a fresh state, after :func:`start_replay`.  The sediment is
+    new mass (the highlands that shed it over tectonic time are not lowered);
+    its volume is returned and logged.  Returns ``None`` when off or on a window."""
+    ep = _eparams(params)
+    grade = float(getattr(ep, "basin_fill_grade", 0.0))
+    if grade <= 0.0 or not state.spherical or not isinstance(params, WorldParams):
+        return None
+    from ..hydro.priority_flood import priority_flood_sphere
+    from ..hydro.run import open_ocean
+
+    H = state.H
+    inter = (slice(None), slice(H, -H), slice(H, -H))
+    surf = np.ascontiguousarray(state.surface()[inter], dtype=np.float32)
+    ocean = np.asarray(open_ocean(surf, state.grid, float(params.hydro.ocean_min_fraction)), bool).reshape(surf.shape)
+    flood = priority_flood_sphere(surf, ocean, state.grid)
+    cell_km = float(state.grid.cell_size_m) / 1000.0
+    step = grade * cell_km / state.height_unit_m                     # cell units per cell
+    g = _graded_fill_kernel(surf.reshape(-1).astype(np.float64), flood.parent, flood.pop_seq, step).reshape(surf.shape)
+    # only where the flood found a basin: a plain already draining is left as it is
+    basin = (flood.filled - surf > float(ep.basin_fill_min_m) / state.height_unit_m) & ~ocean
+    add = np.where(basin, np.maximum(g - surf, 0.0), 0.0)
+    state.sediment[inter] += add.astype(state.sediment.dtype)
+    state.exchange_halos()
+    area = state.grid.interior_cell_area
+    return {"basin_cells": int(basin.sum()), "basin_area_km2": float(area[basin].sum() / 1e6),
+            "fill_km3": float((add * state.height_unit_m * area).sum() / 1e9),
+            "fill_mean_m": float(add[basin].mean() * state.height_unit_m) if basin.any() else 0.0,
+            "fill_max_m": float(add.max() * state.height_unit_m)}
 
 
 _KAPPA_CACHE: dict = {}
