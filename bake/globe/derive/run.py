@@ -182,6 +182,12 @@ def run(store, params, log=print) -> dict:
     chan_frac = float(chan_c.sum() / max(int(land_c.sum()), 1))
     lake_c = lakes_mod.lake_mask(surface_c, ws.interior, depth, ocean=ocean_c)
     coarse_lab, n_coarse_lakes = lakes_mod.coarse_lake_labels(lake_c, ws.interior, grid)
+
+    def fine_lake(surface_f, ws_f, ocean_f, f):
+        """A face's refined-grid lakes: water deeper than the marsh line, where the coarse
+        balance has a lake too (lakes_mod.agree_with_coarse)."""
+        return lakes_mod.agree_with_coarse(lakes_mod.lake_mask(surface_f, ws_f, depth, ocean=ocean_f), lake_c[f], R,
+                                           float(getattr(dp, "lake_agree_cells", 0.0)))
     # river source: the graph's reaches, unless there are none to trace
     # (stub hydro; a world too small for any catchment to pass hydro's
     # river_threshold), then the discharge threshold as before
@@ -268,7 +274,7 @@ def run(store, params, log=print) -> dict:
             # centreline straight through every lake and across the land bridges
             # between its pieces (docs/earth-v3-review.md section 2)
             lake_f = lakes_mod.kept_lake_mask(
-                lakes_mod.lake_mask(surface_f, _fine_optional(store, "water_surface", f, Nf, 0.0), depth, ocean=ocean_f),
+                fine_lake(surface_f, _fine_optional(store, "water_surface", f, Nf, 0.0), ocean_f, f),
                 lake_min_cells)
             land_f = ~ocean_f & ~lake_f
             conn.add_face(f, (q_s > q_low) & land_f, (q_s > q_thr) & land_f)
@@ -302,7 +308,7 @@ def run(store, params, log=print) -> dict:
         # only the lake pieces derive keeps clip a river (kept_lake_mask): a
         # one-cell water pocket refine left is not a shore, and a reach
         # clipped on it was cut in two
-        lake_f = lakes_mod.kept_lake_mask(lakes_mod.lake_mask(surface_f, ws_f, depth, ocean=ocean_f), lake_min_cells)
+        lake_f = lakes_mod.kept_lake_mask(fine_lake(surface_f, ws_f, ocean_f, f), lake_min_cells)
         land_f = ~ocean_f & ~lake_f
         # rivers (never through a lake: land_f excludes them, so a traced
         # reach stops at the shore and a thresholded blob is cut there)
@@ -323,7 +329,7 @@ def run(store, params, log=print) -> dict:
             rinfo["coarse_channel_coverage"] = float(on[chan_c[f]].mean())
             chan_covered += int(on[chan_c[f]].sum())
         # lakes
-        lake_f = lakes_mod.lake_mask(surface_f, ws_f, depth, ocean=ocean_f)
+        lake_f = fine_lake(surface_f, ws_f, ocean_f, f)
         area_f = (upsample_nearest(coarse_face_array(grid, grid.cell_area, f), R) / float(R * R)).astype(np.float32)
         pcs, frame = lakes_mod.face_lake_pieces(f, lake_f, ws_f, surface_f, area_f, coarse_lab[f], R, lake_min_cells, piece_base=len(pieces))
         pieces += pcs
@@ -358,8 +364,8 @@ def run(store, params, log=print) -> dict:
         surface_f = _fine_surface(store, f, Nf)
         ws_f = _fine_optional(store, "water_surface", f, Nf, 0.0)
         ocean_f = fine_ocean(surface_f, sea_near_c, f, R)
-        lake_f = lakes_mod.lake_mask(surface_f, ws_f, depth, ocean=ocean_f)
-        marsh_f = lakes_mod.lake_mask(surface_f, ws_f, pond, ocean=ocean_f) & ~lake_f if depth > pond else None   # standing water under the marsh line
+        lake_f = fine_lake(surface_f, ws_f, ocean_f, f)
+        marsh_f = lakes_mod.lake_mask(surface_f, ws_f, pond, ocean=ocean_f) & ~lakes_mod.lake_mask(surface_f, ws_f, depth, ocean=ocean_f) if depth > pond else None   # standing water under the marsh line
         river_mask = np.asarray(load_face(store, "river_mask", f))
         T_f = retarget(upsample_face(T0_field, f, R, order=1), 0.0, surface_f, params.climate)
         Pcm_f = np.maximum(upsample_face(Pcm_field, f, R, order=1), 0.0)

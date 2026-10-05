@@ -49,6 +49,37 @@ def kept_lake_mask(lake: np.ndarray, min_cells: int) -> np.ndarray:
     return lake & ~small[labels]
 
 
+def agree_with_coarse(lake: np.ndarray, coarse_lake: np.ndarray, R: int, max_coarse_cells: float) -> np.ndarray:
+    """``lake`` (a face's refined-grid lake mask) less the water the coarse
+    balance does not have: a refined lake cell stays where its coarse cell is
+    lake or touches one, and elsewhere only as a piece of at most
+    ``max_coarse_cells`` coarse cells (a pond below the coarse grid;
+    ``derive.lake_agree_cells``, 0 = no check).
+
+    The refine pass floods its own surface to the spill point and caps the
+    level at the coarse one only where the coarse grid *has* a lake.  Where
+    hydro's balance found none -- a closed basin evaporated down to a small
+    lake, or water too shallow to be one (``hydro.marsh_depth``) -- the whole
+    basin stood full again on the refined grid, which is the grid the viewer
+    draws: earth-v23 had a lake of 425,000 km2 on a plateau whose coarse lake
+    was 80,000, and 276,000 km2 of water 7 m deep where the coarse grid had
+    marsh."""
+    lake = np.asarray(lake, dtype=bool)
+    if float(max_coarse_cells) <= 0.0 or not lake.any():
+        return lake
+    near = ndimage.binary_dilation(np.asarray(coarse_lake, dtype=bool), structure=np.ones((3, 3), bool))
+    ok = np.repeat(np.repeat(near, R, axis=0), R, axis=1)
+    out = lake & ok
+    rest = lake & ~ok
+    if rest.any():
+        labels, _ = ndimage.label(rest, structure=np.ones((3, 3), bool))
+        sizes = np.bincount(labels.ravel())
+        pond = sizes <= float(max_coarse_cells) * R * R
+        pond[0] = False
+        out |= pond[labels]
+    return out
+
+
 def lake_mask(surface: np.ndarray, water_surface: np.ndarray, min_depth_m: float, ocean=None) -> np.ndarray:
     """Lake cells: cells that are not sea, with a water surface more than
     ``min_depth_m`` above the ground.

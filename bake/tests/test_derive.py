@@ -237,9 +237,10 @@ def build_lake_graph_world(path, params):
 
 @pytest.fixture(scope="module")
 def tiny(scratch):
-    # marsh_depth 0: the synthetic lake is 3 m deep at its shallowest cell, and these tests are of
-    # derive's lakes, rivers and biomes as such (the marsh line has its own test, tests/test_hydro.py)
-    params = WorldParams.tiny_world(seed=3).with_overrides(hydro={"marsh_depth": 0.0})
+    # marsh_depth 0, lake_agree_cells 0: the synthetic lake is 3 m deep at its shallowest cell and
+    # stands on the refined grid alone, and these tests are of derive's lakes, rivers and biomes as
+    # such (the marsh line and the agreement with the coarse grid have their own tests)
+    params = WorldParams.tiny_world(seed=3).with_overrides(hydro={"marsh_depth": 0.0}, derive={"lake_agree_cells": 0.0})
     store = build_world(scratch / "derive_tiny", params)
     info = derive_run.run(store, params, _log)
     return store, params, info
@@ -854,3 +855,24 @@ def test_runtime_small(scratch):
     est = dt * (4096 / Nf) ** 2
     print(f"\nderive at N_fine={Nf}: {dt:.2f}s ({info['n_rivers']} rivers); linear estimate for N_fine=4096: {est / 60:.1f} min")
     assert dt < 30.0
+
+
+def test_a_refined_lake_agrees_with_the_coarse_balance():
+    """``lakes.agree_with_coarse``: refined-grid water stays where the coarse
+    grid has a lake or touches one, and elsewhere only as a pond of a few
+    coarse cells -- a basin hydro's balance emptied does not stand full again
+    because the refine pass flooded it."""
+    from globe.derive import lakes as lk
+    R, N = 2, 40
+    coarse = np.zeros((N, N), bool)
+    coarse[5:9, 5:9] = True                                   # the coarse lake
+    fine = np.zeros((N * R, N * R), bool)
+    fine[8:24, 8:24] = True                                   # the refined lake over it, two coarse cells wider all round
+    fine[40:70, 40:70] = True                                 # a basin the coarse balance left dry: 225 coarse cells
+    fine[4:6, 60:63] = True                                   # a pond below the coarse grid
+    out = lk.agree_with_coarse(fine, coarse, R, 4.0)
+    assert out[10:20, 10:20].all()                            # on the coarse lake and the cell beside it
+    assert not out[40:70, 40:70].any()
+    assert out[4:6, 60:63].all()
+    assert out.sum() < fine.sum() and not (out & ~fine).any()
+    assert np.array_equal(lk.agree_with_coarse(fine, coarse, R, 0.0), fine)

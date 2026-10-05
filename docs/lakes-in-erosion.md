@@ -171,6 +171,24 @@ refined grid, which is what the viewer draws, earth-v19 had 3.76 % of its
 land under lakes, four of them over 100,000 km2 (the largest 485,000);
 earth-v21 has 2.29 %, three over 100,000 km2 (163,000, 136,000 and 119,000).
 
+**`derive.lake_agree_cells` (4).** The refine pass floods its own surface to
+the spill point and caps the level at the coarse one only where the coarse
+grid *has* a lake. Where hydro's balance found none -- a closed basin
+evaporated down to a small lake, a marsh, a lake the fill had laid dry -- the
+whole basin stood full again on the refined grid: earth-v23 had a lake of
+425,000 km2 on an arid plateau whose coarse lake was 80,000, and 276,000 km2
+of water 7 m deep where the coarse grid had marsh. A refined lake now stays
+where its coarse cell is a lake or touches one, and elsewhere only as a pond
+of at most four coarse cells (`lakes.agree_with_coarse`, derive and the
+viewer alike).
+
+| the lakes the viewer draws (refined grid), seed 1423 | % of land | over 100,000 km2 | largest |
+|---|---|---|---|
+| earth-v19 | 3.76 | 4 | 485k |
+| earth-v21: marsh, agreement | 1.88 | 2 | 163k, 136k |
+| earth-v22: and the fill | 1.72 | 0 | 85k |
+| earth-v23: and the fill by distance | **1.53** | 1 | 142k, then 71k |
+
 **`erosion.lake_fill`.** A particle entering a lake drops what the shore
 has room for -- on a plain, a metre a visit -- and carries the rest across
 and out, so a lake on flat ground never silts up. With the fill a lake that
@@ -180,14 +198,11 @@ metre over the water (`lake_fill_rise_m`); a frozen lake takes nothing.
 
 | seed 1423, same tectonics | lakes, % of land | marsh | over 100,000 km2 | largest | deeper than 10 m |
 |---|---|---|---|---|---|
-| **refined grid, as the viewer draws them** | | | | | |
-| earth-v19 (neither) | 3.76 | | 4 | 485k | |
-| earth-v21 (marsh) | 2.29 | | 3 | 163k | |
-| earth-v22 (marsh and fill) | **2.26** | | **1** | 117k | |
 | **coarse grid** | | | | | |
-| earth-v19 | 3.13 | -- | 4 | 322k | 1.36 % |
-| earth-v21 | 2.20 | 0.93 | 2 | 212k (frozen), 192k | 1.36 % |
-| earth-v22 | 2.03 | 0.74 | 3 | 122k, 121k, 106k | 1.16 % |
+| earth-v19 (neither) | 3.13 | -- | 4 | 322k | 1.36 % |
+| earth-v21 (marsh) | 2.20 | 0.93 | 2 | 212k (frozen), 192k | 1.36 % |
+| earth-v22 (marsh and fill) | 2.03 | 0.74 | 3 | 122k, 121k, 106k | 1.16 % |
+| earth-v23 (the fill by distance) | **1.79** | 0.75 | 2 | 152k, 147k | 1.00 % |
 | earth-v20 (the fill's first form) | 2.98 | 0.78 | 6 | 280k (frozen), 231k | 1.89 % |
 
 The fill takes the giants more than the area: one seed, and a frozen lake of

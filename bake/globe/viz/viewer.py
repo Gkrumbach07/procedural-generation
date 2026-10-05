@@ -340,13 +340,18 @@ def _fine_final(root: Path, manifest: dict, surf_c: np.ndarray, flow_dir_c: np.n
     ocean_c = (np.asarray(flow_dir_c) == 255) if flow_dir_c is not None else (surf_c < 0.0)
     sea_near = _dilate_max(ocean_c.astype(np.float32), 0.0) > 0.0
     ws = _load_faces(root, "water_surface", "fine")
+    ws_c = _load_faces(root, "water_surface")
+    agree = float((params.get("derive", {}) or {}).get("lake_agree_cells", 0.0))    # a world derived before the rule keeps its lakes
+    lake_c = None if ws_c is None else lakes_mod.lake_mask(surf_c, ws_c, depth, ocean=ocean_c)    # derive's coarse lakes
     water = np.zeros(surf.shape, np.uint8)
     for f in range(6):
         ocean = (surf[f] < 0.0) & np.repeat(np.repeat(sea_near[f], R, axis=0), R, axis=1)
         water[f][ocean] = WATER_OCEAN
         if ws is not None:
-            lake = lakes_mod.kept_lake_mask(lakes_mod.lake_mask(surf[f], ws[f], depth, ocean=ocean), min_cells)
-            water[f][lake] = WATER_LAKE
+            lake = lakes_mod.lake_mask(surf[f], ws[f], depth, ocean=ocean)
+            if lake_c is not None:
+                lake = lakes_mod.agree_with_coarse(lake, lake_c[f], R, agree)      # as derive draws them
+            water[f][lakes_mod.kept_lake_mask(lake, min_cells)] = WATER_LAKE
     return {"surf": surf, "sed": sed, "ws": ws, "water": water,
             "discharge": _load_faces(root, "discharge", "fine"), "biome": _load_faces(root, "biome", "fine"),
             "basin": _load_faces(root, "basin_id", "fine"),

@@ -641,6 +641,7 @@ class DeriveParams:
     slope_stencil: int = 0  # half-width (fine cells) of the fine slope stencil; 0 = R (coarse-scale slope on the fine grid)
     soil_full_depth_m: float = 1.0  # sediment depth at which the soil factor of the vegetation reaches 1 (derive/soil.py)
     lake_min_cells: float = 1.0  # x R^2: smaller fine lake pieces are ignored
+    lake_agree_cells: float = 4.0  # a piece of refined-grid lake where the coarse grid has none may cover this many coarse cells at most (derive/lakes.py agree_with_coarse): the refine pass floods to the spill point wherever hydro's balance left no lake -- an evaporated basin, a marsh -- and the refined grid is the one the viewer draws.  0 = every refined lake stands
 
 
 @dataclass
