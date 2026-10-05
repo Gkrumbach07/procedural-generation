@@ -62,6 +62,9 @@ KERNEL_VERSION = 13  # 13: a lake keeps the load its shore has no room for (eros
 #: a dying particle deposits its remaining load at the cell it died in; the
 #: excess over that cell's caps moves back up its last SPREAD active cells
 SPREAD = 8
+#: the loads one particle may leave in lakes (change entries of volume -3): a river crosses
+#: few lakes on its way to the sea, and past this many its load rides on as it did before
+LAKE_PARKS = 8
 
 #: why a particle stopped (``sp_death`` output of :func:`trace_particles`)
 DEATH_AGE = 0  # reached max_steps
@@ -259,8 +262,14 @@ def change_list_cap(max_steps, lateral):
     deposits -- the death cell and ``SPREAD`` overflow slots -- and the ring
     buffer of the last ``SPREAD`` cells, which lives in the tail of the same
     slice.  :func:`trace_particles` and its caller must agree on this: the
-    caller sizes the arrays with it and passes it to :func:`apply_changes`."""
-    return (2 * max_steps if lateral else max_steps) + 2 * SPREAD + 1 + SPREAD
+    caller sizes the arrays with it and passes it to :func:`apply_changes`.
+
+    ``LAKE_PARKS`` more for the loads a particle leaves in lakes
+    (``erosion.lake_fill``, an entry each beside the step's own).  Without
+    them a particle that entered lakes and then walked its full ``max_steps``
+    wrote past its slice into the next particle's, and past the arrays' end
+    from the last one (earth-v20's first bake died of it at iteration 540)."""
+    return (2 * max_steps if lateral else max_steps) + 2 * SPREAD + 1 + SPREAD + LAKE_PARKS
 
 
 @njit(cache=True, parallel=True)
@@ -406,6 +415,7 @@ def trace_particles(
         exited = False
         in_sea = False  # reached the ocean: deposit-only seafloor walk
         in_lake = False  # on an overflowing lake (S_RFLAG == 2): crossing, no exchange with the bed
+        parks = 0        # loads this particle has left in lakes (at most LAKE_PARKS: the slice has room for no more)
         sea_steps = 0
         cause = DEATH_AGE
         for step in range(max_steps):
@@ -668,9 +678,10 @@ def trace_particles(
                 # the lake cell the particle steps onto (volume -3: apply_changes
                 # takes what the lake still has room for into `lake_load`), for
                 # the lake's next refresh to lay over its floor.
-                if lake_park > 0.0 and trapped > 0.0 and n + 2 * SPREAD + 2 < cap:
+                if lake_park > 0.0 and trapped > 0.0 and parks < LAKE_PARKS:
                     rest = trapped + cdiff            # cdiff <= 0: what the shore took
                     if rest > 0.0:
+                        parks += 1
                         sed -= rest
                         lcell = (nf * NE + nei) * NE + nej
                         cl_cell[base + n] = lcell
