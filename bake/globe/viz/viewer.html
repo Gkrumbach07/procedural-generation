@@ -18,6 +18,7 @@
   #gl { position:fixed; inset:0; width:100%; height:100%; display:block; cursor:grab; touch-action:none; }
   /* the zoom outlines and the scout marks are drawn on this, over the map */
   #ovl { position:fixed; inset:0; width:100%; height:100%; display:block; pointer-events:none; z-index:2; touch-action:none; }
+  #gl.picking { cursor:crosshair; }   /* a section's ends are being picked */
   #gl.dragging { cursor:grabbing; }
 
   .row { display:flex; align-items:center; gap:6px; margin:6px 0; flex-wrap:wrap; }
@@ -34,6 +35,7 @@
     cursor:pointer; font:inherit; appearance:none; -webkit-appearance:none; }
   button.plain:hover, .seg button:hover { background:#1d2635; }
   button.plain:disabled { opacity:.5; cursor:default; }
+  button.plain.on { background:#24344d; color:#fff; }
   /* The chrome, after Google Earth: the map is the page, and everything floats over it in
      glass.  A rail of icons opens one panel at a time (a sheet from the bottom on a phone);
      the map's own controls sit bottom right; a status strip carries the scale and where the
@@ -86,6 +88,13 @@
   #status .grow { flex:1; }
   #legend canvas { width:100%; height:12px; border-radius:3px; display:block; }
   #legend .ticks { display:flex; justify-content:space-between; color:var(--dim); font-size:11px; }
+  /* a rock layer has a key in place of the bar: a swatch and a name per rock, under its family */
+  #rockkey { display:none; grid-template-columns:auto 1fr; gap:3px 10px; align-items:baseline; }
+  #rockkey b { color:var(--dim); font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+  #legend.rocks #rockkey { display:grid; }
+  #legend.rocks canvas, #legend.rocks .ticks { display:none; }
+  .rk { display:inline-flex; align-items:center; gap:4px; margin:1px 9px 1px 0; white-space:nowrap; font-size:11px; }
+  .rk i { width:10px; height:10px; border-radius:2px; border:1px solid rgba(255,255,255,.22); }
   #here .rows div { display:flex; justify-content:space-between; gap:12px; padding:1px 0; }
   #here .rows span:first-child { color:var(--dim); }
   #here img { width:100%; border-radius:6px; margin:6px 0; display:block; }
@@ -122,6 +131,19 @@
   #bakesbody pre { max-height:180px; overflow:auto; background:#0e131b; border:1px solid var(--line); border-radius:4px;
     padding:4px; font-size:10px; white-space:pre-wrap; margin:4px 0 0; }
   .job button { margin-right:4px; }
+  /* The cross-section: docked along the bottom with the map above it.  --sech is the panel's
+     height as laid out (its key wraps), which the map's controls and the side panel make room for */
+  #sec { position:fixed; left:74px; right:12px; bottom:30px; z-index:5; padding:8px 10px 6px; }
+  body.noui #sec { left:12px; }
+  #sechead { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  #sechead h2 { font-size:13px; margin:0; font-weight:600; }
+  #secread { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-variant-numeric:tabular-nums; }
+  #secc { width:100%; height:250px; display:block; margin:4px 0; cursor:crosshair; touch-action:none; }
+  #sec.thin #secc { height:150px; }   /* no crust plot: a world exported before crust_thickness */
+  body.secopen #mapctl { bottom:calc(var(--sech, 0px) + 40px); }
+  body.secopen #panel { max-height:calc(100vh - 100px - var(--sech, 0px)); }
+  #sechint { position:fixed; top:calc(104px + env(safe-area-inset-top)); left:50%; transform:translateX(-50%); z-index:7;
+    display:flex; align-items:center; gap:8px; padding:5px 6px 5px 12px; white-space:nowrap; }
   .hidden { display:none !important; }
   /* A phone: the rail is a bar along the bottom and the panel a sheet above it, at a height
      you can drag between a peek and most of the screen -- the map stays in view either way */
@@ -140,6 +162,18 @@
     body.panelopen #mapctl { bottom:calc(var(--sheet, 55vh) + 72px + env(safe-area-inset-bottom)); }
     #status { bottom:calc(60px + env(safe-area-inset-bottom)); }
     body.panelopen #status { bottom:calc(var(--sheet, 55vh) + 66px + env(safe-area-inset-bottom)); }
+    /* the section is a sheet of its own over the rail, under the panel's when both are open */
+    #sec { left:0; right:0; bottom:calc(60px + env(safe-area-inset-bottom)); border-radius:14px 14px 0 0;
+      border-left:0; border-right:0; border-bottom:0; }
+    #sechead h2 { flex:1; }
+    #secread { flex-basis:100%; order:3; white-space:normal; min-height:2.7em; }
+    #secc { height:210px; }
+    #sec.thin #secc { height:140px; }
+    body.secopen #panel { max-height:var(--sheet, 55vh); }
+    body.secopen #mapctl { bottom:calc(var(--sech, 0px) + 66px + env(safe-area-inset-bottom)); }
+    body.secopen #status { bottom:calc(var(--sech, 0px) + 60px + env(safe-area-inset-bottom)); }
+    body.secopen.panelopen #mapctl { bottom:calc(max(var(--sheet, 55vh), var(--sech, 0px)) + 72px + env(safe-area-inset-bottom)); }
+    body.secopen.panelopen #status { bottom:calc(max(var(--sheet, 55vh), var(--sech, 0px)) + 66px + env(safe-area-inset-bottom)); }
     button.plain { padding:8px 12px; }
     .chk { margin-right:10px; padding:4px 0; }
     .chk input { width:17px; height:17px; }
@@ -179,8 +213,10 @@
       <div class="row">
         <span class="seg" id="viewseg"><button data-v="globe" class="on">Globe</button><button data-v="flat">Flat</button><button data-v="tilt" title="3-D: tilt and turn (T)">3D</button></span>
       </div>
-      <div class="row"><label>Style</label><select id="layer"></select></div>
-      <div id="legend"><canvas id="legendc" width="256" height="12"></canvas><div class="ticks"><span id="lg0"></span><span id="lgmid"></span><span id="lg1"></span></div></div>
+      <div class="row"><label>Style</label><select id="layer"></select>
+        <button class="plain" id="secbtn" title="Cross-section: pick its two ends on the map">Section</button></div>
+      <div id="legend"><canvas id="legendc" width="256" height="12"></canvas><div class="ticks"><span id="lg0"></span><span id="lgmid"></span><span id="lg1"></span></div>
+        <div id="rockkey"></div></div>
       <h3>Relief</h3>
       <div class="row"><label>Height</label><input type="range" id="exag" min="0" max="60" step="0.5" value="12"><span id="exagv" style="width:30px;text-align:right">12&times;</span></div>
       <div class="row hidden" id="tiltrow"><label>Tilt</label>
@@ -243,6 +279,8 @@
         <b>3D:</b> drag pan &middot; <b>right-drag</b> or <b>Ctrl/Shift-drag</b> turn &amp; tilt &middot; <b>Q E</b> turn &middot; <b>PgUp PgDn</b> tilt</div>
       <h3>Search</h3>
       <div class="note">Type coordinates (<b>12.3, -45.6</b>), the name of a zoom window, or <b>scout 3</b>.</div>
+      <h3>Sections</h3>
+      <div class="note"><b>Section</b> (Layers) takes the next two places you tap as its ends and draws what the great circle between them cuts through: the ground and the sea, the sediment, the basement, the crust down to the Moho.</div>
       <h3>Zoom windows</h3>
       <div class="note">A window&rsquo;s levels draw in place as you zoom in (Zooms). Tap the map to bake one where you are looking (Place).</div>
     </section>
@@ -266,6 +304,14 @@
 </div>
 
 <div id="loading" class="glass">Loading&hellip;<div class="bar"><i id="loadbar"></i></div></div>
+
+<div id="sechint" class="glass hidden"><span id="sechintt"></span><button class="plain" id="sechintx" title="Cancel (Esc)">&times;</button></div>
+<div id="sec" class="glass hidden">
+  <div id="sechead"><h2 id="sectitle">Section</h2><span id="secread" class="d"></span><button class="plain" id="secx" title="Close the section">&times;</button></div>
+  <canvas id="secc"></canvas>
+  <div id="seckey"></div>
+  <div class="note" id="secnote"></div>
+</div>
 
 <script>
 "use strict";
@@ -351,10 +397,11 @@ uniform sampler2D uWT;         // water mask: 0 land, 1 lake, 2 ocean (final fra
 uniform vec3 uWGeo;
 uniform int uWCh, uHasWater;
 uniform int uLKind;            // 0 linear, 1 category
-uniform int uCmap;             // 0 thermal, 1 rain, 2 plates, 3 biome, 4 viridis, 5 sediment, 6 satellite, 7 order, 8 crust age
+uniform int uCmap;             // 0 thermal, 1 rain, 2 plates, 3 biome, 4 viridis, 5 sediment, 6 satellite, 7 order, 8 crust age, 9 rock
 uniform ivec2 uLBits;          // (shift, mask) where a layer reads part of a byte; (0, 255) is the whole of it
 uniform vec3 uBiome[32];
 uniform vec3 uSat[32];         // satellite ground colour per biome code (ice, rock classes)
+uniform vec3 uRock[32];        // map colour per rock code (derive.geology PALETTE): the Geology and Basement layers
 uniform int uTreeKind[32];     // tree kind per biome code (derive.biomes TREE_KIND): the shape and colour of its plants
 uniform float uVeg[32];        // vegetation factor per biome code (derive.biomes VEG_FACTOR): forest cover and tree density
 uniform int uTrees;            // 1: tree symbols on zoom levels of 100 m cells or finer (satellite layer)
@@ -1246,7 +1293,9 @@ void main(){
         }
       }
       else if (uCmap == 7) col = wet ? vec3(0.30, 0.34, 0.40) : (b < 0.5 ? vec3(0.82, 0.80, 0.76) : orderColor(b));   // a reach across a lake is the lake
-      else col = uCmap == 3 ? uBiome[int(b) & 31] : (b < 0.5 ? vec3(0.12) : hashColor(b));
+      // a rock is its map colour and nothing else: none of the biome's own reads above (a zoom
+      // level's classes) apply to it, and the sea floor's rock is darkened below like any other id
+      else col = uCmap == 3 ? uBiome[int(b) & 31] : uCmap == 9 ? uRock[int(b) & 31] : (b < 0.5 ? vec3(0.12) : hashColor(b));
     } else {
       float t = b / float(max(uLBits.y, 1));
       col = uCmap == 0 ? thermal(t) : uCmap == 1 ? rain(t)
@@ -1548,6 +1597,7 @@ async function ingest(i) {
   if (tex[FINAL] && (LOWMEM || loaded === NF)) { $("loading").classList.add("hidden"); document.body.dataset.ready = "1"; }
   if (i === state.frame || i === state.frame + 1) requestDraw();
   drawTimeline();
+  if (i === FINAL) secSync();                    // a section in the link was waiting for these bitmaps
 }
 // the atlases that stay on the GPU: the final frame and the last FRAME_KEEP asked for
 function trimFrames() {
@@ -1600,6 +1650,7 @@ const state = {
   heading: 0, tilt: 55 * PI / 180, exag3: 1.5,   // the 3-D view: compass heading, tilt from straight down, vertical exaggeration
   zoff: new Set(),                               // zoom levels switched off ("name_L<R>")
   contours: false, trees: true,
+  sec: null,                                     // a cross-section's ends: [lat A, lon A, lat B, lon B], degrees
 };
 // zoom 1 shows the whole planet in either view
 function baseScale() {
@@ -1622,6 +1673,9 @@ function readHash() {
   if (h.has("ct")) state.contours = h.get("ct") === "1";
   if (h.has("tr")) state.trees = h.get("tr") === "1";
   if (h.get("ui") === "0") document.body.classList.add("noui");
+  // the hash is all of a section's state: a link without one has none
+  const sc = h.has("sec") ? h.get("sec").split(",").map(Number) : [];
+  state.sec = sc.length === 4 && sc.every(v => isFinite(v)) ? sc : null;
 }
 let hashTimer = 0;
 function writeHash() {
@@ -1631,7 +1685,8 @@ function writeHash() {
     const h = `f=${state.frame}&v=${state.view}&lat=${d(state.lat0)}&lon=${d(state.lon0)}&z=${state.zoom.toFixed(4)}`
       + `&layer=${state.layer}&x=${state.exag}&rivers=${+state.rivers}&grid=${+state.grid}&coast=${+state.coast}&fade=${+state.fade}`
       + (state.view === "tilt" ? `&hd=${(state.heading * 180 / PI).toFixed(1)}&tl=${(state.tilt * 180 / PI).toFixed(1)}&x3=${state.exag3}` : "")
-      + (state.zoff.size ? `&zoff=${[...state.zoff].join(",")}` : "") + (state.contours ? "&ct=1" : "") + (state.trees ? "" : "&tr=0");
+      + (state.zoff.size ? `&zoff=${[...state.zoff].join(",")}` : "") + (state.contours ? "&ct=1" : "") + (state.trees ? "" : "&tr=0")
+      + (state.sec ? `&sec=${state.sec.map(v => v.toFixed(3)).join(",")}` : "");
     history.replaceState(null, "", "#" + h);
   }, 200);
 }
@@ -1643,7 +1698,7 @@ readHash();
 // frame.layers:  {name: [texIndex, channel]}
 // ---------------------------------------------------------------------------
 const CHANNELS = Object.assign({ elevation: { label: "Elevation", unit: "m" } }, META.channels || {});
-const CMAPS = { thermal: 0, rain: 1, plates: 2, biome: 3, viridis: 4, sediment: 5, satellite: 6, order: 7, age: 8 };
+const CMAPS = { thermal: 0, rain: 1, plates: 2, biome: 3, viridis: 4, sediment: 5, satellite: 6, order: 7, age: 8, rock: 9 };
 // layers the detail tiles and zoom levels carry at their own resolution (the shader's uFineLayer)
 const FINE_LAYERS = { flow: 1, discharge: 2, water: 3, lake_depth: 4, ocean: 5, sediment: 6 };
 const layerNames = ["elevation", ...Object.keys(META.channels || {}).filter(k => k !== "discharge_overlay" && !META.channels[k].hidden)];
@@ -1654,6 +1709,9 @@ if (!layerNames.includes(state.layer)) state.layer = "elevation";
 const biome = new Float32Array(96), sat = new Float32Array(96);
 (META.biome_palette || []).forEach((c, i) => { if (i < 32) { biome[3*i] = c[0]/255; biome[3*i+1] = c[1]/255; biome[3*i+2] = c[2]/255; } });
 (META.satellite_palette || []).forEach((c, i) => { if (i < 32) { sat[3*i] = c[0]/255; sat[3*i+1] = c[1]/255; sat[3*i+2] = c[2]/255; } });
+// derive.geology PALETTE, by rock code; a world exported before it has no rock layers to colour
+const rock = new Float32Array(96);
+(META.rock_palette || []).forEach((c, i) => { if (i < 32) { rock[3*i] = c[0]/255; rock[3*i+1] = c[1]/255; rock[3*i+2] = c[2]/255; } });
 const veg = new Float32Array(32);
 (META.biome_vegetation || []).forEach((v, i) => { if (i < 32) veg[i] = v; });
 // derive.biomes TREE_KIND; a viewer exported before it has none: mixed trees on every class with vegetation
@@ -2233,6 +2291,7 @@ function draw() {
     gl.uniform2f(U.uDQ, DET.q_lo ?? 1, DET.q_hi ?? 10); gl.uniform2f(U.uDSed, DET.sed_lo ?? 0.5, DET.sed_hi ?? 2000);
   }
   gl.uniform3fv(U.uBiome, biome); gl.uniform3fv(U.uSat, sat); gl.uniform1fv(U.uVeg, veg); gl.uniform1iv(U.uTreeKind, treeKind);
+  gl.uniform3fv(U.uRock, rock);
   gl.uniform1i(U.uTrees, state.trees ? 1 : 0);
   // tree sites ~6 device pixels apart at the view centre, in powers of two of 4 m, so they stay put while
   // panning; past TREE_MAX_M apart a tree would be a hill, so zoomed further out the forest is its canopy
@@ -2294,6 +2353,7 @@ function draw() {
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   updateLabels(a);
   updateLegend(FA);
+  secTitle();
   drawZooms();
 }
 
@@ -2453,6 +2513,7 @@ function drawZooms() {
       ovx.beginPath(); ovx.arc(q[0], q[1] - r, 2.4 * dpr, 0, 2 * PI); ovx.fillStyle = "#fff"; ovx.fill();
     }
   }
+  drawSecLine(dpr);
   scoutHits = [];
   if (state.scout) {
     for (const c of scoutCands) {
@@ -2681,6 +2742,7 @@ canvas.addEventListener("click", ev => {
   const dpr = cssPx(), px = ev.offsetX * dpr, py = ev.offsetY * dpr;
   clearTimeout(clickTimer);
   clickTimer = setTimeout(() => {
+    if (sec.arm) return secPick(px, py);            // a section's end, not a place to open
     const sc = scoutHits.find(hh => Math.hypot(px - hh.x, py - hh.y) < 11 * dpr);
     if (sc) return showScout(sc, px, py);
     // a window's outline or its dot opens the window; inside it, the ground is what you asked
@@ -2727,10 +2789,23 @@ const CM = { age: [[.80,.12,.16],[.96,.58,.20],[.88,.90,.38],[.24,.62,.56],[.06,
              thermal: [[.19,.07,.55],[.16,.44,.90],[.94,.94,.90],[.95,.55,.18],[.62,.05,.10]],
   rain: [[.93,.87,.72],[.72,.80,.45],[.30,.65,.40],[.15,.45,.70],[.10,.15,.50]],
   viridis: [[.27,0,.33],[.23,.32,.55],[.13,.57,.55],[.37,.79,.38],[.99,.91,.14]] };
+// the rocks' map colours as CSS, and a rock's entry in a key (the Geology legend, a section's own)
+const ROCK = (META.rock_palette || []).map(c => `rgb(${c[0]},${c[1]},${c[2]})`);
+const rockChip = (ch, k) => `<span class="rk"><i style="background:${ROCK[k]}"></i>${ch.names[k]}</span>`;
 let legendKey = "";
 function updateLegend(f) {
   const ch = CHANNELS[state.layer], key = state.layer + ":" + (f.layers && f.layers[state.layer] ? 1 : 0);
   if (key === legendKey) return; legendKey = key;
+  // rocks have no order to put along a bar: a key instead, every rock under its family (code 0 is no rock)
+  const rocks = ch.cmap === "rock" && !!ch.names;
+  $("legend").classList.toggle("rocks", rocks);
+  if (rocks) {
+    const fams = new Map();
+    ch.names.forEach((_, k) => { if (!k) return; const fm = (ch.families || [])[k] || ""; fams.set(fm, (fams.get(fm) || "") + rockChip(ch, k)); });
+    $("rockkey").innerHTML = [...fams].map(([fm, chips]) => `<b>${fm}</b><span>${chips}</span>`).join("") +
+      `<b></b><span class="note">The sea floor&rsquo;s rock is drawn darker.</span>`;
+    return;
+  }
   const img = lgc.createImageData(256, 12);
   for (let x = 0; x < 256; x++) {
     let c;
@@ -2813,6 +2888,302 @@ function drawScale() {
   const needle = $("compass") && $("compass").querySelector("svg");
   if (needle) needle.style.transform = `rotate(${state.view === "tilt" ? (-state.heading * 180 / PI).toFixed(1) : 0}deg)`;
 }
+
+// ---------------------------------------------------------------------------
+// Cross-sections.  Two picked places and the great circle between them, read
+// from the final frame: the ground and the water on it, the sediment under
+// the surface, the basement under that, the crust down to the Moho.
+// state.sec is the two ends (degrees, the hash's sec=); the rest is derived
+// here.  The line is sampled once when it is set, and the panel's canvas is
+// redrawn on a resize or a hover -- never per frame of the map.
+// ---------------------------------------------------------------------------
+const SEC_N = 501;                               // samples along the line
+const SEC_SEA = "#2c5f8e", SEC_LAKE = "#5a9bd0", SEC_MANTLE = "#4a2428", SEC_SKY = "#0e131b";
+const SEC_SED = "#e6dcae", SEC_BED = "#77706a";  // sediment and rock where the world has no rock map (an older export)
+const sec = { arm: 0, pA: null, key: "", A: null, B: null, w: 0, data: null, hover: -1, x0: 0, x1: 1 };
+const secc = $("secc"), scx = secc.getContext("2d");
+// a section's ends as directions and the angle between them; null where there is no one line
+// to draw (both ends on a spot, or antipodal, which every great circle joins)
+function secEnds(S) {
+  if (!S) return null;
+  const A = dirOf(S[0] * PI / 180, S[1] * PI / 180), B = dirOf(S[2] * PI / 180, S[3] * PI / 180);
+  const w = Math.acos(Math.max(-1, Math.min(1, dot3(A, B))));
+  return w > 1e-3 && w < PI - 1e-3 ? { A, B, w } : null;
+}
+// the place a fraction t of the way along it
+function secDir(t) {
+  const s = Math.sin(sec.w), a = Math.sin((1 - t) * sec.w) / s, b = Math.sin(t * sec.w) / s;
+  return [0, 1, 2].map(k => a * sec.A[k] + b * sec.B[k]);
+}
+// arm: 0 idle, 1 the next tap on the map is A, 2 the next is B.  A section already drawn stays
+// until a B replaces it, so a cancelled pick loses nothing
+function secArm(n) {
+  sec.arm = n;
+  if (n < 2) sec.pA = null;
+  $("secbtn").classList.toggle("on", n > 0);
+  canvas.classList.toggle("picking", n > 0);
+  $("sechint").classList.toggle("hidden", !n);
+  $("sechintt").textContent = n === 1 ? "Section: tap the map for its first end, A" : "Section: now its other end, B";
+  if (n === 1 && matchMedia("(max-width: 760px), (pointer: coarse)").matches) closePanel();   // a phone's sheet is over the map
+  requestDraw();
+}
+function secPick(px, py) {
+  const p = screenToDir(px, py);
+  if (!p) return;                                            // off the globe: still waiting
+  if (sec.arm === 1) { sec.pA = p; return secArm(2); }
+  const ends = [sec.pA, p].flatMap(q => latLonOf(q).map(v => +(v * 180 / PI).toFixed(3)));
+  if (!secEnds(ends)) return;                                // B on top of A is no section
+  state.sec = ends;
+  secArm(0); writeHash(); secSync();
+}
+// One read of an atlas of the final frame at p: the 2 x 2 texels the shader's bilinear read
+// takes (the pad carries the neighbouring face), the one of them p is in, and the blend of the
+// four.  A section wants seven values at each of 501 places; they live in five atlases, so
+// each atlas is read once per place and its channels shared
+let secRd = null;
+function secTexels(k, p) {
+  const f = frames[FINAL], g = (f.tex && f.tex[k]) || f, T = g.res + 2 * g.pad, [fc, u, v] = fromSphere(p);
+  const x = (fc % 3) * T + g.pad + u * g.res - 0.5, y = Math.floor(fc / 3) * T + g.pad + v * g.res - 0.5;
+  const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+  if (!secRd) {
+    const c = document.createElement("canvas"); c.width = c.height = 2;
+    secRd = c.getContext("2d", { willReadFrequently: true });
+  }
+  secRd.clearRect(0, 0, 2, 2);
+  secRd.drawImage(bitmaps[FINAL][k], x0, y0, 2, 2, 0, 0, 2, 2);
+  const d = secRd.getImageData(0, 0, 2, 2).data;
+  return { d, near: 4 * ((fx >= 0.5 ? 1 : 0) + (fy >= 0.5 ? 2 : 0)),
+           lin: val => (val(0) * (1 - fx) + val(4) * fx) * (1 - fy) + (val(8) * (1 - fx) + val(12) * fx) * fy };
+}
+// The line's samples.  Heights and crust thickness are interpolated, as the map draws them;
+// classes and the sediment's log byte are the cell's own
+function secSample() {
+  const f = frames[FINAL], L = f.layers || {}, n = SEC_N, sea = META.sea_level_m || 0;
+  const has = name => !!(L[name] && CHANNELS[name]);
+  const rch = has("rock") ? CHANNELS.rock : null, fam = (rch && rch.families) || [];
+  const loose = rch ? rch.names.indexOf("alluvium") : -1;     // sediment under a rock that is not one: alluvium's colour
+  const D = { n, km: sec.w * META.R_planet_m / 1000, h: new Float32Array(n), sed: new Float32Array(n), sedc: new Uint8Array(n).fill(255),
+              water: new Uint8Array(n), lake: new Float32Array(n), rock: rch ? new Uint8Array(n) : null,
+              base: has("basement") ? new Uint8Array(n) : null, crust: has("crust_thickness") ? new Float32Array(n) : null };
+  for (let i = 0; i < n; i++) {
+    const p = secDir(i / (n - 1)), read = {};
+    const at = k => read[k] || (read[k] = secTexels(k, p));
+    const byte = name => { const t = at(L[name][0]); return t.d[t.near + L[name][1]]; };
+    const t0 = at(0);
+    D.h[i] = f.h0 + t0.lin(o => t0.d[o] * 256 + t0.d[o + 1]) / 65535 * (f.h1 - f.h0);
+    if (has("sediment")) { const b = byte("sediment"); D.sed[i] = b ? decodeByte(CHANNELS.sediment, b) : 0; }   // byte 0 is none
+    D.water[i] = has("water") ? byte("water") : (D.h[i] < sea ? 2 : 0);
+    if (has("lake_depth")) D.lake[i] = decodeByte(CHANNELS.lake_depth, byte("lake_depth"));
+    if (rch) { D.rock[i] = byte("rock"); D.sedc[i] = fam[D.rock[i]] === "sedimentary" ? D.rock[i] : (loose < 0 ? 255 : loose); }
+    if (D.base) D.base[i] = byte("basement");
+    if (D.crust) { const [k, c] = L.crust_thickness, t = at(k); D.crust[i] = decodeByte(CHANNELS.crust_thickness, t.lin(o => t.d[o + c])); }
+  }
+  return D;
+}
+// state.sec changed, or the final frame arrived: show or hide the panel, and sample a new line
+function secSync() {
+  const e = secEnds(state.sec);
+  if (!e) state.sec = null;
+  const key = e ? state.sec.join(",") : "";
+  if (key !== sec.key) { sec.key = key; sec.A = e && e.A; sec.B = e && e.B; sec.w = e ? e.w : 0; sec.data = null; sec.hover = -1; }
+  $("sec").classList.toggle("hidden", !e);
+  document.body.classList.toggle("secopen", !!e);
+  if (e && !sec.data && bitmaps[FINAL]) {
+    const D = sec.data = secSample(), rch = CHANNELS.rock || CHANNELS.basement;
+    // the key: only what this line cuts through
+    const seen = new Set(), chip = (col, name) => `<span class="rk"><i style="background:${col}"></i>${name}</span>`;
+    for (let i = 0; i < D.n; i++) { if (D.rock) seen.add(D.rock[i]); if (D.base) seen.add(D.base[i]); if (D.sed[i] > 0) seen.add(D.sedc[i]); }
+    $("seckey").innerHTML = [...seen].filter(k => k > 0 && k < 255).sort((a, b) => a - b).map(k => rockChip(rch, k)).join("") +
+      (seen.has(255) ? chip(SEC_SED, "sediment") : "") + (D.base ? "" : chip(SEC_BED, "rock")) +
+      (D.water.some(v => v > 0) ? chip(SEC_SEA, "water") : "") + (D.crust ? chip(SEC_MANTLE, "mantle") : "");
+    $("sec").classList.toggle("thin", !D.crust);
+    $("secnote").textContent = (D.crust ? "Sediment and crust thickness are the model’s" : "Sediment thickness is the model’s") +
+      (D.base ? "; the rock under the sediment is the mapped basement class, not a simulated stratigraphy."
+              : ". This world was exported before its rocks were mapped, so what lies under the sediment is drawn as one rock.");
+  }
+  secTitle(); secReadout(); drawSec(); requestDraw();
+}
+function secTitle() {
+  if (!sec.A) return;
+  const t = `Section A–B · ${Math.round(sec.w * META.R_planet_m / 1000).toLocaleString()} km` +
+    (state.frame !== FINAL ? " · drawn from the final frame, not the earlier one on the map" : "");
+  if ($("sectitle").textContent !== t) $("sectitle").textContent = t;
+}
+// the line under the title: what is at the cursor, or what to do to have one
+function secReadout() {
+  const D = sec.data, i = sec.hover, rch = CHANNELS.rock || CHANNELS.basement;
+  if (!D) { $("secread").textContent = state.sec ? "Loading the final frame…" : ""; return; }
+  if (i < 0) { $("secread").textContent = "Hover or touch the section for what is there."; return; }
+  const [lat, lon] = latLonOf(secDir(i / (D.n - 1))), deg = v => (v * 180 / PI).toFixed(3) + "°";
+  $("secread").textContent = [
+    `${Math.round(D.km * i / (D.n - 1)).toLocaleString()} km`, `${deg(lat)}, ${deg(lon)}`,
+    fmtM(D.h[i]) + (D.water[i] === 2 ? " (sea floor)" : D.water[i] === 1 ? " (lake bed)" : ""),
+    D.rock && `surface ${rch.names[D.rock[i]]}`, D.base && `basement ${rch.names[D.base[i]]}`,
+    `sediment ${D.sed[i] > 0 ? fmtM(D.sed[i]) : "none"}`, D.crust && `crust ${D.crust[i].toFixed(1)} km`].filter(Boolean).join(" · ");
+}
+// the 1-2-5 step nearest v, for an axis' ticks
+const niceStep = v => { const p = Math.pow(10, Math.floor(Math.log10(v))), m = v / p; return (m < 1.5 ? 1 : m < 3.5 ? 2 : m < 7.5 ? 5 : 10) * p; };
+function drawSec() {
+  const u = window.devicePixelRatio || 1, W = Math.round(secc.clientWidth * u), H = Math.round(secc.clientHeight * u);
+  if (secc.width !== W || secc.height !== H) { secc.width = W; secc.height = H; }
+  const g = scx, D = sec.data;
+  g.clearRect(0, 0, W, H);
+  if (!D || W < 120 * u) return;
+  const n = D.n, sea = META.sea_level_m || 0, DIM = "#8a96a8";
+  const X0 = sec.x0 = Math.round(46 * u), X1 = sec.x1 = W - Math.round(14 * u);
+  const xOf = i => X0 + (X1 - X0) * i / (n - 1);
+  // a sample's column runs to the midpoints either side, on whole pixels: bands of colour laid
+  // side by side leave no seam
+  const edge = i => i <= 0 ? X0 : i >= n ? X1 : Math.round(xOf(i - 0.5));
+  const bands = (col, t, b) => {
+    for (let i = 0, j; i < n; i = j) {
+      const c = col(i);
+      for (j = i + 1; j < n && col(j) === c; j++);
+      if (c) { g.fillStyle = c; g.fillRect(edge(i), t, edge(j) - edge(i), b - t); }
+    }
+  };
+  const surf = i => D.h[i], sedBase = i => D.h[i] - D.sed[i], moho = i => D.h[i] - 1000 * D.crust[i];
+  const baseCol = i => D.base ? ROCK[D.base[i]] : SEC_BED, sedCol = i => ROCK[D.sedc[i]] || SEC_SED;
+  const text = (t, x, y, align, col) => { g.textAlign = align; g.fillStyle = col || DIM; g.fillText(t, x, y); };
+  g.font = `${10 * u}px system-ui`; g.textBaseline = "middle"; g.lineWidth = u;
+  // One plot, top..bot px for hi..lo metres, captioned at capY.  Each layer is the region between
+  // two lines along the section, clipped to and filled in bands: the basement from under the
+  // sediment down to the plot's foot (or to floor(i), with the mantle below that), the sediment
+  // under the surface, the water over it
+  const plot = (top, bot, hi, lo, capY, floor) => {
+    const y = m => bot - (m - lo) / (hi - lo) * (bot - top);
+    const clipBetween = (a, b) => {
+      g.save(); g.beginPath();
+      for (let i = 0; i < n; i++) g.lineTo(xOf(i), y(a(i)));
+      for (let i = n - 1; i >= 0; i--) g.lineTo(xOf(i), y(b(i)));
+      g.closePath(); g.clip();
+    };
+    g.save(); g.beginPath(); g.rect(X0, top, X1 - X0, bot - top); g.clip();
+    g.fillStyle = SEC_SKY; g.fillRect(X0, top, X1 - X0, bot - top);
+    if (floor) { clipBetween(floor, () => lo); g.fillStyle = SEC_MANTLE; g.fillRect(X0, top, X1 - X0, bot - top); g.restore(); }
+    clipBetween(sedBase, floor || (() => lo)); bands(baseCol, top, bot); g.restore();
+    clipBetween(surf, sedBase); bands(sedCol, top, bot); g.restore();
+    // water lies on the ground: clipped to what is above it, the sea is flat at sea level
+    // whatever the floor does between two samples.  A lake is a few metres on a plot of
+    // kilometres, so it is drawn two pixels deep at the least
+    clipBetween(() => hi, surf);
+    bands(i => D.water[i] === 2 ? SEC_SEA : null, y(sea), bot);
+    g.fillStyle = SEC_LAKE;
+    for (let i = 0; i < n; i++) if (D.water[i] === 1) {
+      const yt = Math.min(y(D.h[i] + D.lake[i]), y(D.h[i]) - 2 * u);
+      g.fillRect(edge(i), yt, edge(i + 1) - edge(i), bot - yt);
+    }
+    g.restore();
+    g.beginPath(); for (let i = 0; i < n; i++) g.lineTo(xOf(i), y(D.h[i]));
+    g.strokeStyle = "rgba(0,0,0,.6)"; g.stroke();
+    g.restore();
+    const step = niceStep((hi - lo) / Math.max(2, Math.floor((bot - top) / (26 * u))));
+    for (let k = Math.ceil(lo / step); k * step <= hi; k++) {
+      const v = k * step, yy = Math.round(y(v)) + 0.5;
+      g.globalAlpha = 0.13; g.strokeStyle = "#fff"; g.beginPath(); g.moveTo(X0, yy); g.lineTo(X1, yy); g.stroke(); g.globalAlpha = 1;
+      text(v === 0 ? "0" : hi - lo >= 4000 ? `${+(v / 1000).toFixed(1)} km` : `${Math.round(v)} m`, X0 - 5 * u, yy, "right");
+    }
+    // the vertical exaggeration this plot came out at: its pixels per metre up, over those along
+    text(`vertical ×${+((bot - top) / (hi - lo) / ((X1 - X0) / (D.km * 1000))).toPrecision(2)}`, X1, capY, "right");
+    return y;
+  };
+  // the surface plot: from over the summits to under the deepest sediment, with basement below.
+  // The range is the line's own (sea level is in it only where the line meets the sea), so a
+  // section across high ground is not a flat strip on top of kilometres of basement
+  const top1 = (D.rock ? 24 : 15) * u, bot = H - 27 * u;
+  const bot1 = D.crust ? Math.round(top1 + 0.57 * (bot - top1 - 17 * u)) : bot;
+  let hi1 = -Infinity, lo1 = Infinity;
+  for (let i = 0; i < n; i++) {
+    hi1 = Math.max(hi1, D.h[i] + (D.water[i] === 1 ? Math.max(D.lake[i], 0) : 0), D.water[i] === 2 ? sea : -Infinity);
+    lo1 = Math.min(lo1, sedBase(i));
+  }
+  const span1 = Math.max(hi1 - lo1, 200);
+  const y1 = plot(top1, bot1, hi1 + 0.08 * span1, lo1 - 0.15 * span1, 6 * u);
+  if (D.rock) {                                              // the map unit along the line
+    text("at the surface", X0, 6 * u, "left");
+    bands(i => ROCK[D.rock[i]], 13 * u, 20 * u);
+  }
+  // the crust plot: the same line from 10 km up to under the deepest Moho
+  if (D.crust) {
+    let lo2 = 0, im = 0;
+    for (let i = 0; i < n; i++) { lo2 = Math.min(lo2, moho(i)); if (D.crust[i] > D.crust[im]) im = i; }
+    const y2 = plot(bot1 + 17 * u, bot, 10000, lo2 - 0.3 * (10000 - lo2), bot1 + 9 * u, moho);
+    g.beginPath(); for (let i = 0; i < n; i++) g.lineTo(xOf(i), y2(moho(i)));
+    g.strokeStyle = "#f3e9c8"; g.lineWidth = 1.4 * u; g.stroke(); g.lineWidth = u;
+    const label = (t, x, y) => { g.textAlign = "center"; g.lineWidth = 3 * u; g.strokeStyle = "rgba(0,0,0,.55)"; g.strokeText(t, x, y);
+      g.lineWidth = u; g.fillStyle = "#fff"; g.fillText(t, x, y); };
+    const inX = i => Math.max(X0 + 24 * u, Math.min(X1 - 24 * u, xOf(i)));
+    const ik = Math.round((im < n / 2 ? 0.8 : 0.2) * (n - 1));       // away from the thickest crust, which has the other label
+    label("crust", inX(im), y2((sedBase(im) + moho(im)) / 2));
+    label("Moho", inX(ik), y2(moho(ik)) + 8 * u);
+    label("mantle", (X0 + X1) / 2, bot - 7 * u);
+    text("the crust", X0, bot1 + 9 * u, "left");
+  }
+  // the distance axis, shared
+  const xs = niceStep(D.km / Math.max(2, Math.floor((X1 - X0) / (90 * u))));
+  g.strokeStyle = DIM;
+  for (let k = 0; k * xs <= D.km; k++) {
+    const x = Math.round(X0 + (X1 - X0) * k * xs / D.km) + 0.5, t = (k * xs).toLocaleString();
+    g.beginPath(); g.moveTo(x, bot); g.lineTo(x, bot + 3 * u); g.stroke();
+    text(t, Math.min(x, W - g.measureText(t).width / 2 - u), bot + 9 * u, "center");
+  }
+  text("km along the great circle", (X0 + X1) / 2, bot + 21 * u, "center");
+  g.font = `bold ${10 * u}px system-ui`;
+  text("A", X0, bot + 21 * u, "left", "#d6dde8"); text("B", X1, bot + 21 * u, "right", "#d6dde8");
+  if (sec.hover >= 0) {
+    const x = Math.round(xOf(sec.hover)) + 0.5;
+    g.strokeStyle = "rgba(255,255,255,.9)"; g.beginPath(); g.moveTo(x, D.rock ? 13 * u : top1); g.lineTo(x, bot); g.stroke();
+    g.fillStyle = "#fff"; g.beginPath(); g.arc(x, y1(D.h[sec.hover]), 2.5 * u, 0, 2 * PI); g.fill();
+  }
+}
+// The section on the map: its great circle, broken where it passes behind the globe or off one
+// edge of the flat map and on at the other; its ends; and the place the panel's cursor is on
+function drawSecLine(dpr) {
+  const mark = (p, t, fill) => {
+    const q = dirToScreen(p);
+    if (!q) return;
+    ovx.beginPath(); ovx.arc(q[0], q[1], 8 * dpr, 0, 2 * PI);
+    ovx.fillStyle = fill; ovx.fill(); ovx.strokeStyle = "rgba(0,0,0,.6)"; ovx.lineWidth = dpr; ovx.stroke();
+    ovx.font = `bold ${10 * dpr}px system-ui`; ovx.fillStyle = "#10141c"; ovx.textAlign = "center"; ovx.textBaseline = "middle";
+    ovx.fillText(t, q[0], q[1] + 0.5 * dpr);
+    ovx.textAlign = "start"; ovx.textBaseline = "alphabetic";
+  };
+  if (sec.A) {
+    ovx.beginPath();
+    for (let k = 0, last = null; k <= 180; k++) {
+      const q = dirToScreen(secDir(k / 180));
+      if (q) last && Math.abs(q[0] - last[0]) < PI * scalePx() ? ovx.lineTo(q[0], q[1]) : ovx.moveTo(q[0], q[1]);
+      last = q;
+    }
+    ovx.strokeStyle = "rgba(0,0,0,.6)"; ovx.lineWidth = 4 * dpr; ovx.stroke();
+    ovx.strokeStyle = "#fff"; ovx.lineWidth = 1.8 * dpr; ovx.stroke();
+    mark(sec.A, "A", "#fff"); mark(sec.B, "B", "#fff");
+    const q = sec.hover >= 0 && sec.data && dirToScreen(secDir(sec.hover / (sec.data.n - 1)));
+    if (q) {
+      ovx.beginPath(); ovx.arc(q[0], q[1], 5 * dpr, 0, 2 * PI);
+      ovx.fillStyle = "#ffd666"; ovx.fill(); ovx.strokeStyle = "#10141c"; ovx.lineWidth = 1.5 * dpr; ovx.stroke();
+    }
+  }
+  if (sec.pA) mark(sec.pA, "A", "#ffd666");                  // the first end of one being picked
+}
+function secHover(ev) {
+  const D = sec.data;
+  const i = !ev || !D ? -1 : Math.max(0, Math.min(D.n - 1,
+    Math.round((ev.offsetX * secc.width / secc.clientWidth - sec.x0) / (sec.x1 - sec.x0) * (D.n - 1))));
+  if (i === sec.hover) return;
+  sec.hover = i;
+  secReadout(); drawSec(); drawZooms();
+}
+secc.addEventListener("pointermove", secHover);
+secc.addEventListener("pointerdown", secHover);
+// a finger lifted leaves its reading on the panel; a mouse gone takes the cursor with it
+secc.addEventListener("pointerleave", ev => { if (ev.pointerType === "mouse") secHover(null); });
+$("secbtn").onclick = () => secArm(sec.arm ? 0 : 1);
+$("sechintx").onclick = () => secArm(0);
+$("secx").onclick = () => { state.sec = null; writeHash(); secSync(); };
+// the panel's height is the room the map's controls give it; its canvas follows its width
+new ResizeObserver(() => { document.body.style.setProperty("--sech", `${$("sec").offsetHeight}px`); drawSec(); }).observe($("sec"));
+secSync();
 
 // ---------------------------------------------------------------------------
 // Timeline
@@ -3190,7 +3561,7 @@ $("full").onclick = () => {
 };
 document.addEventListener("fullscreenchange", () => { $("full").title = document.fullscreenElement ? "Leave full screen" : "Full screen"; });
 window.addEventListener("keydown", ev => {
-  if (ev.key === "Escape") { closePanel(); return; }
+  if (ev.key === "Escape") { sec.arm ? secArm(0) : closePanel(); return; }   // a section being picked is what Esc cancels first
   // Tab is the browser's: it moves focus between the controls.  The panel toggles on B
   if ((ev.key === "b" || ev.key === "B") && ev.target === document.body) { tab ? closePanel() : openTab(lastTab); return; }
   if (ev.key === "/" && ev.target !== $("search")) { ev.preventDefault(); $("search").focus(); return; }
@@ -3222,7 +3593,7 @@ canvas.addEventListener("webglcontextlost", ev => {
   setTimeout(() => location.reload(), 1200);
 });
 window.addEventListener("resize", () => { requestDraw(); drawTimeline(); });
-window.addEventListener("hashchange", () => { readHash(); requestDraw(); drawTimeline(); });
+window.addEventListener("hashchange", () => { readHash(); secSync(); requestDraw(); drawTimeline(); });
 if (document.body.classList.contains("noui")) for (const id of ["rail", "panel", "omni", "mapctl", "status", "loading"]) $(id).classList.add("hidden");
 // the panel the last visit left open (none on a phone, where the map is all there is room for)
 let lastTab = "layers";
