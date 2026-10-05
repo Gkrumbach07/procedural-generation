@@ -1292,6 +1292,77 @@ def test_lake_balance_makes_a_dug_basin_water_the_kernel_respects(scratch):
     assert (after >= before - 1e-6).all()
 
 
+def test_a_lake_keeps_its_rivers_sediment_and_fills_towards_a_plain(scratch):
+    """`erosion.lake_fill`: in a lake with room the load its shore cannot take
+    is parked on the lake (`lake_load`), never more than the lake's room, and
+    the lake's refresh lays it towards a plain that rises from the outlet --
+    where the least is needed first.  A full lake and a frozen one take
+    nothing; a load parked where the lake has gone goes on as `pending`."""
+    from globe.erosion import maps as emaps
+    p, st = _land_world(scratch, "lake_fill")
+    face, i0, j0 = _dry_site(st, 6)
+    H = st.H
+    around = st.surface()[face, H + i0 - 2:H + i0 + 8, H + j0 - 2:H + j0 + 8]
+    floor = 0.3 * float(around.min())
+    basin = _dig_basin(st, face, i0, j0, 5, floor)
+    inter = st.interior
+
+    def put(arr, flat_cells, values):               # interior flat ids -> the extended array
+        f, i, j = np.unravel_index(flat_cells, (6, st.N, st.N))
+        arr[f, i + H, j + H] += values
+
+    p = p.with_overrides(hydro={"lake_evap": 0.0}, erosion={"lake_fill": True, "basin_fill_grade": 0.1})   # every depression overflows
+    st.evap[...] = 1.0                                                                                # ... and none is frozen
+    fill = emaps.lake_fill_args(st, p)
+    assert fill is not None and fill[0] > 0.0
+    min_depth = p.hydro.lake_min_depth / st.height_unit_m
+
+    def refresh():
+        st.refresh_base(p.hydro.ocean_min_fraction)
+        st.refresh_route(cell_units(p.erosion, "route_eps", st.height_unit_m))
+        return st.refresh_lakes(p.hydro.lake_evap, min_depth, p.hydro.ocean_min_fraction, fill)
+
+    info = refresh()
+    flag = st.lake_flag[inter].reshape(-1)
+    ids = st.lake_id[inter].reshape(-1)
+    assert (flag[basin] == 2).mean() > 0.8 and info["load_lakes"] >= 1 and info["load_room"] > 0.0
+    mine = int(np.bincount(ids[basin][ids[basin] >= 0]).argmax())             # the dug basin's lake
+    cells = np.flatnonzero(ids == mine)
+    room0 = float(st.lake_room[mine])
+    assert room0 > 0.0 and (flag[ids >= 0] == 2).all() and (ids[flag != 2] == -1).all()
+    # the kernel parks on lakes that take load only, and never more than a lake's room
+    for it in range(3):
+        run_iteration(st, p, it)
+    parked = st.lake_load[inter].reshape(-1)
+    assert parked.sum() > 0.0 and parked.min() >= 0.0 and not (parked[ids < 0] > 0).any()
+    took = np.bincount(ids[ids >= 0], weights=parked[ids >= 0], minlength=st.lake_room.size)
+    assert (st.lake_room >= -1e-12).all() and took[mine] <= room0 + 1e-9
+    # lay a known load: a quarter of the lake's room
+    st.lake_load[...] = 0.0
+    surf = st.surface()[inter].reshape(-1).copy()
+    put(st.lake_load, cells[0], 0.25 * room0)
+    off = int(np.flatnonzero((flag == 0) & (st.mask[inter].reshape(-1) == pk.MASK_ACTIVE))[0])
+    put(st.lake_load, off, 3.0)                                    # a load where there is no lake
+    pend0 = float(st.pending[inter].sum())
+    info = refresh()
+    rise = st.surface()[inter].reshape(-1) - surf
+    assert info["load_laid"] == pytest.approx(0.25 * room0, rel=1e-3) and info["load_stray"] == pytest.approx(3.0)
+    assert float(st.lake_load.sum()) == 0.0 and float(st.pending[inter].sum()) == pytest.approx(pend0 + 3.0)
+    assert rise[cells].sum() == pytest.approx(0.25 * room0, rel=1e-3) and (rise[cells] >= 0).all()
+    assert 0 < (rise[cells] > 0).sum() < cells.size                # part of the lake, not all of it
+    # a frozen lake takes nothing
+    st.evap[...] = 0.0
+    info = refresh()
+    assert info["load_lakes"] == 0 and (st.lake_flag[inter].reshape(-1)[basin] <= 1).all() and (st.lake_id < 0).all()
+    st.evap[...] = 1.0
+    # filled to its plain the lake is ground that drains: nothing of it is water any more
+    info = refresh()
+    mine = int(np.bincount(st.lake_id[inter].reshape(-1)[basin][st.lake_id[inter].reshape(-1)[basin] >= 0]).argmax())
+    put(st.lake_load, np.flatnonzero(st.lake_id[inter].reshape(-1) == mine)[0], float(st.lake_room[mine]))
+    info = refresh()
+    assert (st.lake_flag[inter].reshape(-1)[basin] == 0).mean() > 0.8
+
+
 def test_offshore_writeoff_is_range_checked():
     import pytest
     from globe.config import WorldParams

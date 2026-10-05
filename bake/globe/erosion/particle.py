@@ -57,7 +57,7 @@ MASK_FROZEN = 2
 
 #: bumped whenever a kernel change alters results: part of the checkpoint
 #: hash, so stale checkpoints are never resumed after a code change
-KERNEL_VERSION = 12  # 12: lateral erosion (erosion.lateral_rate): a particle cutting its bed also cuts the bank on the outside of its bend, which is what lets a channel migrate and meander; off by default. 11: discharge scales in cells (erosion.disc_saturation_cells / momentum_saturation_cells) and soillib's slope limits (erosion.slope_limit_erode / slope_limit_deposit); all off by default, where the pass is unchanged. 10: the evaporation floor is a fraction of the spawn volume (erosion.min_volume_frac). 9: the datum hold keeps the bedrock's land fraction in shelf mode (maps.datum_land_fraction)
+KERNEL_VERSION = 13  # 13: a lake keeps the load its shore has no room for (erosion.lake_fill): in a lake with room left (S_RFLAG 3) it is parked on the lake cell the particle steps onto (a change entry of volume -3, `lake_load`, up to the lake's `lake_room`), for the lake's next refresh to lay over its floor (maps.ErosionState.settle_lake_loads); off, the pass is unchanged. 12: lateral erosion (erosion.lateral_rate): a particle cutting its bed also cuts the bank on the outside of its bend, which is what lets a channel migrate and meander; off by default. 11: discharge scales in cells (erosion.disc_saturation_cells / momentum_saturation_cells) and soillib's slope limits (erosion.slope_limit_erode / slope_limit_deposit); all off by default, where the pass is unchanged. 10: the evaporation floor is a fraction of the spawn volume (erosion.min_volume_frac). 9: the datum hold keeps the bedrock's land fraction in shelf mode (maps.datum_land_fraction)
 
 #: a dying particle deposits its remaining load at the cell it died in; the
 #: excess over that cell's caps moves back up its last SPREAD active cells
@@ -181,7 +181,8 @@ def pack_samples(samp, height, sediment, route, use_route, discharge, momentum, 
                     samp[f, ei, ej, S_G + k] = metric[f, ei, ej, k]
                     samp[f, ei, ej, S_GINV + k] = metric_inv[f, ei, ej, k]
                 if use_route and lake_flag[f, ei, ej] > 0:
-                    samp[f, ei, ej, S_RFLAG] = 2.0
+                    # 3 on a lake that has room for its rivers' load (lake_flag 2, erosion.lake_fill)
+                    samp[f, ei, ej, S_RFLAG] = 3.0 if lake_flag[f, ei, ej] > 1 else 2.0
                 else:
                     samp[f, ei, ej, S_RFLAG] = 1.0 if (use_route and samp[f, ei, ej, S_ROUTE] != samp[f, ei, ej, S_SURF]) else 0.0
                 samp[f, ei, ej, S_BASE] = base[f, ei, ej]
@@ -304,6 +305,7 @@ def trace_particles(
     fan_room,
     dep_floor,
     lake_trap,
+    lake_park,
     lateral_rate,
     # roots (F, NE, NE) float32 in [0, 1]: the share of the bed's exchange with a particle
     # the plants hold back (erosion.vegetation); used when use_roots, else any 3-d array
@@ -610,6 +612,7 @@ def trace_particles(
                     # takes up and lays down less where they grow
                     k_e *= 1.0 - roots[f, ei, ej]
                 cdiff = k_e * (c_eq - sed)
+                trapped = 0.0
                 if in_lake:
                     # crossing a lake: the water surface is what the particle
                     # rides, the bed sees nothing
@@ -619,6 +622,8 @@ def trace_particles(
                     trap = -lake_trap * sed
                     if trap < cdiff:
                         cdiff = trap
+                    if samp[nf, nei, nej, S_RFLAG] >= 2.5:
+                        trapped = lake_trap * sed     # ...and this lake has room for the rest of it
                 # Terrain is frozen within a chunk, so K concurrent particles
                 # would each act against the same stale heights.  Cap the
                 # change at (local relief) / (1 + expected visits of this cell
@@ -654,6 +659,30 @@ def trace_particles(
                     lo = cell
                 if cell > hi:
                     hi = cell
+                # --- a lake keeps what its shore had no room for ----------------
+                # The shore takes what the caps above allow -- on a plain, a
+                # metre a visit -- and the rest of the trapped load used to ride
+                # across the water and out at the outlet, so a lake on flat
+                # ground never silted up however much its rivers carried.  In a
+                # lake with room left (S_RFLAG 3) it settles instead: parked on
+                # the lake cell the particle steps onto (volume -3: apply_changes
+                # takes what the lake still has room for into `lake_load`), for
+                # the lake's next refresh to lay over its floor.
+                if lake_park > 0.0 and trapped > 0.0 and n + 2 * SPREAD + 2 < cap:
+                    rest = trapped + cdiff            # cdiff <= 0: what the shore took
+                    if rest > 0.0:
+                        sed -= rest
+                        lcell = (nf * NE + nei) * NE + nej
+                        cl_cell[base + n] = lcell
+                        cl_delta[base + n] = rest * vol_rel
+                        cl_vol[base + n] = -3.0
+                        cl_mom[base + n, 0] = 0.0
+                        cl_mom[base + n, 1] = 0.0
+                        n += 1
+                        if lcell < lo:
+                            lo = lcell
+                        if lcell > hi:
+                            hi = lcell
                 # --- the outside of the bend ------------------------------
                 # A particle that is cutting and turning also cuts the bank it
                 # is thrown against: the cell one across the flow on the
@@ -783,7 +812,7 @@ def apply_changes(
     cl_cell, cl_delta, cl_vol, cl_mom, cl_count, cap,
     height, sediment, acc, pending, samp, disch_track, mom_track, mask,
     iter_erode, iter_deposit, fan_slope, use_route, dep_floor, offshore_writeoff,
-    erode_cap, use_erode_cap,
+    erode_cap, use_erode_cap, lake_load, lake_id, lake_room,
 ):
     """Apply a change list serially in particle order against the live
     terrain.  This is the single place where physical limits are enforced
@@ -848,6 +877,8 @@ def apply_changes(
     sflat = sediment.reshape(total)
     aflat = acc.reshape(total)
     pdflat = pending.reshape(total)
+    lkflat = lake_load.reshape(total)
+    idflat = lake_id.reshape(total)
     pflat = samp.reshape(total, NS)
     dflat = disch_track.reshape(total)
     mflat = mom_track.reshape(total, 2)
@@ -866,6 +897,26 @@ def apply_changes(
         death = -1  # first final-deposit cell
         for k in range(cnt):
             c = cl_cell[base + k]
+            if cl_vol[base + k] == -3.0:
+                # a load for a lake to keep (trace_particles): the lake takes what it still
+                # has room for (`lake_room`, counted down here so the particles of a refresh
+                # cannot bring more than the lake holds) and the ground does not change until
+                # its refresh lays that down.  The rest stays with the particle, as a
+                # surplus its next deposits place: the delta at the inlet of a full lake
+                take = cl_delta[base + k]
+                rest = 0.0
+                lk = idflat[c]
+                if lk < 0:
+                    rest = take
+                    take = 0.0
+                elif take > lake_room[lk]:
+                    rest = take - lake_room[lk]
+                    take = lake_room[lk]
+                if take > 0.0:
+                    lkflat[c] += take
+                    lake_room[lk] -= take
+                surplus += rest
+                continue
             if kflat[c] != MASK_ACTIVE:
                 continue
             d = cl_delta[base + k]

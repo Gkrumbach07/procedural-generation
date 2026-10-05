@@ -649,3 +649,44 @@ def test_the_balance_runs_in_the_stage(scratch):
     bal = counts[6.0][2]
     assert bal["depressions"] == bal["overflowing"] + bal["closed"] + bal["dry"]
     assert bal["cells_balanced"] <= bal["cells_spill"]
+
+
+def test_water_too_shallow_to_be_a_lake_is_marsh(scratch):
+    """``hydro.marsh_depth``: standing water no deeper than it is marsh -- dry
+    in ``water_surface``, marked in ``marsh``, out of the lakes -- and deeper
+    water is a lake as before; with the knob at 0 every depth is a lake.  The
+    routing is the flood's either way."""
+    p = WorldParams.small_world(3)
+    grid = p.coarse_grid()
+    out = {}
+    for md in (0.0, 3.0):
+        pp = p.with_overrides(hydro={"lake_evap": 0.0, "marsh_depth": md, "requantile_land_fraction": False})
+        store = _bake_to_erosion(scratch, f"marsh_{md}", pp)
+        h = store.load_field("height", grid)
+        if md == 0.0:
+            # two dug basins on the highest ground: one 2 m deep, one 30 m
+            land = h.interior + store.load_field("sediment", grid).interior
+            f, i, j = np.unravel_index(int(np.argmax(land)), land.shape)
+            i, j = int(np.clip(i, 12, grid.N - 13)), int(np.clip(j, 12, grid.N - 13))
+            site = (f, i, j, float(land[f, i - 10:i + 11, j - 10:j + 11].min()))
+        f, i, j, low = site
+        H = grid.H
+        sed = store.load_field("sediment", grid)
+        sed.data[f, H + i - 10:H + i + 11, H + j - 10:H + j + 11] = 0.0
+        h.data[f, H + i - 10:H + i + 11, H + j - 10:H + j + 11] = low
+        h.data[f, H + i - 7:H + i - 3, H + j - 7:H + j - 3] = low - 2.0
+        h.data[f, H + i + 3:H + i + 7, H + j + 3:H + j + 7] = low - 30.0
+        store.save_field(h)
+        store.save_field(sed)
+        info = hydro_run.run(store, pp, _log)
+        ws = store.load_field("water_surface", grid).interior
+        surf = store.load_field("height", grid).interior + store.load_field("sediment", grid).interior
+        out[md] = (info, (ws - surf)[f], store.load_field("marsh", grid).interior[f], store.load_field("flow_dir", grid).interior.copy())
+    shallow = (slice(i - 7, i - 3), slice(j - 7, j - 3))
+    deep = (slice(i + 3, i + 7), slice(j + 3, j + 7))
+    (i0, d0, m0, fd0), (i3, d3, m3, fd3) = out[0.0], out[3.0]
+    assert (d0[shallow] > 1.5).all() and (d0[deep] > 25.0).all() and not m0.any() and i0["marsh_cells"] == 0
+    assert (d3[shallow] == 0.0).all() and m3[shallow].all()                 # the 2 m sheet: marsh, no water
+    assert (d3[deep] > 25.0).all() and not m3[deep].any()                   # the 30 m basin: a lake still
+    assert i3["marsh_cells"] >= 16 and i3["lake_cells"] <= i0["lake_cells"] - 16
+    assert np.array_equal(fd0, fd3)

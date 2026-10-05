@@ -194,6 +194,10 @@ def run(store, params, log=print) -> dict:
     alpine_min = biomes.effective_alpine_min(surface_c[land_c], dp)
     river_near_c = biomes.near_faces(chan_c, dp.riparian_cells, grid)
     lake_near_c = biomes.near_faces(lake_c, dp.wetland_cells, grid)
+    # hydro's marsh -- standing water too shallow to be a lake -- is wetland too
+    marsh_c = (store.load_field("marsh", grid).interior > 0) if store.has_field("marsh") else None
+    if marsh_c is not None:
+        lake_near_c = lake_near_c | marsh_c
     biome_c = biomes.classify(T_c, Pcm_c, surface_c, slope_c, lake_c, river_near_c, lake_near_c, dp, cliff_slope, alpine_min, ocean=ocean_c)
     store.save_field(FaceField.from_interior(grid, biome_c, name="biome", exchange=False))
     hist = np.bincount(biome_c.ravel(), minlength=biomes.N_BIOMES)
@@ -365,6 +369,8 @@ def run(store, params, log=print) -> dict:
         else:
             lake_pads = None
         lake_near_f = biomes.near_padded(lake_f, lake_pads, d_wet)
+        if marsh_c is not None:
+            lake_near_f = lake_near_f | np.repeat(np.repeat(marsh_c[f], R, axis=0), R, axis=1)
         biome_f = biomes.classify(T_f, Pcm_f, surface_f, slope_f, lake_f, river_near_f, lake_near_f, dp, cliff_slope, alpine_min, ocean=ocean_f)
         land_mask_f = ~ocean_f
         face_info[f]["T_land_mean"] = float(T_f[land_mask_f].mean()) if land_mask_f.any() else None

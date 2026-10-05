@@ -30,7 +30,7 @@ from .lakes import extract_lakes, label_components
 from .priority_flood import priority_flood_sphere
 from .routing import channel_network, flow_directions
 
-OUTPUTS = ["water_surface", "flow_dir", "flow_acc", "graph/drainage.json", "graph/lakes_coarse.json"]
+OUTPUTS = ["water_surface", "flow_dir", "flow_acc", "marsh", "graph/drainage.json", "graph/lakes_coarse.json"]
 
 
 def open_ocean(surface: np.ndarray, grid, min_fraction: float = 0.02) -> np.ndarray:
@@ -172,6 +172,14 @@ def run(store, params, log=print) -> dict:
     info["lake_balance"] = bal
     depth = water - surface
     depth[ocean] = 0.0
+    # standing water too shallow to be a lake is marsh (hydro.marsh_depth): dry in the water
+    # surface every later stage reads, and marked for derive's wetland.  The routing above is
+    # the flood's and does not change: its rivers cross a marsh as they cross a plain
+    marsh = (depth > hp.lake_min_depth) & (depth <= float(getattr(hp, "marsh_depth", 0.0))) & ~ocean
+    if marsh.any():
+        water = np.where(marsh, surface.astype(water.dtype), water)
+        depth[marsh] = 0.0
+    info["marsh_cells"] = int(np.count_nonzero(marsh))
     acc[ocean.reshape(-1)] = 0.0
     acc = acc.astype(np.float32).reshape(6, N, N)
     if hp.lake_evap > 0:
@@ -203,7 +211,7 @@ def run(store, params, log=print) -> dict:
     info["lake_cells"] = int(np.count_nonzero(lake))
     lakes_json = {"lakes": lakes, "lake_min_depth": hp.lake_min_depth}
     store.write_json("graph/lakes_coarse.json", lakes_json)
-    log(f"[hydro] lakes: {len(lakes)} ({info['lake_cells']:,} cells)")
+    log(f"[hydro] lakes: {len(lakes)} ({info['lake_cells']:,} cells); marsh, water no deeper than {float(getattr(hp, 'marsh_depth', 0.0)):g} m: {info['marsh_cells']:,} cells")
 
     # outputs
     ws = water.copy()
@@ -211,6 +219,7 @@ def run(store, params, log=print) -> dict:
     store.save_field(FaceField.from_interior(grid, ws, name="water_surface"))
     store.save_field(FaceField.from_interior(grid, fd, name="flow_dir"))
     store.save_field(FaceField.from_interior(grid, acc, name="flow_acc"))
+    store.save_field(FaceField.from_interior(grid, marsh.astype(np.uint8), name="marsh", exchange=False))
     info["t_total_s"] = time.time() - t0
     return info
 

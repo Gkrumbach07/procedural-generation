@@ -57,7 +57,7 @@ import numpy as np
 from ..config import WorldParams
 from ..field import FaceField
 from ..io.world_store import WorldStore
-from .maps import ErosionState, datum_land_fraction, fill_basins, start_replay, step, uplift_cap
+from .maps import ErosionState, datum_land_fraction, fill_basins, settle_lakes, start_replay, step, uplift_cap
 from .particle import KERNEL_VERSION, MASK_ACTIVE
 
 OUTPUTS = ["height", "sediment", "discharge", "momentum"]
@@ -103,7 +103,8 @@ def save_checkpoint(store: WorldStore, state: ErosionState, params: WorldParams)
     it = state.iteration
     p = d / f"erosion_iter{it:04d}.npz"
     tmp = p.with_suffix(".npz.tmp")
-    arrays = dict(height=state.height, sediment=state.sediment, discharge=state.discharge, momentum=state.momentum, pending=state.pending)
+    arrays = dict(height=state.height, sediment=state.sediment, discharge=state.discharge, momentum=state.momentum, pending=state.pending,
+                  lake_load=state.lake_load)
     if state.route is not None:  # the routing surface is refreshed every flood_every iterations: part of the state
         arrays["route"] = state.route
     if getattr(state, "base_at", None) is not None:  # the base level is refreshed every sea_mask_every iterations: part of the state
@@ -114,6 +115,8 @@ def save_checkpoint(store: WorldStore, state: ErosionState, params: WorldParams)
         arrays["ice_prev"] = state.ice_prev.astype(np.uint8)
     if state.lake_flag is not None:  # lakes are refreshed every flood_every iterations: part of the state
         arrays["lake_flag"] = state.lake_flag
+        arrays["lake_id"] = state.lake_id        # ...and so is the room each has left for its rivers' load
+        arrays["lake_room"] = state.lake_room
     with open(tmp, "wb") as fh:
         np.savez(fh, **arrays)
     tmp.replace(p)
@@ -187,6 +190,7 @@ def load_checkpoint(state: ErosionState, path: Path, meta: dict) -> None:
         state.discharge[...] = z["discharge"]
         state.momentum[...] = z["momentum"]
         state.pending[...] = z["pending"] if "pending" in z.files else 0.0
+        state.lake_load[...] = z["lake_load"] if "lake_load" in z.files else 0.0
         state.route = np.ascontiguousarray(z["route"]) if "route" in z.files else None
         if "base" in z.files:
             state.base = np.ascontiguousarray(z["base"])
@@ -196,6 +200,9 @@ def load_checkpoint(state: ErosionState, path: Path, meta: dict) -> None:
         state.iso_acc = np.array(z["iso_acc"]) if "iso_acc" in z.files else None
         state.ice_prev = np.array(z["ice_prev"]).astype(bool) if "ice_prev" in z.files else None
         state.lake_flag = np.ascontiguousarray(z["lake_flag"]).astype(np.uint8) if "lake_flag" in z.files else None
+        if "lake_id" in z.files:
+            state.lake_id = np.ascontiguousarray(z["lake_id"]).astype(np.int32)
+            state.lake_room = np.ascontiguousarray(z["lake_room"]).astype(np.float64)
     state.iteration = int(meta["iteration"])
 
 
@@ -304,6 +311,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     datum_shift = 0.0
     sea = None  # last `maps.refresh_base` census: what erosion called sea
     lakes = None  # last `maps.refresh_lakes` census
+    lake_laid = lake_passed = 0.0  # sediment the lakes kept and laid, and what full lakes passed on (cell units)
     while state.iteration < n_iter:
         it = state.iteration
         t0 = time.time()
@@ -315,6 +323,15 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         datum_shift += float(st.get("datum_shift", 0.0))
         sea = st.get("sea", sea)
         lakes = st.get("lakes", lakes)
+        if "lakes" in st:
+            lk = st["lakes"]
+            lake_laid += float(lk.get("load_laid", 0.0))
+            lake_passed += float(lk.get("load_stray", 0.0))
+            if "load_parked" in lk and (it % 50 == 0 or it + 10 >= n_iter):
+                u = state.height_unit_m
+                log(f"[erosion] lakes at {it}: {lk['lake_cells']} cells ({lk['overflowing']} overflowing, {lk['closed']} closed); their rivers left "
+                    f"{lk['load_parked'] * u:,.0f} m-cells, {lk['load_laid'] * u:,.0f} laid, {lk['load_stray'] * u:,.0f} where the lake had gone; "
+                    f"{lk['load_lakes']} lakes have room for {lk['load_room'] * u:,.0f}")
         d = st.get("deaths", {})
         log(
             f"[erosion] iter {it + 1}/{n_iter}: {st['particles']} particles, mean {st['steps_mean']:.0f} steps, "
@@ -333,6 +350,14 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
                 log(f"[erosion] quicklook -> {qp}")
             except Exception as e:  # never break a bake on a picture
                 log(f"[erosion] quicklook failed: {e!r}")
+    # the lakes lay what the last iterations brought them (a run ends between two lake refreshes)
+    lk = settle_lakes(state, params)
+    if lk is not None and "load_parked" in lk:
+        lake_laid += float(lk.get("load_laid", 0.0))
+        lake_passed += float(lk.get("load_stray", 0.0))
+        lakes = lk
+        log(f"[erosion] lakes at the end: {lk['lake_cells']} cells, {lk['load_laid'] * state.height_unit_m:,.0f} m-cells laid of "
+            f"{lk['load_parked'] * state.height_unit_m:,.0f} their rivers left")
     # the active volcanic edifices go back on top of what the stage made of the ground under them
     volc = restore_volcanoes(state, active_volcanoes(store, grid))
     if volc:
@@ -350,6 +375,10 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         "sediment_mean_m": float(state.sediment[state.interior].mean() * state.height_unit_m),
         "sediment_p99_m": float(np.percentile(state.sediment[state.interior], 99) * state.height_unit_m),
         "pending_total_m": float(state.pending[state.interior].sum() * state.height_unit_m),
+        # what the lakes kept of their rivers' sediment (erosion.lake_fill): laid over their floors,
+        # and what was parked on a lake that had drained by its next refresh (sent on as pending)
+        "lake_fill_laid_m": lake_laid * state.height_unit_m,
+        "lake_fill_stray_m": lake_passed * state.height_unit_m,
         # the part of it still walking on the seafloor (a sea death's surplus
         # less the write-off); like the land part it is absent from the outputs
         "pending_sea_m": float(state.pending[state.interior][surf < state.base[state.interior]].sum() * state.height_unit_m),

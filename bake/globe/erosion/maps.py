@@ -90,6 +90,9 @@ class ErosionState:
     samp: np.ndarray = field(default=None, repr=False)  # packed float32 samples (F, NE, NE, NS), rebuilt every iteration
     acc: np.ndarray = field(default=None, repr=False)  # float64 net terrain change of the current iteration (cell units), zero between iterations
     pending: np.ndarray = field(default=None, repr=False)  # float64 sediment stockpile per cell (cell units) that found no room this iteration (particle.apply_changes: land pits, and the seafloor less the offshore write-off); re-injected as a loaded particle next iteration; part of the mass balance
+    lake_load: np.ndarray = field(default=None, repr=False)  # float64 sediment per cell (cell units) that particles brought into a lake and its shore had no room for (particle.trace_particles, `erosion.lake_fill`): parked on the lake cell entered until `settle_lake_loads` lays it over the lake's floor
+    lake_id: np.ndarray = field(default=None, repr=False)  # int32 per cell: the lake of `lake_room` a cell belongs to, -1 where a load cannot be parked
+    lake_room: np.ndarray = field(default=None, repr=False)  # float64 per lake: the room it has left for its rivers' load (cell units), counted down by particle.apply_changes
     base: np.ndarray = field(default=None, repr=False)  # float64 local base level per cell (cell units); see `refresh_base`.  0 everywhere until it is refreshed, which is exactly the old "sea = surface < 0" behaviour
     _owner: np.ndarray = field(default=None, repr=False)
     iteration: int = 0
@@ -110,6 +113,12 @@ class ErosionState:
             self.acc = np.zeros((F, NE, NE), dtype=np.float64)
         if self.pending is None:
             self.pending = np.zeros((F, NE, NE), dtype=np.float64)
+        if self.lake_load is None:
+            self.lake_load = np.zeros((F, NE, NE), dtype=np.float64)
+        if self.lake_id is None:
+            self.lake_id = np.full((F, NE, NE), -1, dtype=np.int32)
+        if self.lake_room is None:
+            self.lake_room = np.zeros(1, dtype=np.float64)
         if self.base is None:
             self.base = np.zeros((F, NE, NE), dtype=np.float64)
         assert NE == self.N + 2 * self.H, "array width must be N + 2H"
@@ -249,10 +258,10 @@ class ErosionState:
         return self.sediment * self.height_unit_m
 
     def total_mass(self) -> float:
-        """Σ (height + sediment + pending) over active interior cells (cell
-        units) — the quantity the particle pass conserves exactly."""
+        """Σ (height + sediment + pending + lake_load) over active interior
+        cells (cell units) — the quantity the particle pass conserves exactly."""
         act = self.mask[self.interior] == pk.MASK_ACTIVE
-        return float(np.sum((self.height + self.sediment + self.pending)[self.interior][act]))
+        return float(np.sum((self.height + self.sediment + self.pending + self.lake_load)[self.interior][act]))
 
     # -- halos ---------------------------------------------------------------
     def exchange_halos(self) -> None:
@@ -348,7 +357,7 @@ class ErosionState:
         self.sea = sea
         return info
 
-    def refresh_lakes(self, lake_evap: float, min_depth: float, min_fraction: float) -> dict:
+    def refresh_lakes(self, lake_evap: float, min_depth: float, min_fraction: float, fill: tuple | None = None) -> dict:
         """Solve every depression's water level on the current surface and
         hand it to the kernel (``erosion.lake_balance``).
 
@@ -364,7 +373,12 @@ class ErosionState:
         goes into ``base`` and the kernel's sea rules do the rest (particles
         entering it settle their load and stop).  Must run after
         :meth:`refresh_base` (which rebuilds ``base`` from scratch) and
-        after :meth:`refresh_route`."""
+        after :meth:`refresh_route`.
+
+        With ``fill`` = ``(grade, ice_evap)`` (``erosion.lake_fill``) the
+        overflowing lakes also take the load their rivers parked on them
+        since the last refresh, and are flagged 2 while they have room for
+        more (:meth:`settle_lake_loads`)."""
         from ..hydro.balance import balance_lakes
         from ..hydro.priority_flood import priority_flood_sphere
         from ..hydro.routing import downstream_table, flow_directions
@@ -386,18 +400,140 @@ class ErosionState:
         lake = ((water - surf) > min_depth) & ~ocean
         closed = lake & (water < flood.filled - 1e-4)
         flag = np.zeros(self.height.shape, dtype=np.uint8)
-        flag[inter] = (lake & ~closed).astype(np.uint8)
+        settled = {}
+        if fill is not None:
+            settled, takes = self.settle_lake_loads(lake & ~closed, water, surf, flood, float(fill[0]), float(fill[1]))
+            surf = np.ascontiguousarray(self.surface()[inter], dtype=np.float32)
+            lake &= (water - surf) > min_depth          # what the load raised to its plain is ground again
+            flag[inter] = (lake & ~closed).astype(np.uint8) + (takes & lake & ~closed)
+        else:
+            flag[inter] = (lake & ~closed).astype(np.uint8)
         if closed.any():
             b = self.base[inter]
-            b[closed] = water[closed]
+            b[closed & lake] = water[closed & lake]
         hm = self.grid.halo
         for arr in (flag, self.base):
             flat = arr.reshape(-1, 1)
             flat[hm.dst] = flat[hm.nearest]
         self.lake_flag = flag
-        return {"lake_cells": int(lake.sum()), "lake_cells_closed": int(closed.sum()),
+        return {"lake_cells": int(lake.sum()), "lake_cells_closed": int((closed & lake).sum()),
                 "depressions": int(bal.get("depressions", 0)), "overflowing": int(bal.get("overflowing", 0)),
-                "closed": int(bal.get("closed", 0)), "dry": int(bal.get("dry", 0))}
+                "closed": int(bal.get("closed", 0)), "dry": int(bal.get("dry", 0)), **{f"load_{k}": v for k, v in settled.items()}}
+
+    def settle_lake_loads(self, lake: np.ndarray, water: np.ndarray, surf: np.ndarray, flood, grade: float, ice_evap: float):
+        """Lay the sediment the lakes kept (``lake_load``) over their floors,
+        and say what each lake has room for until the next refresh.
+
+        ``lake`` (6, N, N) bool are the overflowing lakes of this refresh,
+        ``water`` their level and ``surf`` the ground under them (cell
+        units); ``flood`` is the priority flood they came from.  A lake --
+        cells joined at one level -- fills towards a plain that rises
+        ``grade`` (cell units per cell) from its outlet along the flood's own
+        tree, the surface :func:`fill_basins` lays at the hand-off: ground
+        filled only to the waterline is dead flat at the spill level, and the
+        next few metres of tilt put 300,000 km2 of it back under a metre of
+        water.  Its room is what that plain would take; it fills from the far
+        side towards the outlet, as a delta does, so what is left of the lake
+        is by its outlet at the level it had.
+
+        Then the lakes are numbered for the kernel: ``lake_id`` per cell and
+        ``lake_room`` per lake, the room still left, which
+        :func:`particle.apply_changes` counts down as particles park their
+        loads, so the rivers of a refresh never bring a lake more than it
+        holds -- a full lake's load rides on downstream as it always did.  A
+        frozen lake (``evap <= ice_evap``, where the glacial pass has ice) is
+        under ice, not at the mouth of a river: it takes nothing and keeps the
+        basin the ice cut.
+
+        A load stays with its lake when the shore has moved off the cell it
+        was parked on (the lake of the last refresh hands it to the one that
+        covers most of it now); only where the lake has drained altogether
+        does it go to ``pending``.  The deposit is sediment
+        and a load like any other (``iso_acc``), so the crust under it
+        subsides at the next isostasy pass.  Returns ``(volumes, takes)``:
+        the volumes ``parked``, ``laid`` and ``stray`` (cell units), the
+        ``room`` left in the ``lakes`` that take load, and ``takes`` (6, N, N)
+        bool, their cells."""
+        from ..hydro.lakes import label_components
+
+        H, N = self.H, self.N
+        inter = (slice(None), slice(H, -H), slice(H, -H))
+        load = self.lake_load[inter]
+        out = {"parked": float(load.sum()), "laid": 0.0, "stray": 0.0, "room": 0.0, "lakes": 0}
+        takes = np.zeros(lake.shape, bool)
+        lake_id = np.full(lake.shape, -1, np.int32)
+        self.lake_room = np.zeros(1, dtype=np.float64)
+
+        def add(arr, flat_cells, values):
+            # interior flat ids -> the extended array (a reshape of the interior view is a copy)
+            f, i, j = np.unravel_index(flat_cells, (lake.shape[0], N, N))
+            arr[f, i + H, j + H] += values
+
+        lab, n = label_components(np.ascontiguousarray(lake.reshape(-1)), np.ascontiguousarray(water, np.float32).reshape(-1), self.grid.owner, N, H)
+        # A load belongs to the lake it was parked in, and that lake is still there when its
+        # shore has moved off the cell: each of the last refresh's lakes hands what it holds
+        # to the lake of this one that covers most of it
+        lflat = load.reshape(-1)
+        held = np.flatnonzero(lflat > 0.0)
+        have = np.zeros(max(n, 1), dtype=np.float64)
+        if held.size:
+            was = self.lake_id[inter].reshape(-1)
+            n_was = int(was.max()) + 1 if was.size else 0
+            heir = np.full(max(n_was, 1), -1, dtype=np.int64)
+            both = np.flatnonzero((was >= 0) & (lab >= 0))
+            if both.size and n > 0:
+                key, cnt = np.unique(was[both].astype(np.int64) * n + lab[both], return_counts=True)
+                order = np.lexsort((cnt, key // n))              # per old lake, the largest overlap last
+                k_old = (key // n)[order]
+                last = np.r_[k_old[1:] != k_old[:-1], True]
+                heir[k_old[last]] = (key % n)[order][last]
+            to = np.where(lab[held] >= 0, lab[held], np.where(was[held] >= 0, heir[np.maximum(was[held], 0)], -1))
+            ok = to >= 0
+            np.add.at(have, to[ok], lflat[held[ok]])
+            if (~ok).any():
+                # its lake has drained altogether: on downstream as a pending particle
+                add(self.pending, held[~ok], lflat[held[~ok]])
+                out["stray"] = float(lflat[held[~ok]].sum())
+        cells = np.flatnonzero(lab >= 0)
+        if cells.size:
+            s64 = np.asarray(surf, np.float64).reshape(-1)
+            plain = _lake_plain_kernel(np.asarray(water, np.float64).reshape(-1), lab, flood.parent, flood.pop_seq, float(grade))
+            room = np.maximum(plain[cells] - s64[cells], 0.0)
+            # farthest from the outlet first (the plain is highest there): a delta builds out
+            # from where the rivers come in towards the outlet, which stays open at the level
+            # it had.  Filled from the outlet side the new plain is a dam, each refresh a
+            # little higher (a 119,000 km2 lake at 4.5 m became 244,000 km2 at 20.9 m)
+            order = np.lexsort((-plain[cells], lab[cells]))
+            cells, room = cells[order], room[order]
+            L = lab[cells].astype(np.int64)
+            ptr = np.searchsorted(L, np.arange(n))
+            csum = np.cumsum(room)
+            before = csum - room - (csum[ptr] - room[ptr])[L]    # room in the lake's cells farther from the outlet
+            lay = np.clip(have[L] - before, 0.0, room)
+            add(self.sediment, cells, lay.astype(self.sediment.dtype))
+            if getattr(self, "iso_acc", None) is not None:
+                add(self.iso_acc, cells, lay)
+            left = np.bincount(L, weights=room - lay, minlength=n)
+            over = have - np.bincount(L, weights=lay, minlength=n)    # rounding only: apply_changes holds a lake to its room
+            spill = over > 1e-9
+            if spill.any():
+                add(self.pending, cells[ptr[spill]], over[spill])
+                out["stray"] += float(over[spill].sum())
+            warm = np.ones(n, bool)
+            cold = np.asarray(self.evap[inter], np.float64).reshape(-1)[cells] <= ice_evap
+            warm[np.unique(L[cold])] = False
+            open_ = warm & (left > 0.0)
+            takes.reshape(-1)[cells[open_[L]]] = True
+            ids = np.cumsum(open_) - 1
+            lake_id.reshape(-1)[cells[open_[L]]] = ids[L[open_[L]]].astype(np.int32)
+            if open_.any():
+                self.lake_room = np.ascontiguousarray(left[open_], dtype=np.float64)
+            out.update(laid=float(lay.sum()), room=float(left[open_].sum()), lakes=int(open_.sum()))
+        load[...] = 0.0
+        full = np.full(self.height.shape, -1, np.int32)
+        full[inter] = lake_id
+        self.lake_id = full
+        return out, takes
 
     def refresh_lakes_window(self, min_depth: float, lake_evap: float = 0.0) -> dict:
         """:meth:`refresh_lakes` for a window (``erosion.window_lakes``):
@@ -635,9 +771,12 @@ def run_iteration(
     it in.  It is how a diagnostic gets at what the kernel did without
     re-implementing the loop around it: a particle's entries are
     ``cl_cell[p*cap : p*cap + cl_count[p]]``, its seafloor steps carry
-    ``cl_vol == 0``, its final deposits ``cl_vol < 0``, and so its death
-    cell is the first entry with ``cl_vol < 0``.  Production passes
-    nothing and the branch costs a single ``is None``."""
+    ``cl_vol == 0``, its final deposits ``cl_vol == -1``, and so its death
+    cell is the first entry with ``cl_vol == -1`` (a bank cut beside the path
+    is ``-2`` with ``erosion.lateral_rate``, a load a lake kept ``-3`` with
+    ``erosion.lake_fill``; without them every negative entry is a final
+    deposit).  Production passes nothing and the branch costs a single
+    ``is None``."""
     ep = _eparams(params)
     key = iteration_key if isinstance(iteration_key, (tuple, list)) else (int(iteration_key),)
     rng = params.rng(rng_stage, *key)
@@ -763,6 +902,7 @@ def run_iteration(
                 cell_units(ep, "fan_room", state.height_unit_m),
                 cell_units(ep, "dep_floor_m", state.height_unit_m),
                 float(ep.lake_trap),
+                1.0 if lake_fill_args(state, params) is not None else 0.0,
                 float(getattr(ep, "lateral_rate", 0.0)),
                 state.roots if state.roots is not None else _NO_ROOTS,
                 state.roots is not None,
@@ -786,7 +926,7 @@ def run_iteration(
             float(ep.fan_slope), state.route is not None,
             cell_units(ep, "dep_floor_m", state.height_unit_m),
             float(ep.offshore_writeoff),
-            ecap, use_ecap,
+            ecap, use_ecap, state.lake_load, state.lake_id, state.lake_room,
         )
         n_clamp += int(nc)
         to_pending += tp
@@ -996,6 +1136,49 @@ def _graded_fill_kernel(s, parent, pop_seq, grade):
             if v > g[c]:
                 g[c] = v
     return g
+
+
+@njit(cache=True)
+def _lake_plain_kernel(water, lab, parent, pop_seq, grade):
+    """The plain a lake fills towards: its water level at the outlet, and
+    ``grade`` higher with every cell the flood took to reach a cell from
+    there (``parent`` inside the same lake ``lab``; pop order, so a parent is
+    done before its children)."""
+    g = water.copy()
+    for k in range(pop_seq.size):
+        c = pop_seq[k]
+        if lab[c] >= 0:
+            q = parent[c]
+            if q >= 0 and lab[q] == lab[c]:
+                g[c] = g[q] + grade
+    return g
+
+
+def lake_fill_args(state: ErosionState, params):
+    """``refresh_lakes``' ``fill`` for this state: ``(grade in cell units per
+    cell, ice_evap)`` with ``erosion.lake_fill`` on the planet, else None."""
+    ep = _eparams(params)
+    if not (state.spherical and bool(getattr(ep, "lake_fill", False)) and bool(getattr(ep, "lake_balance", False))):
+        return None
+    cell_km = float(state.grid.cell_size_m) / 1000.0
+    return float(getattr(ep, "basin_fill_grade", 0.0)) * cell_km / state.height_unit_m, float(getattr(ep, "ice_evap", 0.0))
+
+
+def settle_lakes(state: ErosionState, params) -> dict | None:
+    """Lay what the lakes hold after the last iteration: a run ends between
+    two lake refreshes, and the load its last iterations parked would stay
+    out of the surface the next stage reads."""
+    fill = lake_fill_args(state, params)
+    if fill is None or not isinstance(params, WorldParams):
+        return None
+    ep = _eparams(params)
+    if int(getattr(ep, "sea_mask_every", 0)) > 0:
+        state.refresh_base(_ocean_min_fraction(params))
+    state.refresh_route(cell_units(ep, "route_eps", state.height_unit_m))
+    st = state.refresh_lakes(float(params.hydro.lake_evap), float(params.hydro.lake_min_depth) / float(state.height_unit_m),
+                             _ocean_min_fraction(params), fill)
+    state.exchange_halos()
+    return st
 
 
 def fill_basins(state: ErosionState, params) -> dict | None:
@@ -1245,7 +1428,7 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
         # after base (rebuilt from scratch) and route (seeded on base)
         st_lake = state.refresh_lakes(float(params.hydro.lake_evap),
                                       float(params.hydro.lake_min_depth) / float(state.height_unit_m),
-                                      _ocean_min_fraction(params))
+                                      _ocean_min_fraction(params), lake_fill_args(state, params))
     elif not state.spherical and bool(getattr(ep, "window_lakes", False)) and ep.flood_every > 0 and \
             (state.lake_flag is None or state.iteration % ep.flood_every == 0):
         min_depth = float(params.hydro.lake_min_depth) if isinstance(params, WorldParams) else 0.5
@@ -1290,4 +1473,4 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
     return st
 
 
-__all__ = ["ErosionState", "run_iteration", "thermal_erosion", "apply_uplift", "uplift_replay", "start_replay", "apply_isostasy", "hold_datum", "step", "spawn_particles", "height_unit", "max_steps_of"]
+__all__ = ["ErosionState", "run_iteration", "thermal_erosion", "apply_uplift", "uplift_replay", "start_replay", "apply_isostasy", "hold_datum", "step", "settle_lakes", "lake_fill_args", "spawn_particles", "height_unit", "max_steps_of"]
