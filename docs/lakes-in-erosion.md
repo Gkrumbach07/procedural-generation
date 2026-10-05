@@ -146,3 +146,62 @@ What the numbers say, and what the viewer shows:
   > diagnosis and the instrument (`scripts/coastline.py`) are in
   > docs/coast-fringe.md; the lace at the coastline is the narrow splat
   > resolving per-segment history, still open.
+
+## 5. Sheets of water: marsh, and a lake fill that is off
+
+Measured on earth-v19 by labelling the lake cells themselves (a mask of "cells
+at this lake's level" merges lakes that happen to share one, and had given a
+mean depth of 571 m for a lake that averages 9): its largest lakes were
+sheets. 322,000 km2 averaging 9 m, 220,000 km2 averaging 3 m, both over
+basins already holding 500-600 m of sediment, and 30 % of all lake area under
+3 m deep (0.93 % of the land). The frozen ones are deeper: 233,000 km2
+averaging 48 m.
+
+**`hydro.marsh_depth` (3 m).** A coarse cell is kilometres across, and half a
+metre of water over one is a plain tilted by a metre. Standing water no
+deeper than `marsh_depth` is marsh: dry in `water_surface`, marked in the
+coarse `marsh` field, wetland in derive's biomes; the flood's routing does
+not change. Earth's own are the Pantanal, the Sudd, the West Siberian and
+Hudson Bay lowlands.
+
+**`erosion.lake_fill` (off).** A particle entering a lake drops what the shore
+has room for -- on a plain, a metre a visit -- and carries the rest across
+and out, so a lake on flat ground never silts up. With the fill a lake that
+has room keeps that load (`lake_load`, at most `lake_room`) and each refresh
+lays it towards a plain graded from the outlet, far side first; a frozen lake
+takes nothing. It is off because it did not survive full resolution:
+
+| seed 1423, same tectonics | lakes, % of land | marsh | over 100,000 km2 | largest | deeper than 10 m |
+|---|---|---|---|---|---|
+| earth-v19 (neither) | 3.13 | -- | 4 | 322k | 1.36 % |
+| earth-v21 (marsh) | **2.20** | 0.93 | **2** | 212k (frozen), 192k | |
+| earth-v20 (marsh and fill) | 2.98 | 0.78 | 6 | 280k (frozen), 231k, 198k | 1.89 % |
+| quarter resolution, neither | 0.88 | | 1 | 300k | 0.30 % |
+| quarter resolution, marsh and fill | 0.50 | | 0 | 86k | 0.15 % |
+
+At a quarter of the resolution the fill halved the deep water; at full
+resolution it added to it. What the sediment laid in a lake does next is the
+difference: it is a load, the crust under it subsides by 0.8 of it over the
+flexural width, and the lake it was laid in is deeper for it; and a lake that
+is gone no longer evaporates its inflow, so the closed basin downstream
+stands higher (a plateau lake of 33,000 km2 at 1,544 m in earth-v19 is
+231,000 km2 at 1,644 m in earth-v20). The quarter-resolution world is not a
+test of lakes: it has predicted a larger gain than the full bake twice.
+
+Three forms of the fill were worse still on the small world and are not in
+the code: filling to the waterline (ground dead flat at the spill level
+floods again with the next tilt); sending a full lake's surplus on as one
+`pending` particle (it dams the outlet); filling from the outlet side (the
+new plain is the dam: 119,000 km2 at 4.5 m became 244,000 km2 at 20.9 m).
+
+What is left in earth-v21: one frozen lake of 212,000 km2 averaging 52 m (the
+Great Lakes together are 244,000 km2); a tropical one of 192,000 km2
+averaging 13 m, its floor below sea level 700 km inland; frozen basins of
+30-70,000 km2 up to 350 m deep; and an arid plateau lake of 32,000 km2
+(rain 0.08 of the land mean) that a real climate would dry to a pan.
+
+A trap for the next change to the kernel: a particle's slice of the change
+list is sized one entry a step (`particle.change_list_cap`). The fill's
+entries needed room of their own there; without it earth-v20's first bake
+died at iteration 540 with a corrupted heap, after every small world had
+passed.
