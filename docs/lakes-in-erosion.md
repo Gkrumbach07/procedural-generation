@@ -557,6 +557,33 @@ ice's own lakes cover 5.1 % of it in 5,300 lakes (1,840 over 3 km2, 98 over
 lakes 8.3 %. The grain's gain (0.7) and base wavelength (20 km) were chosen
 for that slope: 0.6 gives 0.82, 0.8 gives 0.92, 30 km gives 0.76.
 
+**The coarse carve was a blanket** (`erosion.glacial_rate`). The glacial pass
+lowers the bed by `glacial_rate x sqrt(discharge / disc_saturation)`, capped
+at `glacial_max` (20 m) a pass: selective, by its design -- deep along the
+ice streams, light between them. At the discharges the coarse grid has on
+ice ground (earth-v25: median 5.9, 90th percentile 77, 99th 796) and the
+shipped rate of 50 m the cap binds on 53 % of the ice's cells, and on 81 % of
+a wet lowland. Over a run's 20 passes every cell of the ice loses about the
+same 200 m (median 225, 99th percentile 328, before the margin's taper) --
+the rock top on ice ground is a median 384 m under its tectonic bedrock
+against 235 m off it -- and the spoil of a whole ice field is laid on the
+cells along its margin (1 % of that lowland's cells, thousands of metres a
+pass through `pending`). The lakes this leaves are not troughs: they are the
+low-discharge patches between the rivers' lines and the ground beside the
+outwash, lenses and wedges with straight sides. Per-run cut by rate, on
+earth-v25's ice ground:
+
+| rate | cells at the cap | mean | median cell | 99th percentile |
+|---|---|---|---|---|
+| 50 | 53 % | 193 m | 225 m | 328 m |
+| 16 | 14 % | 110 m | 87 m | 291 m |
+| 8 | 4.3 % | 64 m | 43 m | 246 m |
+| 6 | 2.5 % | 50 m | 33 m | 231 m |
+| 4 | 1.0 % | 35 m | 22 m | 224 m |
+
+An ice sheet's erosion of a shield over the Quaternary is tens of metres on
+average and hundreds in its troughs. earth-v26 has 6 (and the ice age).
+
 **Valley ice** (`VALLEY_M`, 200 m). A valley glacier's trough ends at a lip
 under its snout, and the trough behind the lip is a finger lake (the Alps'
 border lakes, the Finger Lakes). The cut has a second term for it: the
