@@ -51,6 +51,13 @@ GRAIN_KM = 20.0
 GRAIN_GAIN = 0.7
 #: rng sub-key of the grain
 ICE_KEY = 6_310_077
+#: the deepest a valley glacier cuts below the valley it found, metres, where its ice is a full
+#: river's worth (:func:`ice_flux`) half way up the ice's margin ramp.  0 = no valley ice.  The
+#: troughs of the Alps' and the Finger Lakes' glaciers are 100-400 m below their sills
+VALLEY_M = 200.0
+#: the reach of a valley glacier's bed either side of its line of flow, km (the standard deviation
+#: its flux is spread with): a trough is kilometres wide, the level's stream is one cell
+VALLEY_KM = 2.0
 #: the share of its own catchment a small lake of the lake country covers (the Shield, Finland:
 #: 10-15 %): what the water balance of a hollow is struck against (:func:`coarse_ice`)
 LAKE_COUNTRY_SHARE = 0.15
@@ -113,15 +120,17 @@ def coarse_ice(fields: dict, temperature, params) -> dict:
     follow = bool(getattr(ep, "climate_at_surface", False))
     # the ice line erosion ended with: the climate's own, or at the surface (erosion.climate_at_surface;
     # `temperature` is then hydro.run.surface_temperature's)
-    ice = ((T <= float(ep.ice_evap) / max(float(params.climate.k_evap), 1e-12)) if follow else (evap <= float(ep.ice_evap))) & ~sea
+    age = float(getattr(ep, "ice_age_c", 0.0))                # the ice of the last glacial maximum (erosion.ice_age_c)
+    ice = ((T - age <= float(ep.ice_evap) / max(float(params.climate.k_evap), 1e-12)) if (follow or age > 0.0) else (evap <= float(ep.ice_evap))) & ~sea
     t0 = float(getattr(hp, "pet_t0", 0.0))
     pet = potential_evaporation(T, grid.latitude(), float(params.climate.T_eq), t0) if t0 > 0.0 else evap
+    pet_ice = potential_evaporation(T - age, grid.latitude(), float(params.climate.T_eq), t0) if t0 > 0.0 else evap
     land_evap = float(getattr(hp, "land_evap", 0.0))
     dry = float(getattr(ep, "ice_aridity", 0.0))
     # the rain as a depth, in the land-mean rain's (the balance's own measure, hydro/balance.py)
     rain = np.asarray(FaceField.from_interior(grid, (fields["precip"].interior / (grid.interior_cell_area / float(grid.cell_size_m) ** 2)).astype(np.float32)).data, np.float64)
     if dry > 0.0:
-        ice &= aridity(pet, rain, land_evap) < dry            # ice needs snow (erosion.ice_aridity)
+        ice &= aridity(pet_ice, rain, land_evap) < dry        # ice needs snow (erosion.ice_aridity), in the climate it grew in
     ramp = float(max(int(ep.glacial_ramp), 0) + 1)
     taper = np.zeros(ice.shape, np.float32)
     for f in range(ice.shape[0]):
@@ -163,9 +172,17 @@ def coarse_ice_of(root, params, fields: dict) -> dict:
 
     key = str(Path(root).resolve())
     if key not in _COARSE:
+        store = WorldStore(root)
         surface = fields["height"].data.astype(np.float32) + fields["sediment"].data.astype(np.float32)
         _COARSE.clear()
-        _COARSE[key] = coarse_ice(fields, surface_temperature(WorldStore(root), params, surface), params)
+        if store.has_field("temperature"):
+            _COARSE[key] = coarse_ice(fields, surface_temperature(store, params, surface), params)
+        else:
+            # a world with no climate temperature (a stub): the kernel's `evap` is all there is
+            from ..field import FaceField
+
+            plain = params.with_overrides(erosion={"climate_at_surface": False, "ice_aridity": 0.0}, hydro={"pet_t0": 0.0})
+            _COARSE[key] = coarse_ice(fields, FaceField(fields["evap"].grid, np.zeros(fields["evap"].data.shape, np.float32)), plain)
     return _COARSE[key]
 
 
@@ -182,15 +199,54 @@ def beside_lakes(surface: np.ndarray, far: np.ndarray, near: np.ndarray, taper_m
     return 1.0 - w * (1.0 - t)
 
 
-def scour(ice: np.ndarray, weak: np.ndarray, hardness: np.ndarray, surface: np.ndarray, coast_taper_m: float, quiet: np.ndarray | None = None) -> np.ndarray:
+def ice_flux(discharge: np.ndarray, cell_m: float, full: float) -> np.ndarray:
+    """How much of a full valley glacier a level's cells carry, 0..1: the
+    square root (as the coarse carve takes it, ``erosion.glacial``) of the
+    level's own ``discharge`` -- under ice the same snow feeds the same point
+    -- spread over a glacier's width (:data:`VALLEY_KM`) and measured against
+    ``full``, the discharge of a river at full strength
+    (``erosion.disc_saturation_cells``).  float32."""
+    q = ndimage.gaussian_filter(np.maximum(np.asarray(discharge, np.float32), 0.0), VALLEY_KM * 1000.0 / float(cell_m))
+    return np.minimum(1.0, np.sqrt(q / max(float(full), 1e-9))).astype(np.float32)
+
+
+def keep_rims(cut: np.ndarray, surface: np.ndarray, far: np.ndarray, near: np.ndarray) -> np.ndarray:
+    """``cut`` with the rims of the planet's lakes left standing: within a
+    coarse cell of a lake (``far``, coarse cells to the nearest lake cell;
+    fading out by three) the ice takes at most half of what the ground
+    stands above the lake's level (``near``), so no path from the lake's
+    shore is cut below its water.  A lake behind a cut rim drains to the
+    cut: of the area of the planet's lakes on a cold lowland of earth-v24 at
+    1.2 km, 79 % was left after the areal scour without this and 90 % with
+    it; on a mountain front 93 and 98 %."""
+    w = 1.0 - np.clip((np.asarray(far, np.float64) - 1.0) / 2.0, 0.0, 1.0)
+    w = w * w * (3.0 - 2.0 * w)
+    cap = 0.5 * np.maximum(np.asarray(surface, np.float64) - np.asarray(near, np.float64), 0.0)
+    return (cut * (1.0 - w) + np.minimum(cut, cap) * w).astype(np.float32)
+
+
+def scour(ice: np.ndarray, weak: np.ndarray, hardness: np.ndarray, surface: np.ndarray, coast_taper_m: float, quiet: np.ndarray | None = None,
+          flux: np.ndarray | None = None) -> np.ndarray:
     """Metres the ice lowers a level's ground: :data:`SCOUR_M` times the
-    ice's share ``ice`` (0..1), the rock's weakness ``weak`` (:func:`grain`)
-    and ``1 - hardness / 2`` (hard rock resists the ice too, as on the coarse
-    grid), fading to nothing at sea level over ``coast_taper_m`` and never
-    taking land under the sea, and times ``quiet`` where given (the share the
-    parent's lakes leave beside them, ``parent_lakes.lake_quiet``).  float32."""
+    rock's weakness ``weak`` (:func:`grain`) and the ice's share ``ice``
+    (0..1) everywhere under it, and with ``flux`` (:func:`ice_flux`)
+    :data:`VALLEY_M` times that along its valleys in the ice's margin zone
+    (a valley glacier's bed rises to a lip at its snout, and the trough
+    behind the lip is a finger lake); both times ``1 - hardness / 2`` (hard
+    rock resists the ice too, as on the coarse grid), fading to nothing at
+    sea level over ``coast_taper_m`` and never taking land under the sea, and
+    times ``quiet`` where given (the share the parent's lakes leave beside
+    them, :func:`beside_lakes`).  float32."""
     s = np.asarray(surface, np.float64)
-    dz = SCOUR_M * np.asarray(ice, np.float64) * np.asarray(weak, np.float64) * (1.0 - 0.5 * np.clip(np.asarray(hardness, np.float64), 0.0, 1.0))
+    share = np.asarray(ice, np.float64)
+    depth = SCOUR_M * np.asarray(weak, np.float64) * share
+    if flux is not None and VALLEY_M > 0.0:
+        # the valley glaciers' troughs belong to the ice's margin zone: nothing at the margin, all of
+        # it half way up the ramp, nothing past it.  Out on a lowland under the sheet the ice does
+        # not run in the rivers' valleys, and carved along them it left a ribbon of lake down every
+        # river of a plain and cut through the rims of the planet's lakes (34 % of their area kept)
+        depth = depth + VALLEY_M * np.asarray(flux, np.float64) * 4.0 * share * (1.0 - share)
+    dz = depth * (1.0 - 0.5 * np.clip(np.asarray(hardness, np.float64), 0.0, 1.0))
     if float(coast_taper_m) > 0.0:
         t = np.clip(s / float(coast_taper_m), 0.0, 1.0)
         dz *= t * t * (3.0 - 2.0 * t)
@@ -211,11 +267,12 @@ def lower(height: np.ndarray, sediment: np.ndarray, cut: np.ndarray) -> None:
     height -= cut - take
 
 
-def window_cut(root, params, grid, fields: dict, win, surface: np.ndarray, hardness: np.ndarray) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
+def window_cut(root, params, grid, fields: dict, win, surface: np.ndarray, hardness: np.ndarray, flux: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
     """``(cut, wet)`` over a window's work array (``refine.upsample.sample``'s
-    extended array; ``surface`` and ``hardness`` on it): the metres the ice
-    lowers its ground (:func:`scour`) and where its hollows hold water, or
-    ``(None, None)`` where the window has no glaciated ground."""
+    extended array; ``surface``, ``hardness`` and the ice's ``flux``,
+    :func:`ice_flux`, on it): the metres the ice lowers its ground
+    (:func:`scour`) and where its hollows hold water, or ``(None, None)``
+    where the window has no glaciated ground."""
     from ..cubesphere import to_sphere_v
     from ..refine.upsample import sample
 
@@ -228,11 +285,12 @@ def window_cut(root, params, grid, fields: dict, win, surface: np.ndarray, hardn
     U, V = np.meshgrid((np.arange(a0, a1) + 0.5) / Nf, (np.arange(b0, b1) + 0.5) / Nf, indexing="ij")
     weak = grain(to_sphere_v(np.full(U.shape, win.face), U, V), grid.R_planet, grid.cell_size_m / win.R, int(params.world.seed))
     taper_m = float(params.refine.coast_taper_m)
-    quiet = beside_lakes(surface, sample(ci["lake_far"], win, order=1), sample(ci["lake_near"], win, order=0), taper_m, LAKE_REACH)
-    return scour(share, weak, hardness, surface, taper_m, quiet), sample(ci["ice_wet"], win) > 0
+    far, near = sample(ci["lake_far"], win, order=1), sample(ci["lake_near"], win, order=0)
+    cut = scour(share, weak, hardness, surface, taper_m, beside_lakes(surface, far, near, taper_m, LAKE_REACH), flux)
+    return keep_rims(cut, surface, far, near), sample(ci["ice_wet"], win) > 0
 
 
-def rows_cut(root, params, grid, fields: dict, face: int, R: int, i0: int, i1: int, surface: np.ndarray) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
+def rows_cut(root, params, grid, fields: dict, face: int, R: int, i0: int, i1: int, surface: np.ndarray, flux: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
     """:func:`window_cut` over the fine rows of the coarse rows ``[i0, i1)``
     of a whole face of a planet level (``surface`` ``((i1 - i0) R, N R)``),
     with the planet's own hardness (``fields["hardness"]``, as the levels see
@@ -249,11 +307,12 @@ def rows_cut(root, params, grid, fields: dict, face: int, R: int, i0: int, i1: i
     weak = grain(to_sphere_v(np.full(U.shape, face), U, V), grid.R_planet, grid.cell_size_m / R, int(params.world.seed))
     hard = fields["hardness"].sample_window(face, i0, i1, 0, N, R, order=1)
     taper_m = float(params.refine.coast_taper_m)
-    quiet = beside_lakes(surface, ci["lake_far"].sample_window(face, i0, i1, 0, N, R, order=1), ci["lake_near"].sample_window(face, i0, i1, 0, N, R, order=0), taper_m, LAKE_REACH)
-    return scour(share, weak, hard, surface, taper_m, quiet), ci["ice_wet"].sample_window(face, i0, i1, 0, N, R) > 0
+    far, near = ci["lake_far"].sample_window(face, i0, i1, 0, N, R, order=1), ci["lake_near"].sample_window(face, i0, i1, 0, N, R, order=0)
+    cut = scour(share, weak, hard, surface, taper_m, beside_lakes(surface, far, near, taper_m, LAKE_REACH), flux)
+    return keep_rims(cut, surface, far, near), ci["ice_wet"].sample_window(face, i0, i1, 0, N, R) > 0
 
 
-def face_cut(root, params, grid, fields: dict, face: int, R: int, surface: np.ndarray, strip: int = 64) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
+def face_cut(root, params, grid, fields: dict, face: int, R: int, surface: np.ndarray, flux: np.ndarray | None = None, strip: int = 64) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
     """:func:`rows_cut` over a whole face (``surface`` ``(N R, N R)``), a
     strip of coarse rows at a time; ``(None, None)`` where the face has no
     glaciated ground."""
@@ -263,7 +322,7 @@ def face_cut(root, params, grid, fields: dict, face: int, R: int, surface: np.nd
     for i0 in range(0, N, strip):
         i1 = min(N, i0 + strip)
         rs = slice(i0 * R, i1 * R)
-        c, w = rows_cut(root, params, grid, fields, face, R, i0, i1, surface[rs])
+        c, w = rows_cut(root, params, grid, fields, face, R, i0, i1, surface[rs], None if flux is None else flux[rs])
         if c is None:
             continue
         if cut is None:
@@ -272,5 +331,5 @@ def face_cut(root, params, grid, fields: dict, face: int, R: int, surface: np.nd
     return cut, wet
 
 
-__all__ = ["SCOUR_M", "GRAIN_KM", "GRAIN_GAIN", "LAKE_COUNTRY_SHARE", "LAKE_REACH", "grain", "grain_octaves", "coarse_ice", "coarse_ice_of", "beside_lakes", "scour", "lower",
+__all__ = ["SCOUR_M", "VALLEY_M", "VALLEY_KM", "GRAIN_KM", "GRAIN_GAIN", "LAKE_COUNTRY_SHARE", "LAKE_REACH", "grain", "grain_octaves", "coarse_ice", "coarse_ice_of", "beside_lakes", "keep_rims", "ice_flux", "scour", "lower",
            "window_cut", "rows_cut", "face_cut"]

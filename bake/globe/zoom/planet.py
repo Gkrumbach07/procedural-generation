@@ -716,7 +716,8 @@ def finish_face(root: Path, out: Path, level: PlanetLevel, face: int, strip: int
     lake_depth = max(float(params.hydro.lake_min_depth), float(getattr(params.hydro, "marsh_depth", 0.0)))
     coarse_level = fields["water_surface"].interior[face].astype(np.float32)
     coarse_lake = ((coarse_level - derived["surface"].interior[face].astype(np.float32)) > lake_depth) & ~ocean_c
-    cut, wet = (None, None) if int(level.parent) else ice.face_cut(root, lp, grid, fields, face, R, surf)
+    flux = ice.ice_flux(arrays["discharge"], grid.cell_size_m / R, float(lp.erosion.disc_saturation_cells)) if ice.VALLEY_M > 0.0 and not int(level.parent) else None
+    cut, wet = (None, None) if int(level.parent) else ice.face_cut(root, lp, grid, fields, face, R, surf, flux)
     if cut is not None:
         # the ice's own work at this level (zoom/ice.py), as planet_finish does it
         cut[ocean] = 0.0

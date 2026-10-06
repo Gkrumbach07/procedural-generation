@@ -101,6 +101,7 @@ class ErosionState:
     temp_k: float = 1.0  # climate.k_evap: `evap` = temp_k max(T, 0), so `evap <= e` is `T <= e / temp_k`
     pet_law: tuple | None = None  # (T_eq, t0, sun (F, NE, NE)): the lakes' evaporation by hydro.pet_t0 (hydro.balance.potential_evaporation), read off `temperature()`
     ice_snow: tuple | None = None  # (aridity limit, land_evap, rain depth (F, NE, NE)): ice needs snow (erosion.ice_aridity; hydro.balance.aridity)
+    ice_age: float = 0.0  # C the ice line is read colder than the climate (erosion.ice_age_c): the last glacial maximum's ice
     lake_load: np.ndarray = field(default=None, repr=False)  # float64 sediment per cell (cell units) that particles brought into a lake and its shore had no room for (particle.trace_particles, `erosion.lake_fill`): parked on the lake cell entered until `settle_lake_loads` lays it over the lake's floor
     lake_id: np.ndarray = field(default=None, repr=False)  # int32 per cell: the lake of `lake_room` a cell belongs to, -1 where a load cannot be parked
     lake_room: np.ndarray = field(default=None, repr=False)  # float64 per lake: the room it has left for its rivers' load (cell units), counted down by particle.apply_changes
@@ -273,29 +274,34 @@ class ErosionState:
         has one that follows the surface, so ground the stage has lowered into
         the warmth is no longer ice and ground it has raised into the cold
         is -- and, with ``ice_snow`` (``erosion.ice_aridity``), only where
-        the ground is not too dry for the snow to last."""
-        if self.temp0 is None or not self.temp_follow:
+        the ground is not too dry for the snow to last.  With ``ice_age``
+        (``erosion.ice_age_c``) the line is read that many degrees colder
+        than the climate: the ice of the last glacial maximum."""
+        age = float(self.ice_age)
+        if self.temp0 is None or not (self.temp_follow or age > 0.0):
             cold = self.evap <= float(ice_evap)
         else:
-            cold = self.temperature() <= float(ice_evap) / max(float(self.temp_k), 1e-12)
+            cold = (self.temperature() - age) <= float(ice_evap) / max(float(self.temp_k), 1e-12)
         if self.ice_snow is not None:
             # ...and has the snow for it (erosion.ice_aridity): not where the year can take more than falls
             from ..hydro.balance import aridity
 
             limit, land_evap, rain = self.ice_snow
-            cold = cold & (aridity(self.balance_evaporation(), rain, land_evap) < float(limit))
+            cold = cold & (aridity(self.balance_evaporation(cooler=age), rain, land_evap) < float(limit))
         return cold
 
-    def balance_evaporation(self) -> np.ndarray:
+    def balance_evaporation(self, cooler: float = 0.0) -> np.ndarray:
         """The potential evaporation the lake balance runs on (extended
         array): ``lake_pet`` where one was given, the law of ``hydro.pet_t0``
-        on :meth:`temperature` where the state has it, else ``evap``."""
+        on :meth:`temperature` where the state has it, else ``evap``.
+        ``cooler``: in a climate that many degrees colder (the ice age's, for
+        whether its snow lasted)."""
         if self.lake_pet is not None:
             return self.lake_pet
         if self.pet_law is None or self.temp0 is None:
             return self.evap
         t_eq, t0, sun = self.pet_law
-        return (np.maximum(self.temperature() + float(t0), 0.0) / (float(t_eq) + float(t0)) * sun).astype(np.float32)
+        return (np.maximum(self.temperature() - float(cooler) + float(t0), 0.0) / (float(t_eq) + float(t0)) * sun).astype(np.float32)
 
     def pack(self) -> None:
         """Refresh the packed float32 sample array from the state arrays."""

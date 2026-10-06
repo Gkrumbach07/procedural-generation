@@ -1534,6 +1534,36 @@ def test_the_ice_leaves_hollows_and_they_are_the_levels_own_lakes():
     assert np.unique(held[held > surf]).tolist() == [float(np.float32(float(surf[25, 25]) + 5.0))]
 
 
+def test_valley_ice_cuts_in_the_margin_zone_and_lake_rims_stand():
+    """``zoom.ice``: a valley glacier's share of the cut follows the level's
+    discharge spread to a glacier's width (``ice_flux``) and acts in the
+    ice's margin zone only -- nothing at the margin (the lip a finger lake
+    stands behind), nothing deep under the sheet -- and the rim of a lake of
+    the planet's keeps half its height above the lake (``keep_rims``)."""
+    from globe.zoom import ice
+
+    n = 64
+    q = np.zeros((n, n))
+    q[:, 32] = 400.0                                             # one stream, a cell wide, four full rivers' worth
+    flux = ice.ice_flux(q, 1200.0, 100.0)
+    assert flux.dtype == np.float32 and flux.max() <= 1.0 and flux[10, 32] > 0.9
+    assert 0.2 < flux[10, 34] < flux[10, 33] < flux[10, 32] and flux[10, 44] < 1e-3          # a trough kilometres wide, not a line
+    assert float(ice.ice_flux(np.full((n, n), 25.0), 1200.0, 100.0)[32, 32]) == pytest.approx(0.5, abs=1e-3)   # the square root, as the coarse carve
+    surf = np.full((n, n), 900.0)
+    flat = np.zeros((n, n))
+    one = np.ones((n, n))
+    cut = lambda share: float(ice.scour(np.full((n, n), share), flat, flat, surf, 40.0, None, one)[5, 5])
+    assert cut(0.0) == 0.0 and cut(1.0) == 0.0 and cut(0.5) == pytest.approx(ice.VALLEY_M)   # the margin zone
+    assert cut(0.25) == pytest.approx(0.75 * ice.VALLEY_M)
+    assert float(ice.scour(np.full((n, n), 0.5), flat, flat, surf, 40.0)[5, 5]) == 0.0       # no flux given, no valley ice
+    # the planet's lake stands at 880 m: beside it the ice takes at most half of the 20 m its rim has
+    deep = np.full(4, 150.0)
+    far = np.array([0.0, 1.0, 2.0, 3.5])
+    kept = ice.keep_rims(deep, np.full(4, 900.0), far, np.full(4, 880.0))
+    assert kept[0] == pytest.approx(10.0) and kept[1] == pytest.approx(10.0) and 10.0 < kept[2] < 150.0 and kept[3] == pytest.approx(150.0)
+    assert float(ice.keep_rims(np.array([150.0]), np.array([870.0]), np.array([0.0]), np.array([880.0]))[0]) == 0.0   # ground under the lake's level is left
+
+
 def test_a_level_starts_with_its_parents_lakes_as_water():
     """What a level does with its parent's lakes before it erodes
     (globe/zoom/parent_lakes.py): the detail noise is nothing under a lake and

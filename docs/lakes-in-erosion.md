@@ -490,8 +490,26 @@ against 1.40):
 | mean depth of lakes | 34 m | 15 m |
 | marsh | 0.56 % | 0.53 % |
 
-Earth has about 250 lakes over 1,000 km2 and 20 over 10,000. The three
-switches are still off by default.
+Earth has about 250 lakes over 1,000 km2 and 20 over 10,000. Since earth-v25
+the three switches are the defaults, and `hydro.land_evap` 3.0 with them
+(earth-v25 had it from earth-v24); the toy presets keep the kernel's `evap`
+for both (`config.TOY_ICE`, `TOY_WATER`).
+
+### The ice of the last glacial maximum (`erosion.ice_age_c`, off)
+
+Earth's lake country is ground the ice left ten thousand years ago and is
+temperate now. With the ice where it is cold today, the model has its lake
+basins only where they are still frozen. `ice_age_c` reads the ice line that
+many degrees colder than the climate for the glacial pass and for the lakes
+that take no fill for being under ice (`ErosionState.cold`); the climate
+itself -- the lakes' evaporation, the biomes, the snow the viewer draws --
+stays today's. On earth-v25's surface the ice is on 12.0 % of land at 0 (Earth
+today: 10 %), 19.6 % at 6 and 24.1 % at 8 (Earth at its last maximum: about a
+quarter), by when 30 % of the ice ground is above freezing today, at 56
+degrees of latitude on average and with the mean rain. Rerun from earth-v25's
+iteration-750 checkpoint at 8, five glacial passes: closed lows over 5 m on
+the ground only the ice age covers (12.3 % of land) 0.84 -> 4.84 %, on the
+planet 1.05 -> 1.71 % of land. earth-v26 is earth-v25 with it from the start.
 
 ## 8. The ice's small lakes (`zoom/ice.py`)
 
@@ -539,9 +557,27 @@ ice's own lakes cover 5.1 % of it in 5,300 lakes (1,840 over 3 km2, 98 over
 lakes 8.3 %. The grain's gain (0.7) and base wavelength (20 km) were chosen
 for that slope: 0.6 gives 0.82, 0.8 gives 0.92, 30 km gives 0.76.
 
-Not here yet: lakes in glacial *valleys* (a carve by ice flux at 1.2 km cut
-hair-thin lakes along every flow line of the level's own rivers, and was
-dropped), the elongation of real shield lakes along the ice's flow, ice
-ground that is warm today (the model's ice is where it is cold now, 23.5 % of
-land, nearer Earth's last glacial maximum than its present ice), crater lakes
-and oxbows.
+**Valley ice** (`VALLEY_M`, 200 m). A valley glacier's trough ends at a lip
+under its snout, and the trough behind the lip is a finger lake (the Alps'
+border lakes, the Finger Lakes). The cut has a second term for it: the
+level's own discharge, spread over a glacier's width (`ice_flux`, 2 km) and
+taken as its square root against a full river's, in the ice's *margin zone*
+only -- nothing at the margin, all of it half way up the ramp, nothing past
+it. Three forms before this one: along the level's flow accumulation it cut
+hair-thin lakes down every flow line; by the discharge everywhere under the
+ice it left a ribbon of lake down every river of a lowland and cut through
+the rims of the planet's lakes (34 % of their area left); limited to ground
+with relief it lost the finger lakes too, which lie on the low ground a
+glacier runs out onto. On a mountain front the ice's margin crosses
+(earth-v24 at 1.2 km, the ice of an 8 C ice age): the ice's own lakes 1.1 ->
+3.3 % of the tile, 46 over 100 km2 against 19, mean depth 3.5 -> 27 m.
+
+**The planet's lakes keep their rims** (`keep_rims`). Within a coarse cell of
+a lake of the planet's the ice takes at most half of what the ground stands
+above the lake's level, so no path from its shore is cut below its water: a
+lake behind a cut rim drains to the cut. Area of the planet's lakes left
+after the areal scour, without and with: 79 and 90 % on a cold lowland, 93
+and 98 % on a mountain front.
+
+Not here yet: the elongation of real shield lakes along the ice's flow,
+crater lakes and oxbows.

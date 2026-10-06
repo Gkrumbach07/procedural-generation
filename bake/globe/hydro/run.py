@@ -120,7 +120,7 @@ def surface_temperature(store, params, surface: np.ndarray | None = None) -> Fac
 
     grid = params.coarse_grid()
     T = store.load_field("temperature", grid)
-    if not bool(getattr(params.erosion, "climate_at_surface", False)):
+    if not bool(getattr(params.erosion, "climate_at_surface", False)) or not store.has_field("bedrock"):
         return T
     if surface is None:
         surface = store.load_field("height", grid).data.astype(np.float32) + store.load_field("sediment", grid).data.astype(np.float32)
@@ -133,7 +133,7 @@ def balance_evaporation(store, params, evap: FaceField, surface: np.ndarray | No
     that does not stop at freezing (:func:`balance.potential_evaporation`),
     from :func:`surface_temperature`."""
     t0 = float(getattr(params.hydro, "pet_t0", 0.0))
-    if t0 <= 0.0:
+    if t0 <= 0.0 or not store.has_field("temperature"):      # (a stub world has no temperature: `evap`)
         return evap
     grid = params.coarse_grid()
     T = surface_temperature(store, params, surface)

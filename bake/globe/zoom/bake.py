@@ -1106,7 +1106,8 @@ def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level
     # have that ground from it
     cut = wet = None
     if parent is None:
-        cut, wet = ice.window_cut(root, lp, params.coarse_grid(), bj.coarse_inputs(root, lp)[1], geo.win, surface, inp["hardness"])
+        flux = ice.ice_flux(cur["discharge"], params.coarse_grid().cell_size_m / geo.R, float(lp.erosion.disc_saturation_cells)) if ice.VALLEY_M > 0.0 else None
+        cut, wet = ice.window_cut(root, lp, params.coarse_grid(), bj.coarse_inputs(root, lp)[1], geo.win, surface, inp["hardness"], flux)
     if cut is not None:
         cut[inp["ocean"] | ~done] = 0.0
         ice.lower(height, sediment, cut)

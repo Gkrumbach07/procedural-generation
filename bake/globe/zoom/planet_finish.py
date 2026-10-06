@@ -111,10 +111,12 @@ def finish_face(root: Path, out: Path, level, face: int) -> dict:
     cut = wet = None
     cut_path, wet_path = out / f"L{R}.f{face}.cut.tmp.npy", out / f"L{R}.f{face}.wet.tmp.npy"
     if not int(getattr(level, "parent", 0)):
+        # the valley glaciers' share of the cut reads the level's own discharge, spread to a glacier's width
+        flux = ice.ice_flux(np.asarray(arrays["discharge"]), grid.cell_size_m / R, float(lp.erosion.disc_saturation_cells)) if ice.VALLEY_M > 0.0 else None
         for i0 in range(0, N, strip):
             i1 = min(N, i0 + strip)
             surf, ocean = rows(i0 * R, i1 * R, 0, n)
-            c, w = ice.rows_cut(root, lp, grid, fields, face, R, i0, i1, surf)
+            c, w = ice.rows_cut(root, lp, grid, fields, face, R, i0, i1, surf, None if flux is None else flux[i0 * R:i1 * R])
             if c is None:
                 continue
             if cut is None:
@@ -127,6 +129,7 @@ def finish_face(root: Path, out: Path, level, face: int) -> dict:
             arrays["height"][rs] = h
             arrays["sediment"][rs] = sd
             cut[rs], wet[rs] = c, w
+        del flux
     if n <= FLOOD_WHOLE:
         surf, ocean = rows(0, n, 0, n)
         ws = level_lakes(surf, ocean, over_cells(coarse_lake, R, surf.shape), over_cells(coarse_level, R, surf.shape), cut, wet)

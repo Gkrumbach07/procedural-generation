@@ -240,14 +240,18 @@ def build_state(store: WorldStore, params: WorldParams, replay: bool = True) -> 
     ev = store.load_field("evap", grid)
     state = ErosionState.from_grid(grid, bed, hard, pr, ev, upl, params.erosion)
     state.land_target = datum_land_fraction(params, bed.interior)
-    t0 = float(getattr(params.hydro, "pet_t0", 0.0))
-    follow = bool(getattr(params.erosion, "climate_at_surface", False))
-    dry = float(getattr(params.erosion, "ice_aridity", 0.0))
+    # (a world with no climate temperature -- a stub -- has the kernel's `evap` for all three)
+    has_t = store.has_field("temperature")
+    t0 = float(getattr(params.hydro, "pet_t0", 0.0)) if has_t else 0.0
+    follow = bool(getattr(params.erosion, "climate_at_surface", False)) and has_t
+    dry = float(getattr(params.erosion, "ice_aridity", 0.0)) if has_t else 0.0
+    age = float(getattr(params.erosion, "ice_age_c", 0.0)) if has_t else 0.0
     if dry > 0.0:
         # ice needs snow: the rain as a depth (the land-mean rain's), for the aridity of cold ground
         af = grid.interior_cell_area / float(grid.cell_size_m) ** 2
         state.ice_snow = (dry, float(getattr(params.hydro, "land_evap", 0.0)), np.ascontiguousarray(FaceField.from_interior(grid, (pr.interior / af).astype(np.float32)).data))
-    if t0 > 0.0 or follow or dry > 0.0:
+    if t0 > 0.0 or follow or dry > 0.0 or age > 0.0:
+        state.ice_age = age
         # the climate's temperature itself: for the lakes' evaporation, which does not stop at freezing
         # (hydro.pet_t0), and for a cold that follows the ground (erosion.climate_at_surface)
         from ..hydro.balance import insolation
