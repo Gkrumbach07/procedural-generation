@@ -103,7 +103,7 @@ def coarse_ice(fields: dict, temperature, params) -> dict:
     (``hydro.lake_evap`` / ``land_evap`` / ``pet_t0``).  Cold wet ground
     keeps its lakes; a cold desert's hollows are dry rock."""
     from ..field import FaceField
-    from ..hydro.balance import budyko_evaporation, potential_evaporation
+    from ..hydro.balance import aridity, budyko_evaporation, potential_evaporation
 
     grid = fields["evap"].grid
     ep, hp = params.erosion, params.hydro
@@ -114,18 +114,23 @@ def coarse_ice(fields: dict, temperature, params) -> dict:
     # the ice line erosion ended with: the climate's own, or at the surface (erosion.climate_at_surface;
     # `temperature` is then hydro.run.surface_temperature's)
     ice = ((T <= float(ep.ice_evap) / max(float(params.climate.k_evap), 1e-12)) if follow else (evap <= float(ep.ice_evap))) & ~sea
+    t0 = float(getattr(hp, "pet_t0", 0.0))
+    pet = potential_evaporation(T, grid.latitude(), float(params.climate.T_eq), t0) if t0 > 0.0 else evap
+    land_evap = float(getattr(hp, "land_evap", 0.0))
+    dry = float(getattr(ep, "ice_aridity", 0.0))
+    # the rain as a depth, in the land-mean rain's (the balance's own measure, hydro/balance.py)
+    rain = np.asarray(FaceField.from_interior(grid, (fields["precip"].interior / (grid.interior_cell_area / float(grid.cell_size_m) ** 2)).astype(np.float32)).data, np.float64)
+    if dry > 0.0:
+        ice &= aridity(pet, rain, land_evap) < dry            # ice needs snow (erosion.ice_aridity)
     ramp = float(max(int(ep.glacial_ramp), 0) + 1)
     taper = np.zeros(ice.shape, np.float32)
     for f in range(ice.shape[0]):
         if ice[f].any():
             taper[f] = np.clip(ndimage.distance_transform_edt(ice[f]) / ramp, 0.0, 1.0)
-    t0 = float(getattr(hp, "pet_t0", 0.0))
-    pet = potential_evaporation(T, grid.latitude(), float(params.climate.T_eq), t0) if t0 > 0.0 else evap
-    rain = np.maximum(np.asarray(fields["precip"].data, np.float64), 1e-9)
-    land_evap = float(getattr(hp, "land_evap", 0.0))
+    rain = np.maximum(rain, 1e-9)
     room = 1.0 / LAKE_COUNTRY_SHARE - 1.0
     if land_evap > 0.0:
-        a = land_evap * pet / rain                        # the aridity: potential evaporation over rain
+        a = aridity(pet, rain, land_evap)                 # potential evaporation over rain
         wet = (1.0 - budyko_evaporation(a)) * room + 1.0 >= a
     elif float(hp.lake_evap) > 0.0:
         wet = rain * (room + 1.0) >= float(hp.lake_evap) * pet

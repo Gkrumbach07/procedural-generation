@@ -151,6 +151,19 @@ def potential_evaporation(temperature_c: np.ndarray, latitude: np.ndarray, t_eq:
     return (np.maximum(T + float(t0), 0.0) / (float(t_eq) + float(t0)) * insolation(latitude)).astype(np.float32)
 
 
+#: the potential evaporation of a sea-level equatorial cell over the land's mean rain where a world
+#: does not say (hydro.land_evap, which is that number when set): Earth's is about 2000 over 800 mm
+PET_OVER_RAIN = 2.5
+
+
+def aridity(pet: np.ndarray, rain_depth: np.ndarray, land_evap: float = 0.0) -> np.ndarray:
+    """The aridity index, potential evaporation over rain: ``pet`` in the
+    balance's units (1 at a sea-level equatorial cell), ``rain_depth`` in the
+    land-mean rain's (a cell's ``precip`` volume over its area factor)."""
+    k = float(land_evap) if float(land_evap) > 0.0 else PET_OVER_RAIN
+    return k * np.asarray(pet, np.float64) / np.maximum(np.asarray(rain_depth, np.float64), 1e-9)
+
+
 def budyko_evaporation(aridity: np.ndarray) -> np.ndarray:
     """Share of the rain a land surface evaporates, by its aridity index
     (potential evaporation over rain): Budyko's (1974) curve, ``sqrt(a

@@ -423,6 +423,44 @@ frozen and take no fill, and with `pet_t0` the lakes' evaporation all read
 it. Hydro and `zoom/ice.py` then read it at the final surface
 (`hydro.run.surface_temperature`), as derive's biomes always have.
 
+### Ice needs snow (`erosion.ice_aridity`)
+
+Every cell at or below the ice line was ice. On earth-v24 that is 20.8 % of
+land at the final surface, and half of it gets under 0.15 of the mean rain:
+on average a cold steppe at -4 C and 56 degrees of latitude -- Siberia and
+Tibet, not Canada. Ice sheets grew over wet cold ground and not over those
+(north-east Siberia and the Tibetan interior were largely ice-free at the
+last glacial maximum for want of snow).
+
+With `erosion.ice_aridity` > 0 cold ground is ice only where its aridity --
+the water balance's potential evaporation over its rain
+(`hydro.balance.aridity`, on `pet_t0` and `land_evap`) -- is under it. A
+polar desert stays ice whatever its rain: at -18 C and under the law
+evaporates nothing. On earth-v24's surface, ice on 8.4 / 9.4 / 10.7 / 11.8 /
+13.6 % of land at 0.75 / 1 / 1.5 / 2 / 3 (Earth today: 10 %; at the last
+glacial maximum about 25 %); earth-v25 has 1.5. The plateau of section 6 has
+an aridity of 8 to 9 and no ice at any of these. `zoom/ice.py` reads the
+same line.
+
+The three together, rerun from earth-v24's iteration-750 checkpoint for its
+last 50 iterations (closed lows over 5 m, share of land / of the plateau
+tile; lake cells by erosion's own count):
+
+| | planet | plateau | lake cells |
+|---|---|---|---|
+| as baked | 1.34 % | 17.5 % | 35,025 |
+| `pet_t0` 17.8 | 1.22 % | 7.6 % | 27,144 |
+| `climate_at_surface` | 1.11 % | 15.9 % | 28,138 |
+| both | 1.14 % | 16.7 % | 24,228 |
+| both and `ice_aridity` 1.5 | 1.21 % | 4.2 % | 25,160 |
+| no glacial pass at all | 0.88 % | 10.3 % | 27,635 |
+
+The cold following the ground takes the ice off the ranges it had cut down
+(their closed lows 3.81 -> 0.62 % of that ground) and puts it on ground the
+stage built up into the cold (2.72 -> 6.46 %), which on the plateau is a
+desert; the snow rule takes it off the desert again. earth-v25 is earth-v24
+with all three from the first iteration.
+
 ## 8. The ice's small lakes (`zoom/ice.py`)
 
 What the planet's lakes are made by, on earth-v24's coarse grid (share of

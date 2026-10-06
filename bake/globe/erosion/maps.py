@@ -100,6 +100,7 @@ class ErosionState:
     temp_follow: bool = False
     temp_k: float = 1.0  # climate.k_evap: `evap` = temp_k max(T, 0), so `evap <= e` is `T <= e / temp_k`
     pet_law: tuple | None = None  # (T_eq, t0, sun (F, NE, NE)): the lakes' evaporation by hydro.pet_t0 (hydro.balance.potential_evaporation), read off `temperature()`
+    ice_snow: tuple | None = None  # (aridity limit, land_evap, rain depth (F, NE, NE)): ice needs snow (erosion.ice_aridity; hydro.balance.aridity)
     lake_load: np.ndarray = field(default=None, repr=False)  # float64 sediment per cell (cell units) that particles brought into a lake and its shore had no room for (particle.trace_particles, `erosion.lake_fill`): parked on the lake cell entered until `settle_lake_loads` lays it over the lake's floor
     lake_id: np.ndarray = field(default=None, repr=False)  # int32 per cell: the lake of `lake_room` a cell belongs to, -1 where a load cannot be parked
     lake_room: np.ndarray = field(default=None, repr=False)  # float64 per lake: the room it has left for its rivers' load (cell units), counted down by particle.apply_changes
@@ -271,10 +272,19 @@ class ErosionState:
         ice_evap / k_evap`` -- read off :meth:`temperature` where the state
         has one that follows the surface, so ground the stage has lowered into
         the warmth is no longer ice and ground it has raised into the cold
-        is."""
+        is -- and, with ``ice_snow`` (``erosion.ice_aridity``), only where
+        the ground is not too dry for the snow to last."""
         if self.temp0 is None or not self.temp_follow:
-            return self.evap <= float(ice_evap)
-        return self.temperature() <= float(ice_evap) / max(float(self.temp_k), 1e-12)
+            cold = self.evap <= float(ice_evap)
+        else:
+            cold = self.temperature() <= float(ice_evap) / max(float(self.temp_k), 1e-12)
+        if self.ice_snow is not None:
+            # ...and has the snow for it (erosion.ice_aridity): not where the year can take more than falls
+            from ..hydro.balance import aridity
+
+            limit, land_evap, rain = self.ice_snow
+            cold = cold & (aridity(self.balance_evaporation(), rain, land_evap) < float(limit))
+        return cold
 
     def balance_evaporation(self) -> np.ndarray:
         """The potential evaporation the lake balance runs on (extended

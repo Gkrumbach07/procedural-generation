@@ -1351,6 +1351,12 @@ def test_the_cold_follows_the_ground(scratch):
     warm = st.balance_evaporation()
     st.temp_follow = False
     assert (st.balance_evaporation()[high] < warm[high]).all()                             # the cut ground evaporates more than the climate's field says
+    # ice needs snow (erosion.ice_aridity): cold ground is ice where its rain is not all the year can take
+    st.temp_follow = True
+    cold = st.cold(0.0)
+    rain = np.where(np.arange(st.evap.shape[2])[None, None, :] % 2 == 0, 5.0, 0.01) * np.ones(st.evap.shape)
+    st.ice_snow = (1.5, 3.0, rain)
+    assert np.array_equal(st.cold(0.0), cold & (rain > 1.0)) and (st.cold(0.0) & cold).any()
 
 
 def test_a_lake_keeps_its_rivers_sediment_and_fills_towards_a_plain(scratch):
