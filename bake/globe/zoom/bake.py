@@ -60,6 +60,7 @@ from ..io.world_store import WorldStore
 from ..refine import basin_job as bj
 from ..refine.upsample import FineWindow, Window, detail_amplitude, detail_noise, ridged_fbm, sample, upsample_window
 from ..refine.zoom import DETAIL_HEIGHT_SHARE, ROCK_HARDNESS, ZOOM_REFINE, cone_shield, drain_noise, smooth_drift, zoom_params
+from . import parent_lakes as lk
 from . import progress
 
 #: D8 offsets of the hydro stage's ``flow_dir`` codes (0..7; 8 and above = sink)
@@ -70,8 +71,9 @@ ZOOM_KEY = 7_700_001
 #: version: bumped when the inputs or the hold change, so a zoom baked before
 #: is baked again.  2: the detail noise within a share of the ground's height,
 #: islands held on their own, active cones as fresh lava.  3: the bedrock's
-#: hardness from the geologic map (refine.zoom.ROCK_HARDNESS)
-INPUTS_VERSION = 3
+#: hardness from the geologic map (refine.zoom.ROCK_HARDNESS).  4: the parent's
+#: lakes are water from the start and the only lakes at the end (zoom/parent_lakes.py)
+INPUTS_VERSION = 4
 #: a tile spawns at most this many times the particles its rain alone would
 #: get when inflow adds to the spawn weight (beyond it the spawn volume grows)
 MAX_INFLOW_PARTICLES = 3.0
@@ -614,6 +616,7 @@ def level_inputs(root: Path, params: WorldParams, geo: Geometry, level: ZoomLeve
                                      surface=plain, coast_taper_m=coast_taper, height_share=DETAIL_HEIGHT_SHARE).astype(np.float64)
         inflow = planet_inflow(root, geo, plain)
         f = geo.R
+        over, lake_level, floor = lk.parent_lakes(fields, derived, win)
     else:
         pg = parent.geo
         pa = parent.arrays
@@ -631,6 +634,12 @@ def level_inputs(root: Path, params: WorldParams, geo: Geometry, level: ZoomLeve
         depth = np.maximum(map_coordinates(np.maximum(pa["water_surface"] - psurf, 0.0), [I, J], order=1, mode="nearest"), 0.0)
         seed = map_coordinates(pa["ocean"].astype(np.float32), [I, J], order=0, mode="nearest") > 0.5
         ocean = _ocean(plain, seed)
+        # the parent's lakes: its own water, which it took from its parent in turn
+        p_lake = ((pa["water_surface"] - psurf) > float(params.hydro.lake_min_depth)) & ~pa["ocean"]
+        over = map_coordinates(p_lake.astype(np.float32), [I, J], order=0, mode="nearest") > 0.5
+        lake_level = map_coordinates(pa["water_surface"].astype(np.float32), [I, J], order=0, mode="nearest")
+        floor = None
+        del p_lake
         parent_cell = grid.cell_size_m / pg.R
         gy, gx = np.gradient(psurf, parent_cell)
         slope = map_coordinates(np.hypot(gx, gy), [I, J], order=1, mode="nearest")
@@ -647,10 +656,17 @@ def level_inputs(root: Path, params: WorldParams, geo: Geometry, level: ZoomLeve
     if rock_h is not None:
         # the bedrock is as hard as the rock it is; the active cones stay fresh lava on top of that
         up["hardness"] = rock_h if cone is None else cone_shield(cone, rock_h)[0]
-    noise = noise + drain_noise(height0 + noise + sed0, ocean)      # the noise's own basins, filled before anything erodes
+    # the parent's lakes are water from the first iteration (zoom/parent_lakes.py): no noise under one, none at
+    # its level on the ground beside it, and its bed out of the erosion's reach (prepare_tile)
+    water, still = lk.standing(plain, ocean, over, lake_level)
+    noise = noise * lk.lake_quiet(plain, water, still, coast_taper, lk.LAKE_REACH * f)
+    # the noise's own basins, filled before anything erodes; the parent's stay open
+    noise = noise + drain_noise(height0 + noise + sed0, ocean, still if floor is None else still | floor)
+    still &= water - (height0 + noise + sed0) > float(params.hydro.lake_min_depth)
     precip = np.where(ocean, 0.0, np.maximum(up["precip"], 0.0)).astype(np.float64)
     return {
         "plain": plain, "height": height0 + noise, "sediment": sed0, "discharge": discharge, "depth": depth, "ocean": ocean,
+        "still": still, "lake_over": over & ~ocean, "lake_level": np.asarray(lake_level, np.float32),
         "precip": precip, "inflow": inflow, "evap": up["evap"], "hardness": up["hardness"], "momentum": momentum,
         "metric": up["metric"], "metric_inv": up["metric_inv"], "f": f, "noise_max_m": float(np.abs(noise).max()),
         "forest": None if clim is None else clim["forest"], "temp0": None if clim is None else clim["temp0"],
@@ -740,6 +756,8 @@ def prepare_tile(level: ZoomLevel, geo: Geometry, inp: dict, cur: dict, flux_w: 
     land = inwin & ~ocean
     frozen = land & ndimage.binary_dilation(ocean & inwin, structure=np.ones((3, 3), bool))
     active = land & ~frozen
+    if inp.get("still") is not None:
+        active &= ~inp["still"][sl]                     # a lake's bed is not the erosion's to work (zoom/parent_lakes.py)
     if not active.any():
         return None
     act_w = np.zeros((NE, NE), bool)
@@ -752,7 +770,7 @@ def prepare_tile(level: ZoomLevel, geo: Geometry, inp: dict, cur: dict, flux_w: 
     np.add.at(src, recv[cross], flux_w.ravel()[cross])
     src = src.reshape(NE, NE)[sl]
     arr = {k: np.array(cur[k][sl]) for k in ("height", "sediment", "discharge", "momentum", "vegetation") if k in cur}
-    arr.update({k: np.array(inp[k][sl]) for k in ("hardness", "precip", "evap", "metric", "metric_inv", "plain", "forest", "temp0") if inp.get(k) is not None})
+    arr.update({k: np.array(inp[k][sl]) for k in ("hardness", "precip", "evap", "metric", "metric_inv", "plain", "forest", "temp0", "still") if inp.get(k) is not None})
     return {"a": a, "b": b, "c": c, "sl": sl, "land": land, "active": active, "inwin": inwin, "ocean": ocean, "src": src, "arrays": arr, "f": int(inp["f"])}
 
 
@@ -800,6 +818,12 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
         cell_m = float(params.world.cell_size_m) / float(R)
         cell_km2 = (cell_m / 1000.0) ** 2
         rain_cell = max(rain_total / max(float(active.sum()), 1.0), 1e-30)
+    # the parent's lakes are water (zoom/parent_lakes.py): their cells are not active -- the bed stays as
+    # the parent left it, and a particle that ends on one leaves its load on the shore it came by --
+    # and flagged, so a particle lays `lake_trap` of its load on the shore as it enters
+    still = arr.get("still")
+    if still is not None and still.any():
+        state.lake_flag = (still & land)[None].astype(np.uint8)
     t0 = time.time()
     deaths = {k: 0 for k in pk.DEATH_NAMES}
     particles = 0
@@ -1063,12 +1087,8 @@ def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level
     height -= np.minimum(fd, 0.0)
     surface = height + sediment
     held_after = held_p90(surface - plain, cells, 4 * inp["f"], geo.product())
-    # water: a local flood, no higher than the parent's lakes where it has one
-    drain = inp["ocean"].copy()
-    drain[0, :] = drain[-1, :] = drain[:, 0] = drain[:, -1] = True
-    ws = bj.local_flood(surface.astype(np.float32), drain, np.ones(drain.shape, bool), np.ones(drain.shape, np.uint8)).astype(np.float64)
-    lake0 = inp["depth"] > 0.0
-    ws = np.where(lake0, np.maximum(surface, np.minimum(ws, plain + inp["depth"])), ws)
+    # water: the parent's lakes and no others, each at its own level (zoom/parent_lakes.py)
+    ws = lk.level_lakes(surface, inp["ocean"], inp["lake_over"], inp["lake_level"]).astype(np.float64)
     ws = np.where(inp["ocean"], np.maximum(0.0, surface), ws)
     _, flux = drainage(surface, inp["ocean"], weight)
     arrays = {

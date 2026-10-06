@@ -219,22 +219,30 @@ def zoom_params(params, R: int, **erosion):
     return params.with_overrides(world={"R": int(R)}, refine=dict(ZOOM_REFINE), erosion=eo)
 
 
-def drain_noise(surface: np.ndarray, ocean: np.ndarray) -> np.ndarray:
+def drain_noise(surface: np.ndarray, ocean: np.ndarray, sinks: np.ndarray | None = None) -> np.ndarray:
     """The detail noise's own closed depressions, filled to their spill level
-    (a priority flood draining to the sea and the array's border): the amount
-    to add to the surface, 0 outside them.
+    (a priority flood draining to the sea, the array's border and ``sinks``):
+    the amount to add to the surface, 0 outside them.
 
-    The upsample of a coarser level drains everywhere -- it is the surface a
-    flood already shaped -- but ridged noise on top of it invents basins: at
-    R = 8 the noise puts 14 % of a tile's land in closed depressions over 2 m
-    deep, and 80 iterations drain only part of them (2.6 % left; 200
-    iterations, 2.5x the cost, leave 1.2 %).  Filling them first leaves 0.8 %
-    and the same relief, and the lakes that remain are the parent's.
+    Ridged noise on the upsample of a coarser level invents basins: at R = 8
+    the noise puts 14 % of a tile's land in closed depressions over 2 m deep,
+    and 80 iterations drain only part of them (2.6 % left; 200 iterations,
+    2.5x the cost, leave 1.2 %).  Filling them first leaves 0.8 % and the
+    same relief.
+
+    ``sinks`` are the cells the parent's own basins drain to: the water of
+    its lakes and the floor of every basin it left dry (globe/zoom/parent_lakes.py).
+    The upsample of a coarser level does not drain everywhere -- its lakes
+    are closed depressions -- and without them this laid a lake's whole basin
+    as ground up to its rim before anything eroded (97 % of the water of a
+    31 m-deep lake on earth-v24 at 1.2 km), and a dry basin's floor with it.
     """
     from ..hydro.priority_flood import priority_flood_flat
 
     drain = np.asarray(ocean, bool).copy()
     drain[0, :] = drain[-1, :] = drain[:, 0] = drain[:, -1] = True
+    if sinks is not None:
+        drain |= np.asarray(sinks, bool)
     fr = priority_flood_flat(np.ascontiguousarray(surface, np.float32), drain, None)
     return np.maximum(fr.filled.reshape(surface.shape) - surface, 0.0)
 

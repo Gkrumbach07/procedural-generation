@@ -858,21 +858,24 @@ def test_runtime_small(scratch):
 
 
 def test_a_refined_lake_agrees_with_the_coarse_balance():
-    """``lakes.agree_with_coarse``: refined-grid water stays where the coarse
-    grid has a lake or touches one, and elsewhere only as a pond of a few
-    coarse cells -- a basin hydro's balance emptied does not stand full again
-    because the refine pass flooded it."""
+    """``lakes.agree_with_coarse``: a piece of refined-grid water stays, whole,
+    where a fair share of it lies over the coarse grid's lake -- with its own
+    shore, not one cut along the coarse cells -- and otherwise only as a pond
+    of a few coarse cells: a basin hydro's balance emptied does not stand full
+    again because the refine pass flooded it."""
     from globe.derive import lakes as lk
     R, N = 2, 40
     coarse = np.zeros((N, N), bool)
     coarse[5:9, 5:9] = True                                   # the coarse lake
     fine = np.zeros((N * R, N * R), bool)
-    fine[8:24, 8:24] = True                                   # the refined lake over it, two coarse cells wider all round
+    fine[7:21, 9:23] = True                                   # the refined lake over it, off the coarse cells' lines
     fine[40:70, 40:70] = True                                 # a basin the coarse balance left dry: 225 coarse cells
     fine[4:6, 60:63] = True                                   # a pond below the coarse grid
     out = lk.agree_with_coarse(fine, coarse, R, 4.0)
-    assert out[10:20, 10:20].all()                            # on the coarse lake and the cell beside it
+    assert np.array_equal(out[:30, :30], fine[:30, :30])      # the whole lake, as the refined grid has it
     assert not out[40:70, 40:70].any()
     assert out[4:6, 60:63].all()
-    assert out.sum() < fine.sum() and not (out & ~fine).any()
     assert np.array_equal(lk.agree_with_coarse(fine, coarse, R, 0.0), fine)
+    # a large basin that only touches the coarse lake is not it
+    fine[21:60, 9:40] = True
+    assert not lk.agree_with_coarse(fine, coarse, R, 4.0)[7:60, 9:40].any()

@@ -242,10 +242,15 @@ def window_metric(win: Window | FineWindow, grid: Grid) -> tuple[np.ndarray, np.
 # --------------------------------------------------------------------------
 # coarse derived fields (per process, once)
 # --------------------------------------------------------------------------
-def coarse_derived(fields: dict[str, FaceField]) -> dict[str, FaceField]:
+def coarse_derived(fields: dict[str, FaceField], lake_depth: float = 0.0) -> dict[str, FaceField]:
     """``surface``, ``slope`` (rise/run), ``relief`` (3x3 max - min of the
     surface, metres) and ``depth`` (lake depth, 0 on ocean) on the coarse
-    grid, valid on the extended arrays (indices 1..NE-2)."""
+    grid, valid on the extended arrays (indices 1..NE-2); and what a level
+    below the coarse grid has to leave as it finds it (globe/zoom/parent_lakes.py):
+    ``lake`` (u8), the planet's lakes -- standing water more than
+    ``lake_depth`` deep, off the sea, whose level is ``water_surface`` -- and
+    ``floor`` (u8), the land cells no neighbour is lower than, which is where
+    every closed basin of the planet bottoms out, the dry ones too."""
     h, s = fields["height"], fields["sediment"]
     grid = h.grid
     surf = FaceField(grid, (h.data.astype(np.float32) + s.data.astype(np.float32)), name="surface")
@@ -263,11 +268,16 @@ def coarse_derived(fields: dict[str, FaceField]) -> dict[str, FaceField]:
     rel[:, 1:-1, 1:-1] = mx - mn
     ws = fields["water_surface"].data
     depth = np.where(ws > 0.0, np.maximum(ws - d, 0.0), 0.0).astype(np.float32)
+    sea = fields["basin_id"].data < 0
+    floor = np.zeros(d.shape, dtype=bool)
+    floor[:, 1:-1, 1:-1] = d[:, 1:-1, 1:-1] <= mn
     return {
         "surface": surf,
         "slope": slope,
         "relief": FaceField(grid, rel.astype(np.float32), name="relief"),
         "depth": FaceField(grid, depth, name="depth"),
+        "lake": FaceField(grid, (((ws - d) > float(lake_depth)) & ~sea).astype(np.uint8), name="lake"),
+        "floor": FaceField(grid, (floor & ~sea).astype(np.uint8), name="floor"),
     }
 
 

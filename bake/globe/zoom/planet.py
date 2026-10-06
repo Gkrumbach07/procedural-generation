@@ -45,12 +45,12 @@ from scipy import ndimage
 
 from ..config import WorldParams
 from ..cubesphere import from_sphere_v, project_to_face_v, to_sphere_v
-from ..hydro.priority_flood import priority_flood_flat
 from ..io.world_store import WorldStore
 from ..refine import basin_job as bj
 from ..refine.upsample import COARSE_INPUTS, Window, detail_amplitude, upsample_window
 from ..refine.zoom import DETAIL_HEIGHT_SHARE, ROCK_HARDNESS, ZOOM_REFINE, cone_shield, drain_noise, zoom_params
 from . import bake as zb
+from . import parent_lakes as lk
 
 #: rng / hash sub-key of planet bakes
 PLANET_KEY = 7_700_101
@@ -202,7 +202,9 @@ _SHARED: dict[str, tuple] = {}
 def _input_stamp(root: Path, params: WorldParams | None = None) -> str:
     """Sizes and modification times of the coarse files the inputs come
     from, and the knobs that reshape them (:func:`basin_job.hardness_key`)."""
-    parts = [] if params is None else ["hardness:%g:%g" % bj.hardness_key(params)]
+    parts = ["derived:2"]                                       # 2: the planet's lakes and basin floors (refine.upsample.coarse_derived)
+    if params is not None:
+        parts.append("hardness:%g:%g" % bj.hardness_key(params))
     for name in COARSE_INPUTS + ("flow_dir", "flow_acc"):
         for f in range(6):
             st = (Path(root) / "coarse" / f"{name}.f{f}.npy").stat()
@@ -366,8 +368,13 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
         f_hold = chained["f"]
     if noise is None:
         noise = np.where(ocean, 0.0, quiet * amp * hashed_ridged(int(params.world.seed) + PLANET_KEY, face, ta0 * R - 1, tb0 * R - 1, n, n, 2.0 * R))
-    # the noise's own basins (chained or not), filled before anything erodes
-    noise = noise + drain_noise(base["height0"] + noise + base["sediment0"], ocean)
+    # the planet's lakes are water from the first iteration (zoom/parent_lakes.py): no noise under one, none at
+    # its level on the ground beside it, and its cells flagged for the particles (zoom.bake.erode_tile)
+    over, lake_level, floor = (a[t, t] for a in lk.parent_lakes(fields, derived, win))
+    water, still = lk.standing(plain, ocean, over, lake_level)
+    noise = noise * lk.lake_quiet(plain, water, still, coast_taper, lk.LAKE_REACH * R)
+    # the noise's own basins (chained or not), filled before anything erodes; the planet's stay open
+    noise = noise + drain_noise(base["height0"] + noise + base["sediment0"], ocean, still | floor)
     NF = (N + 2 * level.guard) * R
     mm = {k: open_work(Path(out), face, k, NF) for k in WORK_FIELDS}
     o = level.guard * R
@@ -383,7 +390,9 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
     inwin[1:-1, 1:-1] = True
     land = inwin & ~ocean
     frozen = land & ndimage.binary_dilation(ocean & inwin, structure=np.ones((3, 3), bool))
-    active = land & ~frozen
+    # ...and a lake's bed is not the erosion's to work: the level starts with it as the planet left it
+    still &= water - (cur["height"] + cur["sediment"]) > float(lp.hydro.lake_min_depth)
+    active = land & ~frozen & ~still
     stats = {"face": face, "window": [ta0, tb0, nc], "active_cells": int(active.sum())}
     if not active.any():
         return stats
@@ -391,7 +400,7 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
     job = {"a": ta0 + mc, "b": tb0 + mc, "c": cc, "sl": sl, "land": land, "active": active, "inwin": inwin, "ocean": ocean, "src": src, "f": f_hold,
            "arrays": {"height": cur["height"], "sediment": cur["sediment"], "discharge": cur["discharge"], "momentum": cur["momentum"],
                       "hardness": tr["hardness"], "precip": np.where(ocean, 0.0, np.maximum(tr["precip"], 0.0)), "evap": tr["evap"],
-                      "metric": tr["metric"], "metric_inv": tr["metric_inv"], "plain": plain}}
+                      "metric": tr["metric"], "metric_inv": tr["metric_inv"], "plain": plain, "still": still}}
     if int(level.snapshots) > 0 and int(level.frame_res) > 0:
         # the time lapse: the tile's core every few iterations, block-averaged to its share of
         # the face's frame.  Tiles run in passes, so no two are at the same iteration at the
@@ -702,20 +711,11 @@ def finish_face(root: Path, out: Path, level: PlanetLevel, face: int, strip: int
     ocean_c = ocean_all[face]
     sea_near = np.repeat(np.repeat(ndimage.binary_dilation(ocean_c, structure=np.ones((3, 3), bool)), R, 0), R, 1)
     ocean = (surf < 0.0) & sea_near
-    drain = ocean.copy()
-    drain[0, :] = drain[-1, :] = drain[:, 0] = drain[:, -1] = True
-    fr = priority_flood_flat(surf, drain, None)
-    ws = np.maximum(fr.filled.reshape(surf.shape), surf)
-    del fr
-    lake_c = plain_ws > surf + 1e-3                     # the planet's lakes, upsampled
-    ws = np.where(lake_c, np.maximum(surf, np.minimum(ws, plain_ws)), ws)
-    # ...and only those: water under the marsh line, or standing where the planet's balance has
-    # no lake, is ground (planet_finish.lakes_as_the_planet_has_them)
-    from . import planet_finish as pf
-
+    # the planet's lakes and no others, each at its own level (zoom/parent_lakes.py)
     lake_depth = max(float(params.hydro.lake_min_depth), float(getattr(params.hydro, "marsh_depth", 0.0)))
-    coarse_lake = ((fields["water_surface"].interior[face].astype(np.float32) - derived["surface"].interior[face].astype(np.float32)) > lake_depth) & ~ocean_c
-    ws = pf.lakes_as_the_planet_has_them(ws, surf, ocean, coarse_lake, R, lake_depth, float(getattr(params.derive, "lake_agree_cells", 0.0)))
+    coarse_level = fields["water_surface"].interior[face].astype(np.float32)
+    coarse_lake = ((coarse_level - derived["surface"].interior[face].astype(np.float32)) > lake_depth) & ~ocean_c
+    ws = lk.level_lakes(surf, ocean, lk.over_cells(coarse_lake, R, surf.shape), lk.over_cells(coarse_level, R, surf.shape))
     arrays["water_surface"] = ws.astype(np.float32)
     for k, a in arrays.items():
         np.save(out_path(out, R, face, k), a)

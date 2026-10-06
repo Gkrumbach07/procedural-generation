@@ -128,7 +128,8 @@ def coarse_inputs(root: str | Path, params: WorldParams) -> tuple:
         store = WorldStore(root)
         fields = {n: store.load_field(n, grid) for n in COARSE_INPUTS}
         fields["hardness"] = refined_hardness(fields["hardness"], params)
-        derived = coarse_derived(fields)
+        # a lake of the planet's is its standing water deeper than the marsh line (hydro.marsh_depth)
+        derived = coarse_derived(fields, max(float(params.hydro.lake_min_depth), float(getattr(params.hydro, "marsh_depth", 0.0))))
         _CACHE.clear()
         hit = (grid, fields, derived)
         _CACHE[key] = hit

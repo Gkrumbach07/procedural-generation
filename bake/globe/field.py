@@ -253,7 +253,9 @@ class FaceField:
 
         Points outside the face are looked up on the face that owns them
         (via ``from_sphere``); vector fields are rotated into ``face``'s
-        components.  ``order`` 1 = bilinear, 3 = cubic (use 3 for height)."""
+        components.  ``order`` 0 = the value of the cell a point lies in (what
+        an integer field always gets), 1 = bilinear, 3 = cubic (use 3 for
+        height)."""
         return self.sample_fine(face, i0 * R, i1 * R, j0 * R, j1 * R, R, order=order)
 
     def sample_fine(self, face: int, a0: int, a1: int, b0: int, b1: int, R: int = 1, order: int = 1) -> np.ndarray:
@@ -275,7 +277,7 @@ class FaceField:
             faces[~inside] = f2
             su[~inside] = u2
             sv[~inside] = v2
-        if np.issubdtype(self.data.dtype, np.integer) or self.data.dtype == np.bool_:
+        if order == 0 or np.issubdtype(self.data.dtype, np.integer) or self.data.dtype == np.bool_:
             return self.sample_nearest(faces, su, sv)
         vals = self.sample_cubic(faces, su, sv) if order == 3 else self.sample_bilinear(faces, su, sv)
         if self.is_vector:

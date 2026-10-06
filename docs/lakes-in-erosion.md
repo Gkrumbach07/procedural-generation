@@ -265,3 +265,80 @@ list is sized one entry a step (`particle.change_list_cap`). The fill's
 entries needed room of their own there; without it earth-v20's first bake
 died at iteration 540 with a corrupted heap, after every small world had
 passed.
+
+## 6. Below the coarse grid: the planet's lakes, and no others
+
+A level below the coarse grid -- the planet at 1.2 km (`zoom/planet.py`), a
+zoom window (`zoom/bake.py`) -- upsamples its parent, adds detail noise and
+erodes. None of that is a cause for a lake. On Earth every lake has one that
+is recent or still at work -- ice (more lake basins than every other origin
+together), a sinking or blocked basin, a dry climate with no way out to the
+sea -- because a river-cut landscape drains: a lake silts up or its outlet
+cuts down within a geological moment. The planet's stages are where the
+model's causes are (tectonics' basins, the glacial pass, the water balance).
+What a level's own flood finds are its erosion's dams, the pits of its noise
+and the pools of its hold. So a level takes its lakes from its parent
+(`zoom/parent_lakes.py`) and treats them as water from start to end.
+
+What was wrong before, measured on earth-v24 at 1.2 km:
+
+* **Square corners, stair edges.** The level's water was its own flood capped
+  at the *upsampled* coarse water surface -- not a level surface: 73 % of the
+  lake area lay in water bodies whose surface varied by more than a metre --
+  then cut to the coarse lake cells and one beside them: 15.7 % of the shore
+  ran along coarse-cell lines (12.5 % by chance).
+* **Ponds without a cause**, strung along rivers and across plains: 26 % of
+  the lake cells.
+* **Large lakes in fingers and loops.** `refine.zoom.drain_noise` fills the
+  closed depressions of the starting surface "because the upsample of a
+  coarser level drains everywhere". It does not: the planet's lakes are
+  closed depressions. A 31 m-deep plateau lake had 97 % of its water volume
+  laid as ground before the first particle moved; the erosion cut that flat
+  by 40 m rms (uncorrelated with the detail noise, r = 0.1); the finish
+  flooded whatever pieces lay under the lake's level.
+
+What a level does now:
+
+* **At the start** (`parent_lakes.standing`): the parent's lakes on the plain
+  (its surface upsampled), each at its one level. The detail noise is nothing
+  under a lake and fades to nothing at the lake's level on the ground within
+  two parent cells (`lake_quiet`, the rule the sea has had as
+  `refine.coast_taper_m`). `drain_noise` takes sinks: the lakes' water and
+  the floor of every basin the planet left dry (`derived["floor"]`, the
+  coarse cells no neighbour is lower than), so it fills the noise's pits and
+  leaves the planet's basins open.
+* **While it erodes**: a lake's cells are not active (the bed stays as the
+  parent left it; a particle that ends on one leaves its load on the shore it
+  came by) and are flagged, so a particle lays `lake_trap` of its load on the
+  shore as it enters. On the same plateau tile the bed under the lakes
+  changes by 0.00 m at the 90th percentile (5.8 m at the 99th: the deltas);
+  flagged but active, the same cells took +23 m on average, and single dying
+  particles speckled the shallows with islands.
+* **At the end** (`parent_lakes.level_lakes`): a depression of the level
+  holds water only where at least `LAKE_SHARE` (a quarter) of the water it
+  would hold lies over the parent's lake cells, at that lake's level or its
+  own spill point where its outlet has cut lower. One level surface per
+  lake; the shore is the level's own ground meeting it. A lake that runs off
+  a block (a tile, a cube face, a window) keeps its level there: the border
+  cells it covers drain at the lake's level, not along its bed.
+
+The refined grid (R = 2) has the matching rule in `derive.lakes.agree_with_coarse`:
+a refined lake piece is kept whole where a quarter of it lies over coarse
+lake cells, and otherwise only as a pond under `derive.lake_agree_cells`
+coarse cells; nothing is clipped along coarse cells.
+
+After the finish alone (the first two points; the level's erosion as it was)
+earth-v24 at 1.2 km: no water body with a tilted surface, 12.9 % of the shore
+on coarse-cell lines (chance), lake cells 2.18 M -> 1.53 M.
+
+**What this does not fix.** A level now shows the planet's lakes as they are,
+and the large ones on sediment plains are an odd shape on the coarse grid
+already: long stripes, triangles and blocks between rivers that run on
+raised ground. The particle pass lays its load along the channel wherever
+the gradient falls, the momentum term keeps the next particle on the same
+line, and nothing makes a channel leave a bed it has raised above the plain
+beside it; the lows between the channels hold the water. On Earth a river
+perched by about its own depth breaks out (avulsion) and fills the low, so
+an alluvial plain is level to metres and its flood-basin lakes are small and
+shallow. The same pass at 1.2 km raises a trunk channel 100 m over 80
+iterations. That belongs in the kernel's deposition, not in the lake rules.

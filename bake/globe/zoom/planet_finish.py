@@ -1,7 +1,7 @@
 """A planet level's finish in bounded memory (docs/zoom-windows.md, "The
 planet at 305 m"): the same outputs as the in-memory finish of the 1.2 km
 level -- height, sediment and discharge from the work raster, seams blended,
-refine's coast rule, a water surface capped by the planet's lakes -- for a
+refine's coast rule, a water surface with the planet's lakes -- for a
 face of any size.  At R = 32 a face is 32768^2 cells, 4.3 GB a float32
 field, and a priority flood of it would need ~50 GB:
 
@@ -10,9 +10,10 @@ field, and a priority flood of it would need ~50 GB:
 * the water surface is a flood of the whole face while it is at most
   ``FLOOD_WHOLE`` cells a side (so the 1.2 km level is byte-identical to
   the in-memory finish), else of ``FLOOD_BLOCK`` blocks overlapping by
-  ``FLOOD_OVERLAP``, each draining to its border as well: a depression
-  wider than the overlap that crosses a block edge is drained there, which
-  the cap by the planet's own lakes (the big ones) covers.
+  ``FLOOD_OVERLAP``, each draining to its border as well -- at a lake's
+  level where the border lies over a lake of the planet's
+  (:func:`parent_lakes.level_lakes`), so a lake that crosses a block edge keeps
+  its water.
 """
 from __future__ import annotations
 
@@ -23,9 +24,9 @@ import numpy as np
 from scipy import ndimage
 
 from ..config import WorldParams
-from ..hydro.priority_flood import priority_flood_flat
 from ..io.world_store import WorldStore
 from ..refine.zoom import zoom_params
+from .parent_lakes import lakes_of_the_planet, level_lakes, over_cells  # noqa: F401  (lakes_of_the_planet: the name the finish has had)
 
 FLOOD_WHOLE = 8192
 FLOOD_BLOCK = 8192
@@ -36,35 +37,6 @@ def strip_rows(R: int) -> int:
     """Coarse rows per strip: ~512 fine rows (an upsample of a strip holds a
     dozen fields of it)."""
     return max(1, 512 // int(R))
-
-
-def lakes_as_the_planet_has_them(ws: np.ndarray, surf: np.ndarray, ocean: np.ndarray, coarse_lake: np.ndarray, R: int,
-                                 lake_depth: float, agree_cells: float) -> np.ndarray:
-    """A level's water surface with only the lakes the planet has: water
-    deeper than ``lake_depth`` (the marsh line, ``hydro.marsh_depth``) where
-    the coarse grid has a lake too, or as a pond of at most ``agree_cells``
-    coarse cells where it has none (:func:`derive.lakes.agree_with_coarse`);
-    everything else stands dry (the sea at 0).
-
-    The level floods its own surface to the spill point and caps the water at
-    the coarse level only where the coarse grid has water.  Where hydro's
-    balance left none -- a basin evaporated to a small lake, a marsh, a lake
-    its rivers filled -- the whole basin stood full again at 1.2 km, as it did
-    on the refined grid.  ``ws`` / ``surf`` / ``ocean`` are the same block of
-    a face, whose corner is on a coarse cell; ``coarse_lake`` its coarse
-    cells."""
-    from ..derive import lakes as lakes_mod
-
-    lake = (ws - surf > np.float32(lake_depth)) & ~ocean
-    keep = lakes_mod.agree_with_coarse(lake, coarse_lake, R, agree_cells) if agree_cells > 0.0 else lake
-    return np.where(ocean, np.float32(0.0), np.where(keep, ws, surf)).astype(np.float32)
-
-
-def _flood_ws(surf: np.ndarray, ocean: np.ndarray) -> np.ndarray:
-    drain = ocean.copy()
-    drain[0, :] = drain[-1, :] = drain[:, 0] = drain[:, -1] = True
-    fr = priority_flood_flat(surf, drain, None)
-    return np.maximum(fr.filled.reshape(surf.shape), surf)
 
 
 def finish_face(root: Path, out: Path, level, face: int) -> dict:
@@ -84,8 +56,6 @@ def finish_face(root: Path, out: Path, level, face: int) -> dict:
     strip = strip_rows(R)
     wk = {k: zp.open_work(out, face, k, NF, mode="r") for k in zp.WORK_FIELDS}
     arrays = {k: np.lib.format.open_memmap(zp.out_path(out, R, face, k), mode="w+", dtype=np.float32, shape=(n, n)) for k in zp.OUT_FIELDS}
-    plain_ws_path = out / f"L{R}.f{face}.plain_ws.tmp.npy"
-    plain_ws = np.lib.format.open_memmap(plain_ws_path, mode="w+", dtype=np.float32, shape=(n, n))
     for i0 in range(0, N, strip):
         i1 = min(N, i0 + strip)
         up = upsample_face(fields, derived, face, R, i0, i1)
@@ -94,7 +64,6 @@ def finish_face(root: Path, out: Path, level, face: int) -> dict:
         done = np.asarray(wk["done"][wr, g:g + n])
         for k in ("height", "sediment", "discharge"):
             arrays[k][rs] = np.where(done, wk[k][wr, g:g + n], up[k])
-        plain_ws[rs] = up["water_surface"]
         del up, done
     seams = zp.blend_face_seams(out, level, N, face, arrays)
     ocean_all = np.stack([np.load(root / "coarse" / f"flow_dir.f{k}.npy") == 255 for k in range(6)])
@@ -134,20 +103,15 @@ def finish_face(root: Path, out: Path, level, face: int) -> dict:
     lake_cells = land_cells = 0
     # the planet's own lakes: its coarse water deeper than the marsh line, off the sea
     lake_depth = max(float(params.hydro.lake_min_depth), float(getattr(params.hydro, "marsh_depth", 0.0)))
-    agree_cells = float(getattr(params.derive, "lake_agree_cells", 0.0))
-    coarse_lake = ((fields["water_surface"].interior[face].astype(np.float32) - derived["surface"].interior[face].astype(np.float32)) > lake_depth) \
-        & ~ocean_all[face]
+    coarse_level = fields["water_surface"].interior[face].astype(np.float32)
+    coarse_lake = ((coarse_level - derived["surface"].interior[face].astype(np.float32)) > lake_depth) & ~ocean_all[face]
     if n <= FLOOD_WHOLE:
         surf, ocean = rows(0, n, 0, n)
-        ws = _flood_ws(surf, ocean)
-        pws = np.asarray(plain_ws)
-        lake_c = pws > surf + 1e-3
-        ws = np.where(lake_c, np.maximum(surf, np.minimum(ws, pws)), ws)
-        ws = lakes_as_the_planet_has_them(ws, surf, ocean, coarse_lake, R, lake_depth, agree_cells)
-        ws_out[:] = ws.astype(np.float32)
+        ws = level_lakes(surf, ocean, over_cells(coarse_lake, R, surf.shape), over_cells(coarse_level, R, surf.shape))
+        ws_out[:] = ws
         lake_cells = int(((ws - surf > float(params.hydro.lake_min_depth)) & ~ocean).sum())
         land_cells = int((~ocean).sum())
-        del surf, ocean, ws, pws, lake_c
+        del surf, ocean, ws
     else:
         B, O = FLOOD_BLOCK, FLOOD_OVERLAP
         for a0 in range(0, n, B):
@@ -156,20 +120,19 @@ def finish_face(root: Path, out: Path, level, face: int) -> dict:
                 e0, e1 = max(0, a0 - O), min(n, a1 + O)
                 f0, f1 = max(0, b0 - O), min(n, b1 + O)
                 surf, ocean = rows(e0, e1, f0, f1)
-                ws = _flood_ws(surf, ocean)
+                cs = (slice(e0 // R, (e1 + R - 1) // R), slice(f0 // R, (f1 + R - 1) // R))
+                cut = (slice(e0 - cs[0].start * R, e1 - cs[0].start * R), slice(f0 - cs[1].start * R, f1 - cs[1].start * R))
+                big = ((cs[0].stop - cs[0].start) * R, (cs[1].stop - cs[1].start) * R)
+                ws = level_lakes(surf, ocean, over_cells(coarse_lake[cs], R, big)[cut], over_cells(coarse_level[cs], R, big)[cut])
                 core = (slice(a0 - e0, a1 - e0), slice(b0 - f0, b1 - f0))
                 s, oc, w = surf[core], ocean[core], ws[core]
-                pws = np.asarray(plain_ws[a0:a1, b0:b1])
-                w = np.where(pws > s + 1e-3, np.maximum(s, np.minimum(w, pws)), w)
-                w = lakes_as_the_planet_has_them(w, s, oc, coarse_lake[a0 // R:(a1 + R - 1) // R, b0 // R:(b1 + R - 1) // R], R, lake_depth, agree_cells)
-                ws_out[a0:a1, b0:b1] = w.astype(np.float32)
+                ws_out[a0:a1, b0:b1] = w
                 lake_cells += int(((w - s > float(params.hydro.lake_min_depth)) & ~oc).sum())
                 land_cells += int((~oc).sum())
                 del surf, ocean, ws
     for a in arrays.values():
         a.flush()
-    del arrays, plain_ws
-    plain_ws_path.unlink(missing_ok=True)
+    del arrays
     return {"face": face, "seam_cells": seams, "coast_lowered_cells": coast_lowered, "coast_raised_cells": coast_raised,
             "land_cells": land_cells, "lake_cells": lake_cells, "seconds": round(time.time() - t0, 1)}
 

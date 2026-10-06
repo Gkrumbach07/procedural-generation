@@ -49,12 +49,20 @@ def kept_lake_mask(lake: np.ndarray, min_cells: int) -> np.ndarray:
     return lake & ~small[labels]
 
 
+#: a piece of refined-grid water is a lake of the coarse grid's where at least this share of it lies over coarse lake cells
+AGREE_SHARE = 0.25
+
+
 def agree_with_coarse(lake: np.ndarray, coarse_lake: np.ndarray, R: int, max_coarse_cells: float) -> np.ndarray:
     """``lake`` (a face's refined-grid lake mask) less the water the coarse
-    balance does not have: a refined lake cell stays where its coarse cell is
-    lake or touches one, and elsewhere only as a piece of at most
-    ``max_coarse_cells`` coarse cells (a pond below the coarse grid;
-    ``derive.lake_agree_cells``, 0 = no check).
+    balance does not have.  A piece of it (8-connected) stays whole where at
+    least :data:`AGREE_SHARE` of it lies over the coarse grid's lake cells --
+    it is that lake, with the refined grid's own shore -- and otherwise only
+    as a pond of at most ``max_coarse_cells`` coarse cells
+    (``derive.lake_agree_cells``, 0 = no check).  Whole pieces, never a cut
+    along the coarse cells: the first form of this kept the refined cells on
+    or beside a coarse lake cell and dropped the rest, and the lakes came out
+    with square corners and stair edges eight cells long.
 
     The refine pass floods its own surface to the spill point and caps the
     level at the coarse one only where the coarse grid *has* a lake.  Where
@@ -67,17 +75,15 @@ def agree_with_coarse(lake: np.ndarray, coarse_lake: np.ndarray, R: int, max_coa
     lake = np.asarray(lake, dtype=bool)
     if float(max_coarse_cells) <= 0.0 or not lake.any():
         return lake
-    near = ndimage.binary_dilation(np.asarray(coarse_lake, dtype=bool), structure=np.ones((3, 3), bool))
-    ok = np.repeat(np.repeat(near, R, axis=0), R, axis=1)
-    out = lake & ok
-    rest = lake & ~ok
-    if rest.any():
-        labels, _ = ndimage.label(rest, structure=np.ones((3, 3), bool))
-        sizes = np.bincount(labels.ravel())
-        pond = sizes <= float(max_coarse_cells) * R * R
-        pond[0] = False
-        out |= pond[labels]
-    return out
+    labels, n = ndimage.label(lake, structure=np.ones((3, 3), bool))
+    if n == 0:
+        return lake
+    over = np.repeat(np.repeat(np.asarray(coarse_lake, dtype=bool), R, axis=0), R, axis=1)
+    sizes = np.bincount(labels.ravel(), minlength=n + 1)
+    under = np.bincount(labels.ravel(), weights=over.ravel(), minlength=n + 1)
+    keep = (under >= AGREE_SHARE * sizes) | (sizes <= float(max_coarse_cells) * R * R)
+    keep[0] = False
+    return keep[labels]
 
 
 def lake_mask(surface: np.ndarray, water_surface: np.ndarray, min_depth_m: float, ocean=None) -> np.ndarray:

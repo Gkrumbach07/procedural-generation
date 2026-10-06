@@ -1410,28 +1410,110 @@ def test_zoom_textures_for_every_baked_level(world, zoom):
 
 
 def test_a_planet_level_keeps_only_the_lakes_the_planet_has():
-    """``planet_finish.lakes_as_the_planet_has_them``: of the water a level's
-    own flood leaves, a lake is what stands deeper than the marsh line where
-    the coarse grid has a lake too, or as a pond of a few coarse cells where
-    it has none; the rest is ground, and the sea is at 0."""
-    from globe.zoom import planet_finish as pf
+    """``parent_lakes.lakes_of_the_planet``: of the depressions a level's own
+    flood fills, one holds water only where it lies under a lake of the
+    planet, at that lake's level (or its own spill point where that is
+    lower): one level surface per lake, a shore that is the level's ground
+    and not the coarse cells' edge, nothing where the planet has no lake, and
+    the sea at 0."""
+    from globe.hydro.priority_flood import priority_flood_flat
+    from globe.zoom import parent_lakes as pf
+
+    def flood(surf, ocean):
+        drain = ocean.copy()
+        drain[0, :] = drain[-1, :] = drain[:, 0] = drain[:, -1] = True
+        return np.maximum(priority_flood_flat(surf, drain, None).filled.reshape(surf.shape), surf)
+
     R, N = 4, 24
     n = N * R
+    y, x = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
     surf = np.full((n, n), 100.0, np.float32)
-    ws = surf.copy()
     ocean = np.zeros((n, n), bool)
     ocean[:, :8] = True
     surf[:, :8] = -50.0
+    bowl = lambda ci, cj, r, depth: np.maximum(0.0, depth * (1.0 - ((y - ci) ** 2 + (x - cj) ** 2) / float(r * r)))
+    surf -= bowl(30, 40, 14, 20.0).astype(np.float32)             # the planet's lake lies over this one...
+    surf -= bowl(70, 70, 12, 20.0).astype(np.float32)             # ...and not over this one, nor the next
+    surf -= bowl(12, 80, 3, 6.0).astype(np.float32)
+    ws = flood(surf, ocean)
+    assert (ws[26:34, 36:44] == 100.0).all() and (ws[66:74, 66:74] == 100.0).all()       # the level's flood fills them all
     coarse = np.zeros((N, N), bool)
-    coarse[4:8, 6:10] = True                                    # the planet's lake
-    ws[16:32, 24:40] = 110.0                                    # the level's water over it: 10 m
-    ws[48:90, 40:90] = 108.0                                    # a basin the planet's balance left dry, flooded 8 m
-    ws[4:8, 60:66] = 106.0                                      # a pond below the coarse grid
-    ws[40:44, 20:30] = 102.0                                    # 2 m of water: marsh
-    out = pf.lakes_as_the_planet_has_them(ws, surf, ocean, coarse, R, 3.0, 4.0)
-    assert out.dtype == np.float32 and (out[ocean] == 0.0).all()
-    assert (out[16:32, 24:40] == 110.0).all()
-    assert (out[48:90, 40:90] == 100.0).all()
-    assert (out[4:8, 60:66] == 106.0).all()
-    assert (out[40:44, 20:30] == 100.0).all()
-    assert (out[~ocean] >= surf[~ocean]).all()
+    coarse[6:9, 9:12] = True                                      # a few coarse cells in the middle of the first bowl
+    level = np.where(coarse, 92.0, 100.0).astype(np.float32)       # the planet's balance holds it 8 m under the rim
+    out = pf.lakes_of_the_planet(ws, surf, ocean, coarse, level, R)
+    assert out.dtype == np.float32 and (out[ocean] == 0.0).all() and (out[~ocean] >= surf[~ocean]).all()
+    wet = (out > surf) & ~ocean
+    assert wet[30, 40] and not wet[70, 70] and not wet[12, 80]
+    assert np.unique(out[wet]).tolist() == [92.0]                 # one level surface
+    assert np.array_equal(wet, (surf < 92.0) & ~ocean & (bowl(30, 40, 14, 20.0) > 0))     # the shore is the ground at that level
+    beyond = wet & ~np.repeat(np.repeat(coarse, R, 0), R, 1)
+    assert beyond.sum() > 0.3 * wet.sum()                         # ...well outside the coarse lake's own cells
+    # where the level's own outlet has cut below the planet's level, the lake stands at the spill point
+    wide = np.zeros((N, N), bool)
+    wide[5:10, 8:12] = True
+    out2 = pf.lakes_of_the_planet(ws, surf, ocean, wide, np.where(wide, 130.0, 100.0).astype(np.float32), R)
+    assert np.unique(out2[(out2 > surf) & ~ocean]).tolist() == [100.0]
+    # a basin that only touches a lake of the planet's is not that lake
+    corner = np.zeros((N, N), bool)
+    corner[14:16, 14:16] = True                                   # under the rim of the second bowl
+    out3 = pf.lakes_of_the_planet(ws, surf, ocean, corner, np.where(corner, 130.0, 100.0).astype(np.float32), R)
+    assert not ((out3 > surf) & ~ocean).any()
+    # from the ground alone (level_lakes), the same water
+    assert np.array_equal(pf.level_lakes(surf, ocean, pf.over_cells(coarse, R, surf.shape), pf.over_cells(level, R, surf.shape)), out)
+
+
+def test_a_lake_that_runs_off_a_block_keeps_its_water():
+    """``parent_lakes.level_lakes``: a block's flood drains to its border, and
+    a lake cut by the border would drain along its bed and be lost; where the
+    border lies over the parent's lake it drains at the lake's level."""
+    from globe.zoom import parent_lakes as pl
+
+    n = 64
+    y, x = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    surf = (100.0 - np.maximum(0.0, 30.0 * (1.0 - ((y - 32) ** 2 + (x - 0) ** 2) / 24.0 ** 2))).astype(np.float32)   # a bowl cut in half by the edge x = 0
+    ocean = np.zeros((n, n), bool)
+    over = (surf < 90.0)
+    level = np.where(over, 92.0, surf).astype(np.float32)
+    out = pl.level_lakes(surf, ocean, over, level)
+    wet = out > surf
+    assert np.array_equal(wet, surf < 92.0) and np.unique(out[wet]).tolist() == [92.0]
+    # without the parent's lake over it the same bowl is a dry valley leaving the block
+    assert not (pl.level_lakes(surf, ocean, np.zeros((n, n), bool), level) > surf).any()
+
+
+def test_a_level_starts_with_its_parents_lakes_as_water():
+    """What a level does with its parent's lakes before it erodes
+    (globe/zoom/parent_lakes.py): the detail noise is nothing under a lake and
+    fades to nothing at its level on the ground beside it
+    (``lake_quiet``), and the fill that drains the noise's pits leaves the
+    lake's basin, and a dry basin's floor, open (``refine.zoom.drain_noise``
+    with ``sinks``) -- without them it lays the basin as ground to its rim."""
+    from globe.refine.zoom import drain_noise
+    from globe.zoom import parent_lakes as pl
+
+    n = 96
+    y, x = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    r2 = lambda ci, cj: ((y - ci) ** 2 + (x - cj) ** 2).astype(np.float64)
+    plain = 200.0 + 0.5 * x - np.maximum(0.0, 40.0 * (1.0 - r2(30, 30) / 18.0 ** 2)) - np.maximum(0.0, 40.0 * (1.0 - r2(70, 60) / 14.0 ** 2))
+    ocean = np.zeros((n, n), bool)
+    over = r2(30, 30) < 8.0 ** 2                                  # the parent has a lake in the first basin, held 10 m under its rim...
+    rim = float(plain[30, 30 - 18])
+    water, still = pl.standing(plain, ocean, over, np.full((n, n), rim - 10.0, np.float32))
+    assert still[30, 30] and not still[70, 60] and still.sum() > over.sum() * 0.5 and (water[~still] == plain[~still]).all()
+    q = pl.lake_quiet(plain, water, still, 40.0, 16.0)
+    assert q.min() == 0.0 and q.max() == 1.0 and (q[still] == 0.0).all()
+    shore = ndimage.binary_dilation(still) & ~still
+    assert q[shore].max() < 0.1                                   # next to nothing at the water's edge
+    far = ndimage.distance_transform_edt(~still) > 16.0
+    assert (q[far] == 1.0).all()                                  # untouched out past the reach
+    assert (q[(plain - (rim - 10.0) > 40.0) & ~still] == 1.0).all()   # and on ground a taper above the lake, however near
+    rng = np.random.default_rng(3)
+    noise = q * ndimage.gaussian_filter(8.0 * rng.normal(size=(n, n)), 1.5)
+    floor = np.zeros((n, n), bool)
+    floor[68:72, 58:62] = True                                    # ...and left the second basin dry: its floor
+    add = drain_noise(plain + noise, ocean, still | floor)
+    assert add.max() > 0.5                                        # the noise's own pits are filled
+    assert add[still].max() < 1e-3 and add[70, 60] < 1e-3            # ...and nothing is laid in the lake or on the dry floor
+    assert float((plain + noise + add)[70, 60]) < float(plain[70, 60 - 14]) - 30.0      # the dry basin is still a basin
+    blind = drain_noise(plain + noise, ocean)
+    assert blind[30, 30] > 25.0 and blind[70, 60] > 25.0          # without the sinks both are laid as ground to the rim
