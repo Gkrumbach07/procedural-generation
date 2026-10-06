@@ -1481,6 +1481,59 @@ def test_a_lake_that_runs_off_a_block_keeps_its_water():
     assert not (pl.level_lakes(surf, ocean, np.zeros((n, n), bool), level) > surf).any()
 
 
+def test_the_ice_leaves_hollows_and_they_are_the_levels_own_lakes():
+    """``zoom.ice`` and ``parent_lakes.level_lakes(cut=...)``: the rock's
+    grain is the same wherever and however finely it is asked for; the scour
+    is nothing off the ice, at the sea or under a lake of the planet's; and a
+    depression holds water as the ice's own only where the ground was dry
+    before the cut and the climate lets a hollow keep its water."""
+    from globe.cubesphere import to_sphere_v
+    from globe.zoom import ice
+    from globe.zoom import parent_lakes as pl
+
+    u, v = np.meshgrid((np.arange(64) + 0.5) / 4096, (np.arange(64) + 0.5) / 4096, indexing="ij")
+    p = to_sphere_v(np.full(u.shape, 2), u + 0.3, v + 0.4)
+    g = ice.grain(p, 6.371e6, 1200.0, 7)
+    assert g.shape == (64, 64) and 0.0 <= g.min() < 0.5 < g.max() <= 1.0
+    assert np.array_equal(g[10:20, 5:9], ice.grain(p[10:20, 5:9], 6.371e6, 1200.0, 7))       # a point's value is its own
+    assert ice.grain_octaves(300.0) == ice.grain_octaves(1200.0) + 2                          # finer cells, more octaves...
+    assert np.corrcoef(g.ravel(), ice.grain(p, 6.371e6, 300.0, 7).ravel())[0, 1] > 0.8        # ...under the same large ones
+    edge = to_sphere_v(np.array([2, 2]), np.array([1.0 - 1e-9, 1.0 + 1e-9]), np.array([0.37, 0.37]))
+    assert abs(float(np.diff(ice.grain(edge, 6.371e6, 1200.0, 7))[0])) < 1e-3                 # seamless across a cube edge
+
+    n = 96
+    y, x = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    surf0 = (200.0 + 0.2 * x).astype(np.float32)                 # a plain tilted to its border: it drains
+    surf0 -= np.maximum(0.0, 12.0 * (1.0 - ((y - 70) ** 2 + (x - 70) ** 2) / 8.0 ** 2)).astype(np.float32)   # ...but for a low its rivers left
+    ocean = np.zeros((n, n), bool)
+    share = np.where(x < 60, 1.0, 0.0)
+    weak = np.zeros((n, n))
+    weak[20:30, 20:30] = 1.0                                     # the ice finds weak rock here...
+    weak[67:73, 67:73] = 0.5                                     # ...and deepens the middle of the old low
+    cut = ice.scour(np.ones((n, n)), weak, np.zeros((n, n)), surf0, 40.0)
+    assert cut.max() == ice.SCOUR_M and cut[0, 0] == 0.0
+    assert float(ice.scour(share, weak, np.zeros((n, n)), surf0, 40.0)[65:75, 65:75].max()) == 0.0   # off the ice
+    assert float(ice.scour(np.ones((n, n)), weak, np.ones((n, n)), surf0, 40.0).max()) == 0.5 * ice.SCOUR_M   # hard rock gives half
+    assert float(ice.scour(np.ones((n, n)), weak, np.zeros((n, n)), np.full((n, n), 2.0), 40.0).max()) <= 1.0   # the sea's edge is left
+    assert float(ice.beside_lakes(np.full(4, 100.0), np.array([0.0, 1.0, 3.0, 0.0]), np.array([120.0, 120.0, 120.0, 20.0]), 40.0, 2.0)[0]) == 0.0
+    assert np.allclose(ice.beside_lakes(np.full(4, 100.0), np.array([0.0, 1.0, 3.0, 0.0]), np.array([120.0, 120.0, 120.0, 20.0]), 40.0, 2.0)[2:], 1.0)
+    surf = surf0 - cut
+    none = np.zeros((n, n), bool)
+    lvl = surf.copy()
+    assert not (pl.level_lakes(surf, ocean, none, lvl) > surf).any()                          # with no cause, no water
+    ws = pl.level_lakes(surf, ocean, none, lvl, cut)
+    wet = ws > surf
+    assert wet[25, 25] and not wet[70, 70]                       # the ice's hollow, not the rivers' low
+    assert np.unique(ws[wet]).size == 1 and float(ws[wet][0]) <= float(surf0[20:30, 19].max()) + 1e-3   # at its spill point
+    dry = np.zeros((n, n), bool)
+    assert not (pl.level_lakes(surf, ocean, none, lvl, cut, dry) > surf).any()                # a desert's hollows are dry rock
+    # a lake of the planet's keeps its own level where the ice's hollow joins it
+    over = np.zeros((n, n), bool)
+    over[23:27, 23:27] = True
+    held = pl.level_lakes(surf, ocean, over, np.full((n, n), float(surf[25, 25]) + 5.0, np.float32), cut)
+    assert np.unique(held[held > surf]).tolist() == [float(np.float32(float(surf[25, 25]) + 5.0))]
+
+
 def test_a_level_starts_with_its_parents_lakes_as_water():
     """What a level does with its parent's lakes before it erodes
     (globe/zoom/parent_lakes.py): the detail noise is nothing under a lake and

@@ -50,6 +50,7 @@ from ..refine import basin_job as bj
 from ..refine.upsample import COARSE_INPUTS, Window, detail_amplitude, upsample_window
 from ..refine.zoom import DETAIL_HEIGHT_SHARE, ROCK_HARDNESS, ZOOM_REFINE, cone_shield, drain_noise, zoom_params
 from . import bake as zb
+from . import ice
 from . import parent_lakes as lk
 
 #: rng / hash sub-key of planet bakes
@@ -715,7 +716,13 @@ def finish_face(root: Path, out: Path, level: PlanetLevel, face: int, strip: int
     lake_depth = max(float(params.hydro.lake_min_depth), float(getattr(params.hydro, "marsh_depth", 0.0)))
     coarse_level = fields["water_surface"].interior[face].astype(np.float32)
     coarse_lake = ((coarse_level - derived["surface"].interior[face].astype(np.float32)) > lake_depth) & ~ocean_c
-    ws = lk.level_lakes(surf, ocean, lk.over_cells(coarse_lake, R, surf.shape), lk.over_cells(coarse_level, R, surf.shape))
+    cut, wet = (None, None) if int(level.parent) else ice.face_cut(root, lp, grid, fields, face, R, surf)
+    if cut is not None:
+        # the ice's own work at this level (zoom/ice.py), as planet_finish does it
+        cut[ocean] = 0.0
+        ice.lower(arrays["height"], arrays["sediment"], cut)
+        surf = arrays["height"] + arrays["sediment"]
+    ws = lk.level_lakes(surf, ocean, lk.over_cells(coarse_lake, R, surf.shape), lk.over_cells(coarse_level, R, surf.shape), cut, wet)
     arrays["water_surface"] = ws.astype(np.float32)
     for k, a in arrays.items():
         np.save(out_path(out, R, face, k), a)

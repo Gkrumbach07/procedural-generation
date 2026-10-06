@@ -45,7 +45,7 @@ LAKE_REACH = 2.0
 
 
 @njit(cache=True)
-def _lakes_kernel(ws, surf, ocean, over, level, share):
+def _lakes_kernel(ws, surf, ocean, over, level, own, share):
     n0, n1 = ws.shape
     parent = np.full(n0 * n1, -1, np.int32)
     # the level's depressions: wet cells joined where they stand at one flood level
@@ -89,6 +89,20 @@ def _lakes_kernel(ws, surf, ocean, over, level, share):
                 c = parent[c]
             if level[i, j] > top[c]:
                 top[c] = level[i, j]
+    # a depression no lake of the parent's lies over may still have a cause of the level's own
+    # (`own`: the hollows the ice cut, zoom/ice.py): it stands at its spill point
+    for i in range(n0):
+        for j in range(n1):
+            if not own[i, j]:
+                continue
+            c = i * n1 + j
+            if parent[c] < 0:
+                continue
+            while parent[c] != c:
+                parent[c] = parent[parent[c]]
+                c = parent[c]
+            if top[c] == -np.inf:
+                top[c] = np.inf
     # ...which it is the same water as only if a fair share of what it would hold lies under that
     # lake's cells: a basin that touches a lake of the parent's at one corner is not that lake
     wet = np.zeros(n0 * n1, np.int32)
@@ -104,7 +118,7 @@ def _lakes_kernel(ws, surf, ocean, over, level, share):
             z = top[c]
             if z > -np.inf and surf[i, j] < (ws[i, j] if ws[i, j] < z else z):
                 wet[c] += 1
-                if over[i, j]:
+                if over[i, j] or own[i, j]:
                     under[c] += 1
     out = np.empty((n0, n1), np.float32)
     for i in range(n0):
@@ -127,7 +141,7 @@ def _lakes_kernel(ws, surf, ocean, over, level, share):
     return out
 
 
-def lakes_under(ws: np.ndarray, surf: np.ndarray, ocean: np.ndarray, over: np.ndarray, level: np.ndarray) -> np.ndarray:
+def lakes_under(ws: np.ndarray, surf: np.ndarray, ocean: np.ndarray, over: np.ndarray, level: np.ndarray, own: np.ndarray | None = None) -> np.ndarray:
     """A level's water surface with the lakes its parent has, and no others.
 
     ``ws`` is the level's own flood (every depression of its surface filled
@@ -142,14 +156,20 @@ def lakes_under(ws: np.ndarray, surf: np.ndarray, ocean: np.ndarray, over: np.nd
     shore that is the level's own ground meeting it.  Everything else is dry;
     the sea is at 0.
 
+    ``own`` marks cells with a cause for a lake that is the level's own (the
+    hollows the ice cut, zoom/ice.py).  A depression no lake of the parent's
+    lies over holds water at its spill point where at least that share of it
+    lies on such cells; where a lake of the parent's does, its level rules.
+
     Before this a level's water was its flood capped at the *upsampled*
     parent water surface wherever that stood above the ground, which is not a
     level surface (73 % of earth-v24's lake area at 1.2 km lay in water bodies
     whose surface varied by more than a metre), then cut to the coarse lake
     cells and one beside them, which is where the square corners and stair
     edges came from."""
+    own = np.zeros(ws.shape, np.bool_) if own is None else np.ascontiguousarray(own, np.bool_)
     return _lakes_kernel(np.ascontiguousarray(ws, np.float32), np.ascontiguousarray(surf, np.float32), np.ascontiguousarray(ocean, np.bool_),
-                         np.ascontiguousarray(over, np.bool_), np.ascontiguousarray(level, np.float32), LAKE_SHARE)
+                         np.ascontiguousarray(over, np.bool_), np.ascontiguousarray(level, np.float32), own, LAKE_SHARE)
 
 
 def over_cells(coarse: np.ndarray, R: int, shape: tuple[int, int]) -> np.ndarray:
@@ -189,7 +209,23 @@ def _rim_levels(surf: np.ndarray, over: np.ndarray, level: np.ndarray) -> np.nda
     return out
 
 
-def level_lakes(surf: np.ndarray, ocean: np.ndarray, over: np.ndarray, level: np.ndarray) -> np.ndarray:
+def _flood(s: np.ndarray, ocean: np.ndarray, over: np.ndarray, level: np.ndarray) -> np.ndarray:
+    """A block's flood, draining to the sea and to its border -- at a lake's
+    level where the border lies over a lake of the parent's (:func:`_rim_levels`)."""
+    edge = np.zeros(s.shape, bool)
+    edge[0, :] = edge[-1, :] = edge[:, 0] = edge[:, -1] = True
+    held = _rim_levels(np.where(ocean, np.float32(np.inf), s), over, level) if (edge & over).any() else s
+    held = np.where(ocean, s, held).astype(np.float32)
+    fr = priority_flood_flat(held, ocean | edge, None)
+    return np.maximum(fr.filled.reshape(s.shape), held)
+
+
+#: a cell under less than this much of the level's own flood is dry ground, metres (what "dry
+#: before the ice cut it" means in :func:`level_lakes`)
+DRY_M = 0.5
+
+
+def level_lakes(surf: np.ndarray, ocean: np.ndarray, over: np.ndarray, level: np.ndarray, cut: np.ndarray | None = None, wet: np.ndarray | None = None) -> np.ndarray:
     """The water surface of a block of a level (:func:`lakes_under`), from
     its ground alone: the ground itself where it is dry, a lake's level on
     the lake, 0 on the sea.
@@ -197,20 +233,29 @@ def level_lakes(surf: np.ndarray, ocean: np.ndarray, over: np.ndarray, level: np
     The flood drains to the sea and to the block's border, and a lake that
     runs off the block would drain through the border along its bed and be
     lost there.  The border cells the parent's lake covers are the lake's
-    surface, so they drain at its level instead (:func:`_rim_levels`)."""
+    surface, so they drain at its level instead (:func:`_rim_levels`).
+
+    ``cut`` (metres, 0 where none) is how far the ice lowered ``surf`` at
+    this level (zoom/ice.py), ``wet`` where the climate lets its hollows
+    hold water (all of them when None).  A cell is the ice's own lake where
+    it is under water now and was dry ground (under :data:`DRY_M` of flood)
+    on the surface before the cut, ``surf + cut``: the hollows the ice made,
+    not the lows the level's rivers had left."""
     s = np.ascontiguousarray(surf, np.float32)
     ocean = np.ascontiguousarray(ocean, np.bool_)
     over = np.asarray(over, bool) & ~ocean
-    if not over.any():
+    iced = cut is not None and bool((np.asarray(cut) > 0.0).any())
+    if not over.any() and not iced:
         return np.where(ocean, np.float32(0.0), s).astype(np.float32)
     level = np.ascontiguousarray(level, np.float32)
-    edge = np.zeros(s.shape, bool)
-    edge[0, :] = edge[-1, :] = edge[:, 0] = edge[:, -1] = True
-    held = _rim_levels(np.where(ocean, np.float32(np.inf), s), over, level) if (edge & over).any() else s
-    held = np.where(ocean, s, held).astype(np.float32)
-    fr = priority_flood_flat(held, ocean | edge, None)
-    ws = np.maximum(fr.filled.reshape(s.shape), held)
-    return lakes_under(ws, s, ocean, over, level)
+    ws = _flood(s, ocean, over, level)
+    own = None
+    if iced:
+        before = (s + np.asarray(cut, np.float32)).astype(np.float32)
+        own = (ws > s) & ~(_flood(before, ocean, over, level) > before + np.float32(DRY_M)) & ~ocean
+        if wet is not None:
+            own &= np.asarray(wet, bool)
+    return lakes_under(ws, s, ocean, over, level, own)
 
 
 def parent_lakes(fields: dict, derived: dict, win) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

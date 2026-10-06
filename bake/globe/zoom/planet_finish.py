@@ -26,6 +26,7 @@ from scipy import ndimage
 from ..config import WorldParams
 from ..io.world_store import WorldStore
 from ..refine.zoom import zoom_params
+from . import ice
 from .parent_lakes import lakes_of_the_planet, level_lakes, over_cells  # noqa: F401  (lakes_of_the_planet: the name the finish has had)
 
 FLOOD_WHOLE = 8192
@@ -105,9 +106,30 @@ def finish_face(root: Path, out: Path, level, face: int) -> dict:
     lake_depth = max(float(params.hydro.lake_min_depth), float(getattr(params.hydro, "marsh_depth", 0.0)))
     coarse_level = fields["water_surface"].interior[face].astype(np.float32)
     coarse_lake = ((coarse_level - derived["surface"].interior[face].astype(np.float32)) > lake_depth) & ~ocean_all[face]
+    # the first level below the coarse grid lets the ice finish its work (zoom/ice.py); a level
+    # chained from it has that ground already.  What it cut is kept for the water below
+    cut = wet = None
+    cut_path, wet_path = out / f"L{R}.f{face}.cut.tmp.npy", out / f"L{R}.f{face}.wet.tmp.npy"
+    if not int(getattr(level, "parent", 0)):
+        for i0 in range(0, N, strip):
+            i1 = min(N, i0 + strip)
+            surf, ocean = rows(i0 * R, i1 * R, 0, n)
+            c, w = ice.rows_cut(root, lp, grid, fields, face, R, i0, i1, surf)
+            if c is None:
+                continue
+            if cut is None:
+                cut = np.lib.format.open_memmap(cut_path, mode="w+", dtype=np.float32, shape=(n, n))
+                wet = np.lib.format.open_memmap(wet_path, mode="w+", dtype=np.bool_, shape=(n, n))
+            c[ocean] = 0.0
+            rs = slice(i0 * R, i1 * R)
+            h, sd = np.array(arrays["height"][rs]), np.array(arrays["sediment"][rs])
+            ice.lower(h, sd, c)
+            arrays["height"][rs] = h
+            arrays["sediment"][rs] = sd
+            cut[rs], wet[rs] = c, w
     if n <= FLOOD_WHOLE:
         surf, ocean = rows(0, n, 0, n)
-        ws = level_lakes(surf, ocean, over_cells(coarse_lake, R, surf.shape), over_cells(coarse_level, R, surf.shape))
+        ws = level_lakes(surf, ocean, over_cells(coarse_lake, R, surf.shape), over_cells(coarse_level, R, surf.shape), cut, wet)
         ws_out[:] = ws
         lake_cells = int(((ws - surf > float(params.hydro.lake_min_depth)) & ~ocean).sum())
         land_cells = int((~ocean).sum())
@@ -121,9 +143,11 @@ def finish_face(root: Path, out: Path, level, face: int) -> dict:
                 f0, f1 = max(0, b0 - O), min(n, b1 + O)
                 surf, ocean = rows(e0, e1, f0, f1)
                 cs = (slice(e0 // R, (e1 + R - 1) // R), slice(f0 // R, (f1 + R - 1) // R))
-                cut = (slice(e0 - cs[0].start * R, e1 - cs[0].start * R), slice(f0 - cs[1].start * R, f1 - cs[1].start * R))
+                crop = (slice(e0 - cs[0].start * R, e1 - cs[0].start * R), slice(f0 - cs[1].start * R, f1 - cs[1].start * R))
                 big = ((cs[0].stop - cs[0].start) * R, (cs[1].stop - cs[1].start) * R)
-                ws = level_lakes(surf, ocean, over_cells(coarse_lake[cs], R, big)[cut], over_cells(coarse_level[cs], R, big)[cut])
+                ext = (slice(e0, e1), slice(f0, f1))
+                ws = level_lakes(surf, ocean, over_cells(coarse_lake[cs], R, big)[crop], over_cells(coarse_level[cs], R, big)[crop],
+                                 None if cut is None else cut[ext], None if wet is None else wet[ext])
                 core = (slice(a0 - e0, a1 - e0), slice(b0 - f0, b1 - f0))
                 s, oc, w = surf[core], ocean[core], ws[core]
                 ws_out[a0:a1, b0:b1] = w
@@ -132,7 +156,9 @@ def finish_face(root: Path, out: Path, level, face: int) -> dict:
                 del surf, ocean, ws
     for a in arrays.values():
         a.flush()
-    del arrays
+    del arrays, cut, wet
+    cut_path.unlink(missing_ok=True)
+    wet_path.unlink(missing_ok=True)
     return {"face": face, "seam_cells": seams, "coast_lowered_cells": coast_lowered, "coast_raised_cells": coast_raised,
             "land_cells": land_cells, "lake_cells": lake_cells, "seconds": round(time.time() - t0, 1)}
 

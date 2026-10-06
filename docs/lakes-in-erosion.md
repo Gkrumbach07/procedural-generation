@@ -332,13 +332,117 @@ earth-v24 at 1.2 km: no water body with a tilted surface, 12.9 % of the shore
 on coarse-cell lines (chance), lake cells 2.18 M -> 1.53 M.
 
 **What this does not fix.** A level now shows the planet's lakes as they are,
-and the large ones on sediment plains are an odd shape on the coarse grid
-already: long stripes, triangles and blocks between rivers that run on
-raised ground. The particle pass lays its load along the channel wherever
-the gradient falls, the momentum term keeps the next particle on the same
-line, and nothing makes a channel leave a bed it has raised above the plain
-beside it; the lows between the channels hold the water. On Earth a river
-perched by about its own depth breaks out (avulsion) and fills the low, so
-an alluvial plain is level to metres and its flood-basin lakes are small and
-shallow. The same pass at 1.2 km raises a trunk channel 100 m over 80
-iterations. That belongs in the kernel's deposition, not in the lake rules.
+and some of the large ones are an odd shape on the coarse grid already: long
+stripes, a triangle and a block on a sediment plateau at 44 S. The first
+reading of that -- rivers running on beds they had raised, the lows between
+them flooded, wanting a rule that makes a perched river break out -- did not
+survive measurement: of the river cells on plains, 1 % stand more than 5 m
+above the lower of the two cells beside them, on the coarse grid and at
+1.2 km alike, and none above both. Section 7 has what it was.
+
+## 7. Lakes evaporate in the cold too (`hydro.pet_t0`)
+
+The water balance took its potential evaporation from the climate's `evap`,
+`k_evap max(T, 0)`: nothing at freezing, a ninth of the tropics' at 3 C. That
+is the kernel's particle decay and its ice line. It is not what open water
+loses (mm a year, roughly as measured / `potential_evaporation` / `evap`,
+scaled to Lake Chad's 2200):
+
+| lake | latitude, mean T | measured | the law | `evap` |
+|---|---|---|---|---|
+| Caspian | 42 N, 12 C | ~1000 | 1090 | 940 |
+| Titicaca | 16 S, 8 C | ~1700 | 1220 | 630 |
+| Nam Co (Tibet) | 31 N, 0 C | ~900 | 750 | 0 |
+| Superior | 47 N, 4 C | ~600 | 750 | 310 |
+| Baikal | 53 N, -1 C | ~400 | 530 | 0 |
+| Great Bear | 66 N, -7 C | ~300 | 280 | 0 |
+
+So nothing dried a cold basin, however little rain it got. earth-v24 had
+lakes on 1.83 % of its land with under a quarter of the mean rain and on
+1.55 % of the rest -- the dry land the wetter in lakes -- and the plateau
+above (3 C, a tenth of the mean rain, tectonic lows over 42 % of it) stood
+13 % under water. Its lakes were in 1.4 % of it in earth-v19 and 17 % in
+earth-v24: the lake fill is not what keeps them (rerunning earth-v24's last
+50 iterations without it leaves more closed lows there, 20.0 against 17.5 %
+of the tile, and more on the planet, 2.00 against 1.34 % of land), the two
+histories simply differ; no climate dries them in either.
+
+`hydro.pet_t0` > 0 puts the balance -- hydro's, and erosion's own every
+`flood_every` (`ErosionState.lake_pet`) -- on Hargreaves' law of temperature
+under the latitude's annual insolation,
+
+    (T + pet_t0) / (T_eq + pet_t0) x Q(lat) / Q(0)        (17.8 is Hargreaves' constant)
+
+1 at a sea-level cell on the equator, as `evap` is, so `lake_evap` and
+`land_evap` keep their meaning. Cold comes two ways: ground cold for its
+latitude has little sun and loses little, and the lake country of the shields
+keeps its water; ground cold for its height has the sun of its latitude, and
+a dry plateau's basins are pans (Tibet's lakes cover about 2 % of it).
+
+Hydro stage alone on earth-v24's surface, at 17.8:
+
+| lake cover of | `evap` | the law |
+|---|---|---|
+| all land | 1.66 % | 1.14 % |
+| land with under a quarter of the mean rain | 1.83 % | 0.60 % |
+| the rest | 1.55 % | 1.47 % |
+| cold (T <= 0) and not dry | 4.88 % | 4.74 % |
+| cold below 50 degrees of latitude | 4.72 % | 1.67 % |
+| cold above 50 degrees | 3.32 % | 2.71 % |
+| the plateau | 13.1 % | 0.0 % |
+
+Lakes over 10,000 km2: 26 -> 14; the three largest unchanged. Off by default
+until earth-v25 (earth-v24 with it from the start of erosion) is measured.
+
+## 8. The ice's small lakes (`zoom/ice.py`)
+
+What the planet's lakes are made by, on earth-v24's coarse grid (share of
+lake area; a cell goes to the first class it fits):
+
+| cause | where it is in the model | share |
+|---|---|---|
+| ice-carved basin on ground at or below 0 C | `erosion.glacial`, the last quarter of the run | 50 % |
+| closed low the tectonic bedrock arrived with | tectonics; 20 % of its land, of which 3.5 % still holds water | 24 % |
+| basin held below its rim by evaporation, elsewhere | the water balance | 10 % |
+| basin below sea level behind a sill | `open_ocean` | 1 % |
+| none of these, overflowing | -- | 14 % |
+
+The census at the large end is close to Earth's (1431 lakes over 100 km2,
+351 over 1,000, 26 over 10,000, 1 over 100,000). The small end is missing
+altogether: a coarse cell is 95 km2 and a level below it adds no lakes of its
+own (section 6), so a cold wet lowland of 1.5 million km2 had 55 lakes at
+1.2 km. Earth has a third of a million lakes over a square kilometre, most
+of them on ground an ice sheet has crossed: ice quarries the rock under it
+wherever the rock is weak and leaves hollows no river could cut and none has
+yet drained.
+
+The first level below the coarse grid (the planet at 1.2 km, the first level
+of a zoom window; their children inherit the ground) lets the ice finish its
+work, after its own erosion:
+
+* **where**: the climate's ice (`evap <= erosion.ice_evap`), tapered in from
+  its margin over `erosion.glacial_ramp` coarse cells as the coarse carve is;
+  not below the level of a lake of the planet's beside it, not at the sea;
+* **how deep**: up to `SCOUR_M` (40 m) times the rock's *grain* -- a ridged
+  fractal field on the sphere (seamless across cube faces, the same at every
+  level) standing for the fracture spacing the model does not carry, deepest
+  along its lineaments -- and `1 - hardness / 2`; no base level;
+* **which hollows hold water**: those on ground that was dry before the cut
+  (the lows the level's rivers had left are not the ice's), where a lake
+  covering 15 % of its own catchment gets what it evaporates by the planet's
+  water balance; each at its own spill point
+  (`parent_lakes.level_lakes(cut=...)`).
+
+Set against Earth's lake country (the Shield, Finland: about a tenth under
+water, N(> A) ~ A^-1, mean depths of 5-15 m) on that lowland at 1.2 km: the
+ice's own lakes cover 5.1 % of it in 5,300 lakes (1,840 over 3 km2, 98 over
+100), N(> A) ~ A^-0.88 from 3 to 300 km2, mean depth 6.6 m; with the planet's
+lakes 8.3 %. The grain's gain (0.7) and base wavelength (20 km) were chosen
+for that slope: 0.6 gives 0.82, 0.8 gives 0.92, 30 km gives 0.76.
+
+Not here yet: lakes in glacial *valleys* (a carve by ice flux at 1.2 km cut
+hair-thin lakes along every flow line of the level's own rivers, and was
+dropped), the elongation of real shield lakes along the ice's flow, ice
+ground that is warm today (the model's ice is where it is cold now, 23.5 % of
+land, nearer Earth's last glacial maximum than its present ice), crater lakes
+and oxbows.

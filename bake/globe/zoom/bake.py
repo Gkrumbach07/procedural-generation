@@ -60,6 +60,7 @@ from ..io.world_store import WorldStore
 from ..refine import basin_job as bj
 from ..refine.upsample import FineWindow, Window, detail_amplitude, detail_noise, ridged_fbm, sample, upsample_window
 from ..refine.zoom import DETAIL_HEIGHT_SHARE, ROCK_HARDNESS, ZOOM_REFINE, cone_shield, drain_noise, smooth_drift, zoom_params
+from . import ice
 from . import parent_lakes as lk
 from . import progress
 
@@ -1087,8 +1088,17 @@ def run_level(root: Path, params: WorldParams, spot: tuple[int, int, int], level
     height -= np.minimum(fd, 0.0)
     surface = height + sediment
     held_after = held_p90(surface - plain, cells, 4 * inp["f"], geo.product())
-    # water: the parent's lakes and no others, each at its own level (zoom/parent_lakes.py)
-    ws = lk.level_lakes(surface, inp["ocean"], inp["lake_over"], inp["lake_level"]).astype(np.float64)
+    # the first level below the coarse grid lets the ice finish its work (zoom/ice.py); its children
+    # have that ground from it
+    cut = wet = None
+    if parent is None:
+        cut, wet = ice.window_cut(root, lp, params.coarse_grid(), bj.coarse_inputs(root, lp)[1], geo.win, surface, inp["hardness"])
+    if cut is not None:
+        cut[inp["ocean"] | ~done] = 0.0
+        ice.lower(height, sediment, cut)
+        surface = height + sediment
+    # water: the parent's lakes and the ice's own, each at its own level (zoom/parent_lakes.py)
+    ws = lk.level_lakes(surface, inp["ocean"], inp["lake_over"], inp["lake_level"], cut, wet).astype(np.float64)
     ws = np.where(inp["ocean"], np.maximum(0.0, surface), ws)
     _, flux = drainage(surface, inp["ocean"], weight)
     arrays = {
