@@ -584,6 +584,26 @@ earth-v25's ice ground:
 An ice sheet's erosion of a shield over the Quaternary is tens of metres on
 average and hundreds in its troughs. earth-v26 has 6 (and the ice age).
 
+**earth-v26, measured** (earth-v25 with `ice_age_c` 8 and `glacial_rate` 6;
+land 26.2 % of the sphere, median elevation 362 m against 345, above 3 km
+1.42 % against 1.39):
+
+| | earth-v25 | earth-v26 |
+|---|---|---|
+| lakes, coarse / refined grid | 0.92 / 0.73 % of land | 0.92 / 0.76 % |
+| largest four, refined grid (1000 km2) | 112, 36, 25, 21 | 33, 31, 30, 28 |
+| lake cover of today's ice ground (12 % of land) | 2.62 % | 1.17 % |
+| ... of ground only the ice age covers (12 %) | 1.16 % | 2.37 % |
+| ... of ground never under ice | 0.63 % | 0.65 % |
+| ... of land with under a quarter of the mean rain | 0.41 % | 0.77 % |
+| lakes over 100 / 1,000 / 10,000 / 100,000 km2 | 1000 / 203 / 16 / 1 | 1043 / 206 / 20 / 0 |
+| mean depth of lakes | 15 m | 20 m |
+
+The lake country moved onto the ground the ice has left, and the lakes on it
+are ovals and troughs at river junctions where earth-v25 had its wedges. The
+dry land's lake cover rose: some cold dry ground is ice in the ice age's
+climate, and its basins hold water in today's where the balance allows.
+
 **Valley ice** (`VALLEY_M`, 200 m). A valley glacier's trough ends at a lip
 under its snout, and the trough behind the lip is a finger lake (the Alps'
 border lakes, the Finger Lakes). The cut has a second term for it: the
