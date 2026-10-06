@@ -370,7 +370,7 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
     if noise is None:
         noise = np.where(ocean, 0.0, quiet * amp * hashed_ridged(int(params.world.seed) + PLANET_KEY, face, ta0 * R - 1, tb0 * R - 1, n, n, 2.0 * R))
     # the planet's lakes are water from the first iteration (zoom/parent_lakes.py): no noise under one, none at
-    # its level on the ground beside it, and its cells flagged for the particles (zoom.bake.erode_tile)
+    # its level on the ground beside it, and its level the base level of its cells (zoom.bake.erode_tile)
     over, lake_level, floor = (a[t, t] for a in lk.parent_lakes(fields, derived, win))
     water, still = lk.standing(plain, ocean, over, lake_level)
     noise = noise * lk.lake_quiet(plain, water, still, coast_taper, lk.LAKE_REACH * R)
@@ -391,9 +391,9 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
     inwin[1:-1, 1:-1] = True
     land = inwin & ~ocean
     frozen = land & ndimage.binary_dilation(ocean & inwin, structure=np.ones((3, 3), bool))
-    # ...and a lake's bed is not the erosion's to work: the level starts with it as the planet left it
+    # ...and a lake of the planet's is standing water at its level, as the sea is at 0 (zoom.bake.erode_tile)
     still &= water - (cur["height"] + cur["sediment"]) > float(lp.hydro.lake_min_depth)
-    active = land & ~frozen & ~still
+    active = land & ~frozen
     stats = {"face": face, "window": [ta0, tb0, nc], "active_cells": int(active.sum())}
     if not active.any():
         return stats
@@ -401,7 +401,7 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
     job = {"a": ta0 + mc, "b": tb0 + mc, "c": cc, "sl": sl, "land": land, "active": active, "inwin": inwin, "ocean": ocean, "src": src, "f": f_hold,
            "arrays": {"height": cur["height"], "sediment": cur["sediment"], "discharge": cur["discharge"], "momentum": cur["momentum"],
                       "hardness": tr["hardness"], "precip": np.where(ocean, 0.0, np.maximum(tr["precip"], 0.0)), "evap": tr["evap"],
-                      "metric": tr["metric"], "metric_inv": tr["metric_inv"], "plain": plain, "still": still}}
+                      "metric": tr["metric"], "metric_inv": tr["metric_inv"], "plain": plain, "lake_level": np.where(still, water, -np.inf)}}
     if int(level.snapshots) > 0 and int(level.frame_res) > 0:
         # the time lapse: the tile's core every few iterations, block-averaged to its share of
         # the face's frame.  Tiles run in passes, so no two are at the same iteration at the

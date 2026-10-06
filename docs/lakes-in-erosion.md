@@ -307,13 +307,23 @@ What a level does now:
   the floor of every basin the planet left dry (`derived["floor"]`, the
   coarse cells no neighbour is lower than), so it fills the noise's pits and
   leaves the planet's basins open.
-* **While it erodes**: a lake's cells are not active (the bed stays as the
-  parent left it; a particle that ends on one leaves its load on the shore it
-  came by) and are flagged, so a particle lays `lake_trap` of its load on the
-  shore as it enters. On the same plateau tile the bed under the lakes
-  changes by 0.00 m at the 90th percentile (5.8 m at the 99th: the deltas);
-  flagged but active, the same cells took +23 m on average, and single dying
-  particles speckled the shallows with islands.
+* **While it erodes**: a lake is standing water at its level, as the sea is
+  at 0 -- the level is the base level of the lake's cells, so the kernel's sea
+  rules hold: the drop into the lake counts down to its surface, the shore is
+  not cut below it, and a river's load goes into the water. What the particles
+  lay on the bed is not kept (after a level's 80 iterations it is a stipple of
+  single tracks, a third of the floor moved over 20 m): the floor ends as the
+  level found it. Two forms before this one were worse at the shore. Cells
+  only flagged as a lake took +23 m on average and islands from single dying
+  particles. Cells taken out of the erosion kept their bed (0.00 m at the 90th
+  percentile) but every particle ending in the lake left its whole load on the
+  shore cell it came by, and nothing held the shore to the water level: on a
+  tile of earth-v24 the ground within two cells of a lake was cut 190 m and
+  built 330 m at its first and last percentiles -- moats and walls a cell
+  wide, twice what it was before the lakes were water at all (89 and 170 m).
+  With the sea rules: 86 and 82 m, the bed under the lakes -2.8 to +1.2 m, and
+  ground over 12 cells from any lake moved over 20 m on 8 % of its cells
+  against 34 %.
 * **At the end** (`parent_lakes.level_lakes`): a depression of the level
   holds water only where at least `LAKE_SHARE` (a quarter) of the water it
   would hold lies over the parent's lake cells, at that lake's level or its
