@@ -394,6 +394,35 @@ Hydro stage alone on earth-v24's surface, at 17.8:
 Lakes over 10,000 km2: 26 -> 14; the three largest unchanged. Off by default
 until earth-v25 (earth-v24 with it from the start of erosion) is measured.
 
+### The cold follows the ground (`erosion.climate_at_surface`)
+
+The climate runs before erosion, on the tectonic bedrock, and its
+`temperature` and `evap` stay on that surface. Erosion's ice line is `evap <=
+ice_evap`, so a range the stage takes down a kilometre is glaciated to the end
+for the height it no longer has, and the glacial pass, which has no base
+level, keeps cutting it. On earth-v24:
+
+* 23.5 % of land is ice ground by the bedrock's temperature, 20.8 % by the
+  temperature at the surface the stage ended with;
+* 19 % of the ice ground (4.5 % of land) is above freezing at that surface --
+  a median 794 m under its bedrock, now at +2.3 C -- and it has the highest
+  lake cover of any ground: 5.9 %, against 3.1 % on ice ground still cold and
+  1.1 % off it. That is 16 % of all lake area;
+* rerun from the iteration-750 checkpoint, the last 50 iterations without the
+  glacial pass end with closed lows on 0.88 % of land against 1.34 % with it
+  (on the plateau, 10.3 against 17.5 % of the tile): its striped lakes lie
+  along tectonic ranges whose crests were ice by their bedrock height, cut
+  into troughs and dammed at the ice's margin. The same reruns clear the
+  rest: without the lake fill 2.00 %, without the fill's load on the crust
+  1.30 %, without isostasy 1.66 %.
+
+With `erosion.climate_at_surface` the erosion state carries the temperature
+itself and moves it by the lapse rate to the surface as it stands
+(`ErosionState.temperature`): the ice line (`cold`), the lakes that are
+frozen and take no fill, and with `pet_t0` the lakes' evaporation all read
+it. Hydro and `zoom/ice.py` then read it at the final surface
+(`hydro.run.surface_temperature`), as derive's biomes always have.
+
 ## 8. The ice's small lakes (`zoom/ice.py`)
 
 What the planet's lakes are made by, on earth-v24's coarse grid (share of

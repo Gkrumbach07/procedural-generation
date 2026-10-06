@@ -675,6 +675,14 @@ def test_the_balance_reads_the_law_from_the_worlds_temperature(tmp_path):
     assert balance_evaporation(store, params, evap) is evap
     pet = balance_evaporation(store, params.with_overrides(hydro={"pet_t0": 17.8}), evap)
     assert pet.data.shape == evap.data.shape and float(pet.data.min()) > 0.1 and float(pet.data.max()) < 0.4
+    # with erosion.climate_at_surface the temperature is read at the surface given: 1000 m under the
+    # bedrock the climate ran on is 6.5 C warmer, and evaporates more
+    bed = FaceField(grid, np.full((6, grid.NE, grid.NE), 1500.0, np.float32), name="bedrock")
+    store.save_field(bed)
+    low = np.full((6, grid.NE, grid.NE), 500.0, np.float32)
+    here = params.with_overrides(hydro={"pet_t0": 17.8}, erosion={"climate_at_surface": True})
+    assert np.allclose(balance_evaporation(store, here, evap, bed.data).data, pet.data)
+    assert (balance_evaporation(store, here, evap, low).data > pet.data * 1.3).all()
 
 
 def test_a_closed_lake_passes_no_water_downstream():

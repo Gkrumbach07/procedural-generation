@@ -90,7 +90,16 @@ class ErosionState:
     samp: np.ndarray = field(default=None, repr=False)  # packed float32 samples (F, NE, NE, NS), rebuilt every iteration
     acc: np.ndarray = field(default=None, repr=False)  # float64 net terrain change of the current iteration (cell units), zero between iterations
     pending: np.ndarray = field(default=None, repr=False)  # float64 sediment stockpile per cell (cell units) that found no room this iteration (particle.apply_changes: land pits, and the seafloor less the offshore write-off); re-injected as a loaded particle next iteration; part of the mass balance
-    lake_pet: np.ndarray | None = None  # (F, NE, NE) float32: the potential evaporation the lake balance runs on where it is not `evap` (hydro.pet_t0; erosion.run.build_state); a field of the inputs, not of the run, so not checkpointed
+    lake_pet: np.ndarray | None = None  # (F, NE, NE) float32: a potential evaporation for the lake balance to run on in place of `evap` or the law below, as given
+    # the climate's temperature, for what erosion reads off it besides the kernel's `evap` (erosion.run.build_state; fields
+    # of the inputs, not of the run, so not checkpointed): `temp0` (F, NE, NE) float32 C on the surface `temp_z` (m, the
+    # tectonic bedrock the climate ran on); with `temp_follow` it moves by `temp_lapse` C/km to the surface as it stands
+    temp0: np.ndarray | None = None
+    temp_z: np.ndarray | None = None
+    temp_lapse: float = 0.0
+    temp_follow: bool = False
+    temp_k: float = 1.0  # climate.k_evap: `evap` = temp_k max(T, 0), so `evap <= e` is `T <= e / temp_k`
+    pet_law: tuple | None = None  # (T_eq, t0, sun (F, NE, NE)): the lakes' evaporation by hydro.pet_t0 (hydro.balance.potential_evaporation), read off `temperature()`
     lake_load: np.ndarray = field(default=None, repr=False)  # float64 sediment per cell (cell units) that particles brought into a lake and its shore had no room for (particle.trace_particles, `erosion.lake_fill`): parked on the lake cell entered until `settle_lake_loads` lays it over the lake's floor
     lake_id: np.ndarray = field(default=None, repr=False)  # int32 per cell: the lake of `lake_room` a cell belongs to, -1 where a load cannot be parked
     lake_room: np.ndarray = field(default=None, repr=False)  # float64 per lake: the room it has left for its rivers' load (cell units), counted down by particle.apply_changes
@@ -245,6 +254,39 @@ class ErosionState:
     def surface(self) -> np.ndarray:
         return self.height + self.sediment
 
+    def temperature(self) -> np.ndarray | None:
+        """The climate's temperature (C, extended array): at the surface as
+        it stands with ``temp_follow`` (``erosion.climate_at_surface``), on
+        the bedrock the climate ran on without; None where the state carries
+        none."""
+        if self.temp0 is None:
+            return None
+        if not self.temp_follow or self.temp_z is None:
+            return self.temp0
+        z = np.maximum(self.surface() * self.height_unit_m, 0.0)
+        return (self.temp0 + self.temp_lapse * (np.maximum(self.temp_z, 0.0) - z) / 1000.0).astype(np.float32)
+
+    def cold(self, ice_evap: float = 0.0) -> np.ndarray:
+        """Where the climate holds ice: ``evap <= ice_evap``, which is ``T <=
+        ice_evap / k_evap`` -- read off :meth:`temperature` where the state
+        has one that follows the surface, so ground the stage has lowered into
+        the warmth is no longer ice and ground it has raised into the cold
+        is."""
+        if self.temp0 is None or not self.temp_follow:
+            return self.evap <= float(ice_evap)
+        return self.temperature() <= float(ice_evap) / max(float(self.temp_k), 1e-12)
+
+    def balance_evaporation(self) -> np.ndarray:
+        """The potential evaporation the lake balance runs on (extended
+        array): ``lake_pet`` where one was given, the law of ``hydro.pet_t0``
+        on :meth:`temperature` where the state has it, else ``evap``."""
+        if self.lake_pet is not None:
+            return self.lake_pet
+        if self.pet_law is None or self.temp0 is None:
+            return self.evap
+        t_eq, t0, sun = self.pet_law
+        return (np.maximum(self.temperature() + float(t0), 0.0) / (float(t_eq) + float(t0)) * sun).astype(np.float32)
+
     def pack(self) -> None:
         """Refresh the packed float32 sample array from the state arrays."""
         use_route = self.route is not None
@@ -395,7 +437,7 @@ class ErosionState:
         down = downstream_table(fd, self.grid.owner, H)
         topo = flood.pop_seq[::-1]
         topo = topo[~ocean.reshape(-1)[topo]]
-        pet = self.evap if self.lake_pet is None else self.lake_pet
+        pet = self.balance_evaporation()
         water, _acc, bal = balance_lakes(surf, flood.filled, ocean, flood.order, down, topo,
                                          np.ascontiguousarray(self.precip[inter]), np.ascontiguousarray(pet[inter]),
                                          self.grid, float(lake_evap), float(land_evap))
@@ -546,7 +588,7 @@ class ErosionState:
                 add(self.pending, cells[ptr[spill]], over[spill])
                 out["stray"] += float(over[spill].sum())
             warm = np.ones(n, bool)
-            cold = np.asarray(self.evap[inter], np.float64).reshape(-1)[cells] <= ice_evap
+            cold = self.cold(ice_evap)[inter].reshape(-1)[cells]
             warm[np.unique(L[cold])] = False
             open_ = warm & (left > 0.0)
             takes.reshape(-1)[cells[open_[L]]] = True

@@ -29,6 +29,13 @@ field has to be threaded through the erosion contract.  Because the
 temperature field already includes the lapse rate, this picks out both
 high latitudes and high ground, which is where Earth's lake districts are.
 
+That temperature is the climate's, though, and the climate ran on the
+tectonic bedrock: a range this stage takes down a kilometre stays ice for
+the height it had.  With ``erosion.climate_at_surface`` the state carries
+the temperature itself and moves it with the lapse rate to the surface as it
+stands (``ErosionState.cold``), so the ice leaves ground it has cut into the
+warmth -- and takes ground the rivers have built into the cold.
+
 Ice flux is taken from ``discharge``.  Under ice the same precipitation
 falls and the same catchment feeds the same point — it simply travels as
 ice rather than water — and ``discharge`` is already an accumulation of
@@ -59,7 +66,7 @@ def ice_mask(state, ice_evap: float = 0.0) -> np.ndarray:
     22 of the small preset bottoms out at +1.64 C), so no setting of the
     other glacial parameters can give it a single lake.
     """
-    return (state.mask == pk.MASK_ACTIVE) & (state.evap <= float(ice_evap)) & (state.surface() > 0.0)
+    return (state.mask == pk.MASK_ACTIVE) & state.cold(ice_evap) & (state.surface() > 0.0)
 
 
 def ice_depth(state, ice: np.ndarray, ramp: int) -> np.ndarray:
@@ -140,7 +147,7 @@ def carve(state, params) -> dict:
         # margin -- and the next pass's taper -- jumps inland, printing a
         # land/sea band per pass (docs/streaks-and-flats.md).  Sticky: a
         # cell glaciated before stays glaciated while it is still cold.
-        cold = (state.mask == pk.MASK_ACTIVE) & (state.evap <= float(ep.ice_evap))
+        cold = (state.mask == pk.MASK_ACTIVE) & state.cold(float(ep.ice_evap))
         ice = ice | (prev & cold)
     if not ice.any():
         return stats

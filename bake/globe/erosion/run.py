@@ -240,11 +240,20 @@ def build_state(store: WorldStore, params: WorldParams, replay: bool = True) -> 
     ev = store.load_field("evap", grid)
     state = ErosionState.from_grid(grid, bed, hard, pr, ev, upl, params.erosion)
     state.land_target = datum_land_fraction(params, bed.interior)
-    if float(getattr(params.hydro, "pet_t0", 0.0)) > 0.0:
-        # the lakes' own evaporation, which does not stop at freezing (hydro.balance.potential_evaporation)
-        from ..hydro.run import balance_evaporation
+    t0 = float(getattr(params.hydro, "pet_t0", 0.0))
+    follow = bool(getattr(params.erosion, "climate_at_surface", False))
+    if t0 > 0.0 or follow:
+        # the climate's temperature itself: for the lakes' evaporation, which does not stop at freezing
+        # (hydro.pet_t0), and for a cold that follows the ground (erosion.climate_at_surface)
+        from ..hydro.balance import insolation
 
-        state.lake_pet = balance_evaporation(store, params, ev).data
+        state.temp0 = np.ascontiguousarray(store.load_field("temperature", grid).data, np.float32)
+        state.temp_z = np.ascontiguousarray(store.load_field("bedrock", grid).data, np.float32)      # with its cones on: what the climate saw
+        state.temp_lapse = float(params.climate.lapse)
+        state.temp_k = float(params.climate.k_evap)
+        state.temp_follow = follow
+        if t0 > 0.0:
+            state.pet_law = (float(params.climate.T_eq), t0, insolation(grid.latitude()).astype(np.float32))
     if replay:
         start_replay(state, params)
     return state

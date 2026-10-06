@@ -111,16 +111,32 @@ def river_threshold_volume(precip_interior: np.ndarray, land: np.ndarray, river_
     return float(river_threshold) * mean_p
 
 
-def balance_evaporation(store, params, evap: FaceField) -> FaceField:
+def surface_temperature(store, params, surface: np.ndarray | None = None) -> FaceField:
+    """The climate's ``temperature``: as it is (on the tectonic bedrock the
+    climate ran on), or with ``erosion.climate_at_surface`` moved by the
+    lapse rate to ``surface`` (extended ``(6, NE, NE)`` metres; the world's
+    ``height + sediment`` when None)."""
+    from ..climate.temperature import retarget
+
+    grid = params.coarse_grid()
+    T = store.load_field("temperature", grid)
+    if not bool(getattr(params.erosion, "climate_at_surface", False)):
+        return T
+    if surface is None:
+        surface = store.load_field("height", grid).data.astype(np.float32) + store.load_field("sediment", grid).data.astype(np.float32)
+    return FaceField(grid, retarget(T.data, store.load_field("bedrock", grid).data, surface, params.climate), name="temperature")
+
+
+def balance_evaporation(store, params, evap: FaceField, surface: np.ndarray | None = None) -> FaceField:
     """The potential evaporation the water balance runs on: the climate's
     ``evap``, or with ``hydro.pet_t0`` the law of temperature and latitude
     that does not stop at freezing (:func:`balance.potential_evaporation`),
-    from the climate's ``temperature``."""
+    from :func:`surface_temperature`."""
     t0 = float(getattr(params.hydro, "pet_t0", 0.0))
     if t0 <= 0.0:
         return evap
     grid = params.coarse_grid()
-    T = store.load_field("temperature", grid)
+    T = surface_temperature(store, params, surface)
     return FaceField(grid, potential_evaporation(T.data, grid.latitude(), float(params.climate.T_eq), t0), name="pet")
 
 
@@ -180,7 +196,8 @@ def run(store, params, log=print) -> dict:
     topo = flood.pop_seq[::-1]
     topo = topo[~ocean.reshape(-1)[topo]]
     water, acc, bal = balance_lakes(surface, filled, ocean, flood.order, down, topo,
-                                    precip.interior, balance_evaporation(store, params, evap).interior, grid, hp.lake_evap, float(getattr(hp, "land_evap", 0.0)))
+                                    precip.interior, balance_evaporation(store, params, evap, h.data.astype(np.float32) + sed.data.astype(np.float32)).interior,
+                                    grid, hp.lake_evap, float(getattr(hp, "land_evap", 0.0)))
     info["t_balance_s"] = time.time() - t
     info["lake_balance"] = bal
     depth = water - surface

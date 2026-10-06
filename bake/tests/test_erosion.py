@@ -1318,6 +1318,41 @@ def test_erosions_lake_balance_runs_on_the_evaporation_that_does_not_stop_at_fre
     assert (st.evap == 0.0).all()                                 # the kernel's field is not the balance's
 
 
+def test_the_cold_follows_the_ground(scratch):
+    """``erosion.climate_at_surface`` (``ErosionState.temperature`` /
+    ``cold`` / ``balance_evaporation``): the ice line and the lakes'
+    evaporation read the climate's temperature moved by the lapse rate to
+    the surface as it stands.  Ground taken down into the warmth stops being
+    ice, ground built up into the cold starts, and without the switch the
+    climate's own field rules whatever the surface does."""
+    from globe.erosion import glacial
+    from globe.hydro.balance import insolation
+    p, st = _land_world(scratch, "cold_ground")
+    u = st.height_unit_m
+    z0 = (st.surface() * u).astype(np.float32)
+    assert st.temperature() is None and np.array_equal(st.cold(0.0), st.evap <= 0.0)      # no temperature: `evap` as before
+    top = float(np.percentile(z0[st.interior][z0[st.interior] > 0.0], 60))
+    assert top > 260.0
+    st.temp0 = np.where(z0 > top, -1.0, 4.0).astype(np.float32)                           # the high ground just under freezing
+    st.temp_z, st.temp_lapse, st.temp_k = z0.copy(), 6.5, 1.0 / 28.0
+    st.evap[...] = (st.temp_k * np.maximum(st.temp0, 0.0)).astype(st.evap.dtype)
+    high = st.temp0 < 0.0
+    assert np.array_equal(st.cold(0.0), high)                                              # the climate's own field...
+    st.height[high] -= 250.0 / u                                                           # ...which a 250 m cut does not move
+    assert np.array_equal(st.cold(0.0), high)
+    st.temp_follow = True
+    assert not st.cold(0.0)[high].any()                                                    # 250 m down is 1.6 C warmer: no ice left
+    land = (st.mask == pk.MASK_ACTIVE) & (st.surface() > 0.0)
+    assert not (glacial.ice_mask(st, 0.0) & high).any()
+    st.sediment[~high & land] += 800.0 / u                                                 # the low ground built 800 m up: 5.2 C colder
+    assert st.cold(0.0)[~high & land].all() and glacial.ice_mask(st, 0.0)[~high & land].all()
+    # the lakes' evaporation reads the same temperature
+    st.pet_law = (28.0, 17.8, insolation(st.grid.latitude()).astype(np.float32))
+    warm = st.balance_evaporation()
+    st.temp_follow = False
+    assert (st.balance_evaporation()[high] < warm[high]).all()                             # the cut ground evaporates more than the climate's field says
+
+
 def test_a_lake_keeps_its_rivers_sediment_and_fills_towards_a_plain(scratch):
     """`erosion.lake_fill`: in a lake with room the load its shore cannot take
     is parked on the lake (`lake_load`), never more than the lake's room, and

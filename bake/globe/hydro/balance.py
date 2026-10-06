@@ -108,6 +108,13 @@ def _accumulate_endorheic(w, down, topo, outlet_lake, lake_ptr, lake_z, lake_cum
 INSOLATION_S2 = -0.477
 
 
+def insolation(latitude: np.ndarray) -> np.ndarray:
+    """The annual-mean insolation at ``latitude`` (radians) over the
+    equator's: 1 there, 0.42 at the poles."""
+    x = np.sin(np.asarray(latitude, dtype=np.float64))
+    return (1.0 + INSOLATION_S2 * 0.5 * (3.0 * x * x - 1.0)) / (1.0 - 0.5 * INSOLATION_S2)
+
+
 def potential_evaporation(temperature_c: np.ndarray, latitude: np.ndarray, t_eq: float, t0: float) -> np.ndarray:
     """What open water can evaporate in a year, as a multiple of what it does
     at a sea-level cell on the equator (``hydro.pet_t0``): Hargreaves' law of
@@ -141,9 +148,7 @@ def potential_evaporation(temperature_c: np.ndarray, latitude: np.ndarray, t_eq:
     1.55 % of the rest, and on 13 % of a 1650 m plateau at 44 S that gets a
     tenth of it."""
     T = np.asarray(temperature_c, dtype=np.float64)
-    x = np.sin(np.asarray(latitude, dtype=np.float64))
-    q = (1.0 + INSOLATION_S2 * 0.5 * (3.0 * x * x - 1.0)) / (1.0 - 0.5 * INSOLATION_S2)
-    return (np.maximum(T + float(t0), 0.0) / (float(t_eq) + float(t0)) * q).astype(np.float32)
+    return (np.maximum(T + float(t0), 0.0) / (float(t_eq) + float(t0)) * insolation(latitude)).astype(np.float32)
 
 
 def budyko_evaporation(aridity: np.ndarray) -> np.ndarray:

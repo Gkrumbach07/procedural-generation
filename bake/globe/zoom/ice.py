@@ -92,7 +92,8 @@ def coarse_ice(fields: dict, temperature, params) -> dict:
     """``ice`` (float32, 0..1) and ``ice_wet`` (u8) on the coarse grid.
 
     ``ice`` is how fully the ice worked a cell: 0 off the glaciated ground
-    (the climate's ``evap`` above ``erosion.ice_evap``, or sea), rising to 1
+    (the climate's ``evap`` above ``erosion.ice_evap`` -- ``temperature``
+    above that line with ``erosion.climate_at_surface`` -- or sea), rising to 1
     ``erosion.glacial_ramp`` cells in from its margin, as the coarse pass's
     own carve does (``erosion.glacial.ice_depth``).
 
@@ -108,14 +109,18 @@ def coarse_ice(fields: dict, temperature, params) -> dict:
     ep, hp = params.erosion, params.hydro
     evap = np.asarray(fields["evap"].data, np.float32)
     sea = fields["basin_id"].data < 0
-    ice = (evap <= float(ep.ice_evap)) & ~sea
+    T = np.asarray(temperature.data, np.float64)
+    follow = bool(getattr(ep, "climate_at_surface", False))
+    # the ice line erosion ended with: the climate's own, or at the surface (erosion.climate_at_surface;
+    # `temperature` is then hydro.run.surface_temperature's)
+    ice = ((T <= float(ep.ice_evap) / max(float(params.climate.k_evap), 1e-12)) if follow else (evap <= float(ep.ice_evap))) & ~sea
     ramp = float(max(int(ep.glacial_ramp), 0) + 1)
     taper = np.zeros(ice.shape, np.float32)
     for f in range(ice.shape[0]):
         if ice[f].any():
             taper[f] = np.clip(ndimage.distance_transform_edt(ice[f]) / ramp, 0.0, 1.0)
     t0 = float(getattr(hp, "pet_t0", 0.0))
-    pet = potential_evaporation(temperature.data, grid.latitude(), float(params.climate.T_eq), t0) if t0 > 0.0 else evap
+    pet = potential_evaporation(T, grid.latitude(), float(params.climate.T_eq), t0) if t0 > 0.0 else evap
     rain = np.maximum(np.asarray(fields["precip"].data, np.float64), 1e-9)
     land_evap = float(getattr(hp, "land_evap", 0.0))
     room = 1.0 / LAKE_COUNTRY_SHARE - 1.0
@@ -148,13 +153,14 @@ def coarse_ice_of(root, params, fields: dict) -> dict:
     """:func:`coarse_ice` of the world at ``root``, kept for the process."""
     from pathlib import Path
 
+    from ..hydro.run import surface_temperature
     from ..io.world_store import WorldStore
 
     key = str(Path(root).resolve())
     if key not in _COARSE:
-        grid = fields["evap"].grid
+        surface = fields["height"].data.astype(np.float32) + fields["sediment"].data.astype(np.float32)
         _COARSE.clear()
-        _COARSE[key] = coarse_ice(fields, WorldStore(root).load_field("temperature", grid), params)
+        _COARSE[key] = coarse_ice(fields, surface_temperature(WorldStore(root), params, surface), params)
     return _COARSE[key]
 
 
