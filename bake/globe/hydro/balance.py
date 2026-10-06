@@ -103,6 +103,49 @@ def _accumulate_endorheic(w, down, topo, outlet_lake, lake_ptr, lake_z, lake_cum
     return acc
 
 
+#: second Legendre coefficient of the annual-mean insolation by latitude at Earth's obliquity
+#: (North 1975): Q(lat) = Q0 (1 + s2 P2(sin lat)), the poles at 0.42 of the equator
+INSOLATION_S2 = -0.477
+
+
+def potential_evaporation(temperature_c: np.ndarray, latitude: np.ndarray, t_eq: float, t0: float) -> np.ndarray:
+    """What open water can evaporate in a year, as a multiple of what it does
+    at a sea-level cell on the equator (``hydro.pet_t0``): Hargreaves' law of
+    temperature under the latitude's own sun,
+
+        (T + t0) / (t_eq + t0) * Q(lat) / Q(0),   never below 0
+
+    with ``t0`` = 17.8 C his constant and ``Q`` the annual-mean insolation.
+    Same units as the climate's ``evap`` (1 at ``t_eq`` on the equator), which
+    it replaces in the water balance; float32, the shape of ``temperature_c``
+    (``latitude`` in radians, the same shape).
+
+    ``evap`` is ``k_evap max(T, 0)``: nothing evaporates at freezing and a
+    3 C cell loses a ninth of what a 28 C one does.  That is the kernel's
+    particle decay and its ice line, and it is not what lakes do.  Open-water
+    evaporation in mm a year, roughly as measured / this law / ``evap``'s,
+    the scale set by Lake Chad (13 N, 28 C, ~2200):
+
+    * the Caspian (42 N, 12 C): ~1000 / 1090 / 940;
+    * Titicaca (16 S, 8 C, 3800 m): ~1700 / 1220 / 630;
+    * Nam Co, Tibet (31 N, 0 C, 4700 m): ~900 / 750 / 0;
+    * Lake Superior (47 N, 4 C): ~600 / 750 / 310;
+    * Baikal (53 N, -1 C): ~400 / 530 / 0;
+    * Great Bear Lake (66 N, -7 C): ~300 / 280 / 0.
+
+    Cold comes two ways.  Ground cold for its latitude has little sun and
+    loses little: the lake country of the shields keeps its water.  Ground
+    cold for its height has the sun of its latitude: a dry plateau's basins
+    are salt pans.  With ``evap`` both kept every drop: earth-v24 had lakes
+    on 1.83 % of its land with under a quarter of the mean rain, against
+    1.55 % of the rest, and on 13 % of a 1650 m plateau at 44 S that gets a
+    tenth of it."""
+    T = np.asarray(temperature_c, dtype=np.float64)
+    x = np.sin(np.asarray(latitude, dtype=np.float64))
+    q = (1.0 + INSOLATION_S2 * 0.5 * (3.0 * x * x - 1.0)) / (1.0 - 0.5 * INSOLATION_S2)
+    return (np.maximum(T + float(t0), 0.0) / (float(t_eq) + float(t0)) * q).astype(np.float32)
+
+
 def budyko_evaporation(aridity: np.ndarray) -> np.ndarray:
     """Share of the rain a land surface evaporates, by its aridity index
     (potential evaporation over rain): Budyko's (1974) curve, ``sqrt(a

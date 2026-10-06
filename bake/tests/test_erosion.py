@@ -1292,6 +1292,32 @@ def test_lake_balance_makes_a_dug_basin_water_the_kernel_respects(scratch):
     assert (after >= before - 1e-6).all()
 
 
+def test_erosions_lake_balance_runs_on_the_evaporation_that_does_not_stop_at_freezing(scratch):
+    """``hydro.pet_t0``: erosion's own lake balance takes ``lake_pet`` where
+    the state has one (``erosion.run.build_state``), not the kernel's
+    ``evap``.  In a frozen world ``evap`` is zero and every basin stands full;
+    with the law they settle or dry as their rain allows."""
+    p, st = _land_world(scratch, "lake_pet")
+    face, i0, j0 = _dry_site(st, 6)
+    H = st.H
+    around = st.surface()[face, H + i0 - 2:H + i0 + 8, H + j0 - 2:H + j0 + 8]
+    _dig_basin(st, face, i0, j0, 5, 0.3 * float(around.min()))
+    st.evap[...] = 0.0
+    min_depth = p.hydro.lake_min_depth / st.height_unit_m
+
+    def lakes():
+        st.refresh_base(p.hydro.ocean_min_fraction)
+        st.refresh_route(cell_units(p.erosion, "route_eps", st.height_unit_m))
+        return st.refresh_lakes(64.0, min_depth, p.hydro.ocean_min_fraction)
+
+    frozen = lakes()
+    assert frozen["lake_cells"] > 0 and frozen["closed"] == 0 and frozen["dry"] == 0
+    st.lake_pet = np.full(st.evap.shape, 1.0, dtype=np.float32)
+    thawed = lakes()
+    assert thawed["closed"] + thawed["dry"] > 0 and thawed["lake_cells"] < frozen["lake_cells"]
+    assert (st.evap == 0.0).all()                                 # the kernel's field is not the balance's
+
+
 def test_a_lake_keeps_its_rivers_sediment_and_fills_towards_a_plain(scratch):
     """`erosion.lake_fill`: in a lake with room the load its shore cannot take
     is parked on the lake (`lake_load`), never more than the lake's room, and

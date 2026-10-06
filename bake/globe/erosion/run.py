@@ -240,6 +240,11 @@ def build_state(store: WorldStore, params: WorldParams, replay: bool = True) -> 
     ev = store.load_field("evap", grid)
     state = ErosionState.from_grid(grid, bed, hard, pr, ev, upl, params.erosion)
     state.land_target = datum_land_fraction(params, bed.interior)
+    if float(getattr(params.hydro, "pet_t0", 0.0)) > 0.0:
+        # the lakes' own evaporation, which does not stop at freezing (hydro.balance.potential_evaporation)
+        from ..hydro.run import balance_evaporation
+
+        state.lake_pet = balance_evaporation(store, params, ev).data
     if replay:
         start_replay(state, params)
     return state

@@ -632,6 +632,51 @@ def test_the_land_evaporates_too():
     assert np.allclose(acc_cold, acc0, rtol=1e-9)
 
 
+def test_cold_water_evaporates_too():
+    """``hydro.pet_t0`` (``balance.potential_evaporation``): the water
+    balance's evaporation is Hargreaves' law of temperature under the
+    latitude's sun -- 1 at a sea-level cell on the equator, like the
+    climate's ``evap``, but not zero at freezing, and less towards the poles
+    at the same temperature.  A dry basin at 0 C, full to its rim by ``evap``,
+    settles below it; a wet one still overflows."""
+    from globe.hydro.balance import potential_evaporation
+    pe = lambda T, lat: float(potential_evaporation(np.array([T]), np.radians(np.array([lat])), 28.0, 17.8)[0])
+    assert abs(pe(28.0, 0.0) - 1.0) < 1e-6 and pe(-17.8, 0.0) == 0.0 and pe(-30.0, 0.0) == 0.0
+    assert 0.35 < pe(0.0, 0.0) < 0.42                             # freezing is not the end of evaporation
+    assert pe(10.0, 60.0) < pe(10.0, 30.0) < pe(10.0, 0.0)        # the same warmth under less sun
+    assert abs(pe(28.0, 90.0) / pe(28.0, 0.0) - 0.42) < 0.01      # the poles get 0.42 of the equator's year
+    surface, filled, _, _, _ = _solve_bowl(0.0)
+    spill = float(filled[0][filled[0] > surface[0]].max())
+
+    def level(evap, precip):
+        _, _, water, _, _ = _solve_bowl(6.0, precip_scale=precip, evap_scale=evap)
+        on = water[0] > surface[0]
+        return float(water[0][on].max()) if on.any() else float(surface[0].min())
+
+    assert level(0.0, 0.1) >= spill - 1e-3                        # `evap` at 0 C: a desert basin stands full
+    assert level(pe(0.0, 30.0), 0.1) < spill - 1.0                # with the law it does not
+    assert level(pe(0.0, 60.0), 8.0) >= spill - 1e-3              # and a wet cold one keeps its lake
+
+
+def test_the_balance_reads_the_law_from_the_worlds_temperature(tmp_path):
+    """``hydro.run.balance_evaporation``: ``evap`` itself at ``pet_t0`` 0,
+    the law on the climate's ``temperature`` above it -- positive where
+    ``evap`` is zero."""
+    from globe.config import WorldParams
+    from globe.field import FaceField
+    from globe.hydro.run import balance_evaporation
+    from globe.io.world_store import WorldStore
+    params = WorldParams.tiny_world()
+    grid = params.coarse_grid()
+    store = WorldStore(tmp_path / "w", create=True)
+    T = FaceField(grid, np.full((6, grid.NE, grid.NE), -3.0, np.float32), name="temperature")
+    store.save_field(T)
+    evap = FaceField(grid, np.zeros((6, grid.NE, grid.NE), np.float32), name="evap")
+    assert balance_evaporation(store, params, evap) is evap
+    pet = balance_evaporation(store, params.with_overrides(hydro={"pet_t0": 17.8}), evap)
+    assert pet.data.shape == evap.data.shape and float(pet.data.min()) > 0.1 and float(pet.data.max()) < 0.4
+
+
 def test_a_closed_lake_passes_no_water_downstream():
     """A lake that does not reach its spill point has no outlet, so the flow
     accumulation *at* its outlet cell is zero -- that, not ``flow_dir``, is

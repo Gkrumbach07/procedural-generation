@@ -25,7 +25,7 @@ import numpy as np
 
 from ..field import FaceField
 from .d8 import OCEAN, downstream_table
-from .balance import balance_lakes
+from .balance import balance_lakes, potential_evaporation
 from .lakes import extract_lakes, label_components
 from .priority_flood import priority_flood_sphere
 from .routing import channel_network, flow_directions
@@ -111,6 +111,19 @@ def river_threshold_volume(precip_interior: np.ndarray, land: np.ndarray, river_
     return float(river_threshold) * mean_p
 
 
+def balance_evaporation(store, params, evap: FaceField) -> FaceField:
+    """The potential evaporation the water balance runs on: the climate's
+    ``evap``, or with ``hydro.pet_t0`` the law of temperature and latitude
+    that does not stop at freezing (:func:`balance.potential_evaporation`),
+    from the climate's ``temperature``."""
+    t0 = float(getattr(params.hydro, "pet_t0", 0.0))
+    if t0 <= 0.0:
+        return evap
+    grid = params.coarse_grid()
+    T = store.load_field("temperature", grid)
+    return FaceField(grid, potential_evaporation(T.data, grid.latitude(), float(params.climate.T_eq), t0), name="pet")
+
+
 def run(store, params, log=print) -> dict:
     grid = params.coarse_grid()
     N, H = grid.N, grid.H
@@ -167,7 +180,7 @@ def run(store, params, log=print) -> dict:
     topo = flood.pop_seq[::-1]
     topo = topo[~ocean.reshape(-1)[topo]]
     water, acc, bal = balance_lakes(surface, filled, ocean, flood.order, down, topo,
-                                    precip.interior, evap.interior, grid, hp.lake_evap, float(getattr(hp, "land_evap", 0.0)))
+                                    precip.interior, balance_evaporation(store, params, evap).interior, grid, hp.lake_evap, float(getattr(hp, "land_evap", 0.0)))
     info["t_balance_s"] = time.time() - t
     info["lake_balance"] = bal
     depth = water - surface

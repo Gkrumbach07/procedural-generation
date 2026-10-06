@@ -90,6 +90,7 @@ class ErosionState:
     samp: np.ndarray = field(default=None, repr=False)  # packed float32 samples (F, NE, NE, NS), rebuilt every iteration
     acc: np.ndarray = field(default=None, repr=False)  # float64 net terrain change of the current iteration (cell units), zero between iterations
     pending: np.ndarray = field(default=None, repr=False)  # float64 sediment stockpile per cell (cell units) that found no room this iteration (particle.apply_changes: land pits, and the seafloor less the offshore write-off); re-injected as a loaded particle next iteration; part of the mass balance
+    lake_pet: np.ndarray | None = None  # (F, NE, NE) float32: the potential evaporation the lake balance runs on where it is not `evap` (hydro.pet_t0; erosion.run.build_state); a field of the inputs, not of the run, so not checkpointed
     lake_load: np.ndarray = field(default=None, repr=False)  # float64 sediment per cell (cell units) that particles brought into a lake and its shore had no room for (particle.trace_particles, `erosion.lake_fill`): parked on the lake cell entered until `settle_lake_loads` lays it over the lake's floor
     lake_id: np.ndarray = field(default=None, repr=False)  # int32 per cell: the lake of `lake_room` a cell belongs to, -1 where a load cannot be parked
     lake_room: np.ndarray = field(default=None, repr=False)  # float64 per lake: the room it has left for its rivers' load (cell units), counted down by particle.apply_changes
@@ -394,8 +395,9 @@ class ErosionState:
         down = downstream_table(fd, self.grid.owner, H)
         topo = flood.pop_seq[::-1]
         topo = topo[~ocean.reshape(-1)[topo]]
+        pet = self.evap if self.lake_pet is None else self.lake_pet
         water, _acc, bal = balance_lakes(surf, flood.filled, ocean, flood.order, down, topo,
-                                         np.ascontiguousarray(self.precip[inter]), np.ascontiguousarray(self.evap[inter]),
+                                         np.ascontiguousarray(self.precip[inter]), np.ascontiguousarray(pet[inter]),
                                          self.grid, float(lake_evap), float(land_evap))
         lake = ((water - surf) > min_depth) & ~ocean
         closed = lake & (water < flood.filled - 1e-4)
