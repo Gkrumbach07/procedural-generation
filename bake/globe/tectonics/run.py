@@ -1915,7 +1915,10 @@ def finalise(sim: TectonicSim, bed_only: bool = False) -> dict:
     edifices active at the last step, which are in ``bedrock`` but not in
     ``uplift`` -- the erosion stage takes them off before it starts and puts
     them back on top when it ends, so only extinct edifices are eroded
-    (globe/erosion/run.py)."""
+    (globe/erosion/run.py).  With ``tectonics.rift_graben_m`` the grabens of
+    the rifts still opening are in ``bedrock`` and, whole, in ``uplift`` as
+    subsidence (globe/tectonics/rifts.py), and the diagnostic ``rift_graben``
+    (m) is what was stamped."""
     params, tp = sim.params, sim.tp
     grid, seg, plates = sim.grid, sim.seg, sim.plates
     coarse = params.coarse_grid()
@@ -2019,12 +2022,26 @@ def finalise(sim: TectonicSim, bed_only: bool = False) -> dict:
         vinfo.update(vi)
         vinfo.update({f"events_{k}": v for k, v in sim.volc.events.items()})
         bed += cone
+    graben = None
+    rift_info: dict = {}
+    if float(tp.rift_graben_m) > 0.0:
+        # the grabens of the rifts still opening, at their own width (globe/tectonics/rifts.py):
+        # like the cones a reconstruction detail, stamped after sea level and the vertical
+        # scale so they move neither.  A floor under sea level is still land -- a basin shut
+        # in by its shoulders, which hydro.open_ocean keeps out of the sea
+        from . import rifts
+
+        graben, rift_info = rifts.graben_field(sim, coarse, bed, float(tp.rift_graben_m),
+                                               vfac=scale / float(tp.volc_ref_m_per_unit), ctree=ctree)
+        bed += graben
     del ctree
     if bed_only:
         out = {"bed": bed.astype(np.float32), "ck": cont_c.astype(np.uint8), "scale": float(scale), "q": float(q),
                "volcanoes": vinfo}
         if cone is not None:
             out.update({"cone": cone, "cone_active": cone_act, "cone_kind": who})
+        if graben is not None:
+            out.update({"graben": graben.astype(np.float32), "rifts": rift_info})
         return out
     bedrock = FaceField.from_interior(coarse, bed.astype(np.float32), name="bedrock")
 
@@ -2051,6 +2068,15 @@ def finalise(sim: TectonicSim, bed_only: bool = False) -> dict:
         # cones to 0.03-0.6 km islets even at hardness 1, so they leave the stage's input
         # (volcano_active) and are put back on top at its end
         up = up + (cone - cone_act).astype(np.float64) / n_iter
+    if graben is not None:
+        # A graben is all subsidence, and all of it in the uplift window: 'replay' starts the
+        # erosion stage from the bedrock less the total, which is the ground before the
+        # graben -- nothing there for the basin fill to level -- and the trough sinks under
+        # its rivers as the stage runs, the shoulders rising beside it.  Handed over in the
+        # bedrock alone it would be filled at the start and lost (rifts.py).  After the clamp
+        # above: a rift's teeth still grind in places, and a collision zone there would take
+        # the graben's sinking out again (47 % of the land axis of earth-v25's youngest rift)
+        up = up + graben / n_iter
     uplift = FaceField.from_interior(coarse, up.astype(np.float32), name="uplift")
     del up
 
@@ -2177,9 +2203,13 @@ def finalise(sim: TectonicSim, bed_only: bool = False) -> dict:
         extra["volcano_active"] = FaceField.from_interior(coarse, cone_act.astype(np.float32), name="volcano_active")
         # every edifice, active and extinct (m above the ground it stands on): a diagnostic
         extra["volcano_cone"] = FaceField.from_interior(coarse, cone.astype(np.float32), name="volcano_cone")
+    if graben is not None:
+        # the grabens as stamped (m: negative floors, positive shoulders): a diagnostic
+        extra["rift_graben"] = FaceField.from_interior(coarse, graben.astype(np.float32), name="rift_graben")
     return {
         **extra,
         "_volcanoes": vinfo,
+        "_rifts": rift_info,
         "bedrock": bedrock,
         "uplift": uplift,
         "hardness": hardness,
@@ -2281,6 +2311,8 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     out["crust_province"].save(diag_dir)
     if "volcano_cone" in out:
         out["volcano_cone"].save(diag_dir)
+    if "rift_graben" in out:
+        out["rift_graben"].save(diag_dir)
     last = sim.stats[-1] if sim.stats else {}
     info = {
         "segments_final": int(sim.seg.M),
@@ -2311,6 +2343,8 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         # the arc ridge redraw and the volcanic edifices (empty with both off)
         "volcanoes": {k: (float(v) if isinstance(v, (int, float, np.integer, np.floating)) else v)
                       for k, v in out.get("_volcanoes", {}).items()},
+        # the rift grabens stamped (empty with tectonics.rift_graben_m 0)
+        "rifts": dict(out.get("_rifts", {})),
         "bedrock_max_m": float(out["bedrock"].interior.max()),
         "bedrock_min_m": float(out["bedrock"].interior.min()),
         "uplift_max": float(out["uplift"].interior.max()),
