@@ -401,8 +401,8 @@ Hydro stage alone on earth-v24's surface, at 17.8:
 | cold above 50 degrees | 3.32 % | 2.71 % |
 | the plateau | 13.1 % | 0.0 % |
 
-Lakes over 10,000 km2: 26 -> 14; the three largest unchanged. Off by default
-until earth-v25 (earth-v24 with it from the start of erosion) is measured.
+Lakes over 10,000 km2: 26 -> 14; the three largest unchanged. The full bake
+is earth-v25, below.
 
 ### The cold follows the ground (`erosion.climate_at_surface`)
 
@@ -470,6 +470,28 @@ The cold following the ground takes the ice off the ranges it had cut down
 stage built up into the cold (2.72 -> 6.46 %), which on the plateau is a
 desert; the snow rule takes it off the desert again. earth-v25 is earth-v24
 with all three from the first iteration.
+
+**earth-v25, measured** (same seed and tectonics as earth-v24; land 26.3 % of
+the sphere against 26.2, median elevation 345 m against 346, above 3 km 1.39 %
+against 1.40):
+
+| | earth-v24 | earth-v25 |
+|---|---|---|
+| lakes, coarse grid | 1.66 % of land | 0.92 % |
+| lakes, refined grid (what the viewer draws) | 1.47 % | 0.73 % |
+| largest four, refined grid (1000 km2) | 118, 88, 64, 57 | 112, 36, 25, 21 |
+| lake cover of land with under a quarter of the mean rain (38 % of land) | 1.81 % | 0.41 % |
+| ... of the rest | 1.57 % | 1.24 % |
+| ... of cold ground with snow (aridity under 1.5; 12 % of land) | 2.69 % | 2.62 % |
+| ... of cold ground too dry for ice | 3.23 % | 0.75 % |
+| ... of ground never cold | 1.31 % | 0.69 % |
+| the plateau | 13.1 % | 0.1 % |
+| lakes over 100 / 1,000 / 10,000 / 100,000 km2 | 1431 / 351 / 26 / 1 | 1000 / 203 / 16 / 1 |
+| mean depth of lakes | 34 m | 15 m |
+| marsh | 0.56 % | 0.53 % |
+
+Earth has about 250 lakes over 1,000 km2 and 20 over 10,000. The three
+switches are still off by default.
 
 ## 8. The ice's small lakes (`zoom/ice.py`)
 
