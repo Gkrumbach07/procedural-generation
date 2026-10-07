@@ -288,7 +288,7 @@ def test_rainout_is_parameterised_in_physical_length():
     assert 0.2 < res[64][0] < 0.9  # the interior is neither bone dry nor saturated
 
 
-#: the weather the mean wind leaves out, on (config.ClimateParams: off by default)
+#: the weather the mean wind leaves out, at the values its tests were measured with (config.ClimateParams' defaults since earth-v32)
 WEATHER = {"storm_front": 1.0, "eddy_reach_frac": 0.15, "cold_air_k": 0.067}
 
 
