@@ -27,7 +27,10 @@ texture (D8 flow, signed lake depth, ocean mask) from which the shader
 places coasts and lake shores between cells instead of painting whole
 cells, and a
 ``satellite`` layer that colours the ground continuously from the climate
-channels.  The
+channels.  An erosion frame that recorded its lakes and ice
+(:func:`globe.viz.frames.erosion_frame`), and a planet level's frame with
+lakes in it, carries a shoreline texture of its own -- ice share, signed lake
+depth, ocean mask -- so the same shader path draws the timeline's lakes.  The
 shader (``viewer.html``) maps every pixel to a direction on the sphere and
 then to ``(face, u, v)`` exactly as :mod:`globe.cubesphere` does, so no
 reprojection happens anywhere.  Latitude has its pole on +Z, as in
@@ -224,7 +227,9 @@ def order_raster(root: Path, N: int) -> np.ndarray | None:
 
 #: ``water`` channel codes.  Nothing else in the viewer knows what is water:
 #: the timeline frames are pre-hydro, so there the shader still reads the sea
-#: off the height, and only the final frame carries this.
+#: off the height, and only the final frame carries this.  (A timeline frame
+#: that recorded its lakes gets the shoreline channels made of these codes,
+#: :func:`timeline_water`, but not the channel itself.)
 WATER_LAND, WATER_LAKE, WATER_OCEAN = 0, 1, 2
 
 
@@ -312,6 +317,26 @@ def lake_depth(surface: np.ndarray, water_surface: np.ndarray | None, code: np.n
     d = np.where(lake, level - surf, np.where(np.isfinite(near), near - surf, far))
     d[code == WATER_OCEAN] = far
     return np.clip(d, -LAKE_DEPTH_RANGE_M, LAKE_DEPTH_RANGE_M).astype(np.float32)
+
+
+def timeline_water(height: np.ndarray, lake: np.ndarray | None, lake_min_depth: float = 0.5) -> dict:
+    """The shoreline channels (``lake_depth``, ``ocean``) of a timeline frame
+    that recorded its standing water: ``lake`` is metres of it over the
+    ground, 0 where there is none (:func:`globe.viz.frames.erosion_frame`, a
+    planet level's time lapse).  ``{}`` for a frame that did not, which is
+    then drawn as it always was.
+
+    Hydro has not run on a timeline frame, so the sea is still the ground
+    below 0 -- less the lakes: a lake's bed is often below sea level (a
+    tenth of earth-v26's lake cells), and by the height sign alone those
+    would be holes of ocean in the middle of their own lake."""
+    if lake is None:
+        return {}
+    surf = np.asarray(height, np.float32)
+    ws = surf + np.asarray(lake, np.float32)
+    sea = (surf < 0.0) & ~((ws - surf) > np.float32(lake_min_depth))
+    code = water_code(surf, np.where(sea, 255, 0).astype(np.uint8), ws, lake_min_depth)   # 255: flow_dir's code for the sea
+    return {"lake_depth": lake_depth(surf, ws, code), "ocean": smooth_mask(code == WATER_OCEAN)}
 
 
 def _fine_final(root: Path, manifest: dict, surf_c: np.ndarray, flow_dir_c: np.ndarray | None, log=print) -> dict | None:
@@ -482,10 +507,21 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
                     if "crust_age" in z.files and "crust_kind" in z.files else {}
                 frames.append(_Frame("tectonics", key, f"tectonics · step {key} / {meta.get('of', '?')}",
                                      lo(z["height"].astype(np.float32) * float(scale)), plate=lo(z["plate"], "nearest"), **crust))
+    lake_min = float((manifest.get("params", {}).get("hydro", {}) or {}).get("lake_min_depth", 0.5))
     for key, p, meta in ero:
         with np.load(p) as z:
-            frames.append(_Frame("erosion", key, f"erosion · iteration {key} / {meta.get('of', '?')}",
-                                 lo(z["height"]), discharge=lo(z["discharge"], "max")))
+            # the lakes and the ice where the run recorded them (frames before it did have
+            # neither, and the frame is what it was): the shoreline channels the final frame
+            # has, and the ice as a share of the cell
+            h = lo(z["height"])
+            water = timeline_water(h, lo(z["lake"].astype(np.float32)) if "lake" in z.files else None, lake_min)
+            ice = lo(z["ice"].astype(np.float32) / 255.0) if "ice" in z.files and water else None
+            frames.append(_Frame("erosion", key, f"erosion · iteration {key} / {meta.get('of', '?')}" + (" · ice age" if meta.get("glacial") else ""),
+                                 h, discharge=lo(z["discharge"], "max"), ice=ice, **water))
+    if not any(f.ch["ice"].any() for f in frames if "ice" in f.ch):
+        # a run with no ice in it (the glacial pass off, or no cold ground) has no ice layer
+        for f in frames:
+            f.ch.pop("ice", None)
     # then the planet level's own erosion, if it kept a time lapse: the same planet at the
     # level's cell (1.2 km on the earth preset) rather than the coarse grid's 9.8 km
     if planet:
@@ -498,9 +534,11 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
             at = _fmt_cell(cell) if cell else f"R = {R_lvl}"
             its = [int(v) for v in lapse["iterations"]]
             for k, it in enumerate(its):
-                frames.append(_Frame("planet", it, f"{at} · iteration {it} / {its[-1]}",
-                                     lapse["surface"][k].astype(np.float32),
-                                     discharge=lapse["discharge"][k].astype(np.float32)))
+                # the level's lakes where its lapse kept them (planet_frames.build): the planet's, at their own levels
+                h = lapse["surface"][k].astype(np.float32)
+                frames.append(_Frame("planet", it, f"{at} · iteration {it} / {its[-1]}", h,
+                                     discharge=lapse["discharge"][k].astype(np.float32),
+                                     **timeline_water(h, lapse["lake"][k].astype(np.float32) if "lake" in lapse else None, lake_min)))
             log(f"[viewer] planet time lapse: {len(its)} frames of {frames[-1].res}^2 a face at {at}")
 
     # the final state, from the coarse fields -- or the refined grid with
@@ -594,12 +632,16 @@ def _pctl(a, q, default):
     return float(np.percentile(a, q)) if a.size else default
 
 
-def channel_specs(final: _Frame, river_threshold: float | None = None) -> dict:
+def channel_specs(final: _Frame, river_threshold: float | None = None, timeline=()) -> dict:
     """Byte encodings, fixed across the timeline so frames compare.
     ``river_threshold`` is hydro's ``river_threshold_volume``: a cell whose
     flow accumulation exceeds it is a channel in the drainage graph, so the
-    final frame's rivers are drawn at exactly that line."""
+    final frame's rivers are drawn at exactly that line.  ``timeline`` are
+    the frames before the final one: what only they carry (the ice of the
+    erosion's glacial pass) or may carry without it (the shoreline channels,
+    on a world hydro has not run on) is encoded too."""
     specs = {}
+    have = lambda name: name in final.ch or any(name in f.ch for f in timeline)  # noqa: E731
     land = final.height >= 0
     if "biome" in final.ch:
         from ..derive.biomes import NAMES
@@ -679,11 +721,15 @@ def channel_specs(final: _Frame, river_threshold: float | None = None) -> dict:
         specs["crust_thickness"] = {"label": "Crust thickness", "kind": "linear", "lo": 0.0, "hi": CRUST_THICKNESS_KM, "unit": "km", "cmap": "viridis"}
     if "water" in final.ch:
         specs["water"] = {"label": "Water", "kind": "category", "cmap": "plates", "names": ["land", "lake", "ocean"]}
+    if have("ice"):
+        # the share of a frame cell the glacial pass has under ice: a layer of the erosion frames,
+        # and what the elevation view whitens their ground by
+        specs["ice"] = {"label": "Ice", "kind": "linear", "lo": 0.0, "hi": 1.0, "unit": "", "cmap": "viridis"}
     # read by the shader to place shores between cells, not offered as layers
-    if "lake_depth" in final.ch:
+    if have("lake_depth"):
         specs["lake_depth"] = {"label": "Lake level above ground", "kind": "linear", "lo": -LAKE_DEPTH_RANGE_M,
                                "hi": LAKE_DEPTH_RANGE_M, "unit": "m", "cmap": "viridis", "hidden": True}
-    if "ocean" in final.ch:
+    if have("ocean"):
         specs["ocean"] = {"label": "Ocean", "kind": "linear", "lo": 0.0, "hi": 1.0, "unit": "", "cmap": "viridis", "hidden": True}
     return specs
 
@@ -714,6 +760,10 @@ def _byte(name: str, a: np.ndarray, specs: dict, ch: dict | None = None) -> np.n
 # (short tuples are padded with zero channels)
 FINAL_TEXTURES = (("temperature", "precip", "biome"), ("plate", "sediment", "crust"), ("water", "order", "basin"),
                   ("flow", "lake_depth", "ocean"), ("rock", "basement", "crust_thickness"))
+#: ...and on a timeline frame that recorded its water: the shoreline texture, lake depth and
+#: ocean in the channels the page's shore path reads them from on the final frame (G, B), with
+#: the ice where the final frame has its flow
+TIMELINE_TEXTURES = (("ice", "lake_depth", "ocean"),)
 #: top of the crust-thickness byte (km): Earth's thickest crust is ~75 km, under Tibet
 CRUST_THICKNESS_KM = 80.0
 
@@ -731,19 +781,18 @@ def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
         s = specs[over]
         river_min_byte = int(log_byte(np.array([s["river_min"]]), s["lo"], s["hi"])[0])
         river_full_byte = int(log_byte(np.array([s.get("river_full", s["river_min"])]), s["lo"], s["hi"])[0])
-    if fr.stage == "final":
-        for names in FINAL_TEXTURES:
-            present = [n for n in names if n in fr.ch and n in specs]
-            if not present:
-                continue
-            chans = [pad_faces(_byte(n, fr.ch[n], specs, fr.ch)) if n in present else zero for n in names]
-            chans += [zero] * (3 - len(chans))
-            k = len(images)
-            images.append(atlas(chans))
-            for c, n in enumerate(names):
-                if n in present:
-                    layers[n] = [k, c]
-    elif "crust" in fr.ch and "crust" in specs:
+    for names in (FINAL_TEXTURES if fr.stage == "final" else TIMELINE_TEXTURES):
+        present = [n for n in names if n in fr.ch and n in specs]
+        if not present:
+            continue
+        chans = [pad_faces(_byte(n, fr.ch[n], specs, fr.ch)) if n in present else zero for n in names]
+        chans += [zero] * (3 - len(chans))
+        k = len(images)
+        images.append(atlas(chans))
+        for c, n in enumerate(names):
+            if n in present:
+                layers[n] = [k, c]
+    if fr.stage != "final" and "crust" in fr.ch and "crust" in specs:
         # a timeline frame carries the crust in a texture of its own: the sea floor's age is
         # the one thing about a tectonic step that its height does not show
         images.append(atlas([pad_faces(_byte("crust", fr.ch["crust"], specs, fr.ch)), zero, zero]))
@@ -937,7 +986,7 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
                                       frame_res=frame_res, max_frames=max_frames, refined=refined, planet=planet)
     final = frames[-1]
     hydro_info = (manifest.get("stages", {}).get("hydro", {}) or {}).get("info", {}) or {}
-    specs = channel_specs(final, hydro_info.get("river_threshold_volume"))
+    specs = channel_specs(final, hydro_info.get("river_threshold_volume"), frames[:-1])
     land_final = final.height[final.height >= 0]
     land_top = max(_pctl(land_final, 99.5, 1000.0), 200.0)
     ocean_bottom = min(_pctl(final.height[final.height < 0], 1.0, -4000.0), -200.0)
@@ -1189,7 +1238,7 @@ def export_extras(frames: list[_Frame], specs: dict, meta: dict, out: Path, fmts
         wat = equirect(pad_faces(final.ch["water"]), W, nearest=True) if "water" in final.ch else None
         Image.fromarray(relief(h, R, top, bot, river=river, water=wat)).save(out / "equirect_relief.png")
         for name, s in specs.items():
-            if name in ("discharge", "flow", "satellite"):
+            if name in ("discharge", "flow", "satellite") or name not in final.ch:   # (the ice is the timeline's)
                 continue
             b = equirect(pad_faces(_byte(name, final.ch[name], specs)), W, nearest=True)
             if s["kind"] == "category":

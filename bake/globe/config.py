@@ -663,8 +663,16 @@ class RenderParams:
     tectonics_frames: int = 60
     #: capture an erosion frame every this many iterations (0 = none)
     erosion_frame_every: int = 10
-    #: cells per face of a timeline frame
-    frame_res: int = 256
+    #: cells per face of a timeline frame (512 since the frames carry their
+    #: lakes and ice; 256 before).  At 256 an Earth frame was an eighth of the
+    #: final frame's side and the erosion read as a blur before it.  It is
+    #: paid for in the viewer: earth-v26's last erosion frame is 0.66 MB
+    #: there at 256 and 2.39 MB at 512 (0.10 of it the shoreline texture), so
+    #: the 81 of an 800-iteration run are 194 MB against 53 -- and 12.7 MB a
+    #: frame on the GPU against 1.6, where a desktop keeps them all.  The
+    #: export's --frame-res takes them down again.  Tectonics frames stop at
+    #: N_tect, 256 on the Earth preset
+    frame_res: int = 512
     #: cells per face of the final frame: 0 = the full resolution of its
     #: source (N_c, or N_c x R with viewer_refined)
     viewer_final_res: int = 0

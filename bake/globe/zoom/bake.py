@@ -845,6 +845,13 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
     # spread over the whole run (the first iteration, then evenly to the last)
     snap_at = {0} | {int(round((k + 1) * int(level.iterations) / snaps)) - 1 for k in range(snaps)} if snaps > 0 else set()
     frames: list = []
+    # ...and the water of a frame, for the planet's time lapse (globe/zoom/planet_frames.py): the
+    # parent's lakes at their levels over the floors the level found, the same in every frame.
+    # A lake is static while a level erodes -- its level is given and the result keeps its floor
+    # (below) -- and what the particles lay under the water meanwhile is not the level's: read
+    # off a frame's own ground, a quarter of the test planet's lake cells (994 -> 734) had
+    # silted up three iterations in, to stand full again in the finished level
+    lake0 = np.where(wet, np.maximum(lake_level - (arr["height"] + arr["sediment"]), 0.0), 0.0) if wet is not None and snaps > 0 else None
     drain = job["ocean"] | ~job["inwin"]      # where a tile's water leaves it, for the flood tree
     prod = job.get("prod")
     hold = int(level.hold_every)
@@ -884,6 +891,8 @@ def erode_tile(params: WorldParams, level: ZoomLevel, R: int, job: dict, key: tu
                 fac = int(job.get("snap_factor") or 0) or _snap_factor(fsurf.shape[0])
                 frames.append({"it": it + 1, "surface": _block_mean(fsurf, fac),
                                "discharge": _block_mean(facc[fsl], fac), "factor": fac})
+                if lake0 is not None:
+                    frames[-1]["lake"] = _block_mean(lake0[fsl], fac)
             if hold > 0 and (it + 1) % hold == 0:
                 # hold the tile to its parent while it erodes, as an uplift rate:
                 # the offset now, and how fast it grew over the last `hold`

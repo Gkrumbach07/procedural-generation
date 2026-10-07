@@ -476,6 +476,10 @@ class ErosionState:
             flat = arr.reshape(-1, 1)
             flat[hm.dst] = flat[hm.nearest]
         self.lake_flag = flag
+        # the levels themselves and when they were solved, for whoever draws the lakes (viz.frames): the
+        # kernel needs none of it, and the routing surface a flagged cell stands at is not one -- it
+        # rises `route_eps` a cell from the outlet
+        self.lake_level, self.lake_level_at = water, self.iteration
         return {"lake_cells": int(lake.sum()), "lake_cells_closed": int((closed & lake).sum()),
                 "depressions": int(bal.get("depressions", 0)), "overflowing": int(bal.get("overflowing", 0)),
                 "closed": int(bal.get("closed", 0)), "dry": int(bal.get("dry", 0)), **{f"load_{k}": v for k, v in settled.items()}}
@@ -1494,10 +1498,16 @@ def hold_datum(state: ErosionState, land_fraction: float) -> float:
     return q
 
 
-def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
+def step(state: ErosionState, params, iteration_key, log=None, after_refresh=None, **kw) -> dict:
     """One full PLAN 8.2 iteration: particles, thermal erosion, uplift,
     datum hold (:func:`hold_datum`, global pass only), halo exchange.
-    Increments ``state.iteration``."""
+    Increments ``state.iteration``.
+
+    ``after_refresh(state)`` is called once the sea mask, the routing surface
+    and the lakes have been brought up to the surface as it stands, before
+    the particles run: the one moment of an iteration at which the state's
+    water is the water of its own ground (the viewer's frames are taken
+    there, erosion.run).  It must only read."""
     ep = _eparams(params)
     t0 = time.time()
     sea_every = int(getattr(ep, "sea_mask_every", 0))
@@ -1521,6 +1531,8 @@ def step(state: ErosionState, params, iteration_key, log=None, **kw) -> dict:
             (state.lake_flag is None or state.iteration % ep.flood_every == 0):
         min_depth = float(params.hydro.lake_min_depth) if isinstance(params, WorldParams) else 0.5
         st_lake = state.refresh_lakes_window(min_depth / float(state.height_unit_m), float(getattr(ep, "window_lake_evap", 0.0)))
+    if after_refresh is not None:
+        after_refresh(state)      # (its time is the refresh's below, not the particles')
     tr = time.time() - t0
     iso = state.spherical and float(getattr(ep, "isostasy", 0.0)) > 0.0
     if iso:

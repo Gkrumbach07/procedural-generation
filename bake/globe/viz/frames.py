@@ -11,6 +11,11 @@ Arrays are interior-only ``(6, r, r)``, indexed ``[face, i, j]`` like every
 coarse field.  ``height`` is float16: metres for erosion frames, bedrock
 units for tectonics frames (the metres-per-unit scale is only fixed in
 ``tectonics.finalise``, so the exporter applies it from the manifest).
+An erosion frame also carries the water and the ice the stage was working
+with when it was taken -- ``lake`` (metres of standing water, float16) and
+``ice`` (the share of a frame cell under ice, uint8) -- which the height
+alone does not show: a lake stands above sea level, and the glacial pass is
+a quarter of the run that looked like the rest of it.
 """
 from __future__ import annotations
 
@@ -125,11 +130,79 @@ def tectonics_frame(sim, rec: FrameRecorder, index: int, total: int) -> None:
               step=int(index), of=int(total), units="bedrock", alive=alive)
 
 
-def erosion_frame(state, rec: FrameRecorder, iteration: int, total: int) -> None:
-    """Surface ``height + sediment`` (metres, block mean) and discharge (block
-    max, so a channel one coarse cell wide survives the downsample)."""
+def standing_water(state) -> np.ndarray:
+    """Depth of the lakes the erosion state holds, interior ``(F, N, N)`` in
+    cell units; 0 on dry ground and on the sea.
+
+    ``ErosionState.refresh_lakes`` leaves two kinds.  An overflowing lake is
+    flagged (``lake_flag``) and stands at its spill point: the level the
+    refresh solved (``lake_level``), while the surface is still the one it
+    solved it on.  Later in the iteration, or with no level kept (a resumed
+    state), the routing surface the flagged cells are crossed on stands in
+    for it, which the datum hold carries with the ground -- a reading, not
+    the level.  It rises ``erosion.route_eps`` a cell from the outlet, and
+    its flood drains a closed basin below sea level at the basin's floor: on
+    the small preset the 524 cells of lake at iteration 40, most of them in
+    such a basin, read as 5, and the 4 cells the run ends with as 55.
+
+    A closed lake has its level as the base level of its cells, so it is
+    wherever the ground is below a base level that is not the sea's 0.  The
+    sea is taken by that rule too -- the kernel's own, ``surface < base``
+    with a base of 0 -- and not from ``state.sea``: a coastal cell that has
+    gone under since the mask was made is sea to the kernel, not a lake (the
+    mask drifts 50-120 cells an iteration at N_c = 1024 and jumps by
+    thousands on a glacial pass, ``erosion.sea_mask_every``).  Before the
+    first refresh there is neither kind."""
     I = state.interior
-    surf = (state.height[I] + state.sediment[I]) * state.height_unit_m
+    surf = state.height[I] + state.sediment[I]
+    depth = np.zeros(surf.shape, np.float64)
+    if state.lake_flag is not None and state.route is not None:
+        over = state.lake_flag[I] > 0
+        fresh = getattr(state, "lake_level", None) is not None and getattr(state, "lake_level_at", None) == state.iteration
+        level = np.asarray(state.lake_level, np.float64).reshape(surf.shape) if fresh else state.route[I]
+        depth[over] = np.maximum(level[over] - surf[over], 0.0)
+    base = state.base[I]
+    closed = (surf < base) & (base != 0.0)
+    depth[closed] = np.maximum(depth[closed], (base - surf)[closed])
+    return depth
+
+
+def erosion_frame(state, rec: FrameRecorder, iteration: int, total: int, params) -> None:
+    """Surface ``height + sediment`` (metres, block mean), discharge (block
+    max, so a channel one coarse cell wide survives the downsample), and what
+    the height does not show: ``lake``, the standing water over the ground
+    (:func:`standing_water`; metres, block mean, so a lake smaller than a
+    frame cell is a shallower one), and ``ice``, the share of the frame cell
+    under ice (0..255).
+
+    Water no deeper than the marsh line is ground, as hydro has it
+    (``hydro.marsh_depth``) -- taken cell by cell before the block mean, or
+    the sheets a metre deep that hydro leaves dry would be the timeline's
+    largest lakes and vanish on its last frame.
+
+    The ice is the glacial pass's own (``glacial.carve``): the cold ground
+    above the sea, and with ``erosion.glacial_sticky`` what the last pass
+    carved under.  It is zero until the pass starts, ``erosion.glacial_from``
+    of the way through the run; the sidecar says ``glacial`` from then on."""
+    from ..erosion import glacial
+
+    ep, hp = params.erosion, params.hydro
+    I = state.interior
+    unit = state.height_unit_m
+    surf = (state.height[I] + state.sediment[I]) * unit
+    lake = standing_water(state) * unit
+    lake[lake <= max(float(hp.lake_min_depth), float(getattr(hp, "marsh_depth", 0.0)))] = 0.0
+    iced = bool(state.spherical) and int(ep.glacial_every) > 0 and float(ep.glacial_rate) > 0.0 \
+        and int(iteration) >= float(ep.glacial_from) * int(total)
+    ice = np.zeros(surf.shape, np.float32)
+    if iced:
+        on = glacial.ice_mask(state, float(ep.ice_evap))
+        prev = getattr(state, "ice_prev", None) if bool(getattr(ep, "glacial_sticky", False)) else None
+        if prev is not None:
+            on = on | prev
+        ice = on[I].astype(np.float32)
     rec.write(iteration, {"height": downsample(surf, rec.res).astype(np.float16),
-                          "discharge": downsample(state.discharge[I], rec.res, "max").astype(np.float16)},
-              iteration=int(iteration), of=int(total), units="m")
+                          "discharge": downsample(state.discharge[I], rec.res, "max").astype(np.float16),
+                          "lake": downsample(lake, rec.res).astype(np.float16),
+                          "ice": np.round(255.0 * downsample(ice, rec.res)).astype(np.uint8)},
+              iteration=int(iteration), of=int(total), units="m", **({"glacial": True} if iced else {}))

@@ -215,6 +215,17 @@ def test_bake_captures_frames_and_exports_a_viewer(tmp_path):
         if f["stage"] != "tectonics":
             continue
         assert f["layers"]["crust_age"] == f["layers"]["crust"] and f["layers"]["crust"][0] > 0
+    # an erosion frame holds its water and its ice beside the ground, at the frame's own
+    # resolution, and the page gets them as a shoreline texture of the frame's own
+    N = on.world.N_c
+    assert on.render.frame_res >= N                    # a toy body's frame is its whole grid
+    for _, path, _ in ero:
+        with np.load(path) as z:
+            assert z["lake"].shape == z["ice"].shape == z["height"].shape == (6, N, N)
+            assert z["lake"].dtype == np.float16 and z["ice"].dtype == np.uint8 and float(z["lake"].min()) >= 0.0
+    for f in meta["frames"]:
+        if f["stage"] == "erosion":
+            assert f["layers"]["lake_depth"] == [1, 1] and f["layers"]["ocean"] == [1, 2] and len(f["tex"]) == 2
     assert "discharge" in meta["frames"][-1]["layers"]
     assert "water" in meta["frames"][-1]["layers"]  # what the elevation view colours as water
     # rivers on the final frame are the particles' discharge in texture 0's B,
@@ -234,6 +245,159 @@ def test_water_code_tells_lakes_from_sea_and_from_closed_basins():
     # without hydro the height sign is all there is: both lakes disappear and
     # the closed basin reads as ocean
     assert list(vw.water_code(surf, None, None)[0]) == [vw.WATER_OCEAN, vw.WATER_OCEAN, vw.WATER_LAND, vw.WATER_LAND]
+
+
+def test_erosion_frame_records_the_lakes_and_the_ice(scratch, tmp_path):
+    """A frame holds the standing water over its ground and the share of each
+    cell under the glacial pass's ice (``frames.erosion_frame``).  Both kinds
+    of lake are read off the state: an overflowing one is flagged and stands
+    at the level the refresh solved (the routing surface once that is stale),
+    a closed one at the base level of its cells.  Water no deeper than the
+    marsh line is ground, and so is ground under a base level of 0 -- that is
+    the sea, to the kernel and here.  The ice is zero until the pass starts,
+    then the cold land plus what the last pass carved under."""
+    from test_erosion import _dry_site, _land_world
+
+    p, st = _land_world(scratch, "frame_water")
+    p = p.with_overrides(erosion={"iterations": 60, "glacial_every": 10, "glacial_from": 0.5, "glacial_sticky": True, "ice_evap": 0.0},
+                         hydro={"lake_min_depth": 0.5, "marsh_depth": 3.0})
+    u, H, N = st.height_unit_m, st.H, st.N
+    f, i0, j0 = _dry_site(st, 8)
+    ia, ja = i0 + (i0 & 1), j0 + (j0 & 1)                 # on a 2 x 2 block corner, for the block mean below
+    box = lambda i, j, n=2, m=2: (f, slice(H + ia + i, H + ia + i + n), slice(H + ja + j, H + ja + j + m))   # noqa: E731
+    assert (st.surface()[box(0, 0, 6, 6)] > 0.0).all()
+    st.route = st.surface().copy()
+    st.lake_flag = np.zeros(st.height.shape, np.uint8)
+    st.lake_flag[box(0, 0)] = 1
+    st.route[box(0, 0)] += 12.0 / u                       # an overflowing lake, 12 m deep
+    st.lake_flag[box(0, 2)] = 2
+    st.route[box(0, 2)] += 2.0 / u                        # ...and 2 m of water beside it: marsh
+    st.base[box(2, 0)] = st.surface()[box(2, 0)] + 7.0 / u    # a closed lake, 7 m deep
+    coast = (f, H + ia + 4, H + ja)
+    st.height[coast] = -5.0 / u - st.sediment[coast]      # ground gone under since the sea mask was made
+    st.evap[...] = 1.0                                    # a warm planet...
+    st.evap[box(2, 2)] = 0.0                              # ...with four cells of frozen land
+    st.ice_prev = np.zeros(st.height.shape, bool)
+    st.ice_prev[coast] = True                             # and one the last pass carved below the sea
+
+    def frame(res, iteration):
+        rec = vf.FrameRecorder(tmp_path / f"r{res}", "erosion", res)
+        vf.erosion_frame(st, rec, iteration, 60, p)
+        key, path, meta = vf.list_frames(tmp_path / f"r{res}", "erosion")[-1]
+        with np.load(path) as z:
+            return {k: z[k] for k in z.files}, meta
+
+    cell = lambda a, i, j, n=2, m=2: a[f, ia + i:ia + i + n, ja + j:ja + j + m]   # noqa: E731
+    d, meta = frame(N, 20)
+    assert set(d) == {"height", "discharge", "lake", "ice"}
+    assert d["lake"].shape == d["ice"].shape == (6, N, N) and d["lake"].dtype == np.float16 and d["ice"].dtype == np.uint8
+    assert np.allclose(cell(d["lake"], 0, 0), 12.0, atol=0.01) and np.allclose(cell(d["lake"], 2, 0), 7.0, atol=0.01)
+    assert (cell(d["lake"], 0, 2) == 0.0).all()                                   # the marsh is ground
+    assert int((d["lake"] > 0).sum()) == 8 and not (d["lake"][d["height"] < 0] > 0).any()   # ...and so is the sea, the new coast with it
+    assert not d["ice"].any() and "glacial" not in meta                           # the pass starts half way through
+    d, meta = frame(N, 40)
+    assert meta["glacial"] is True and (cell(d["ice"], 2, 2) == 255).all() and d["ice"][f, ia + 4, ja] == 255
+    assert int((d["ice"] > 0).sum()) == 5
+    # block means at half the grid: a lake's depth over the block, the ice as its share of it
+    d, _ = frame(N // 2, 40)
+    assert d["lake"].shape == d["ice"].shape == (6, N // 2, N // 2)
+    b = lambda a, i, j: a[f, (ia + i) // 2, (ja + j) // 2]                        # noqa: E731
+    assert b(d["lake"], 0, 0) == pytest.approx(12.0, abs=0.01) and b(d["lake"], 2, 0) == pytest.approx(7.0, abs=0.01)
+    assert b(d["ice"], 2, 2) == 255 and b(d["ice"], 4, 0) == 64 and b(d["lake"], 4, 0) == 0.0
+    # the level the lake refresh solved, while the surface is the one it solved it on
+    st.lake_level = (st.surface()[st.interior] + 20.0 / u).astype(np.float32)
+    st.lake_level_at = st.iteration
+    assert np.allclose(cell(frame(N, 40)[0]["lake"], 0, 0), 20.0, atol=0.05)
+    st.lake_level_at = st.iteration - 1
+    assert np.allclose(cell(frame(N, 40)[0]["lake"], 0, 0), 12.0, atol=0.01)
+
+
+def _frames_world(root, water: bool):
+    """A hand-made world of one coarse state and two erosion frames: a lake
+    7 m deep whose bed is 4 m below sea level, a strip of sea, and -- on the
+    second frame, taken in the glacial phase -- ice over half of face 1."""
+    N = 8
+    (root / "coarse").mkdir(parents=True)
+    (root / "manifest.json").write_text(json.dumps({"stages": {}, "N_c": N, "cell_size_m": 1000.0, "seed": 0,
+                                                    "params": {"hydro": {"lake_min_depth": 0.5}}}))
+    h = np.full((6, N, N), 100.0, np.float32)
+    h[0, :, :3] = -50.0                                # the sea
+    h[2, 3:5, 3:5] = -4.0                              # the lake's bed
+    for k in range(6):
+        np.save(root / "coarse" / f"height.f{k}.npy", h[k])
+        np.save(root / "coarse" / f"sediment.f{k}.npy", np.zeros((N, N), np.float32))
+        np.save(root / "coarse" / f"discharge.f{k}.npy", np.ones((N, N), np.float32))
+    lake = np.zeros((6, N, N), np.float16)
+    lake[2, 3:5, 3:5] = 7.0
+    ice = np.zeros((6, N, N), np.uint8)
+    rec = vf.FrameRecorder(root, "erosion", N)
+    for key, glacial in ((0, False), (10, True)):
+        arrays = {"height": h.astype(np.float16), "discharge": np.ones((6, N, N), np.float16)}
+        if water:
+            if glacial:
+                ice[1, :, :4] = 255
+                ice[1, :, 4] = 128
+            arrays.update(lake=lake, ice=ice.copy())
+        rec.write(key, arrays, iteration=key, of=10, units="m", **({"glacial": True} if glacial and water else {}))
+    return N
+
+
+def _viewer_frames(index):
+    """The frames of an exported viewer: ``[(meta, [texture payloads])]``."""
+    meta_js = (index.parent / "data" / "meta.js").read_text()
+    meta = json.loads(meta_js[meta_js.index("(") + 1: meta_js.rindex(")")])
+    out = []
+    for f in meta["frames"]:
+        js = (index.parent / f["file"]).read_text()
+        out.append((f, json.loads(js[js.index("["): js.rindex("]") + 1])))
+    return meta, out
+
+
+def test_erosion_frames_with_water_get_a_shoreline_texture_and_an_ice_layer(tmp_path):
+    """A frame that recorded its lakes is drawn through the final frame's
+    shore path: a second texture with the signed lake depth in G and the
+    smoothed ocean mask in B, where the page looks for them, and the ice
+    share in R as a layer of its own.  A lake whose bed is below sea level
+    is a lake, not a hole of ocean in itself.  Frames written before any of
+    this export as they did: one texture, the same bytes, no new layer."""
+    N = _frames_world(tmp_path / "wet", water=True)
+    _frames_world(tmp_path / "dry", water=False)
+    frames, _ = vw.collect_frames(tmp_path / "wet", None, log=lambda m: None)
+    first, second = [fr for fr in frames if fr.stage == "erosion"]
+    assert second.label.endswith("ice age") and "ice age" not in first.label
+    for fr in (first, second):
+        assert fr.ch["lake_depth"][2, 3, 3] == 7.0 and fr.ch["lake_depth"][2, 2, 3] == pytest.approx(3.0 - 100.0)   # the shore next to it: its level less the ground
+        assert fr.ch["ocean"][2, 3, 3] <= 0.4 and fr.ch["ocean"][0, 4, 1] >= 0.6 and fr.ch["ocean"][3, 4, 4] == 0.0
+    assert not first.ch["ice"].any() and second.ch["ice"][1, 0, 0] == 1.0 and second.ch["ice"][1, 0, 4] == pytest.approx(128 / 255)
+    specs = vw.channel_specs(frames[-1], None, frames[:-1])
+    assert specs["ice"]["kind"] == "linear" and not specs["ice"].get("hidden") and specs["lake_depth"]["hidden"]
+    images, meta = vw.encode_frame(second, specs)
+    assert len(images) == 2 and meta["layers"] == {"discharge": [0, 2], "ice": [1, 0], "lake_depth": [1, 1], "ocean": [1, 2]}
+    T = N + 2 * vw.PAD
+    px = lambda face, i, j: images[1][(face // 3) * T + vw.PAD + j, (face % 3) * T + vw.PAD + i]   # noqa: E731
+    assert px(2, 3, 3)[1] > 127 and px(2, 0, 0)[1] == 0 and px(2, 3, 3)[2] == 0        # a lake: depth above the shoreline byte, no ocean
+    assert px(0, 4, 1)[2] > 127 and px(0, 4, 1)[1] == 0                                # the sea
+    assert px(1, 0, 0)[0] == 255 and px(1, 0, 4)[0] == 128 and px(1, 0, 7)[0] == 0     # the ice, as a share
+    # the whole way out, beside the same frames without their water
+    meta_w, wet = _viewer_frames(vw.export_viewer(tmp_path / "wet", log=lambda m: None))
+    meta_d, dry = _viewer_frames(vw.export_viewer(tmp_path / "dry", log=lambda m: None))
+    assert "ice" in meta_w["channels"] and "ice" not in meta_d["channels"]
+    for (fw, tw), (fd, td) in zip(wet, dry):
+        assert tw[0] == td[0]                                                           # the ground and the rivers: byte for byte
+        if fw["stage"] != "erosion":
+            assert fw == fd and tw == td
+            continue
+        assert len(tw) == 2 and len(fw["tex"]) == 2 and fw["layers"]["ocean"] == [1, 2]
+        assert len(td) == 1 and "tex" not in fd and fd["layers"] == {"discharge": [0, 2]} and "ice age" not in fd["label"]
+    # a run with no ice in it has no ice layer
+    for _, path, meta in vf.list_frames(tmp_path / "wet", "erosion"):
+        with np.load(path) as z:
+            arrays = {k: z[k] for k in z.files}
+        arrays["ice"][...] = 0
+        vf.FrameRecorder(tmp_path / "wet", "erosion", N).write(meta["key"], arrays, iteration=meta["key"], of=10, units="m")
+    frames, _ = vw.collect_frames(tmp_path / "wet", None, log=lambda m: None)
+    assert all("ice" not in fr.ch for fr in frames) and "lake_depth" in frames[0].ch
+    assert "ice" not in vw.channel_specs(frames[-1], None, frames[:-1])
 
 
 def test_resumed_erosion_drops_frames_past_the_resume_point(tmp_path):

@@ -326,8 +326,18 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     frame_every = int(rp.erosion_frame_every) if rp.viewer else 0
     rec = vf.FrameRecorder(store.root, "erosion", min(int(rp.frame_res), grid.N))
     rec.clear(after=state.iteration)
-    if frame_every > 0 and state.iteration == 0:
-        vf.erosion_frame(state, rec, 0, n_iter)
+
+    def frame(st: ErosionState) -> None:
+        # Frame k is taken inside iteration k's step, after it has refreshed the sea, the routing
+        # surface and the lakes and before its particles run (maps.step) -- the surface iteration
+        # k - 1 left, with the water that stands on it.  Taken when that step returned, as the
+        # frames were while they held only the ground, the water is a refresh old: on the small
+        # preset the last frame showed 404 cells of lake where hydro finds 4, the levels of
+        # before the last glacial pass over the bed that pass had lowered.  (Only where
+        # `erosion_frame_every` is a multiple of `flood_every`, as the defaults are; a frame
+        # between two refreshes has the water of the one before it.)
+        vf.erosion_frame(st, rec, st.iteration, n_iter, params)
+
     times = []
     clamped = 0
     lost_offshore = 0.0
@@ -338,7 +348,7 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
     while state.iteration < n_iter:
         it = state.iteration
         t0 = time.time()
-        st = step(state, params, it)
+        st = step(state, params, it, after_refresh=frame if frame_every > 0 and it % frame_every == 0 else None)
         dt = time.time() - t0
         times.append(dt)
         clamped += int(st.get("clamped", 0))
@@ -362,8 +372,6 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
             f"pending {st.get('pending_total', 0.0):.1f}, {st['seconds_particles']:.2f}s particles, {dt:.2f}s total"
         )
         done = state.iteration
-        if frame_every > 0 and (done % frame_every == 0 or done == n_iter):
-            vf.erosion_frame(state, rec, done, n_iter)
         if ep.checkpoint_every > 0 and (done % ep.checkpoint_every == 0 or done == n_iter):
             p = save_checkpoint(store, state, params)
             log(f"[erosion] checkpoint -> {p.name}")
@@ -381,6 +389,10 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         lakes = lk
         log(f"[erosion] lakes at the end: {lk['lake_cells']} cells, {lk['load_laid'] * state.height_unit_m:,.0f} m-cells laid of "
             f"{lk['load_parked'] * state.height_unit_m:,.0f} their rivers left")
+    # the last frame: the surface the run ends on, with the lakes as that refresh has just found
+    # them (without `erosion.lake_fill` there was none, and its water is the last refresh's)
+    if frame_every > 0:
+        frame(state)
     # the active volcanic edifices go back on top of what the stage made of the ground under them
     volc = restore_volcanoes(state, active_volcanoes(store, grid))
     if volc:

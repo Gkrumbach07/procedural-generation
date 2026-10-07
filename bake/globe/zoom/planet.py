@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
 import numpy as np
@@ -71,7 +71,7 @@ class PlanetLevel:
     parent: int = 0  # R of the finished planet level this one chains from (zoom/planet_R{parent}, globe/zoom/planet_chain.py); 0 = from the planet's upsample
     chain_detail: float = 0.5  # chained: detail noise x min(parent slope x parent cell, parent 3x3 relief)
     snapshots: int = 24  # frames of the time lapse each tile keeps (globe/zoom/planet_frames.py stitches them)
-    frame_res: int = 512  # cells a face of a frame holds; a tile's core is block-averaged to its share of it
+    frame_res: int = 1024  # (1024 since the lakes joined the time lapse; 512 before) cells a face of a frame holds; a tile's core is block-averaged to its share of it.  At 512 the lapse was a quarter of the final frame's 2048 a side and read as a blur beside it.  It is paid for four times over, the cells being four times as many: a frame of earth-v25's lapse is 2.52 MB in the viewer at 512 and its 25 are 63 MB, which the export's --frame-res does not thin (that is the coarse timeline's); the stitched L{R}.frames.npz was 157 MB there and is 944 MB at 1024 with the lakes in it.  A level under way keeps the frames it started with (run_planet)
 
     @property
     def guard(self) -> int:
@@ -418,11 +418,13 @@ def planet_tile(root: str, params: WorldParams, level: PlanetLevel, out: str, fa
         fdir.mkdir(parents=True, exist_ok=True)
         fr = res["frames"]
         tmp = fdir / f"f{face}_{ta0}_{tb0}.tmp.npz"
+        # a tile with a lake of the planet's in it keeps the water's depth too (zoom.bake.erode_tile)
+        lake = {"lake": np.stack([f["lake"] for f in fr]).astype(np.float16)} if all("lake" in f for f in fr) else {}
         np.savez(tmp, surface=np.stack([f["surface"] for f in fr]).astype(np.float32),
                  discharge=np.stack([f["discharge"] for f in fr]).astype(np.float32),
                  iterations=np.array([f["it"] for f in fr], np.int32),
                  factor=np.array([f["factor"] for f in fr], np.int32),
-                 core=np.array([(ta0 + mc) * R, (tb0 + mc) * R, cc * R], np.int64))
+                 core=np.array([(ta0 + mc) * R, (tb0 + mc) * R, cc * R], np.int64), **lake)
         tmp.replace(fdir / f"f{face}_{ta0}_{tb0}.npz")
     sea = inwin & ocean & ~done                            # write_tile marks the window's sea done: give it the upsample
     for k, v in (("height", base["height0"]), ("sediment", base["sediment0"]), ("discharge", base["discharge"])):
@@ -476,7 +478,10 @@ def run_planet(root: str | Path, level: PlanetLevel = PlanetLevel(), out: str | 
                finish: bool = True) -> Path:
     """Erode every face of the world at ``root`` at ``level.R`` into
     ``out`` (default ``<root>/zoom/planet_R{R}``).  Resumable: finished
-    passes are recorded in ``progress.json`` with the level they ran with."""
+    passes are recorded in ``progress.json`` with the level they ran with.
+    Another ``level`` starts over -- except one that differs only in its time
+    lapse (``snapshots``, ``frame_res``), which is resumed with the lapse it
+    has."""
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor
 
@@ -488,6 +493,18 @@ def run_planet(root: str | Path, level: PlanetLevel = PlanetLevel(), out: str | 
     out.mkdir(parents=True, exist_ok=True)
     prog_path = out / "progress.json"
     prog = json.loads(prog_path.read_text()) if prog_path.exists() else {}
+    if "level" in prog:
+        # The time lapse is a picture of the erosion, not part of it: a level under way keeps the
+        # frames it started with, whatever is asked for now.  Its tiles share one grid
+        # (planet_frames.build), and a level whose only difference is its frames would otherwise
+        # read as another one and start over -- which a new default `frame_res` does to every
+        # unfinished bake on disk (earth-v26's, five faces in, was recorded at 512)
+        was = PlanetLevel.from_dict(prog["level"])
+        kept = replace(level, snapshots=was.snapshots, frame_res=was.frame_res)
+        if asdict(kept) == asdict(was) and kept != level:
+            if log is not None:
+                log(f"resuming with the time lapse the level started with: {was.snapshots} frames of {was.frame_res}^2 a face")
+            level = kept
     if "level" not in prog or asdict(PlanetLevel.from_dict(prog["level"])) != asdict(level):
         prog = {"level": asdict(level), "passes": {}, "tiles": []}
     NF = (N + 2 * level.guard) * R

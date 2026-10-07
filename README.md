@@ -209,8 +209,9 @@ The `render.*` knobs control it: `viewer`, `viewer_formats`,
 frames does not change any stage's output.
 
 **Viewing from another machine.** Copy the viewer there; `scp` works
-wherever SSH does. An Earth viewer is about 100 MB, so for a laptop or phone
-make a light single file (~15 MB): the timeline thinned to 60 frames at
+wherever SSH does. An Earth viewer is about 280 MB (some 190 of it the
+erosion frames, 512² per face with their lakes and ice), so for a laptop or
+phone make a light single file (~15 MB): the timeline thinned to 60 frames at
 128² per face, and the final state at 512²:
 
 ```sh

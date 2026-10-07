@@ -459,6 +459,51 @@ def test_a_time_lapse_frame_keeps_the_flood_trees_streams():
     # then faded out, while the flood tree carries what enters the tile all the way through it
     for f in frames:
         assert float(np.asarray(f["discharge"])[inwin].max()) > float(src.sum())
+    assert all("lake" not in f for f in frames)               # no lake of the parent's in the tile: no water kept
+
+
+def test_a_time_lapse_frame_keeps_the_parents_lakes():
+    """A tile with one of the planet's lakes in it keeps the water for its
+    frames (the planet's time lapse draws it): the lake's level
+    (``lake_level``, the base level of its cells) over the floor the tile
+    started with, block-averaged as the surface is and the same in every
+    frame -- the tile's result keeps that floor, so what the particles lay
+    under the water while it erodes is not the lake's."""
+    from globe.config import WorldParams
+    from globe.refine.zoom import zoom_params
+
+    params = zoom_params(WorldParams.tiny_world(), 8)
+    n = 42
+    i, j = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    bowl = np.maximum(0.0, 30.0 * (1.0 - ((i - 20.0) ** 2 + (j - 20.0) ** 2) / 8.0 ** 2))
+    height = (2.0 * i + 0.3 * np.sin(j * 0.9) - bowl).astype(np.float64)
+    level = float(height[20, 20]) + 12.0                       # the lake: 12 m of water over the bowl's centre
+    wet = (bowl > 0.0) & (height < level)
+    inwin = np.zeros((n, n), bool)
+    inwin[1:-1, 1:-1] = True
+    metric = np.zeros((n, n, 3), np.float32)
+    metric[..., 0] = metric[..., 2] = 1.0
+    core = (slice(1, n - 1), slice(1, n - 1))
+
+    def erode(factor):
+        arrays = {"height": height.copy(), "sediment": np.zeros((n, n)), "discharge": np.zeros((n, n)), "momentum": np.zeros((n, n, 2)),
+                  "hardness": np.full((n, n), 0.5), "precip": np.full((n, n), 0.01), "evap": np.ones((n, n)), "metric": metric,
+                  "metric_inv": metric.copy(), "plain": height.copy(), "lake_level": np.where(wet, level, -np.inf)}
+        job = {"a": 1, "b": 1, "c": n - 2, "sl": None, "land": inwin, "active": inwin, "inwin": inwin, "ocean": np.zeros((n, n), bool),
+               "src": np.zeros((n, n)), "arrays": arrays, "f": 1, "snapshots": 3, "prod": core, "snap_factor": factor}
+        return zb.erode_tile(params, zb.ZoomLevel(8, 1, 4, tile=n - 2, margin=0, hold_every=0), 8, job, (1, 2, 3))
+
+    out = erode(1)
+    depth = np.where(wet, level - height, 0.0)[core]
+    assert wet.sum() > 50 and depth[19, 19] == pytest.approx(12.0) and float(depth.max()) > 12.0
+    assert len(out["frames"]) == 3
+    for f in out["frames"]:
+        assert f["lake"].shape == f["surface"].shape == (n - 2, n - 2)
+        assert f["lake"] == pytest.approx(depth, abs=1e-4), f["it"]
+    assert np.array_equal(out["height"][wet], height[wet])    # the floor the level found is the floor it leaves
+    half = erode(2)["frames"]
+    assert half[-1]["lake"].shape == half[-1]["surface"].shape == ((n - 2) // 2, (n - 2) // 2)
+    assert half[-1]["lake"] == pytest.approx(depth.reshape((n - 2) // 2, 2, (n - 2) // 2, 2).mean(axis=(1, 3)), abs=1e-4)
 
 
 @pytest.fixture(scope="module")
@@ -634,6 +679,21 @@ def test_planet_level_keeps_a_time_lapse_of_its_erosion(world, planet):
     land = red > 0.0
     assert land.any()
     assert np.abs(last - red)[land].mean() < max(50.0, 0.05 * float(np.abs(red[land]).mean()))
+    # the frames hold the planet's lakes too, where a tile had one: metres of water on the ground,
+    # the same in every frame (a level's lakes are given), where the finished level has water too
+    lake = np.asarray(lapse["lake"], np.float32)
+    assert lake.shape == (T, 6, res, res) and lapse["lake"].dtype == np.float16
+    assert (lake[0] > 0.5).sum() > 100 and float(lake.min()) == 0.0 and np.array_equal(lake[0], lake[-1])
+    kept = []
+    for _, _, _, p in tiles:
+        with np.load(p) as z:
+            kept.append("lake" in z.files)
+    assert any(kept) and not all(kept)                        # a tile with no lake in it keeps none
+    wet = 0
+    for f in range(6):
+        ws = np.load(zp.out_path(out, lv.R, f, "water_surface")) - np.load(zp.out_path(out, lv.R, f, "height")) - np.load(zp.out_path(out, lv.R, f, "sediment"))
+        wet += int(((ws.reshape(res, k, res, k).mean(axis=(1, 3)) > 0.5) & (lake[-1, f] > 0.5)).sum())
+    assert wet > 0.7 * int((lake[-1] > 0.5).sum())
 
 
 def test_the_planet_time_lapse_joins_the_viewers_timeline(world, planet):
@@ -653,6 +713,12 @@ def test_the_planet_time_lapse_joins_the_viewers_timeline(world, planet):
     assert all(f"{cell:.0f} m" in f.label or f"{cell / 1000.0:.1f} km" in f.label for f in pf)
     assert [f.key for f in pf] == sorted(f.key for f in pf) and pf[-1].key == lv.iterations
     assert pf[0].res == pf[-1].res and "discharge" in pf[0].ch
+    # ...with the level's lakes as the shoreline channels the final frame has (and no ice: that is the coarse erosion's)
+    lake = np.asarray(pfr.load(out, lv.R)["lake"][0], np.float32)
+    depth = pf[0].ch["lake_depth"]
+    assert (lake > 1.0).any() and np.allclose(depth[lake > 1.0], np.minimum(lake[lake > 1.0], vw.LAKE_DEPTH_RANGE_M), atol=1e-2)
+    assert (depth == -vw.LAKE_DEPTH_RANGE_M).any() and "ice" not in pf[0].ch
+    assert not (pf[0].ch["ocean"][lake > 0.5] > 0.5).any() and (pf[0].ch["ocean"] > 0.5).any()
 
 
 def test_the_planet_lapse_survives_a_viewer_export(world, planet, tmp_path):
@@ -670,6 +736,8 @@ def test_the_planet_lapse_survives_a_viewer_export(world, planet, tmp_path):
         assert (out.parent / f["file"]).exists() and (out.parent / f["file"]).stat().st_size > 0
         assert f["res"] == pf[0]["res"] and "discharge" in f["layers"] and f["h1"] > f["h0"]
         assert "iteration" in f["label"]
+        # the lakes ride in a shoreline texture of the frame's own, where the page's shore path reads them
+        assert f["layers"]["lake_depth"] == [1, 1] and f["layers"]["ocean"] == [1, 2] and len(f["tex"]) == 2 and "ice" not in f["layers"]
 
 
 def test_planet_workers_map_the_inputs_the_world_has(world, planet):
@@ -723,6 +791,20 @@ def test_planet_level_does_not_depend_on_the_workers(world, planet, tmp_path):
     assert rec.get("resumed_tiles", 0) > 0, rec
     for k in ("height", "sediment", "discharge"):
         assert np.array_equal(np.load(zp.work_path(planet["out"], 0, k)), np.load(zp.work_path(out2, 0, k))), k
+    # a level under way keeps the time lapse it started with.  Its frames are no part of the
+    # erosion, and a level that differed only in them read as another one and started over:
+    # every unfinished bake on disk, the day the default `frame_res` changed
+    import dataclasses
+
+    stamp = zp.work_path(out2, 0, "height").stat().st_mtime_ns
+    before = json.loads(prog_path.read_text())
+    said = []
+    zp.run_planet(world["root"], dataclasses.replace(lv, frame_res=lv.frame_res // 2, snapshots=lv.snapshots + 1), out=out2, faces=[0],
+                  workers=1, finish=False, log=said.append)
+    kept = json.loads(prog_path.read_text())
+    assert kept["level"]["frame_res"] == lv.frame_res and kept["level"]["snapshots"] == lv.snapshots
+    assert kept["passes"] == before["passes"] and len(kept["passes"]) > 0
+    assert zp.work_path(out2, 0, "height").stat().st_mtime_ns == stamp and any("time lapse" in m for m in said)
 
 
 def test_zoom_starts_from_the_planet_level(world, zoom, planet, tmp_path):

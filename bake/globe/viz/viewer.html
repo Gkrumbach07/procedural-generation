@@ -412,9 +412,10 @@ uniform vec2 uPrecipRange;     // precip byte -> x land mean (log lo, hi)
 uniform sampler2D uOT;         // Strahler order (final frame only): colours the river overlay
 uniform vec3 uOGeo;
 uniform int uOCh, uHasOrder;
-uniform sampler2D uST;         // shoreline texture (final frame only): G signed lake depth, B smoothed ocean mask
+uniform sampler2D uST;         // shoreline texture (the final frame, and a timeline frame that recorded its lakes): G signed lake depth, B smoothed ocean mask
 uniform vec3 uSGeo;
 uniform int uHasShore;
+uniform int uIceCh;            // the channel of it that holds the ice share of an erosion frame (the glacial pass), -1 = none
 uniform float uLakeRange;      // metres at byte 255 of the signed lake depth (byte 127.5 = the shore)
 uniform int uRivers;           // 1 when frame a carries discharge in B
 uniform float uRiverMin;       // byte at which a river starts to fade in
@@ -1242,6 +1243,9 @@ void main(){
   if (uLayer == 0) {
     // the shore is a blend, not a cut: a lake's edge takes its share of both
     col = wCov >= 0.997 ? elevColor(h, wcode) : mix(elevColor(h, 0.0), elevColor(h, wcode < 0.5 ? 1.0 : wcode), wCov);
+    // the glacial pass's ice (erosion frames): the ground under it goes to ice by the share of
+    // the cell it holds, read as smoothly as the shores; the water keeps its own colour
+    if (uIceCh >= 0) col = mix(col, vec3(0.90, 0.94, 0.98), 0.9 * (1.0 - wCov) * clamp(byteSmooth(uST, uSGeo, uIceCh, p) / 255.0, 0.0, 1.0));
   } else {
     float b = -1.0;
     if (uFineLayer >= 3 && uFineLayer <= 5 && fineW) {
@@ -2321,7 +2325,7 @@ function draw() {
     gl.uniform2i(U.uLBits, 0, 255);
     bindTex(2, tex[a][0], "uLT");
   }
-  // water mask (final frame only; the timeline falls back to the height sign)
+  // water mask (final frame only; a timeline frame with no shoreline texture falls back to the height sign)
   const wat = (FA.layers || {}).water;
   bindTex(3, tex[a][wat ? wat[0] : 0], "uWT");
   gl.uniform3fv(U.uWGeo, geoOf(FA, wat ? wat[0] : 0));
@@ -2332,12 +2336,14 @@ function draw() {
   gl.uniform1f(U.uRiverMin, rb ?? 255);
   gl.uniform1f(U.uRiverSpan, FA.river_span_byte ?? 12);
   gl.uniform1f(U.uRiverZoom, 10.0);
-  // shoreline texture: lake depth and ocean mask, interpolated (final frame only)
-  const lk = (FA.layers || {}).lake_depth, ocn = (FA.layers || {}).ocean;
+  // shoreline texture: lake depth and ocean mask, interpolated (the final frame, and the erosion
+  // and planet frames that recorded their lakes; an erosion frame's has its ice beside them)
+  const lk = (FA.layers || {}).lake_depth, ocn = (FA.layers || {}).ocean, ice = (FA.layers || {}).ice;
   const shore = lk && ocn && lk[0] === ocn[0] && lk[1] === 1 && ocn[1] === 2;
   bindTex(4, tex[a][shore ? lk[0] : 0], "uST");
   gl.uniform3fv(U.uSGeo, geoOf(FA, shore ? lk[0] : 0));
   gl.uniform1i(U.uHasShore, shore ? 1 : 0);
+  gl.uniform1i(U.uIceCh, shore && ice && ice[0] === lk[0] ? ice[1] : -1);
   gl.uniform1f(U.uLakeRange, (CHANNELS.lake_depth || {}).hi ?? 200);
   const ord = (FA.layers || {}).order;
   bindTex(5, tex[a][ord ? ord[0] : 0], "uOT");

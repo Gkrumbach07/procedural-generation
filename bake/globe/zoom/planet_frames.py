@@ -5,7 +5,13 @@ core every few iterations (``PlanetLevel.snapshots``), block-averaged to its
 share of a face's frame (``frame_res``).  :func:`build` stitches those into
 whole faces -- frame ``k`` of every tile together -- and writes one
 ``L{R}.frames.npz`` beside the level, in the shape the viewer's timeline
-reads: ``surface`` and ``discharge`` as ``(frames, 6, res, res)``.
+reads: ``surface`` and ``discharge`` as ``(frames, 6, res, res)`` -- and
+``lake``, the metres of water standing on the ground, where a tile had a
+lake of the planet's in it.  A level's lakes are the planet's, at their
+levels over the floors the level found, for the whole of its erosion
+(:mod:`globe.zoom.parent_lakes`, :func:`globe.zoom.bake.erode_tile`): they
+neither fill nor drain across the lapse, and what moves is the ground beside
+them.
 
 Tiles run in passes, so no two are at the same iteration at the same moment:
 a frame holds every tile as far as it had got by that many iterations of its
@@ -76,6 +82,7 @@ def build(out: str | Path, R: int | None = None, log=None) -> Path | None:
     res = n_fine // factor
     surface = np.empty((nfr, 6, res, res), np.float16)
     discharge = np.empty((nfr, 6, res, res), np.float16)
+    lake = None                                       # made when the first tile with a lake turns up
     for f in range(6):
         base_s, base_q = _face_base(out, R, f, res)
         surface[:, f] = base_s.astype(np.float16)
@@ -83,17 +90,23 @@ def build(out: str | Path, R: int | None = None, log=None) -> Path | None:
     for face, ta0, tb0, path in tiles:
         with np.load(path) as z:
             surf, q, core = z["surface"], z["discharge"], z["core"]
+            wet = z["lake"] if "lake" in z.files else None
         a0, b0 = int(core[0]) // factor, int(core[1]) // factor
         a1, b1 = a0 + surf.shape[1], b0 + surf.shape[2]
         if a1 > res or b1 > res:                      # a level whose faces do not divide evenly
             surf, q = surf[:, :res - a0, :res - b0], q[:, :res - a0, :res - b0]
+            wet = None if wet is None else wet[:, :res - a0, :res - b0]
             a1, b1 = min(a1, res), min(b1, res)
         surface[:, face, a0:a1, b0:b1] = surf[:nfr].astype(np.float16)
         discharge[:, face, a0:a1, b0:b1] = np.minimum(q[:nfr], 65000.0).astype(np.float16)
+        if wet is not None:
+            if lake is None:
+                lake = np.zeros((nfr, 6, res, res), np.float16)
+            lake[:, face, a0:a1, b0:b1] = wet[:nfr].astype(np.float16)
     path = out / FRAMES_NAME.format(R=R)
     tmp = path.with_suffix(".tmp.npz")
     np.savez(tmp, surface=surface, discharge=discharge, iterations=iterations,
-             factor=np.array([factor] * nfr, np.int32))
+             factor=np.array([factor] * nfr, np.int32), **({} if lake is None else {"lake": lake}))
     tmp.replace(path)
     if log is not None:
         log(f"[planet] time lapse: {nfr} frames of {res}^2 a face from {len(tiles)} tiles -> {path.name}")
@@ -101,8 +114,8 @@ def build(out: str | Path, R: int | None = None, log=None) -> Path | None:
 
 
 def load(out: str | Path, R: int) -> dict | None:
-    """``{surface, discharge, iterations, factor}`` of a level's time lapse, or
-    None when it has none."""
+    """``{surface, discharge, iterations, factor}`` of a level's time lapse
+    (and ``lake`` where it kept its lakes), or None when it has none."""
     path = Path(out) / FRAMES_NAME.format(R=int(R))
     if not path.exists():
         return None

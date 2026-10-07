@@ -284,7 +284,7 @@ step, `render.tectonics_frames` of them) and erosion (key = iteration, every
 | stage | arrays | notes |
 |---|---|---|
 | tectonics | `height` f16, `plate` i16 | height in **bedrock units**, sea-levelled per frame; ×`stages.tectonics.info.scale_m_per_unit` for metres. `plate` = raw plate index + 1; the JSON lists the `alive` indices, so compact `coarse/plate_id` maps back to raw |
-| erosion | `height` f16, `discharge` f16 | height = `height + sediment` in metres (block mean); discharge block max |
+| erosion | `height` f16, `discharge` f16, `lake` f16, `ice` u8 | height = `height + sediment` in metres (block mean); discharge block max; `lake` = metres of standing water over the ground (block mean; 0 on dry ground, on the sea and on water no deeper than `hydro.marsh_depth`); `ice` = share of the cell under the glacial pass's ice × 255, zero before the pass starts (the JSON says `glacial` from then on). Frames written before these existed have neither |
 
 Capture only reads the simulation: a bake with and without frames has
 identical hashes (`tests/test_viewer.py`).  A tectonics rerun deletes all
@@ -297,7 +297,9 @@ Every texture is a cube-face atlas of `(r + 2)²` tiles, 3 columns × 2 rows
 cell `(i, j)`.  The one-cell border comes from the neighbouring face.
 Texture 0 is `R,G` = 16-bit height over the frame's `[h0, h1]` m and `B` =
 the overlay (plate byte, or log discharge).  The final frame adds
-`(temperature, precip, biome)` and `(plate, sediment, crust)` textures.  The
+`(temperature, precip, biome)` and `(plate, sediment, crust)` textures; an
+erosion frame with `lake` adds `(ice, lake_depth, ocean)`, the shoreline
+channels where the final frame has them.  The
 channel encodings are in `meta.channels`.  Latitude/longitude use the +Z pole
 (`Grid.latitude`); longitude 0 is +X.
 
