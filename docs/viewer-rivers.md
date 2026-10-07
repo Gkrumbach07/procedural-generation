@@ -8,6 +8,7 @@ worse in three ways, all fixed here:
 | | was | now |
 |---|---|---|
 | rivers | hydro's D8 flow accumulation, thresholded: one cell wide by construction, 45-degree steps | erosion's particle `discharge` (McDonald's stream map), interpolated and eased in from the 85th to the 99.5th percentile of land discharge |
+| | | (2026-10-07: zoomed in, the line on that map's ridge; and on the final frame the routed flow again, smoothed and drawn as lines -- the two sections before *Detail tiles*) |
 | lakes | the per-cell water code, nearest sampled: whole cells | a signed lake depth (lake level above the ground, reaching into the dry neighbours), interpolated; the shore is its 0 crossing |
 | coasts | the per-cell water code | the 0.5 contour of the ocean mask after two 3x3 binomial passes, each cell centre held on its own side |
 | height | 16-bit codes that could round a coastal plain 0.05 m above the water below it | sea level on a code, every cell's sign kept |
@@ -156,6 +157,48 @@ What it does not do, and what was tried for it:
   runs through the lakes, but a D8 path is a staircase and its ridge comes
   out as dashes. One thread needs the river lines above (`--river-source`),
   which draw over the band rather than instead of it.
+
+## One water: the final frame's rivers are the lakes' own
+
+Lines made the rivers thin; they did not make them the lakes' rivers. The
+erosion's discharge is where its particles ran while the ground was still
+moving, and the lakes are hydro's -- the finished surface filled to its
+spills. Drawn from the first, a river passes beside a lake or stops short of
+it (the user, 2026-10-07: "can we make the rivers and lakes look more
+cohesive").
+
+The final frame now draws the routing that fills the lakes:
+
+* **which water**: a planet level's own accumulated flow where the frame is
+  one (it always was, widened into bands), else hydro's `flow_acc`, from an
+  eighth of hydro's river threshold up (`viewer.hydro_rivers`,
+  `HYDRO_RIVER_SHARE`: the drainage graph's reaches are the rivers a basin is
+  named for, and a map draws their tributaries too). The routing runs across
+  a lake at its level and out at its spill, and the rivers are drawn on land
+  only, so each one meets the shore where the water does. One thread: no
+  braids. The timeline's frames are before hydro and keep the erosion's
+  discharge, on a scale read off the last erosion frame.
+* **as what**: a routed river is a path one cell wide, so it is handed to the
+  page as a channel to find the line of (`detail.river_strength`): each
+  channel cell worth 0.4 at the threshold to 1 at full strength, spread by a
+  Gaussian of 1.3 cells and brought back up so a channel's middle is its
+  strength. The spread is what rounds a D8 path's corners: at 0.8 cells the
+  ridge of a staircase draws as a row of hooks. The frame says so
+  (`river_lines`), and the page then draws every channel as a line, 1.2 to
+  5.2 pixels by its strength, and none as a band.
+* **in what colour**: the satellite's river teal was already its lakes' at a
+  few metres; on the other layers a river is now the lakes' own blue.
+
+Earth-v32, refined frame (`scratch` shots, 2026-10-07): a river into the
+head of each valley lake and out of its foot, lake chains strung on one
+line, trunks visibly heavier than their tributaries.
+
+What it costs: on a frame finer than the routing (the refined grid, where
+hydro routes the coarse one) a path is the coarse cell's, up to a cell from
+the fine valley floor the erosion cut; a planet level routes its own grid
+and has no such offset. And a zoom window's rivers are untouched: down to
+5 m a cell a river is many cells wide and is still widened water
+(`detail.widen_rivers`).
 
 ## Detail tiles
 

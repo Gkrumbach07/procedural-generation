@@ -17,9 +17,10 @@ it, loaded only where the view is:
   :func:`viewer.encode_height`), ``B`` = the signed lake depth byte, ``A`` =
   255 - the smoothed ocean mask byte (land opaque, so a browser that
   premultiplies can only touch the sea) -- and its bottom half the water:
-  ``R`` = the log byte of the water the rivers are drawn from (a planet
-  level's accumulated flow, :func:`river_field`), so the stream map keeps
-  the source's resolution at every zoom instead of the atlas' blur;
+  ``R`` = the byte of the water the rivers are drawn from (a planet level's
+  accumulated flow as a channel to find the line of, :func:`river_strength`;
+  the erosion's discharge where there is no routed flow), so the stream map
+  keeps the source's resolution at every zoom instead of the atlas' blur;
 * written as ``tiles/L{L}/{face}_{ti}_{tj}.js`` (``GLOBE_VIEWER.tile(...)``:
   ``file://`` pages cannot fetch); a tile with no land and no lake in it is
   not written, and ``meta.detail`` carries a bitset of the ones that are.
@@ -43,9 +44,19 @@ WATER_LAND, WATER_LAKE, WATER_OCEAN = 0, 1, 2
 #: rivers from a planet level's accumulated flow: a channel from this
 #: percentile of land flow (98.5: ~800 km^2 of catchment at 1.2 km on
 #: earth-v9 -- the 88th the erosion's discharge used draws 12 % of the land as
-#: a hairline web), at full strength by the second, and widened up to
-#: ``RIVER_RADIUS`` cells as it nears it (:func:`widen_rivers`)
-RIVER_MIN_PCT, RIVER_FULL_PCT, RIVER_RADIUS = 98.5, 99.97, 3
+#: a hairline web), at full strength by the second
+RIVER_MIN_PCT, RIVER_FULL_PCT = 98.5, 99.97
+#: ...and drawn as lines (:func:`river_strength`): a channel cell is worth
+#: ``RIVER_BASE`` at the threshold to 1 at full strength, spread by a Gaussian
+#: of ``RIVER_SIGMA`` cells -- a routed path steps cell to cell, and the line
+#: the viewer finds on a staircase's ridge is a row of hooks until its corners
+#: are rounded (0.8 leaves them, 1.3 does not) -- which reaches ``RIVER_REACH``
+#: cells; the weakest channel is byte ``RIVER_MIN_BYTE`` + a quarter of
+#: ``RIVER_SPAN_BYTE`` of the river channel, the strongest the top of it
+RIVER_BASE, RIVER_SIGMA, RIVER_REACH = 0.4, 1.3, 5
+RIVER_MIN_BYTE, RIVER_SPAN_BYTE = 56, 170
+#: a zoom window's rivers are widened up to this many cells instead (:func:`widen_rivers`)
+RIVER_RADIUS = 3
 #: the sediment byte of a tile's or zoom level's water half: log over this
 #: range in metres, 0 at or below the low end
 SED_LO_M, SED_HI_M = 0.5, 2000.0
@@ -65,9 +76,11 @@ class RefinedSource:
     """The refined grid (``fine/``), from the arrays the final frame was built
     from (surface, water surface, water code at full resolution)."""
 
-    def __init__(self, surf: np.ndarray, ws: np.ndarray | None, water: np.ndarray, discharge: np.ndarray | None = None):
+    def __init__(self, surf: np.ndarray, ws: np.ndarray | None, water: np.ndarray, discharge: np.ndarray | None = None,
+                 scale: dict | None = None):
         self.surf, self.ws, self.water, self.q = surf, ws, water, discharge
         self.res = int(surf.shape[1])
+        self.scale = scale                # the river channel's byte scale when it is not the erosion's discharge (strength_scale)
 
     def rows(self, f: int, r0: int, r1: int) -> dict:
         ws = self.ws[f, r0:r1] if self.ws is not None else self.surf[f, r0:r1]
@@ -97,7 +110,7 @@ class PlanetSource:
         it, judged over the rows plus a margin as wide as such a piece."""
         from ..derive import lakes as lakes_mod
 
-        m = max(int(np.ceil(np.sqrt(self.min_cells))) + 2, RIVER_RADIUS)
+        m = max(int(np.ceil(np.sqrt(self.min_cells))) + 2, RIVER_REACH)
         e0, e1 = max(r0 - m, 0), min(r1 + m, self.res)
         load = lambda name: np.load(self.pdir / f"L{self.R}.f{f}.{name}.npy", mmap_mode="r")[e0:e1]
         surf = np.asarray(load("height"), np.float32) + np.asarray(load("sediment"), np.float32)
@@ -113,7 +126,7 @@ class PlanetSource:
         q = np.asarray(load(self.river), np.float32)
         raw = q
         if self.scale is not None:
-            q = widen_rivers(q, self.scale)
+            q = river_strength(q, self.scale)
         sed = np.asarray(load("sediment"), np.float32)
         return {"surf": surf[c], "ws": ws[c], "water": water[c], "discharge": q[c], "flow_raw": raw[c], "sediment": sed[c]}
 
@@ -124,11 +137,27 @@ def river_field(pdir: Path, R: int) -> str:
     return "flow" if all((Path(pdir) / f"L{int(R)}.f{f}.flow.npy").exists() for f in range(6)) else "discharge"
 
 
+def strength_scale(lo: float, hi: float, q_min: float, q_full: float) -> dict:
+    """The byte scale of a river channel drawn as lines (:func:`river_strength`):
+    the flow's own log scale -- ``lo`` byte 1, ``hi`` byte 255, so the channel
+    sits beside the flow layer on one scale -- with ``river_min`` and
+    ``river_full`` at bytes ``RIVER_MIN_BYTE`` and ``RIVER_MIN_BYTE +
+    RIVER_SPAN_BYTE``, and the flow a channel starts at and is full strength
+    by (``q_min``, ``q_full``).  ``lines`` tells the viewer every channel in it
+    is a line and none a band."""
+    lo = max(float(lo), 1e-9)
+    hi = max(float(hi), lo * 10.0)
+    at = lambda b: lo * (hi / lo) ** (b / 255.0)
+    q_min = max(float(q_min), 1e-9)
+    return {"lo": lo, "hi": hi, "river_min": at(RIVER_MIN_BYTE), "river_full": at(RIVER_MIN_BYTE + RIVER_SPAN_BYTE),
+            "q_min": q_min, "q_full": max(float(q_full), q_min * 1.001), "lines": True}
+
+
 def river_scale(pdir: Path, R: int, stride: int = 7) -> dict:
-    """The byte scale of a planet level's flow over all six faces (every
-    ``stride``-th cell of land): ``lo`` its median (byte 1), ``hi`` its
-    maximum (byte 255), rivers from ``river_min`` to full at
-    ``river_full``."""
+    """The scale of a planet level's rivers (:func:`strength_scale`) over all
+    six faces (every ``stride``-th cell of land): ``lo`` the flow's median,
+    ``hi`` its maximum, a channel from the ``RIVER_MIN_PCT`` percentile of
+    land flow to full strength at ``RIVER_FULL_PCT``."""
     qs = []
     for f in range(6):
         q = np.asarray(np.load(Path(pdir) / f"L{int(R)}.f{f}.flow.npy", mmap_mode="r")[::stride, ::stride], np.float64)
@@ -136,13 +165,49 @@ def river_scale(pdir: Path, R: int, stride: int = 7) -> dict:
         qs.append(q[(z > 0.0) & (q > 0.0)])
     q = np.concatenate(qs) if qs else np.array([1.0])
     lo = max(float(np.percentile(q, 50)), 1e-9)
-    hi = max(float(q.max()), lo * 10.0)
-    rmin = max(float(np.percentile(q, RIVER_MIN_PCT)), lo * 1.001)
-    return {"lo": lo, "hi": hi, "river_min": rmin, "river_full": max(float(np.percentile(q, RIVER_FULL_PCT)), rmin * 1.001)}
+    return strength_scale(lo, float(q.max()), max(float(np.percentile(q, RIVER_MIN_PCT)), lo * 1.001), float(np.percentile(q, RIVER_FULL_PCT)))
+
+
+def channel_value(q: np.ndarray, scale: dict) -> np.ndarray:
+    """What each cell of the flow ``q`` is worth as a river: 0 below
+    ``scale["q_min"]``, ``RIVER_BASE`` there, 1 at ``q_full`` (log); float64."""
+    q = np.asarray(q, np.float64)
+    qmin, qfull = float(scale["q_min"]), float(scale["q_full"])
+    s = np.clip(np.log(np.maximum(q, qmin) / qmin) / math.log(qfull / qmin), 0.0, 1.0)
+    return np.where(q >= qmin, RIVER_BASE + (1.0 - RIVER_BASE) * s, 0.0)
+
+
+def smooth_channels(v: np.ndarray, scale: dict, sigma: float = RIVER_SIGMA, width: float = 1.0) -> np.ndarray:
+    """:func:`channel_value` spread by a Gaussian of ``sigma`` cells and
+    brought back up so the middle of a channel ``width`` cells wide is worth
+    what its cells were, as flow on ``scale`` (float32): a smooth ridge along
+    every channel, its height the channel's strength, for the viewer to find
+    the line of (viewer.html ``riverRidge``).  Borders are held (``nearest``):
+    hand it the cells beyond the rows wanted (``RIVER_REACH``)."""
+    gain = 1.0 / math.erf(0.5 * float(width) / (float(sigma) * math.sqrt(2.0)))
+    b = np.minimum(ndimage.gaussian_filter(np.asarray(v, np.float64), float(sigma), mode="nearest") * gain, 1.0)
+    lo, hi = float(scale["lo"]), float(scale["hi"])
+    top = (RIVER_MIN_BYTE + RIVER_SPAN_BYTE) / 255.0
+    return (lo * (hi / lo) ** (b * top)).astype(np.float32)
+
+
+def river_strength(q: np.ndarray, scale: dict, sigma: float = RIVER_SIGMA, width: float = 1.0) -> np.ndarray:
+    """The river channel of the flow ``q``: a routed river is a path one cell
+    wide and the same water that fills the lakes -- it runs into each at its
+    shore and out at its spill -- so it is drawn as a line and not as the
+    cells it crosses.  Each channel cell's strength, smoothed
+    (:func:`channel_value`, :func:`smooth_channels`); a strongest river's
+    middle is byte ``RIVER_MIN_BYTE + RIVER_SPAN_BYTE`` of ``scale``, a
+    weakest ``RIVER_BASE`` of that, the land between byte 0."""
+    return smooth_channels(channel_value(q, scale), scale, sigma, width)
 
 
 def widen_rivers(q: np.ndarray, scale: dict, radius: int = RIVER_RADIUS) -> np.ndarray:
-    """``q`` with each channel spread over a disc that grows with its
+    """(The zoom windows' rivers, :mod:`globe.viz.zoomtex`: down to 5 m a cell a
+    river is many cells wide and is drawn as the water it is; the planet's are
+    lines, :func:`river_strength`.)
+
+    ``q`` with each channel spread over a disc that grows with its
     strength ``s`` (0 at ``river_min``, 1 at ``river_full``, log): radius
     ``r`` where ``s >= (r - 0.5) / radius``, so a creek stays a cell wide and
     a trunk is ``2 radius + 1``, each ring a little weaker than the one inside
@@ -238,7 +303,7 @@ def tile_image(surf, ld, ocean_m, disch, ti: int, tj: int, h0: float, h1: float,
                res: int | None = None, row0: int = 0, flow=None, sediment=None) -> np.ndarray | None:
     """The ``(TILE + 2)`` x ``2 (TILE + 2)`` RGBA image of tile ``(ti, tj)`` of
     a face level ``res`` cells a side, from arrays holding its rows ``[row0,
-    row0 + len)``: the ground on top, the water below -- R the widened river
+    row0 + len)``: the ground on top, the water below -- R the river channel's
     byte, G the flow itself on the same scale (the flow layer), B the sediment
     byte (:data:`SED_LO_M`).  None when the tile has no land and no lake."""
     n = int(res) if res is not None else surf.shape[0]
@@ -316,6 +381,7 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
             "water_gb": True, "sed_lo": SED_LO_M, "sed_hi": SED_HI_M,
             "river_min_byte": int(np.clip(byte(scale["river_min"]), 1, 254)),
             "river_span_byte": max(byte(scale["river_full"]) - byte(scale["river_min"]), 8),
+            "river_lines": bool(scale.get("lines")),          # every channel a line (river_strength): the page draws no bands
             "levels": []}
     for L, res in levels:
         nT = -(-res // TILE)
@@ -357,6 +423,6 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
     return meta
 
 
-__all__ = ["TILE", "RIVER_MIN_PCT", "RIVER_FULL_PCT", "RIVER_RADIUS", "SED_LO_M", "SED_HI_M", "log_byte", "RefinedSource", "PlanetSource", "river_field", "river_scale",
-           "widen_rivers", "reduce_face", "face_lake_depth", "face_smooth_mask", "height_grid",
+__all__ = ["TILE", "RIVER_MIN_PCT", "RIVER_FULL_PCT", "RIVER_BASE", "RIVER_SIGMA", "RIVER_REACH", "RIVER_MIN_BYTE", "RIVER_SPAN_BYTE", "SED_LO_M", "SED_HI_M", "log_byte", "RefinedSource", "PlanetSource", "river_field", "river_scale",
+           "strength_scale", "channel_value", "smooth_channels", "river_strength", "widen_rivers", "RIVER_RADIUS", "reduce_face", "face_lake_depth", "face_smooth_mask", "height_grid",
            "encode_height_on", "tile_image", "levels_for", "export_tiles"]

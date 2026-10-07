@@ -505,28 +505,75 @@ def test_the_river_lines_slope_and_curvature_are_the_splines_own():
         assert v - 0.5 * g * g / h == pytest.approx(across(one, 0.0)[0], rel=0.02)   # ...and the discharge on it
 
 
-def test_rivers_widen_with_their_flow():
-    """``detail.widen_rivers``: a channel spreads over a disc that grows with
-    its strength -- a trunk at full strength to ``RIVER_RADIUS`` cells, a creek
-    just over the threshold not at all, flow below it never -- each ring
-    weaker than the one inside it, and no cell is lowered."""
+def test_a_routed_river_is_a_smooth_ridge_as_high_as_it_is_strong():
+    """``detail.river_strength``: a routed flow's channel is a path one cell
+    wide, and the final frame draws it as the line on a ridge -- so the
+    channel's cells are smoothed into one, as high in the middle as the
+    channel is strong (the top of the river bytes at full strength,
+    ``RIVER_BASE`` of it at the threshold), falling away on both sides and
+    gone within ``RIVER_REACH`` cells, and flow below the threshold is no
+    river at all.  A path two cells wide (the coarse routing on the refined
+    frame) comes out as high when told its width."""
     from globe.viz import detail as dt
 
     n = 64
     q = np.full((n, n), 0.5, np.float32)
     q[:, 16] = 1000.0                         # trunk: full strength
-    q[:, 40] = 10.5                           # creek: just past river_min
-    q[:, 56] = 5.0                            # below the threshold
-    sc = {"lo": 1.0, "hi": 1000.0, "river_min": 10.0, "river_full": 1000.0}
-    w = dt.widen_rivers(q, sc)
-    assert (w >= q).all()
-    row = w[n // 2]
-    r = dt.RIVER_RADIUS
-    assert (row[16 - r:16 + r + 1] >= sc["river_min"]).all() and row[16 - r - 1] < sc["river_min"]
-    assert row[15] > row[14] > row[13] and row[15] < 1000.0                # soft banks
-    assert row[39] < sc["river_min"] and row[41] < sc["river_min"]         # a creek stays a cell wide
-    assert (row[54:59] == q[n // 2, 54:59]).all()
+    q[:, 40] = 10.5                           # creek: just past the threshold
+    q[:, 56] = 5.0                            # below it
+    sc = dt.strength_scale(1.0, 1000.0, 10.0, 1000.0)
+    byte = lambda x: dt.log_byte(np.asarray(x), sc["lo"], sc["hi"]).astype(int)  # noqa: E731
+    top = dt.RIVER_MIN_BYTE + dt.RIVER_SPAN_BYTE
+    assert byte([sc["river_min"]])[0] == dt.RIVER_MIN_BYTE and byte([sc["river_full"]])[0] == top and sc["lines"]
+    row = byte(dt.river_strength(q, sc)[n // 2])
+    assert abs(row[16] - top) <= 1
+    assert abs(row[40] - dt.RIVER_BASE * top) <= 4
+    assert row[16] > row[15] > row[14] > row[13] > 0 and row[16] > row[17] > row[18] > 0     # a ridge, smooth on both sides
+    assert row[16 + dt.RIVER_REACH + 1] == 0 and row[16 - dt.RIVER_REACH - 1] == 0
+    assert (row[52:61] == 0).all() and row[28] == 0
+    q2 = np.full((n, n), 0.5, np.float32)
+    q2[:, 16:18] = 1000.0
+    row2 = byte(dt.river_strength(q2, sc, width=2.0)[n // 2])
+    assert top - 12 <= row2[16] == row2[17] <= top
 
+
+def test_the_final_frames_rivers_are_the_water_that_fills_the_lakes(tmp_path):
+    """``viewer.hydro_rivers``: the final frame draws its rivers from hydro's
+    routing -- the rain down the finished surface, through each lake and out
+    at its spill -- not from the erosion's discharge, so a river meets a lake
+    at its shore.  A routed path comes out as one smooth channel as wide as
+    the frame is finer than the routing, as strong as its flow, from a share
+    of hydro's river threshold up; the sea and the ground between are none;
+    and a world hydro has not run on has no such rivers (the erosion's
+    discharge is drawn as it was)."""
+    from globe.viz import detail as dt
+
+    N, n = 16, 32
+    (tmp_path / "coarse").mkdir()
+    fa = np.full((6, N, N), 1.0, np.float32)
+    fd = np.zeros((6, N, N), np.uint8)
+    fa[0, :, 8] = 4000.0                      # a trunk down face 0...
+    fa[0, 4, :8] = 60.0                       # ...a tributary of it, over the threshold's share but under the threshold
+    fa[0, 12, 9:] = 20.0                      # ...and a trickle under both
+    fd[1] = 255                               # face 1 is sea
+    fa[1, :, 5] = 4000.0
+    for f in range(6):
+        np.save(tmp_path / "coarse" / f"flow_acc.f{f}.npy", fa[f])
+        np.save(tmp_path / "coarse" / f"flow_dir.f{f}.npy", fd[f])
+    manifest = {"stages": {"hydro": {"info": {"river_threshold_volume": 400.0}}}}
+    assert vw.HYDRO_RIVER_SHARE * 400.0 < 60.0 < 400.0
+    river, scale = vw.hydro_rivers(tmp_path, manifest, n)
+    assert river.shape == (6, n, n) and scale["lines"] and scale["q_min"] == pytest.approx(vw.HYDRO_RIVER_SHARE * 400.0)
+    b = dt.log_byte(river, scale["lo"], scale["hi"]).astype(int)
+    top = dt.RIVER_MIN_BYTE + dt.RIVER_SPAN_BYTE
+    row = b[0, 20]                            # across the trunk, away from the tributary: fine cells 16 and 17 are its path
+    assert row[16] == row[17] >= top - 12 and row[16] > row[15] > row[14] > 0 and row[17] > row[18] > row[19] > 0
+    assert row[16 - dt.RIVER_REACH - 2] == 0 and row[17 + dt.RIVER_REACH + 2] == 0
+    trib = b[0, 8:10, 6]                      # the tributary: a river, weaker than the trunk
+    assert dt.RIVER_BASE * top * 0.8 < trib.max() < row[16]
+    assert b[0, 24:26, 26].max() == 0         # the trickle is none
+    assert b[1].max() == 0                    # nor is anything in the sea
+    assert vw.hydro_rivers(tmp_path, {"stages": {}}, n) == (None, None)
 
 
 # --------------------------------------------------------------------------

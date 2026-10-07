@@ -339,6 +339,49 @@ def timeline_water(height: np.ndarray, lake: np.ndarray | None, lake_min_depth: 
     return {"lake_depth": lake_depth(surf, ws, code), "ocean": smooth_mask(code == WATER_OCEAN)}
 
 
+#: the final frame's rivers start at this share of hydro's river threshold: the drainage graph's
+#: reaches are the rivers a basin is named for, and a map draws their tributaries too (an eighth:
+#: 10.7 % of earth-v32's coarse land cells against the graph's 3.7 %)
+HYDRO_RIVER_SHARE = 0.125
+
+
+def hydro_rivers(root: Path, manifest: dict, n: int) -> tuple[np.ndarray | None, dict | None]:
+    """The final frame's rivers from hydro's own routing, ``(6, n, n)`` and
+    their scale (:func:`detail.river_strength`, :func:`detail.strength_scale`),
+    or ``(None, None)`` on a world hydro has not run on.
+
+    The erosion's discharge is where its particles ran while the ground was
+    still moving; ``flow_acc`` is the rain routed down the finished surface,
+    through every lake at its level and out at its spill -- the water the
+    lakes are filled by.  Drawn from the first, a river passes beside a lake
+    or stops short of one; from the second it runs into the shore and out
+    again.  The routing is the coarse grid's: on a finer frame each path is
+    ``n / N_c`` cells wide before it is smoothed, across the cube's edges
+    too (the faces are padded with their neighbours first)."""
+    from . import detail as dt
+
+    fa, fd = _load_faces(root, "flow_acc"), _load_faces(root, "flow_dir")
+    thr = ((manifest.get("stages", {}).get("hydro", {}) or {}).get("info", {}) or {}).get("river_threshold_volume")
+    if fa is None or not thr:
+        return None, None
+    land = (fd != 255) if fd is not None else np.ones(fa.shape, bool)
+    ql = fa[land & (fa > 0)].astype(np.float64)
+    if not ql.size:
+        return None, None
+    q_min = float(thr) * HYDRO_RIVER_SHARE
+    top = ql[ql >= q_min]
+    lo = max(_pctl(ql, 50, 1.0), 1e-9)
+    scale = dt.strength_scale(lo, float(ql.max()), q_min, _pctl(top, 99.5, q_min * 40.0))
+    R = max(1, int(n) // fa.shape[1])
+    v = dt.channel_value(np.where(land, fa, 0.0), scale)
+    if R > 1:
+        v = np.repeat(np.repeat(v, R, axis=1), R, axis=2)
+    pad = dt.RIVER_REACH
+    vp = pad_faces(v, pad)
+    out = np.stack([dt.smooth_channels(vp[f], scale, width=R)[pad:-pad, pad:-pad] for f in range(6)])
+    return out, scale
+
+
 def _fine_final(root: Path, manifest: dict, surf_c: np.ndarray, flow_dir_c: np.ndarray | None, log=print) -> dict | None:
     """The final state on the refined grid (``fine/``), or None when refine
     has not run.  Sea and lakes follow derive's rules, so the viewer draws the
@@ -424,16 +467,16 @@ def _planet_final(root: Path, manifest: dict, surf_c: np.ndarray, flow_dir_c: np
         return out
 
     def red_rivers(face):
-        """The flow widened at full resolution (:func:`detail.widen_rivers`),
-        then block maxima: strips of block rows with the widening's reach
-        beyond them."""
+        """The flow as a river channel at full resolution
+        (:func:`detail.river_strength`), then block maxima: strips of block
+        rows with the smoothing's reach beyond them."""
         a = np.load(pdir / f"L{R_lvl}.f{face}.flow.npy", mmap_mode="r")
         out = np.empty((res, res), np.float32)
-        m, S = dt.RIVER_RADIUS, 64
+        m, S = dt.RIVER_REACH, 64
         for i0 in range(0, res, S):
             i1 = min(res, i0 + S)
             r0, r1 = max(i0 * k - m, 0), min(i1 * k + m, n)
-            w = dt.widen_rivers(np.asarray(a[r0:r1, :res * k], np.float32), scale)[i0 * k - r0:i1 * k - r0]
+            w = dt.river_strength(np.asarray(a[r0:r1, :res * k], np.float32), scale)[i0 * k - r0:i1 * k - r0]
             out[i0:i1] = w.reshape(i1 - i0, k, res, k).max(axis=(1, 3))
         return out
 
@@ -591,6 +634,14 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
         water = water_code(surf, _load_faces(root, "flow_dir"), ws,
                            float((manifest.get("params", {}).get("hydro", {}) or {}).get("lake_min_depth", 0.5)))
         discharge, biome, basin = _load_faces(root, "discharge"), _load_faces(root, "biome"), _load_faces(root, "basin_id")
+    # the rivers: a planet level's own routed flow, else hydro's -- the water the lakes are
+    # filled by, so a river runs into each and out of it (hydro_rivers); the erosion's
+    # discharge only where neither is there
+    river_scale = fine.get("river_scale") if fine is not None else None
+    if river_scale is None and not planet:
+        routed, routed_scale = hydro_rivers(root, manifest, Nsrc)
+        if routed is not None:
+            discharge, river_scale = routed, routed_scale
     ldepth = lake_depth(surf, ws, water)
     fine_rock = fine.get("rock") if fine is not None else None
     fine_base = fine.get("basement") if fine is not None else None
@@ -617,7 +668,7 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
         basement=ds(fine_base if fine_base is not None else up(_load_faces(root, "basement")), "nearest"),
         crust_thickness=ds(up(_load_faces(root, "crust_thickness", "diagnostics"))),
     ))
-    frames[-1].river_scale = fine.get("river_scale") if fine is not None else None
+    frames[-1].river_scale = river_scale
     src = (f"planet level {planet}" if planet else f"refined grid, R={R}") if fine is not None else "coarse grid"
     log(f"[viewer] {len(tect) if scale else 0} tectonics + {sum(f.stage == 'erosion' for f in frames)} erosion frames + final ({r}² per face, {src})")
     return frames, manifest
@@ -660,9 +711,16 @@ def channel_specs(final: _Frame, river_threshold: float | None = None, timeline=
                           "names": ["—"] + [str(k) for k in range(1, 256)]}
     if "basin" in final.ch:
         specs["basin"] = {"label": "Basins", "kind": "category", "cmap": "plates", "offset": 1}
-    if "discharge" in final.ch:
-        q = final.ch["discharge"].astype(np.float64)
-        ql = q[land & (q > 0)]
+    # The discharge byte is the erosion's stream map's, for the timeline's frames.  A final
+    # frame whose rivers are a routed flow has a scale of its own (encode_frame), so the
+    # timeline's is read off its last erosion frame -- taken from the routed flow's, as it
+    # was on a planet level, an erosion frame's discharge was measured against another water
+    stream = final if "discharge" in final.ch and not getattr(final, "river_scale", None) else \
+        next((f for f in reversed(list(timeline)) if f.stage == "erosion" and "discharge" in f.ch), None) or \
+        next((f for f in reversed(list(timeline)) if "discharge" in f.ch and f.stage != "tectonics"), None)
+    if stream is not None:
+        q = stream.ch["discharge"].astype(np.float64)
+        ql = q[(stream.height >= 0) & (q > 0)]
         lo = max(_pctl(ql, 50, 1.0), 1e-6)
         hi = max(float(q.max()), lo * 10)
         # rivers fade in from the 85th percentile of land discharge and are
@@ -670,10 +728,9 @@ def channel_specs(final: _Frame, river_threshold: float | None = None, timeline=
         # channel has soft banks and the faint paths beside it show
         specs["discharge"] = {"label": "Discharge", "kind": "log", "lo": lo, "hi": hi, "unit": "", "cmap": "viridis",
                               "river_min": _pctl(ql, 85, lo * 2), "river_full": _pctl(ql, 99.5, lo * 40)}
-        if getattr(final, "river_scale", None):
-            # a planet level's accumulated flow, widened: the scale of its
-            # source's cells, so the globe and the detail tiles draw one map
-            specs["discharge"] = {"label": "Rivers (accumulated flow)", "kind": "log", "unit": "", "cmap": "viridis", **final.river_scale}
+    elif getattr(final, "river_scale", None) and "discharge" in final.ch:
+        # no timeline at all: the one frame's own scale
+        specs["discharge"] = {"label": "Rivers (accumulated flow)", "kind": "log", "unit": "", "cmap": "viridis", **final.river_scale}
     if "temperature" in final.ch:
         specs["temperature"] = {"label": "Temperature", "kind": "linear", "lo": -45.0, "hi": 35.0, "unit": "°C", "cmap": "thermal"}
     if "precip" in final.ch:
@@ -773,6 +830,10 @@ def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
     hi, lo, h0, h1 = encode_height(pad_faces(fr.height))
     zero = np.zeros_like(hi)
     over = "plate" if fr.stage == "tectonics" else "discharge"
+    if over == "discharge" and getattr(fr, "river_scale", None) and over in fr.ch:
+        # the final frame's rivers on their own scale: a routed flow drawn as lines
+        # (detail.river_strength), not the erosion's discharge the timeline's bytes are for
+        specs = {**specs, over: {"label": "Rivers (accumulated flow)", "kind": "log", "unit": "", "cmap": "viridis", **fr.river_scale}}
     b = pad_faces(_byte(over, fr.ch[over], specs)) if over in fr.ch and over in specs else zero
     images = [atlas([hi, lo, b])]
     layers = {over: [0, 2]} if over in fr.ch and over in specs else {}
@@ -809,6 +870,8 @@ def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
     if river_min_byte is not None:
         meta["river_min_byte"] = river_min_byte
         meta["river_span_byte"] = max(river_full_byte - river_min_byte, 1)
+        if specs[over].get("lines"):
+            meta["river_lines"] = True        # every channel a line: the page draws no bands on this frame
     return images, meta
 
 
@@ -891,6 +954,9 @@ def river_lines(root: Path, final: _Frame, specs: dict, source: str = "graph", l
     elif source == "traced":
         if not {"discharge", "water"} <= final.ch.keys() or "discharge" not in specs:
             return None
+        if (getattr(final, "river_scale", None) or {}).get("lines"):
+            log("[viewer] river lines: the final frame's rivers are a routed flow, drawn as lines already; nothing to trace")
+            return None
         s = specs["discharge"]
         res = _traced_full(full, s, log) if full is not None else None
         if res is not None:
@@ -961,7 +1027,10 @@ def detail_source(root: Path, manifest: dict, refined: bool, planet: str | None)
         return dt.PlanetSource(pdir, R, surf_c.shape[1], sea_near, depth, min_cells)
     if refined:
         fine = _fine_final(root, manifest, surf_c, flow_dir_c)
-        return None if fine is None else dt.RefinedSource(fine["surf"], fine["ws"], fine["water"], fine["discharge"])
+        if fine is None:
+            return None
+        routed, routed_scale = hydro_rivers(root, manifest, fine["surf"].shape[1])     # the rivers the final frame draws
+        return dt.RefinedSource(fine["surf"], fine["ws"], fine["water"], routed if routed is not None else fine["discharge"], routed_scale)
     return None
 
 

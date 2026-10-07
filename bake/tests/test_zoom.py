@@ -1012,7 +1012,7 @@ def test_viewer_final_frame_from_the_planet_level(world, planet):
     from globe.viz import detail as dt
 
     assert dt.river_field(planet["out"], lv.R) == "flow" and fin["river_scale"]["river_full"] > fin["river_scale"]["river_min"]
-    q0 = dt.widen_rivers(np.load(zp.out_path(planet["out"], lv.R, 0, "flow")), fin["river_scale"])     # strips give the whole face's widening
+    q0 = dt.river_strength(np.load(zp.out_path(planet["out"], lv.R, 0, "flow")), fin["river_scale"])   # strips give the whole face's rivers
     assert np.allclose(fin["discharge"][0], q0.reshape(2 * N, k, 2 * N, k).max(axis=(1, 3)))
     h0 = np.load(zp.out_path(planet["out"], lv.R, 0, "height")) + np.load(zp.out_path(planet["out"], lv.R, 0, "sediment"))
     assert np.allclose(fin["surf"][0], h0.reshape(2 * N, k, 2 * N, k).mean(axis=(1, 3)), atol=1e-2)
