@@ -186,6 +186,47 @@ def circulation_profile(lat_rad: np.ndarray, cp: ClimateParams) -> tuple[np.ndar
     return zonal / norm, merid / norm
 
 
+def storm_belt(lat_rad: np.ndarray, cp: ClimateParams) -> np.ndarray:
+    """1 where the surface branches of the circulation *converge*, 0 where
+    they diverge, by latitude.
+
+    The mean wind dips through zero at 60 degrees exactly as it does at 30,
+    but the two calms are opposites.  Under the horse latitudes the air
+    subsides and it is dry.  Along the polar front the westerlies' poleward
+    branch meets the polar easterlies' equatorward one and the air rises:
+    the belt is Earth's storm track, and its zonal-mean wind is weak because
+    its weather is cyclones.  Read as a calm, the front was a dry ring
+    (precipitation.py, ``climate.storm_front``).
+
+    The convergence is that of the meridional branch on the sphere,
+    ``-(1/cos lat) d(v cos lat)/dlat > 0``: the whole westerly band and the
+    front (poleward flow converges on a sphere), and the trades' meeting on
+    the equator; not the 30 degree belt, and not the polar cap.  Only where
+    the wind is slower than at a band centre does it change anything, which
+    is the front: its sign turns 0.05 degrees inside the front's poleward
+    edge, where the wind is within 0.2 % of full speed again."""
+    lat = np.asarray(lat_rad, dtype=np.float64)
+    e = math.radians(0.05)
+    v = lambda x: circulation_profile(x, cp)[1] * np.cos(x)  # noqa: E731
+    return (v(lat + e) < v(lat - e)).astype(np.float64)
+
+
+def storminess(lat_rad: np.ndarray, cp: ClimateParams) -> np.ndarray:
+    """0..1 by latitude: how far the weather, and not the mean wind, carries
+    the moisture (precipitation.py, ``climate.eddy_reach_frac``).
+
+    Cyclones belong to the extratropics: 1 poleward of the horse latitudes,
+    blended in across them as the wind's own bands are (``band_blend_deg``).
+    The trades are the one wind that is its own weather -- steady, under
+    subsiding air -- and there it is 0, which is what keeps their deserts.
+    On the equator they converge and the air rises again: the profile's own
+    ``sech^2(lat / band_blend)``, the convergence of its ``tanh``."""
+    lat = np.degrees(np.asarray(lat_rad, dtype=np.float64))
+    w = max(float(cp.band_blend_deg), 1e-6)
+    extratropics = _smoothstep((np.abs(lat) - (30.0 - 0.5 * w)) / w)
+    return np.maximum(extratropics, 1.0 / np.cosh(lat / w) ** 2)
+
+
 def circulation_wind3(grid: Grid, cp: ClimateParams) -> np.ndarray:
     """Undeflected wind as 3-D tangent vectors (radians per step) on every
     extended cell: ``wind_speed`` cells at band centres."""
@@ -241,6 +282,8 @@ __all__ = [
     "cells_per_radian",
     "smooth_field",
     "circulation_profile",
+    "storm_belt",
+    "storminess",
     "circulation_wind3",
     "deflect_wind3",
     "wind_field",

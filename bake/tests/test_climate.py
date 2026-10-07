@@ -12,9 +12,9 @@ import numpy as np
 import pytest
 
 from globe.climate import run as climate_run
-from globe.climate.precipitation import advect_precip, finalise_precip, latitude_prior, max_sweeps, moisture_reach_m, orographic_rise, rainout_fraction
+from globe.climate.precipitation import advect_precip, cold_air, eddy_resupply, finalise_precip, rain_drift_passes, latitude_prior, max_sweeps, moisture_reach_m, orographic_rise, precipitation, rainout_fraction
 from globe.climate.temperature import evaporation, temperature
-from globe.climate.wind import cells_to_tangent3, circulation_profile, geographic_frame, tangent3_to_cells, wind_field
+from globe.climate.wind import cells_to_tangent3, circulation_profile, geographic_frame, storm_belt, storminess, tangent3_to_cells, wind_field
 from globe.config import WorldParams
 from globe.cubesphere import get_grid
 from globe.field import FaceField
@@ -286,6 +286,114 @@ def test_rainout_is_parameterised_in_physical_length():
     assert res[32][1] == pytest.approx(res[64][1])  # same planet
     assert res[32][0] == pytest.approx(res[64][0], rel=0.15)  # same moisture reach in metres
     assert 0.2 < res[64][0] < 0.9  # the interior is neither bone dry nor saturated
+
+
+#: the weather the mean wind leaves out, on (config.ClimateParams: off by default)
+WEATHER = {"storm_front": 1.0, "eddy_reach_frac": 0.15, "cold_air_k": 0.067}
+
+
+def _front_against_its_sides(grid, bed: FaceField, cp) -> float:
+    """Mean rain depth on the 60 degree line of the northern hemisphere over
+    the mean of the bands 6-10 degrees either side of it."""
+    H, N = grid.H, grid.N
+    sl = (slice(None), slice(H, H + N), slice(H, H + N))
+    f, _ = precipitation(grid, bed, wind_field(grid, bed, cp), cp)
+    r = (f.data.astype(np.float64) / grid.cell_area * grid.cell_size_m**2)[sl]
+    lat = np.degrees(grid.latitude())[sl]
+    sides = 0.5 * (r[(lat > 50) & (lat < 54)].mean() + r[(lat > 66) & (lat < 70)].mean())
+    return float(r[(lat > 58.5) & (lat < 61.5)].mean() / sides)
+
+
+def test_the_polar_front_is_no_calm():
+    """The mean wind dips through zero at 60 degrees as it does at 30, but
+    there the surface branches converge: it is the storm track, and with
+    ``climate.storm_front`` its rain-out is a band centre's.  Read as a calm
+    it was a ring with half the rain over an open sea."""
+    p = _params(64, n_advect=0)
+    grid = p.coarse_grid()
+    cp = dataclasses.replace(p.climate, **WEATHER)
+    # the equator and the westerlies' whole band converge; the horse latitudes and the polar cap diverge
+    assert storm_belt(np.radians([0.0, 30.0, 45.0, 60.0, 85.0, -60.0, -30.0]), cp).tolist() == [1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0]
+    sea = _flat_ocean(grid)
+    assert _front_against_its_sides(grid, sea, cp) > 0.97
+    assert _front_against_its_sides(grid, sea, dataclasses.replace(cp, storm_front=0.0)) < 0.6
+
+
+def test_the_weather_resupplies_the_air_the_mean_wind_starves():
+    """A continent across the polar front: the mean wind creeps towards the
+    front's stagnation line raining as it goes and arrives dry, so the line
+    was a desert through the continent.  With ``climate.eddy_reach_frac``
+    the air is resupplied from the nearest sea and what is left is the
+    interior being farther from one (20 degrees against 12: 0.76 by the
+    moisture reach)."""
+    p = _params(64, n_advect=0)
+    grid = p.coarse_grid()
+    cp = dataclasses.replace(p.climate, **WEATHER)
+    lat = np.degrees(grid.latitude())
+    bed = FaceField(grid, np.where((lat > 40.0) & (lat < 80.0), 200.0, -500.0).astype(np.float32), name="bedrock")
+    bed.exchange_halos()
+    assert _front_against_its_sides(grid, bed, cp) > 0.7
+    assert _front_against_its_sides(grid, bed, dataclasses.replace(cp, storm_front=0.0, eddy_reach_frac=0.0)) < 0.45
+    # each half does its part: the front's step without the supply, the supply without the step
+    assert _front_against_its_sides(grid, bed, dataclasses.replace(cp, eddy_reach_frac=0.0)) < 0.6
+    assert _front_against_its_sides(grid, bed, dataclasses.replace(cp, storm_front=0.0)) < 0.6
+    # no supply, no change to the sweep: the share is exactly zero
+    assert not eddy_resupply(grid, wind_field(grid, bed, cp), dataclasses.replace(cp, eddy_reach_frac=0.0)).any()
+
+
+def test_the_trades_are_their_own_weather_and_cold_air_is_dry():
+    """The resupply is the extratropics' and the equator's, not the trades';
+    and below freezing the air holds less of the sea's moisture, so the rain
+    over an open sea falls off towards the pole instead of staying level."""
+    p = _params(64, n_advect=0)
+    grid = p.coarse_grid()
+    cp = dataclasses.replace(p.climate, **WEATHER)
+    st = storminess(np.radians([0.0, 15.0, 27.0, 33.0, 45.0, 60.0, 85.0, -15.0, -45.0]), cp)
+    assert st[0] == 1.0 and st[1] < 0.05 and st[7] < 0.05            # the equator's convergence; next to nothing under the trades
+    assert st[2] < 0.01 and np.all(st[3:7] == 1.0) and st[8] == 1.0   # blended in across the horse latitudes, 1 to the pole
+    H, N = grid.H, grid.N
+    sl = (slice(None), slice(H, H + N), slice(H, H + N))
+    lat = np.degrees(grid.latitude())[sl]
+    ca = cold_air(grid, cp)[sl]
+    t_sea = cp.T_eq - cp.k_lat * (np.abs(lat) / 90.0) ** 1.5
+    assert np.all(ca[t_sea >= 0.0] == 1.0) and np.all(ca[t_sea < -1.0] < 1.0)
+    assert ca.min() == pytest.approx(np.exp(cp.cold_air_k * t_sea.min()), rel=1e-6)
+    assert np.all(cold_air(grid, dataclasses.replace(cp, cold_air_k=0.0)) == 1.0)
+    sea = _flat_ocean(grid)
+
+    def polar_over_mid(c):
+        f, _ = precipitation(grid, sea, wind_field(grid, sea, c), c)
+        r = (f.data.astype(np.float64) / grid.cell_area * grid.cell_size_m**2)[sl]
+        return float(r[(lat > 78) & (lat < 84)].mean() / r[(lat > 42) & (lat < 54)].mean())
+
+    assert polar_over_mid(cp) < 0.7
+    assert polar_over_mid(dataclasses.replace(cp, cold_air_k=0.0)) > 0.95
+
+
+def test_rain_drifts_while_it_falls():
+    """``climate.rain_drift_frac`` spreads the rain over the distance it
+    drifts: a length, so the passes follow the cell size, and none on a body
+    whose cells are wider than the drift.  The land's mean stays what
+    ``precip_mean`` says; the rain that the climb put on one face of a ridge
+    is spread over both."""
+    p = _params(96, n_advect=0)
+    grid = p.coarse_grid()
+    cp = dataclasses.replace(p.climate, rain_drift_frac=0.03)
+    cells = 0.03 * grid.R_planet / grid.cell_size_m
+    assert rain_drift_passes(grid, cp) == round(2.0 * cells * cells) > 0
+    assert rain_drift_passes(grid, p.climate) == 0
+    assert rain_drift_passes(grid, dataclasses.replace(cp, rain_drift_frac=0.2 * grid.cell_size_m / grid.R_planet)) == 0
+    bed = _island_bedrock(grid)
+    H, N = grid.H, grid.N
+    sl = (slice(None), slice(H, H + N), slice(H, H + N))
+    land = bed.data[sl] >= 0.0
+    out = {}
+    for name, c in (("off", p.climate), ("on", cp)):
+        f, _ = precipitation(grid, bed, wind_field(grid, bed, c), c)
+        out[name] = f.data[sl].astype(np.float64)
+        assert out[name][land].mean() == pytest.approx(c.precip_mean, rel=1e-5)
+    assert out["on"][land].max() < 0.9 * out["off"][land].max()
+    assert out["on"][land].std() < out["off"][land].std()
 
 
 def test_fixed_sweep_count_reaches_the_stationary_rain():

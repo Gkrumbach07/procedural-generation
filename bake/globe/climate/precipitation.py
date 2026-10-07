@@ -40,6 +40,27 @@ which is resolution-dependent and slow).  Every sweep:
    coarse cell from raining out more than ``k_oro``);
 4. ``m ← m − rain`` on land, ``m ← m_ocean`` over ocean.
 
+Before step 3 the weather resupplies the air (``climate.eddy_reach_frac``):
+``m ← m + (1 − exp(−step_m / L_eddy))·(m0 − m)`` with ``m0`` the initial
+state above, the moisture the nearest sea supplies, less what air loses
+climbing to the cell (``exp(−h / oro_height_m)``: the weather brings a
+plateau no more water than the wind could).  The mean wind is not
+the only carrier -- in the mid-latitudes the cyclones are -- and by itself
+it starves whatever it reaches slowly: air creeping towards the stagnation
+line of the polar front rains as it goes and arrives dry, which was a
+desert ring at 60° through both hemispheres.  Where the wind blows straight
+inland ``m`` is ``m0`` already and nothing changes.  And ``step_m``'s floor
+is the whole band-centre step where the circulation converges
+(``climate.storm_front``, :func:`step_length_m`): that calm is the mean of
+its storms, where the 30° belt's is subsiding air.  The resupply is the
+extratropics' and the equator's (:func:`globe.climate.wind.storminess`): the
+trades are their own weather.
+
+And the sea's moisture is not one number: below freezing at sea level the
+air holds ``exp(cold_air_k·T)`` of ``m_ocean`` (:func:`cold_air`), over sea
+and land, and air carried into colder latitudes sheds what it cannot hold
+as rain.
+
 The sweeps are repeated until the moisture field is stationary
 (``n_advect = 0``: the maximum change over land between two sweeps falls
 below ``advect_tol·m_ocean``, capped at ``n_advect_max_factor·N/(wind_speed·dt)``
@@ -75,8 +96,13 @@ from ..field import FaceField, bilinear_ext
 
 
 @njit(cache=True, parallel=True)
-def _sweep(m, wind, frac, ocean, H, N, dt, m_ocean, m_out, rain_out):
-    """One semi-Lagrangian sweep over the interior of every face (gather)."""
+def _sweep(m, wind, frac, ocean, H, N, dt, m_out, rain_out, resupply, m0, cap):
+    """One semi-Lagrangian sweep over the interior of every face (gather).
+    ``resupply`` is the share of the way to ``m0`` -- the moisture the
+    nearest sea supplies -- that the weather takes the air in one step
+    (:func:`eddy_resupply`); zero, and the sweep is the mean wind's alone.
+    ``cap`` is the most the air holds at the cell (``m_ocean`` x
+    :func:`cold_air`): the sea's own moisture, and a ceiling on land."""
     F = m.shape[0]
     for r in prange(F * N):
         f = r // N
@@ -87,12 +113,18 @@ def _sweep(m, wind, frac, ocean, H, N, dt, m_ocean, m_out, rain_out):
             a = wind[f, i, j, 0]
             b = wind[f, i, j, 1]
             madv = bilinear_ext(mf, i - a * dt, j - b * dt)
+            madv += resupply[f, i, j] * (m0[f, i, j] - madv)
             rain = madv * frac[f, i, j]
+            left = madv - rain
+            c = cap[f, i, j]
+            if left > c:                 # carried into colder air: what it cannot hold falls
+                rain += left - c
+                left = c
             rain_out[f, i, j] = rain
             if ocean[f, i, j]:
-                m_out[f, i, j] = m_ocean
+                m_out[f, i, j] = c
             else:
-                m_out[f, i, j] = madv - rain
+                m_out[f, i, j] = left
 
 
 def orographic_rise(surface: FaceField, wind: FaceField, smooth: int = 0) -> np.ndarray:
@@ -168,13 +200,65 @@ def moisture_reach_m(grid: Grid, cp: ClimateParams) -> float:
     return float(cp.moisture_reach_frac) * grid.R_planet
 
 
+def step_length_m(grid: Grid, wind: FaceField, cp: ClimateParams) -> np.ndarray:
+    """Metres of air a cell's weather works through in one sweep (extended
+    float64): the distance the mean wind carries it, floored in a calm.
+
+    The floor is ``calm_floor`` of the band-centre step where the calm is
+    subsiding air (the horse latitudes, the poles) and, with
+    ``climate.storm_front``, the whole of it where the circulation converges
+    (:func:`globe.climate.wind.storm_belt`): along the polar front the calm
+    is the mean of its storms.  Both the rain-out and the storms' resupply
+    are counted over this length, so air that barely moves is neither a
+    zero-rain line nor cut off from the sea."""
+    floor = np.full((6, grid.NE, grid.NE), float(cp.calm_floor))
+    k = min(max(float(getattr(cp, "storm_front", 0.0)), 0.0), 1.0)
+    if k > 0.0:
+        from .wind import storm_belt
+
+        floor += (1.0 - float(cp.calm_floor)) * k * storm_belt(grid.latitude(), cp)
+    speed_m = wind.vec_norm().data.astype(np.float64)
+    return np.maximum(speed_m, floor * abs(float(cp.wind_speed)) * grid.cell_size_m) * float(cp.dt)
+
+
+def eddy_reach_m(grid: Grid, cp: ClimateParams) -> float:
+    """Recovery length (metres) of the storms' resupply:
+    ``eddy_reach_frac x R_planet``; 0 = none."""
+    return max(float(getattr(cp, "eddy_reach_frac", 0.0)), 0.0) * grid.R_planet
+
+
+def eddy_resupply(grid: Grid, wind: FaceField, cp: ClimateParams) -> np.ndarray:
+    """Per-cell share of the way to the sea's supply that one sweep takes the
+    air (extended float32): ``1 - exp(-step_m / L_eddy)``, a length like the
+    rain-out's, so it is the same picture at any cell size, times the
+    latitude's :func:`globe.climate.wind.storminess`.  All zero with
+    ``climate.eddy_reach_frac`` 0, and the stage is then the mean wind's."""
+    L = eddy_reach_m(grid, cp)
+    if L <= 0.0:
+        return np.zeros((6, grid.NE, grid.NE), np.float32)
+    from .wind import storminess
+
+    return ((1.0 - np.exp(-step_length_m(grid, wind, cp) / L)) * storminess(grid.latitude(), cp)).astype(np.float32)
+
+
+def cold_air(grid: Grid, cp: ClimateParams) -> np.ndarray:
+    """The share of the sea's moisture the air holds, by latitude (extended
+    float64, 0..1): 1 down to freezing at sea level, and below it
+    ``exp(cold_air_k x T)`` -- the saturation pressure's 6.7 % a degree.
+    All 1 with ``climate.cold_air_k`` 0."""
+    k = max(float(getattr(cp, "cold_air_k", 0.0)), 0.0)
+    if k <= 0.0:
+        return np.ones((6, grid.NE, grid.NE))
+    t_sea = float(cp.T_eq) - float(cp.k_lat) * (np.abs(grid.latitude()) / (0.5 * math.pi)) ** 1.5
+    return np.exp(k * np.minimum(t_sea, 0.0))
+
+
 def rainout_fraction(grid: Grid, surface: FaceField, wind: FaceField, cp: ClimateParams) -> np.ndarray:
     """Per-cell fraction of the arriving moisture that rains out in one
     sweep (extended float32 array, see the module docstring)."""
     L = moisture_reach_m(grid, cp)
     dt = float(cp.dt)
-    speed_m = wind.vec_norm().data.astype(np.float64)
-    step_m = np.maximum(speed_m, float(cp.calm_floor) * abs(float(cp.wind_speed)) * grid.cell_size_m) * dt
+    step_m = step_length_m(grid, wind, cp)
     rise = orographic_rise(surface, wind, int(cp.rise_smooth)).astype(np.float64) * dt
     f_base = 1.0 - np.exp(-step_m / L)
     f_oro = float(cp.k_oro) * (1.0 - np.exp(-rise / max(float(cp.oro_height_m), 1e-6)))
@@ -203,10 +287,17 @@ def advect_precip(grid: Grid, surface: FaceField, wind: FaceField, cp: ClimatePa
     frac = np.ascontiguousarray(rainout_fraction(grid, surface, wind, cp))
     w = np.ascontiguousarray(wind.data.astype(np.float32))
     dist = coast_distance_m(grid, ocean)
-    m0 = float(cp.m_ocean) * np.exp(-dist / moisture_reach_m(grid, cp))
-    m = FaceField(grid, np.where(ocean, float(cp.m_ocean), m0).astype(np.float32), name="moisture")
+    cap = np.ascontiguousarray((float(cp.m_ocean) * cold_air(grid, cp)).astype(np.float32))
+    m0 = cap * np.exp(-dist / moisture_reach_m(grid, cp))
+    m = FaceField(grid, np.where(ocean, cap, m0).astype(np.float32), name="moisture")
     m_out = m.zeros_like()
     rain = np.zeros((6, grid.NE, grid.NE), dtype=np.float32)
+    resupply = np.ascontiguousarray(eddy_resupply(grid, wind, cp))
+    # what the weather can bring a cell: the nearest sea's supply, less what air loses getting up
+    # to it -- the same exp(-climb / oro_height_m) the wind's own climb rains out.  Left at the
+    # sea-level figure, the resupply watered every plateau as it would a plain (earth-v30: the
+    # ground above 3 km went from 0.10 of the land's mean rain to 0.26, and half of it was gone)
+    m0 = np.ascontiguousarray((m0 * np.exp(-np.maximum(surface.data.astype(np.float64), 0.0) / max(float(cp.oro_height_m), 1e-6))).astype(np.float32))
     dt = float(cp.dt)
     if abs(cp.wind_speed * dt) > H - 1 and log is not None:
         log(f"[climate] warning: wind_speed*dt = {cp.wind_speed * dt:.2f} cells exceeds the halo ({H - 1}); departure points are clamped")
@@ -220,7 +311,7 @@ def advect_precip(grid: Grid, surface: FaceField, wind: FaceField, cp: ClimatePa
     converged = False
     while k < n_max:
         m.exchange_halos(linear=True)
-        _sweep(m.data, w, frac, ocean, H, N, dt, float(cp.m_ocean), m_out.data, rain)
+        _sweep(m.data, w, frac, ocean, H, N, dt, m_out.data, rain, resupply, m0, cap)
         m, m_out = m_out, m
         k += 1
         if auto and k % check == 0:
@@ -248,6 +339,16 @@ def latitude_prior(lat_rad: np.ndarray, cp: ClimateParams) -> np.ndarray:
     return np.maximum(wet * dry, 0.0)
 
 
+def rain_drift_passes(grid: Grid, cp: ClimateParams) -> int:
+    """3x3 binomial passes that spread the rain over the distance it drifts
+    while it forms and falls: sigma = ``rain_drift_frac x R_planet``, and a
+    pass spreads by ``sqrt(1/2)`` cell, so ``2 (sigma / cell)^2`` of them.
+    0 with the parameter at 0, and on a body whose cells are wider than the
+    drift."""
+    d = max(float(getattr(cp, "rain_drift_frac", 0.0)), 0.0) * grid.R_planet / grid.cell_size_m
+    return int(round(2.0 * d * d))
+
+
 def finalise_precip(grid: Grid, rain: np.ndarray, land: np.ndarray, cp: ClimateParams) -> np.ndarray:
     """Rain (extended, any positive scale) -> the ``precip`` field: volume per
     cell per erosion iteration (float32, extended) whose mean over interior
@@ -257,12 +358,13 @@ def finalise_precip(grid: Grid, rain: np.ndarray, land: np.ndarray, cp: ClimateP
     H, N = grid.H, grid.N
     sl = (slice(None), slice(H, H + N), slice(H, H + N))
     r = np.asarray(rain, dtype=np.float64)
-    if cp.precip_smooth > 0:
+    passes = int(cp.precip_smooth) + rain_drift_passes(grid, cp)
+    if passes > 0:
         from .wind import smooth_field
 
         rf = FaceField(grid, r.astype(np.float32), name="rain")
         rf.exchange_halos(linear=True)
-        r = smooth_field(rf, int(cp.precip_smooth)).data.astype(np.float64)
+        r = smooth_field(rf, passes).data.astype(np.float64)
     land = np.asarray(land, dtype=bool)
     if land.shape[1] == N:  # interior mask -> extended (halo cells: not land)
         land_e = np.zeros((6, grid.NE, grid.NE), dtype=bool)
@@ -306,4 +408,4 @@ def precipitation(grid: Grid, surface: FaceField, wind: FaceField, cp: ClimatePa
     return f, info
 
 
-__all__ = ["advect_precip", "coast_distance_m", "orographic_rise", "rainout_fraction", "moisture_reach_m", "max_sweeps", "latitude_prior", "finalise_precip", "precipitation"]
+__all__ = ["advect_precip", "coast_distance_m", "orographic_rise", "rainout_fraction", "step_length_m", "eddy_reach_m", "eddy_resupply", "cold_air", "moisture_reach_m", "max_sweeps", "latitude_prior", "rain_drift_passes", "finalise_precip", "precipitation"]
