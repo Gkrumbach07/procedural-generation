@@ -500,6 +500,8 @@ vec4 detailLinear(vec2 xy){
              mix(texelFetch(uDT, a + ivec2(0,1), 0), texelFetch(uDT, a + ivec2(1,1), 0), fr.x), fr.y);
 }
 vec4 bspline4(float t);
+vec4 bsplineD(float t);
+vec4 bsplineDD(float t);
 // the same bicubic read of a detail tile's texel (see zSmooth).  The sixteen taps are held
 // inside the tile's own slot: a tile carries one cell of halo, and a tap past it lands in
 // whatever unrelated tile the cache put next door -- a hard line along every tile edge, which
@@ -511,6 +513,20 @@ vec4 detailSmooth(vec2 xy){
   vec4 v = vec4(0.0);
   for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++)
     v += wx[i] * wy[j] * texelFetch(uDT, clamp(a + ivec2(i - 1, j - 1), lo, hi), 0);
+  return v;
+}
+// ...and of its red channel alone (0..255), with the slope and the curvature the same sixteen
+// texels give: g = d/dx, d/dy and h = d2/dx2, d2/dxdy, d2/dy2, a texel the unit (riverRidge)
+float detailJet(vec2 xy, out vec2 g, out vec3 h){
+  vec2 i0 = floor(xy); vec2 f = xy - i0; ivec2 a = ivec2(i0);
+  ivec2 lo = ivec2(floor(xy / uDSlot) * uDSlot), hi = lo + ivec2(int(uDSlot) - 1);
+  vec4 wx = bspline4(f.x), wy = bspline4(f.y), dx = bsplineD(f.x), dy = bsplineD(f.y), ex = bsplineDD(f.x), ey = bsplineDD(f.y);
+  float v = 0.0; g = vec2(0.0); h = vec3(0.0);
+  for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++) {
+    float c = texelFetch(uDT, clamp(a + ivec2(i - 1, j - 1), lo, hi), 0).r * 255.0;
+    v += wx[i] * wy[j] * c; g += vec2(dx[i] * wy[j], wx[i] * dy[j]) * c;
+    h += vec3(ex[i] * wy[j], dx[i] * dy[j], wx[i] * ey[j]) * c;
+  }
   return v;
 }
 float detailHeight(vec2 xy){
@@ -581,6 +597,17 @@ vec4 zSmooth(int k, vec2 a){
   vec4 v = vec4(0.0);
   for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++)
     v += wx[i] * wy[j] * zTex(k, c + ivec2(i - 1, j - 1));
+  return v;
+}
+float zJet(int k, vec2 a, out vec2 g, out vec3 h){               // (as detailJet)
+  vec2 i0 = floor(a); vec2 f = a - i0; ivec2 c0 = ivec2(i0);
+  vec4 wx = bspline4(f.x), wy = bspline4(f.y), dx = bsplineD(f.x), dy = bsplineD(f.y), ex = bsplineDD(f.x), ey = bsplineDD(f.y);
+  float v = 0.0; g = vec2(0.0); h = vec3(0.0);
+  for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++) {
+    float c = zTex(k, c0 + ivec2(i - 1, j - 1)).r * 255.0;
+    v += wx[i] * wy[j] * c; g += vec2(dx[i] * wy[j], wx[i] * dy[j]) * c;
+    h += vec3(ex[i] * wy[j], dx[i] * dy[j], wx[i] * ey[j]) * c;
+  }
   return v;
 }
 vec4 zLinear(int k, vec2 a){
@@ -724,6 +751,38 @@ float byteSmooth(sampler2D t, vec3 geo, int ch, vec3 p){
     v += wx[i] * wy[j] * chan(texelFetch(t, clamp(a + ivec2(i - 1, j - 1), lo, hi), 0), ch);
   return v * 255.0;
 }
+float byteJet(sampler2D t, vec3 geo, int ch, vec3 p, out vec2 g, out vec3 h){   // (as detailJet)
+  vec2 xy = atlasXY(p, geo);
+  vec2 i0 = floor(xy); vec2 f = xy - i0; ivec2 a = ivec2(i0);
+  ivec2 lo, hi; tileOf(xy, geo, lo, hi);
+  vec4 wx = bspline(f.x), wy = bspline(f.y), dx = bsplineD(f.x), dy = bsplineD(f.y), ex = bsplineDD(f.x), ey = bsplineDD(f.y);
+  float v = 0.0; g = vec2(0.0); h = vec3(0.0);
+  for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++) {
+    float c = chan(texelFetch(t, clamp(a + ivec2(i - 1, j - 1), lo, hi), 0), ch) * 255.0;
+    v += wx[i] * wy[j] * c; g += vec2(dx[i] * wy[j], wx[i] * dy[j]) * c;
+    h += vec3(ex[i] * wy[j], dx[i] * dy[j], wx[i] * ey[j]) * c;
+  }
+  return v;
+}
+// A river as the line its discharge runs along.  The stream map is the particles' paths
+// averaged over a texel, so a channel is a ridge in it, and drawn as the band it fills every
+// river is kilometres wide once a texel is more than a pixel.  The B-spline read is smooth
+// in its second derivative: the ridge runs where the slope across the direction of sharpest
+// downward curvature is zero, and one Newton step along that direction is the distance to it
+// in texels (exact near the line, which is the only place it is used).  peak is the
+// discharge on the line, and curv that curvature: twice the channel's height over its banks
+// for a channel one texel wide, once for two, nothing on a flat -- which tells a channel
+// from the ripple on water wider than that
+void riverRidge(float v, vec2 g, vec3 h, out float peak, out float dist, out float curv){
+  float tr = h.x + h.z, det = h.x * h.z - h.y * h.y;
+  float l1 = 0.5 * tr - sqrt(max(0.25 * tr * tr - det, 0.0));
+  peak = v; dist = 1e3; curv = max(-l1, 0.0);
+  if (l1 > -1e-3) return;                                  // a slope, a flat or a hollow
+  vec2 e = abs(h.y) > 1e-5 ? normalize(vec2(l1 - h.z, h.y)) : (h.x < h.z ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
+  float ge = dot(g, e);
+  dist = -ge / l1;
+  peak = v - 0.5 * ge * ge / l1;
+}
 // the classes round the pixel, set once per pixel in main (setClasses).  The class texels are
 // big -- a planet texel is kilometres, a zoom level's up to 76 m -- and a class edge along
 // them is a staircase, so the satellite's class properties (colour, vegetation, bare rock,
@@ -757,6 +816,9 @@ vec4 bspline(float t){
   float t2 = t * t, t3 = t2 * t, it = 1.0 - t;
   return vec4(it * it * it, 3.0 * t3 - 6.0 * t2 + 4.0, -3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0, t3) / 6.0;
 }
+// its first and second derivatives (a texel is the unit)
+vec4 bsplineD(float t){ return vec4(-0.5 * (1.0 - t) * (1.0 - t), 1.5 * t * t - 2.0 * t, -1.5 * t * t + t + 0.5, 0.5 * t * t); }
+vec4 bsplineDD(float t){ return vec4(1.0 - t, 3.0 * t - 2.0, -3.0 * t + 1.0, t); }
 void setClasses(vec3 p, int zk, vec2 za, float zw){
   bool zoom = zk >= 0 && zw > 0.5 && uZBio[zk] > 0.5;
   vec2 xy = zoom ? za : atlasXY(p, uLGeo);
@@ -1318,27 +1380,48 @@ void main(){
   // view has one (the level's own stream map, sharp at any zoom), from the
   // atlas otherwise.
   if (uRivers == 1 && wCov < 0.6) {
-    float b, rmin, rspan, texr = uTexelRad;
+    float b, rmin, rspan, texr = uTexelRad, texSrc;       // texSrc: a texel of the stream map read, radians
+    vec2 rg; vec3 rh;                                       // its slope and curvature there (riverRidge)
     if (zk >= 0 && zw > 0.5) {
       // the same smooth read as the water: a channel a cell or two wide is all edge, and
       // bilinear leaves every one of those cells' corners in it
-      b = zSmooth(zk, za + vec2(0.0, uZNE[zk])).r * 255.0;     // the zoom level's river half
+      b = zJet(zk, za + vec2(0.0, uZNE[zk]), rg, rh);          // the zoom level's river half
       rmin = uZRmin[zk];
       rspan = uZRspan[zk];
       texr = 0.5 * PI / uZRes[zk];
+      texSrc = texr;
     } else if (uDetail == 1 && detailXY(p, dxy)) {
-      b = detailSmooth(dxy + vec2(0.0, uDSlot)).r * 255.0;   // the tile's water half
+      b = detailJet(dxy + vec2(0.0, uDSlot), rg, rh);          // the tile's water half
       rmin = uDRiverMin;
       rspan = uDRiverSpan;
+      texSrc = 0.5 * PI / uDRes;
     } else {
-      b = byteSmooth(uT0a, uGeoA, 2, p);
+      b = byteJet(uT0a, uGeoA, 2, p, rg, rh);
       rmin = uRiverMin;
       rspan = uRiverSpan;
+      texSrc = 0.5 * PI / uGeoA.x;
     }
     float pxAng = uMode == 2 ? tHit * uPixAng / uRplanet : 1.0 / uScale;
     float cpp = max(pxAng / texr, 1.0);
     float t = clamp((b - rmin - uRiverZoom * log2(cpp)) / max(rspan, 1.0), 0.0, 1.0);
     float w = t * t * (3.0 - 2.0 * t);
+    float tpp = pxAng / texSrc;                // texels of the stream map a pixel covers
+    if (tpp < 1.0) {
+      // Closer than a texel a pixel the band is not the river: a channel one or two texels
+      // wide is the line on its ridge, 1.4 to 3.4 pixels by what it carries -- a map's rule,
+      // as no grid here has a river a texel wide -- and only water wider than that, which
+      // has no ridge, is still the band it fills, to a crisp edge.  (Its shoulders curve
+      // down too, a texel in from each bank; the lines that draws are inside the band.)
+      // The band comes back as the view pulls out to a texel a pixel, where it was right
+      float peak, dist, curv;
+      riverRidge(b, rg, rh, peak, dist, curv);
+      float ridge = smoothstep(0.25, 0.45, curv / max(peak - (rmin - rspan), 6.0));
+      float tl = clamp((peak - rmin) / max(rspan, 1.0), 0.0, 1.0);
+      float halfw = mix(0.7, 1.7, tl) * tpp, aa = 0.6 * tpp;
+      float line = (1.0 - smoothstep(halfw - aa, halfw + aa, abs(dist))) * smoothstep(0.0, 0.3, tl) * ridge;
+      float fill = smoothstep(0.45, 0.75, clamp((b - rmin) / max(rspan, 1.0), 0.0, 1.0)) * (1.0 - ridge);
+      w = mix(max(line, fill), w, smoothstep(0.5, 1.0, tpp));
+    }
     vec3 rc = uLayer == 1 && uCmap == 6 ? mix(vec3(0.46, 0.66, 0.70), vec3(0.22, 0.47, 0.58), w)    // satellite: teal, as McDonald's
                                         : mix(vec3(0.42, 0.62, 0.80), vec3(0.14, 0.34, 0.70), w);
     col = mix(col, rc, w * 0.9);

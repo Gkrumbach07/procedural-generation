@@ -465,6 +465,46 @@ def test_shader_sources_are_not_cut_short_by_a_stray_backtick():
 
 
 
+def test_the_river_lines_slope_and_curvature_are_the_splines_own():
+    """Closer than a texel a pixel a river is drawn as the line on its
+    discharge's ridge (viewer.html ``riverRidge``), found from the slope and
+    the curvature of the same B-spline read the band is drawn from.  Those
+    come through two one-line weight functions, and a slip in either bends
+    every river on every world without failing anything -- so they are held
+    to the spline here, with the numbers the shader's rule is written on: a
+    channel one texel wide curves twice its height over its banks, one of
+    two texels once, the inside of a wider one not at all, and one Newton
+    step from beside the line lands on it."""
+    js = vw.TEMPLATE.read_text()
+
+    def glsl(name):
+        m = re.search(rf"vec4 {name}\(float t\)\{{ return vec4\((.*?)\); \}}", js)
+        assert m, f"{name} is not the one-liner this test reads"
+        return lambda t: np.array(eval("(" + m.group(1) + ")", {"t": float(t)}))
+
+    D, DD = glsl("bsplineD"), glsl("bsplineDD")
+    B = lambda t: np.array([(1 - t) ** 3, 3 * t**3 - 6 * t**2 + 4, -3 * t**3 + 3 * t**2 + 3 * t + 1, t**3]) / 6.0  # noqa: E731
+    for t in (0.0, 0.13, 0.5, 0.87, 1.0):
+        e = 1e-4
+        assert np.allclose(D(t), (B(t + e) - B(t - e)) / (2 * e), atol=1e-6)
+        assert np.allclose(DD(t), (B(t + e) - 2 * B(t) + B(t - e)) / e**2, atol=1e-5)
+
+    def across(profile, x):
+        """Value, slope and curvature across a channel at x texels from texel 0's centre."""
+        i0 = int(np.floor(x)); f = x - i0
+        c = np.array([profile.get(i0 + k - 1, 0.0) for k in range(4)])
+        return float(B(f) @ c), float(D(f) @ c), float(DD(f) @ c)
+
+    one, two, wide = {0: 100.0}, {0: 100.0, 1: 100.0}, {k: 100.0 for k in range(-3, 4)}
+    assert across(one, 0.0)[2] == pytest.approx(-200.0)            # twice its height
+    assert across(two, 0.5)[2] == pytest.approx(-100.0)            # once
+    assert across(wide, 0.0)[2] == pytest.approx(0.0, abs=1e-9)    # none: a flat top has no ridge
+    for x in (-0.2, -0.05, 0.1, 0.2):                              # beside the line: one step is the distance
+        v, g, h = across(one, x)
+        assert x - g / h == pytest.approx(0.0, abs=0.05)
+        assert v - 0.5 * g * g / h == pytest.approx(across(one, 0.0)[0], rel=0.02)   # ...and the discharge on it
+
+
 def test_rivers_widen_with_their_flow():
     """``detail.widen_rivers``: a channel spreads over a disc that grows with
     its strength -- a trunk at full strength to ``RIVER_RADIUS`` cells, a creek

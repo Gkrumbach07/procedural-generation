@@ -107,6 +107,56 @@ follow the texture's channels with some hatching left on flats (22 k
 lines, 62 k vertices, 0.9 MB). The discharge texture still draws the
 timeline's frames.
 
+## Lines on the discharge's ridge
+
+Zoomed in until a texel is several pixels, the stream map drawn as the band
+it fills is the user's 2026-10-07 screenshots of earth-v32: every river one
+4.9 km cell wide with soft edges, fainter strands beside it, pale fans where
+the flow spreads. The discharge texture was right as data and wrong as a
+drawing: a channel is a *ridge* in it, and the river is the ridge's line.
+
+The shader finds that line from the read it already makes. The cubic
+B-spline is smooth in its second derivative, so the sixteen texels that give
+the discharge at a pixel give its slope and curvature too (`detailJet`,
+`zJet`, `byteJet`: one for each place the stream map comes from -- a detail
+tile, a zoom level, the atlas). The ridge runs where the slope across the
+direction of sharpest downward curvature is zero; one Newton step along that
+direction is the distance to it (`riverRidge`; within 0.05 texel up to 0.2
+texel from the line). Then, once a texel is more than a pixel:
+
+* a channel one or two texels wide -- its curvature is twice, or once, its
+  height over its banks -- is a line 1.4 to 3.4 pixels wide by what it
+  carries, the river-lines' own map rule;
+* water wider than that has no ridge (a flat top; its ripples are a few per
+  cent of its height and are not channels) and is still the band, drawn to a
+  crisp edge;
+* between a texel a pixel and two, the old band fades out as the line fades
+  in; zoomed out further nothing has changed.
+
+It is a change to the page alone: any world shows it on its next export, on
+the final frame, the timeline's frames, the 1.2 km tiles and the zoom
+windows, in the flat, globe and 3-D views (`scratch/` shots of earth-v32,
+earth-v26 and earth-v18's window, 2026-10-07).
+
+What it does not do, and what was tried for it:
+
+* **Braids stay.** The stream map is many particle paths averaged, and on
+  low ground they run side by side; they are now thin strands instead of a
+  smear, but they are strands.
+* **A big river is still a band.** On the 1.2 km tiles earth-v26's trunk
+  rivers are two to four texels across. Looking for their ridge on every
+  second texel finds a centre line, but the texels themselves then show the
+  channel's two shoulders as lines of their own -- a texel in from each bank
+  the surface curves down as a ridge does -- and a river drawn as three
+  parallel lines is worse than the band. Reading the map again either side
+  of a candidate line tells a shoulder from a channel, and with it the
+  software renderer the checks here run on drops its context, so that
+  version could not be looked at and is not in.
+* **Hydro's flow accumulation instead of the discharge** is one thread and
+  runs through the lakes, but a D8 path is a staircase and its ridge comes
+  out as dashes. One thread needs the river lines above (`--river-source`),
+  which draw over the band rather than instead of it.
+
 ## Detail tiles
 
 A browser texture holds one atlas of 2048^2 a face at most -- the refined
