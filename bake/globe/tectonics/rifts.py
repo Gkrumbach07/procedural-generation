@@ -27,6 +27,16 @@ fill it.  So finalise puts the graben in ``bedrock`` *and* the whole of it in ``
 before the graben, with nothing there for the basin fill to level, and the trough opens
 under the rivers over the stage.
 
+What the stage makes of it (docs/lakes-in-erosion.md section 9).  Not a lake: baked through
+erosion on seed 1423, troughs 1.5-2.0 km deep going in were 30-340 m at the surface coming
+out, and at 6,000 m (0.4 mm/yr, Earth's rate) 20-300 m.  The ground beside a sink is cut
+down to it -- the flanks lost 0.6-2.3 km of rock -- and the floor comes up with their
+unloading (0.5-2.4 km above its input bedrock: the regional rebound,
+``erosion.maps.apply_isostasy``), while its rivers run along it and out.  Sunk over the
+last 50 iterations instead the troughs keep 1.1-1.9 km and are the stamp, smooth and
+fresh-walled.  So the parameter is off, and what is not known is how late a graben has to
+open to keep its depth and lose that outline.
+
 Where.  Along the continental contacts of the plate pairs that are rifting at the last
 step: the pairs still held by their rift's strength (``TectonicSim.rift_pairs``, the slow
 phase), as far as they have opened, and the halves of a rift that broke through within

@@ -628,3 +628,43 @@ and 98 % on a mountain front.
 
 Not here yet: the elongation of real shield lakes along the ice's flow,
 crater lakes and oxbows.
+
+## 9. Rift basins do not survive the stage (`tectonics.rift_graben_m`, off)
+
+`tectonics/rifts.py` stamps the grabens of the rifts still opening at their
+own width -- floors 40-70 km across, a chain of basins with sills between --
+into `bedrock`, and the whole of it into `uplift` as subsidence, so the
+trough would open under its rivers over the stage. Baked through erosion on
+seed 1423 (11 basins, 2,950 km of rift), it does not leave one lake. Per land
+basin, floor against the ground 20-60 km outside the stamp:
+
+| | trough in the stage's input | left at the surface | flank rock lost | floor above its input bedrock | fill on the floor | floor that is sea |
+|---|---|---|---|---|---|---|
+| earth-v27: 2,000 m over the stage | 1.5-2.0 km | 30-340 m | 0.6-1.9 km | 0.5-1.1 km | 5-490 m | 50 % |
+| earth-v28: 6,000 m over the stage | 4.5-6.3 km | 20-300 m | 1.6-2.3 km | 1.9-2.4 km | 20-2,500 m | 69 % |
+| earth-v26's last 50 iterations again, 2,000 m sunk over them | 1.5-2.0 km | 1.1-1.9 km | -- | -- | 60-560 m | 36 % |
+
+Two things take the trough out, and neither is the fill. The ground beside a
+sink is cut down to it: the flanks lose more rock than the floor sinks where
+the floor sinks slowly, and a deeper graben only takes more of the highland
+with it (earth-v28's flanks stood at 1.8-2.6 km going in and 40-530 m coming
+out). And the floor comes up with the flanks' unloading: the isostatic
+rebound is regional (`apply_isostasy`, `flexure_km`), a 50 km floor is inside
+it, and it has no erosion of its own to set against it. The rivers run along
+the floors and out, so little is laid on them; what closes below sea level
+within reach of a coast becomes an arm of the sea.
+
+So the stage is long against a rift. Its uplift window is 15 My, but what it
+does to the ground beside a sink -- two kilometres of rock -- would take
+Earth's rift flanks several times that at the 0.02-0.1 mm/yr usually quoted
+for them (an estimate, not a measurement here), and at 2.5 or 7.5 m an
+iteration the floor never gets ahead. Sunk over the last 50 iterations the troughs are all
+there, and are the stamp: smooth pills with fresh walls, four of the seven on
+land with water on 12-31 % of the floor and the rest dry -- this seed's rift
+is in dry country (rain under a quarter of the land's mean on 65 % of the
+floors, median 0.17).
+
+Not settled: how late a graben has to open to keep its depth and lose the
+stamp's outline (a 10 My rift would be the last fifth of the stage by the
+flank-erosion clock above, which no test here has run), and what a rift in
+wet country holds. The parameter stays off.
