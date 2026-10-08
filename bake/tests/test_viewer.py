@@ -72,21 +72,106 @@ def test_height_encoding_keeps_the_sign_of_every_cell():
 
 
 def test_lake_depth_is_signed_so_the_shore_falls_between_cells():
-    """A lake cell carries its depth, a dry neighbour the lake level less its
-    ground (< 0), everything else the far value -- so the bilinear 0
-    crossing is where the ground meets the water."""
-    surf = np.zeros((6, 5, 5), np.float32) + 50.0
-    surf[0, 2, 2] = 10.0                              # a one-cell lake ...
-    surf[0, 2, 3] = 40.0                              # ... whose neighbour stands 10 m above its water
+    """A lake cell carries its depth, the ground near it the lake level less
+    its own height (< 0), everything else the far value -- so the
+    interpolated 0 crossing is where the ground meets the water.  A pond of
+    one cell is too small to smooth: it keeps its cell."""
+    from globe.viz import detail as dt
+
+    surf = np.zeros((6, 12, 12), np.float32) + 50.0
+    surf[0, 5, 5] = 10.0                              # a one-cell lake ...
+    surf[0, 5, 6] = 40.0                              # ... whose neighbour stands 10 m above its water
     ws = surf.copy()                                  # dry ground: water surface = ground
-    ws[0, 2, 2] = 30.0                                # the lake's level
+    ws[0, 5, 5] = 30.0                                # the lake's level
     code = vw.water_code(surf, None, ws, 0.5)
     d = vw.lake_depth(surf, ws, code)
-    assert d[0, 2, 2] == 20.0 and d[0, 2, 3] == -10.0 and d[0, 2, 1] == -20.0
-    assert d[0, 0, 0] == -vw.LAKE_DEPTH_RANGE_M and d[3, 2, 2] == -vw.LAKE_DEPTH_RANGE_M
-    # linear between the lake centre and the neighbour: the shore 2/3 of the way
-    t = 20.0 / (20.0 + 10.0)
-    assert abs(t - 2.0 / 3.0) < 1e-9
+    assert d[0, 5, 5] == 20.0                         # kept whole
+    assert -10.5 < d[0, 5, 6] < -9.5 and -20.5 < d[0, 5, 4] < -19.5      # the banks: their height over the water, smoothed within half a metre of it only
+    assert d[0, 5, 5 + dt.SHORE_RINGS] < -19.0 and d[0, 5, 5 + dt.SHORE_RINGS + 1] == -vw.LAKE_DEPTH_RANGE_M   # the ground, that far out
+    assert d[3, 5, 5] == -vw.LAKE_DEPTH_RANGE_M
+
+
+def test_a_flat_shore_is_smoothed_and_its_byte_is_finest_at_the_water():
+    """Lake country is flat at the water's edge: whether a cell is in the
+    lake is a metre's difference from the next, and the shore drawn from that
+    is the cells' outline.  ``detail.smooth_shore`` smooths the field within
+    a few metres of the level, so a one-cell tooth on a straight shore is cut
+    back and a one-cell bay filled, while the deep water and the high ground
+    keep their values; a finger lake a cell wide, which that would smooth
+    dry, keeps its cells.  And ``detail.lake_byte`` spends its steps at the
+    shore: a centimetre there, where a linear byte has 1.57 m."""
+    from globe.viz import detail as dt
+
+    R = 200.0
+    n = 40
+    surf = np.full((n, n), 1.0, np.float32)           # banks a metre over the water
+    ws = surf.copy()
+    water = np.zeros((n, n), np.uint8)
+    lake = np.zeros((n, n), bool)
+    lake[:, :20] = True                               # a lake with a straight shore down column 19 | 20 ...
+    lake[10, 20] = True                               # ... a tooth of one cell
+    lake[25, 19] = False                              # ... and a bay of one
+    lake[5:35, 30] = True                             # a finger lake, one cell wide
+    surf[lake] = -3.0
+    surf[:, :12] = -40.0                              # deep water away from the shore
+    surf[:, 36:] = 60.0                               # high ground beyond
+    ws[lake] = 0.0
+    water[lake] = dt.WATER_LAKE
+    raw = dt.face_lake_depth(surf, ws, water, R, rings=1, sigma=0.0)
+    d = dt.face_lake_depth(surf, ws, water, R)
+    assert raw[10, 20] > 0 > raw[25, 19]                                  # the cells' outline has both
+    assert d[10, 20] < 0.0 < d[25, 19]                                    # the smoothed shore has neither
+    assert d[15, 19] > 0.0 > d[15, 20]                                    # ...and is where it was
+    assert d[15, 5] == pytest.approx(40.0, abs=0.01) and d[15, 37] < -55.0   # deep water and high ground untouched
+    assert (d[8:32, 30] > 0.0).all()                                      # the finger keeps its cells
+    b = dt.lake_byte(np.array([-R, -10.0, -0.02, 0.0, 0.02, 1.0, 10.0, R]), R).astype(int)
+    assert b[0] == 0 and b[-1] == 255 and (np.diff(b) >= 0).all()
+    assert b[2] < 127.5 < b[4] and b[5] - b[4] >= 7                       # two centimetres either side are apart; a metre is 7 steps
+    lin = np.round(255.0 * (np.array([0.02, 1.0]) + R) / (2 * R))
+    assert lin[0] == lin[1]                                               # which a linear byte cannot tell from the shore
+
+
+def test_the_step_to_the_far_value_is_not_drawn_as_a_shore():
+    """The ground's height against a lake's level is known ``SHORE_RINGS``
+    cells out from it and is the far value beyond, one step down.  The page
+    fades the shore over a pixel of the field's own slope (viewer.html,
+    ``wCov``), and a pixel on that step is within its slope of zero: every
+    lake drew with a dotted ring round it, four cells out.  The fade is of the
+    field between the dry ground's floor (``SHORE_DRY_M``) and as much water,
+    which is flat across the step.  The shader's rule, replayed along a line
+    across a shore."""
+    import re
+
+    from globe.viz import detail as dt
+
+    R = 200.0
+    n = 40
+    surf = np.full((n, n), 1.0, np.float32)
+    water = np.zeros((n, n), np.uint8)
+    surf[:, :20] = -3.0
+    water[:, :20] = dt.WATER_LAKE
+    ws = np.maximum(surf, 0.0)
+    lt = dt.lake_byte(dt.face_lake_depth(surf, ws, water, R), R)[15] / 127.5 - 1.0
+    x = np.arange(0.0, n - 1, 0.5)                                # two pixels a cell
+    line = np.interp(x, np.arange(n), lt)
+    far = (x > 20.0 + dt.SHORE_RINGS - 2.0) & (x < 20.0 + dt.SHORE_RINGS + 2.0)
+    assert line[far].min() == pytest.approx(-1.0) and line[far].max() > -0.1   # the step is here
+
+    def cover(g):
+        sw = np.maximum(np.abs(np.gradient(g)), 1e-5)
+        t = np.clip((g + sw) / (2.0 * sw), 0.0, 1.0)
+        return t * t * (3.0 - 2.0 * t)
+
+    sc = np.sqrt(dt.SHORE_DRY_M / R)
+    assert cover(line)[far].max() > 0.05                          # unclamped: the ring
+    c = cover(np.clip(line, -sc, sc))
+    assert c[far].max() == 0.0 and c[x > 21.0].max() == 0.0       # clamped: none, and no water past the shore's own cells
+    assert (c[x < 18.0] == 1.0).all()                             # the lake is whole
+    assert 18.5 < x[np.argmin(np.abs(c - 0.5))] < 20.5            # and its shore is where it was
+
+    js = vw.TEMPLATE.read_text()
+    assert float(re.search(r"SHORE_DRY_M = ([0-9.]+)", js).group(1)) == dt.SHORE_DRY_M
+    assert "sg = clamp(shoreT, -sc, sc)" in js and "smoothstep(-sw, sw, sg)" in js
 
 
 def test_smooth_mask_rounds_corners_but_keeps_single_cells():
@@ -366,7 +451,7 @@ def test_erosion_frames_with_water_get_a_shoreline_texture_and_an_ice_layer(tmp_
     first, second = [fr for fr in frames if fr.stage == "erosion"]
     assert second.label.endswith("ice age") and "ice age" not in first.label
     for fr in (first, second):
-        assert fr.ch["lake_depth"][2, 3, 3] == 7.0 and fr.ch["lake_depth"][2, 2, 3] == pytest.approx(3.0 - 100.0)   # the shore next to it: its level less the ground
+        assert fr.ch["lake_depth"][2, 3, 3] == 7.0 and fr.ch["lake_depth"][2, 2, 3] == pytest.approx(3.0 - 100.0, abs=3.0)   # the shore next to it: its level less the ground (smoothed within half a metre of the level)
         assert fr.ch["ocean"][2, 3, 3] <= 0.4 and fr.ch["ocean"][0, 4, 1] >= 0.6 and fr.ch["ocean"][3, 4, 4] == 0.0
     assert not first.ch["ice"].any() and second.ch["ice"][1, 0, 0] == 1.0 and second.ch["ice"][1, 0, 4] == pytest.approx(128 / 255)
     specs = vw.channel_specs(frames[-1], None, frames[:-1])
@@ -375,7 +460,7 @@ def test_erosion_frames_with_water_get_a_shoreline_texture_and_an_ice_layer(tmp_
     assert len(images) == 2 and meta["layers"] == {"discharge": [0, 2], "ice": [1, 0], "lake_depth": [1, 1], "ocean": [1, 2]}
     T = N + 2 * vw.PAD
     px = lambda face, i, j: images[1][(face // 3) * T + vw.PAD + j, (face % 3) * T + vw.PAD + i]   # noqa: E731
-    assert px(2, 3, 3)[1] > 127 and px(2, 0, 0)[1] == 0 and px(2, 3, 3)[2] == 0        # a lake: depth above the shoreline byte, no ocean
+    assert px(2, 3, 3)[1] > 127 and px(2, 0, 0)[1] < 127 and px(4, 4, 4)[1] == 0 and px(2, 3, 3)[2] == 0   # a lake: depth above the shoreline byte, its banks below, nothing far from it; no ocean
     assert px(0, 4, 1)[2] > 127 and px(0, 4, 1)[1] == 0                                # the sea
     assert px(1, 0, 0)[0] == 255 and px(1, 0, 4)[0] == 128 and px(1, 0, 7)[0] == 0     # the ice, as a share
     # the whole way out, beside the same frames without their water
@@ -697,8 +782,10 @@ def test_detail_tiles_round_trip_heights_shores_and_the_sea(tmp_path):
     land = water[2, :dt.TILE, :dt.TILE] == dt.WATER_LAND
     assert (cell[..., 3][land & (np.arange(dt.TILE)[:, None] < dt.TILE - 8)] == 255).all()        # land away from the coast is opaque
     assert (cell[..., 3][dt.TILE - 1, :] < 128).all()                                                # the sea is not
-    ld = (cell[..., 2] / 127.5 - 1.0) * 200.0
-    assert (ld[40:50, 100:120] > 14.0).all() and (ld[:30, :60] < -100.0).all()
+    assert info["lake_curve"] == "sqrt"                             # the lake byte is finest at the shore (detail.lake_byte)
+    t = cell[..., 2] / 127.5 - 1.0
+    ld = t * np.abs(t) * 200.0
+    assert (ld[41:49, 101:119] > 14.0).all() and (ld[:30, :60] < -100.0).all()
     # the water half: the log discharge byte of the same cells
     qb = wat[1:-1, 1:-1, 0]
     assert qb[10:14, :].min() > qb[60:62, :].max() and qb[60:62, :].min() > 0

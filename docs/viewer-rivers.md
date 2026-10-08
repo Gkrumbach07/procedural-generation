@@ -231,6 +231,48 @@ and has no such offset. And a zoom window's rivers are untouched: down to
 5 m a cell a river is many cells wide and is still widened water
 (`detail.widen_rivers`).
 
+## Lake shores on flat ground
+
+The user's screenshot of earth-v32's 1.2 km tiles (2026-10-08): lakes with
+square corners and stair-step shores, and pale mottled patches inside them.
+The signed depth was already interpolated; what it interpolated was the
+problem. Measured at 55, 128 (face 4, around cell 246, 183):
+
+* the ground beside a lake stands a median 0.9 m over its level and the lake
+  is a median 3.4 m deep, so which cell is water is a metre's difference from
+  the next cell, and the shore followed the cells;
+* the byte was linear over +-200 m, 1.57 m a step: a shore whose two sides
+  differ by a metre is one step, and cannot be placed between two centres;
+* the ground's height was kept one cell out from the water and was -200 m
+  beyond, which the four-texel spline reads at every shore;
+* the fade was +-2 m of water, so a lake three metres deep was half fade.
+
+Now (`detail.face_lake_depth`, `viewer.lake_depth`; frames and tiles alike,
+zoom windows as they were):
+
+* the ground's height against the level is kept four cells out
+  (`SHORE_RINGS`), and ground that is not lake is at least 0.5 m over it
+  whatever its height (`dry_side`): what is a lake stays hydro's to say.
+  Without that the four rings drew every low cell near a lake as water, 18 %
+  more of it;
+* the field is cut off 0.5 m either side of the level and smoothed over one
+  cell, and the shore is the smoothed field's zero (`smooth_shore`). The
+  cut-off is small against the water and the banks both: at 3 m the deeper
+  side won every close call and the lakes grew by a sixth. A lake that would
+  lose more than 0.4 of its cells to the smoothing -- a finger a cell wide --
+  keeps them as they were;
+* the byte is the signed square root of the depth (`lake_byte`, meta
+  `lake_curve` / channel kind `sroot`): a centimetre a step at the shore, 0.7
+  m at ten metres;
+* the page fades the shore over a pixel of that field's own slope, clamped to
+  +-0.5 m (`wCov`). Unclamped, the step down to the far value four cells out
+  was within its own slope of zero and drew a dotted ring round every lake.
+
+Water area in the two replayed views: 12.98 -> 13.21 % and 12.13 -> 12.60 %.
+What is left is the lake's own outline at a cell's scale, rounded: a lake of
+ten cells is still a ten-cell shape, and the pale patches that remain inside
+a lake are its bed, a metre or less under the water.
+
 ## Detail tiles
 
 A browser texture holds one atlas of 2048^2 a face at most -- the refined

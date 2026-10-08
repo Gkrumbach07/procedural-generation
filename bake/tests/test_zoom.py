@@ -716,7 +716,12 @@ def test_the_planet_time_lapse_joins_the_viewers_timeline(world, planet):
     # ...with the level's lakes as the shoreline channels the final frame has (and no ice: that is the coarse erosion's)
     lake = np.asarray(pfr.load(out, lv.R)["lake"][0], np.float32)
     depth = pf[0].ch["lake_depth"]
-    assert (lake > 1.0).any() and np.allclose(depth[lake > 1.0], np.minimum(lake[lake > 1.0], vw.LAKE_DEPTH_RANGE_M), atol=1e-2)
+    # (their shores smoothed: detail.smooth_shore takes up to its cut-off off a cell beside one, and may hand a cell to the bank)
+    from globe.viz import detail as dt
+
+    wet = (lake > 1.0) & (depth > 0.0)
+    assert (lake > 1.0).any() and wet.sum() >= 0.8 * (lake > 1.0).sum()
+    assert np.allclose(depth[wet], np.minimum(lake[wet], vw.LAKE_DEPTH_RANGE_M), atol=dt.SHORE_CORE_M + 1e-2)
     assert (depth == -vw.LAKE_DEPTH_RANGE_M).any() and "ice" not in pf[0].ch
     assert not (pf[0].ch["ocean"][lake > 0.5] > 0.5).any() and (pf[0].ch["ocean"] > 0.5).any()
 

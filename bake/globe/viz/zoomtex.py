@@ -153,7 +153,7 @@ def level_image(a: dict, geo: dict, lake_range: float = LAKE_RANGE, crop: int = 
     sk = draw[k, k]
     h0, h1 = dt.height_grid(float(sk.min()), float(sk.max()))
     h = dt.encode_height_on(sk, h0, h1)
-    ld = dt.face_lake_depth(surf, ws, water, lake_range)[k, k]
+    ld = dt.face_lake_depth(surf, ws, water, lake_range, rings=1, sigma=0.0)[k, k]     # a window's shores as they were: its byte is linear
     b = np.clip(np.round(255.0 * (ld + lake_range) / (2.0 * lake_range)), 0, 255).astype(np.uint8)
     om = dt.face_smooth_mask(water == dt.WATER_OCEAN)[k, k]
     alpha = (255 - np.clip(np.round(255.0 * om), 0, 255)).astype(np.uint8)

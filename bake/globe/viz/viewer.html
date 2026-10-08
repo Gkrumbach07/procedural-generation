@@ -417,6 +417,8 @@ uniform vec3 uSGeo;
 uniform int uHasShore;
 uniform int uIceCh;            // the channel of it that holds the ice share of an erosion frame (the glacial pass), -1 = none
 uniform float uLakeRange;      // metres at byte 255 of the signed lake depth (byte 127.5 = the shore)
+uniform int uLakeCurve;        // 1: the frame's lake byte is finest at the shore (detail.lake_byte): metres go as its square
+uniform int uDLakeCurve;       // ...and the detail tiles' the same
 uniform int uRivers;           // 1 when frame a carries discharge in B
 uniform int uRiverLine;        // 1 when that is a routed flow's channels, each a line (detail.river_strength), not the erosion's stream map
 uniform int uDRiverLine;       // ...and the detail tiles' the same
@@ -1258,6 +1260,7 @@ void main(){
   // at -1 a frame with no lake depth read as a sixth of water everywhere, which turned the
   // timeline's oceans the colour of land
   bool fineW = false; float fineLd = 0.0, fineOc = 0.0, lakeD = -1e6;
+  bool shoreC = false; float shoreT = -1.0;      // a lake byte that is finest at the shore: its own value there (-1..1, the shore at 0)
   bool inDetail = uDetail == 1 && detailXY(p, dxy);
   // How much of the pixel the water covers, rather than in or out.  A cell either water or
   // not drew every lake as a cut-out pasted on the map, with the source's own squares along
@@ -1272,12 +1275,16 @@ void main(){
     fineW = true; fineLd = ld; fineOc = 1.0 - t.a / 255.0; lakeD = ld;
   } else if (inDetail) {
     vec4 t = detailSmooth(dxy) * 255.0;
-    float ld = (t.b / 127.5 - 1.0) * uLakeRange;
+    float lt = t.b / 127.5 - 1.0;
+    float ld = (uDLakeCurve == 1 ? lt * abs(lt) : lt) * uLakeRange;
+    shoreC = uDLakeCurve == 1; shoreT = lt;
     wcode = 255.0 - t.a > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
     fineW = true; fineLd = ld; fineOc = 1.0 - t.a / 255.0; lakeD = ld;
   } else if (uHasShore == 1) {
     float oc = byteSmooth(uST, uSGeo, 2, p);
-    float ld = (byteSmooth(uST, uSGeo, 1, p) / 127.5 - 1.0) * uLakeRange;
+    float lt = byteSmooth(uST, uSGeo, 1, p) / 127.5 - 1.0;
+    float ld = (uLakeCurve == 1 ? lt * abs(lt) : lt) * uLakeRange;
+    shoreC = uLakeCurve == 1; shoreT = lt;
     wcode = oc > 127.5 ? 2.0 : (ld > 0.0 ? 1.0 : 0.0);
     lakeD = ld;
     fineOc = oc / 255.0;
@@ -1290,8 +1297,18 @@ void main(){
     // the shore, so a couple of metres either side of zero is the width of the edge whatever
     // the texels are.  (Sizing it by a texel's width in metres put most of the land within
     // half a fade of the shore: a blue wash over the whole map, and no trees on any of it.)
-    const float SOFT_M = 2.0;
-    wCov = lakeD > -1e5 ? smoothstep(-SOFT_M, SOFT_M, lakeD) : (wet ? 1.0 : 0.0);
+    // That is for a byte linear in the depth, 1.57 m a step: nothing narrower than a couple of
+    // metres was smooth, and a lake three metres deep was half fade -- pale patches where its
+    // bed came up, a wash where its banks were low.  A byte finest at the shore is a smooth
+    // field across it, and the edge is then a pixel or two of that field, whatever the depth.
+    // Of the field between the dry ground's floor and as much water, that is: the ground is
+    // only known a few cells out from a lake, and past them the byte drops to its far value
+    // in one step.  A pixel on that step is within its own slope of zero, and unclamped it
+    // took a sixth of water: a dotted ring round every lake, four cells out
+    const float SOFT_M = 2.0, SHORE_DRY_M = 0.5;      // detail.SHORE_DRY_M: no dry cell stands nearer the level
+    float sc = sqrt(SHORE_DRY_M / uLakeRange), sg = clamp(shoreT, -sc, sc);
+    float sw = max(fwidth(sg), 1e-5);
+    wCov = shoreC ? smoothstep(-sw, sw, sg) : (lakeD > -1e5 ? smoothstep(-SOFT_M, SOFT_M, lakeD) : (wet ? 1.0 : 0.0));
     if (wcode > 1.5) wCov = max(wCov, smoothstep(0.35, 0.65, fineOc));   // the sea, by its own smoothed mask
     if (!wet && wcode < 0.5) wCov = min(wCov, 0.85);                     // dry ground keeps a little of itself
   }
@@ -2452,6 +2469,8 @@ function draw() {
   gl.uniform1i(U.uHasShore, shore ? 1 : 0);
   gl.uniform1i(U.uIceCh, shore && ice && ice[0] === lk[0] ? ice[1] : -1);
   gl.uniform1f(U.uLakeRange, (CHANNELS.lake_depth || {}).hi ?? 200);
+  gl.uniform1i(U.uLakeCurve, (CHANNELS.lake_depth || {}).kind === "sroot" ? 1 : 0);
+  gl.uniform1i(U.uDLakeCurve, DET && DET.lake_curve === "sqrt" ? 1 : 0);
   const ord = (FA.layers || {}).order;
   bindTex(5, tex[a][ord ? ord[0] : 0], "uOT");
   gl.uniform3fv(U.uOGeo, geoOf(FA, ord ? ord[0] : 0));

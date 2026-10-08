@@ -64,6 +64,13 @@ RIVER_BASE, RIVER_SIGMA, RIVER_PASSES, RIVER_REACH = 0.4, 0.8, 2, 6
 RIVER_MIN_BYTE, RIVER_SPAN_BYTE = 56, 170
 #: a zoom window's rivers are widened up to this many cells instead (:func:`widen_rivers`)
 RIVER_RADIUS = 3
+#: A lake's shore (:func:`face_lake_depth`): the ground's height against the lake's level is
+#: kept this many cells out from the water, smoothed over ``SHORE_SIGMA`` cells where it is
+#: within ``SHORE_CORE_M`` of the level, and a lake that would lose more than
+#: ``1 - SHORE_KEEP`` of its cells to that keeps them all
+SHORE_RINGS, SHORE_SIGMA, SHORE_CORE_M, SHORE_KEEP = 4, 1.0, 0.5, 0.6
+#: ground that is not lake stands at least this far over a lake's level, whatever its height (:func:`dry_side`)
+SHORE_DRY_M = 0.5
 #: the sediment byte of a tile's or zoom level's water half: log over this
 #: range in metres, 0 at or below the low end
 SED_LO_M, SED_HI_M = 0.5, 2000.0
@@ -322,15 +329,89 @@ def reduce_face(d: dict, k: int) -> dict:
     return {"surf": surf, "ws": np.maximum(ws, surf), "water": water, **out_q}
 
 
-def face_lake_depth(surf: np.ndarray, ws: np.ndarray, water: np.ndarray, range_m: float) -> np.ndarray:
-    """:func:`viewer.lake_depth` on one face (neighbours clamped at its edges)."""
+def dry_side(d: np.ndarray, lake: np.ndarray) -> np.ndarray:
+    """The signed lake depth with every cell that is not lake on the dry
+    side of it, ``SHORE_DRY_M`` over the level at least.  What is a lake is
+    hydro's and derive's to say -- a depth, a size, a level the coarse grid
+    agrees with -- and ground that lies under a nearby lake's level without
+    being one (a tenth of the cells beside earth-v32's lakes: flooded under
+    half a metre, or low behind a rise) is not water for the page to add:
+    carried ``SHORE_RINGS`` cells out from each lake it grew them by a
+    sixth."""
+    return np.where(lake, d, np.minimum(d, -SHORE_DRY_M))
+
+
+def smooth_shore(d: np.ndarray, lake: np.ndarray, range_m: float, sigma: float = SHORE_SIGMA, core: float = SHORE_CORE_M) -> np.ndarray:
+    """The signed lake depth ``d`` (metres; ``-range_m`` where no lake is
+    near) with its shores smoothed: float64.
+
+    Lake country is flat at the water's edge.  On earth-v32's 1.2 km level
+    the ground beside a lake stands a median 0.9 m over its level and the
+    lake is 3.4 m deep, so which cell is water and which is not is decided by
+    a metre of difference between one cell and the next, and the shore is the
+    cells' own outline.  A real shore is not: waves cut the points back and
+    fill the bays in a beach's length.  So the field is cut off ``core``
+    metres either side of the level and smoothed over ``sigma`` cells (among
+    the cells that have a value), and the shore is the smoothed field's zero:
+    a cell is water or ground by that, whatever it was, and deeper water and
+    higher ground keep the rest of their depth and height on top of it.  The
+    cut-off is small against the water and the banks both, or the deeper side
+    wins every close call: at 3 m, with banks a metre high, the lakes grew by
+    a sixth.
+
+    A lake too thin for that -- a finger a cell wide, a pond of a few cells
+    -- would be smoothed dry.  One that would lose more than ``1 -
+    SHORE_KEEP`` of its cells keeps them all, as they were."""
+    d = np.asarray(d, np.float64)
+    lake = np.asarray(lake, bool)
+    if sigma <= 0.0 or not lake.any():
+        return d
+    zone = d > -float(range_m) + 1e-6
+    c = np.clip(d, -core, core)
+    num = ndimage.gaussian_filter(np.where(zone, c, 0.0), sigma, mode="nearest")
+    den = ndimage.gaussian_filter(zone.astype(np.float64), sigma, mode="nearest")
+    e = num / np.maximum(den, 1e-6)
+    lab, n = ndimage.label(lake, structure=np.ones((3, 3), bool))
+    if n:
+        ids = np.arange(1, n + 1)
+        total = ndimage.sum(lake, lab, ids)
+        kept = ndimage.sum(lake & (e > 0.0), lab, ids)
+        thin = np.zeros(n + 1, bool)
+        thin[1:] = kept < SHORE_KEEP * total
+        e = np.where(thin[lab], c, e)
+    rest = d - c                                             # what the cut-off took: depth past it, height past it
+    return np.where(zone, e + np.where(e > 0.0, np.maximum(rest, 0.0), np.minimum(rest, 0.0)), d)
+
+
+def face_lake_depth(surf: np.ndarray, ws: np.ndarray, water: np.ndarray, range_m: float,
+                    rings: int = SHORE_RINGS, sigma: float = SHORE_SIGMA) -> np.ndarray:
+    """:func:`viewer.lake_depth` on one face (neighbours clamped at its
+    edges): the lake's level against the ground, ``rings`` cells out from the
+    water, its shores smoothed (:func:`smooth_shore`; ``rings`` 1 and
+    ``sigma`` 0 are the cells' own outline, which the zoom windows keep)."""
     lake = water == WATER_LAKE
     level = np.where(lake, ws.astype(np.float64), -np.inf)
-    near = ndimage.maximum_filter(level, size=3, mode="nearest")
+    near = level
+    for _ in range(max(int(rings), 1)):
+        near = ndimage.maximum_filter(near, size=3, mode="nearest")
     s = surf.astype(np.float64)
     d = np.where(lake, level - s, np.where(np.isfinite(near), near - s, -range_m))
     d[water == WATER_OCEAN] = -range_m
+    if sigma > 0.0:
+        d = dry_side(d, lake)
+    d = smooth_shore(np.clip(d, -range_m, range_m), lake, range_m, sigma)
     return np.clip(d, -range_m, range_m).astype(np.float32)
+
+
+def lake_byte(d: np.ndarray, range_m: float) -> np.ndarray:
+    """The signed lake depth as a byte, finest at the shore: ``127.5 + 127.5
+    sign(d) sqrt(|d| / range_m)``.  A byte that is linear in the depth is 1.57
+    m a step over +-200 m, and a shore whose two sides differ by a metre is
+    then one step: the page cannot place it between the cells' centres, and
+    draws the cells.  Here the steps are a centimetre at the shore and 0.7 m
+    at ten metres; 127.5 is still the shore."""
+    d = np.asarray(d, np.float64)
+    return np.clip(np.round(127.5 + 127.5 * np.sign(d) * np.sqrt(np.abs(d) / float(range_m))), 0, 255).astype(np.uint8)
 
 
 def face_smooth_mask(mask: np.ndarray, passes: int = 2) -> np.ndarray:
@@ -383,7 +464,7 @@ def tile_image(surf, ld, ocean_m, disch, ti: int, tj: int, h0: float, h1: float,
     if not ((oc < 0.5).any() or (lk > 0.0).any()):
         return None
     h = encode_height_on(surf[np.ix_(ii, jj)], h0, h1)
-    b = np.clip(np.round(255.0 * (lk + lake_range) / (2.0 * lake_range)), 0, 255).astype(np.uint8)
+    b = lake_byte(lk, lake_range)
     a = (255 - np.clip(np.round(255.0 * oc), 0, 255)).astype(np.uint8)
     ground = np.stack([(h >> 8).astype(np.uint8), (h & 255).astype(np.uint8), b, a], axis=-1)
     qb = log_byte(disch[np.ix_(ii, jj)], q_lo, q_hi)
@@ -451,6 +532,7 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
             "river_min_byte": int(np.clip(byte(scale["river_min"]), 1, 254)),
             "river_span_byte": max(byte(scale["river_full"]) - byte(scale["river_min"]), 8),
             "river_lines": bool(scale.get("lines")),          # every channel a line (river_strength): the page draws no bands
+            "lake_curve": "sqrt",                             # the lake byte is lake_byte's, finest at the shore
             "levels": []}
     for L, res in levels:
         nT = -(-res // TILE)
@@ -458,8 +540,8 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
         meta["levels"].append({"L": L, "res": res, "nT": nT})
     written = 0
     # a row of tiles at a time, with the rows the lake-shore and ocean-mask
-    # filters reach beyond it (3 cells): a face is never read whole
-    MARGIN = 4
+    # filters reach beyond it (the shore's rings and its smoothing): a face is never read whole
+    MARGIN = SHORE_RINGS + int(math.ceil(4.0 * SHORE_SIGMA)) + 1
     for f in range(6):
         for li, (L, res) in enumerate(levels):
             k = src.res // res
@@ -493,5 +575,5 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
 
 
 __all__ = ["TILE", "RIVER_MIN_PCT", "RIVER_FULL_PCT", "RIVER_BASE", "RIVER_SIGMA", "RIVER_PASSES", "RIVER_REACH", "RIVER_MIN_BYTE", "RIVER_SPAN_BYTE", "SED_LO_M", "SED_HI_M", "log_byte", "RefinedSource", "PlanetSource", "river_field", "river_scale",
-           "strength_scale", "channel_value", "path_ridges", "river_strength", "widen_rivers", "RIVER_RADIUS", "reduce_face", "face_lake_depth", "face_smooth_mask", "height_grid",
+           "strength_scale", "channel_value", "path_ridges", "river_strength", "widen_rivers", "RIVER_RADIUS", "dry_side", "smooth_shore", "lake_byte", "SHORE_DRY_M", "SHORE_RINGS", "SHORE_SIGMA", "SHORE_CORE_M", "SHORE_KEEP", "reduce_face", "face_lake_depth", "face_smooth_mask", "height_grid",
            "encode_height_on", "tile_image", "levels_for", "export_tiles"]

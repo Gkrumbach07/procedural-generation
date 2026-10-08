@@ -299,23 +299,37 @@ def lake_depth(surface: np.ndarray, water_surface: np.ndarray | None, code: np.n
     shore *between* cells.
 
     A lake cell carries its own depth (``water_surface - surface``, > 0).  A
-    cell next to a lake carries the highest neighbouring lake level less its
-    own ground (< 0 where the ground stands above the water).  Interpolated
-    bilinearly, that crosses 0 where the terrain meets the lake level, so the
-    shoreline follows the ground instead of the cell grid; everything
-    farther from a lake is ``-LAKE_DEPTH_RANGE_M``.  Unsigned depth would not
-    do: between a lake cell and a dry one it never reaches 0, so the shore
-    would sit on the dry cell's centre whatever the slope.
-    """
+    cell near a lake -- ``detail.SHORE_RINGS`` cells out -- carries the
+    highest lake level near it less its own ground (< 0 where the ground
+    stands above the water).  Interpolated, that crosses 0 where the terrain
+    meets the lake level, so the shoreline follows the ground instead of the
+    cell grid; everything farther from a lake is ``-LAKE_DEPTH_RANGE_M``.
+    Unsigned depth would not do: between a lake cell and a dry one it never
+    reaches 0, so the shore would sit on the dry cell's centre whatever the
+    slope.  (One ring was enough for a bilinear read; the page's is a cubic
+    B-spline, four cells wide, and the far value two cells from the water
+    pulled every shore to the cells' outline.)
+
+    The shores are then smoothed (:func:`detail.smooth_shore`), across the
+    cube's edges too."""
+    from . import detail as dt
+
     if water_surface is None:
         return None
     surf = np.asarray(surface, np.float64)
     lake = code == WATER_LAKE
     far = -LAKE_DEPTH_RANGE_M
     level = np.where(lake, np.asarray(water_surface, np.float64), -np.inf)
-    near = _dilate_max(level, -np.inf)
+    near = level
+    for _ in range(dt.SHORE_RINGS):
+        near = _dilate_max(near, -np.inf)
     d = np.where(lake, level - surf, np.where(np.isfinite(near), near - surf, far))
     d[code == WATER_OCEAN] = far
+    d = np.clip(dt.dry_side(d, lake), -LAKE_DEPTH_RANGE_M, LAKE_DEPTH_RANGE_M)
+    if lake.any():
+        pad = min(dt.SHORE_RINGS + int(np.ceil(4.0 * dt.SHORE_SIGMA)), d.shape[1])
+        dp, lp = pad_faces(d, pad), pad_faces(lake, pad)
+        d = np.stack([dt.smooth_shore(dp[f], lp[f], LAKE_DEPTH_RANGE_M)[pad:-pad, pad:-pad] for f in range(6)])
     return np.clip(d, -LAKE_DEPTH_RANGE_M, LAKE_DEPTH_RANGE_M).astype(np.float32)
 
 
@@ -781,7 +795,8 @@ def channel_specs(final: _Frame, river_threshold: float | None = None, timeline=
         specs["ice"] = {"label": "Ice", "kind": "linear", "lo": 0.0, "hi": 1.0, "unit": "", "cmap": "viridis"}
     # read by the shader to place shores between cells, not offered as layers
     if have("lake_depth"):
-        specs["lake_depth"] = {"label": "Lake level above ground", "kind": "linear", "lo": -LAKE_DEPTH_RANGE_M,
+        # (its byte is detail.lake_byte's, finest at the shore: kind "sroot")
+        specs["lake_depth"] = {"label": "Lake level above ground", "kind": "sroot", "lo": -LAKE_DEPTH_RANGE_M,
                                "hi": LAKE_DEPTH_RANGE_M, "unit": "m", "cmap": "viridis", "hidden": True}
     if have("ocean"):
         specs["ocean"] = {"label": "Ocean", "kind": "linear", "lo": 0.0, "hi": 1.0, "unit": "", "cmap": "viridis", "hidden": True}
@@ -807,6 +822,10 @@ def _byte(name: str, a: np.ndarray, specs: dict, ch: dict | None = None) -> np.n
         return np.clip(np.asarray(a, np.int64), 0, 255).astype(np.uint8)
     if s["kind"] == "log":
         return log_byte(a, s["lo"], s["hi"])
+    if s["kind"] == "sroot":
+        from . import detail as dt
+
+        return dt.lake_byte(a, s["hi"])
     return lin_byte(a, s["lo"], s["hi"])
 
 
