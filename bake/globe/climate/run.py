@@ -5,7 +5,8 @@ Input: ``bedrock`` (metres; the plan runs climate before erosion, so the
 surface *is* the bedrock and ocean = ``bedrock < 0``).  Outputs (units in
 docs/DEVELOPING.md): ``temperature`` °C, ``wind`` contravariant cells per
 advection step (vector), ``precip`` volume per cell per erosion iteration
-with land mean ``precip_mean``, ``evap`` dimensionless multiplier.
+with land mean ``precip_mean``, ``evap`` dimensionless multiplier, and
+``temp_range`` °C, the warmest month less the coldest.
 
 The stage draws no random numbers; it is deterministic by construction.
 """
@@ -17,10 +18,10 @@ import numpy as np
 
 from ..field import FaceField
 from .precipitation import precipitation
-from .temperature import evaporation, temperature
+from .temperature import evaporation, seasonal_range, temperature
 from .wind import cells_to_tangent3, geographic_frame, wind_field
 
-OUTPUTS = ["temperature", "wind", "precip", "evap"]
+OUTPUTS = ["temperature", "wind", "precip", "evap", "temp_range"]
 
 
 def compute(grid, bedrock: FaceField, params, log=None) -> tuple[dict[str, FaceField], dict]:
@@ -34,6 +35,8 @@ def compute(grid, bedrock: FaceField, params, log=None) -> tuple[dict[str, FaceF
     precip, pinfo = precipitation(grid, bedrock, wind, cp, log=log)
     t2 = time.time()
     evap = FaceField(grid, evaporation(T.data, cp), name="evap")
+    # the year's swing about that mean (temperature.seasonal_range): the summers the ice answers to
+    rng = FaceField(grid, seasonal_range(grid, bedrock.data < 0.0, cp), name="temp_range")
     li = bedrock.interior >= 0.0
     info = {
         "seconds_wind": round(t1 - t0, 3),
@@ -41,10 +44,11 @@ def compute(grid, bedrock: FaceField, params, log=None) -> tuple[dict[str, FaceF
         "T_land_mean": float(T.interior[li].mean()) if li.any() else None,
         "T_min": float(T.interior.min()),
         "T_max": float(T.interior.max()),
+        "T_range_land_median": float(np.median(rng.interior[li])) if li.any() else None,
         "wind_speed_median_cells": float(np.median(wind.vec_norm().interior) / grid.cell_size_m),
         **pinfo,
     }
-    return {"temperature": T, "wind": wind, "precip": precip, "evap": evap}, info
+    return {"temperature": T, "wind": wind, "precip": precip, "evap": evap, "temp_range": rng}, info
 
 
 def run(store, params, log=print) -> dict:

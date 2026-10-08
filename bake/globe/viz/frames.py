@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-STAGES = ("tectonics", "erosion")
+STAGES = ("tectonics", "erosion", "thaw")
 
 
 def frames_dir(root, stage: str) -> Path:
@@ -184,6 +184,8 @@ def erosion_frame(state, rec: FrameRecorder, iteration: int, total: int, params)
     above the sea, and with ``erosion.glacial_sticky`` what the last pass
     carved under.  It is zero until the pass starts, ``erosion.glacial_from``
     of the way through the run; the sidecar says ``glacial`` from then on.
+    With ``erosion.ice_sheet`` the ice has a thickness, ``ice_h`` (metres,
+    block mean; the ground stays the ground).
     With ``erosion.ice_history`` the ice line has a temperature of its own
     at every iteration (``glacial.ice_cooling``) and the ice is on every
     frame, as much as that time's cold holds; the sidecar's ``cooling_c`` is
@@ -206,9 +208,12 @@ def erosion_frame(state, rec: FrameRecorder, iteration: int, total: int, params)
         if prev is not None:
             on = on | prev
         ice = on[I].astype(np.float32)
+    # the ice as a body (erosion.ice_sheet): its thickness, for the viewer to stand on the ground
+    thick = getattr(state, "sheet_h", None) if (iced or history) else None
+    body = {"ice_h": downsample(np.where(ice > 0.0, thick[I], 0.0), rec.res).astype(np.float16)} if thick is not None else {}
     rec.write(iteration, {"height": downsample(surf, rec.res).astype(np.float16),
                           "discharge": downsample(state.discharge[I], rec.res, "max").astype(np.float16),
                           "lake": downsample(lake, rec.res).astype(np.float16),
-                          "ice": np.round(255.0 * downsample(ice, rec.res)).astype(np.uint8)},
+                          "ice": np.round(255.0 * downsample(ice, rec.res)).astype(np.uint8), **body},
               iteration=int(iteration), of=int(total), units="m", **({"glacial": True} if iced else {}),
               **({"cooling_c": round(float(state.ice_age), 2)} if history else {}))

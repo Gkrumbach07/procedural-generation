@@ -522,6 +522,7 @@ class _Frame:
         self.height = np.asarray(height, np.float32)
         self.ch = {k: v for k, v in ch.items() if v is not None}
         self.river_scale = None           # the rivers' byte scale when the source sets it (a planet level's flow)
+        self.ice_h = None                 # an ice sheet's thickness (m) where the frame's height is its surface (erosion.ice_sheet)
 
     @property
     def res(self) -> int:
@@ -651,8 +652,11 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
             h = lo(z["height"])
             water = timeline_water(h, lo(z["lake"].astype(np.float32)) if "lake" in z.files else None, lake_min)
             ice = lo(z["ice"].astype(np.float32) / 255.0) if "ice" in z.files and water else None
+            # an ice sheet's own surface (erosion.ice_sheet): the frame's ground is drawn under its thickness
+            body = lo(z["ice_h"].astype(np.float32)) if "ice_h" in z.files and ice is not None else None
             frames.append(_Frame("erosion", key, f"erosion · iteration {key} / {meta.get('of', '?')}" + ice_label(meta),
-                                 h, discharge=lo(z["discharge"], "max"), ice=ice, **water))
+                                 h if body is None else h + body, discharge=lo(z["discharge"], "max"), ice=ice, **water))
+            frames[-1].ice_h = body
     if not any(f.ch["ice"].any() for f in frames if "ice" in f.ch):
         # a run with no ice in it (the glacial pass off, or no cold ground) has no ice layer
         for f in frames:
@@ -678,17 +682,40 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
             # ...under the ice the stage ended with: the level works the same ground at a finer
             # cell and has no time of its own, so the last maximum's ice is still on it (without
             # this the ice was gone at the lapse's first frame, 25 frames before the final one)
-            ice_last = next((f.ch.get("ice") for f in reversed(frames) if f.stage == "erosion"), None)
+            last = next((f for f in reversed(frames) if f.stage == "erosion"), None)
+            ice_last = last.ch.get("ice") if last is not None else None
             if ice_last is not None:
+                body = getattr(last, "ice_h", None)
                 for f in frames:
                     if f.stage == "planet" and "ocean" in f.ch:
                         f.ch["ice"] = _fit(ice_last, f.res)
                         f.label += " · ice age"
+                        if body is not None:
+                            f.ice_h = _fit(body, f.res)
+                            f.height = (f.height + f.ice_h).astype(np.float32)             # ...and under its thickness, where it is a body
     # and the thaw: the last maximum's ice going back to today's, before the final frame
     n_thaw = int((manifest.get("params", {}).get("render", {}) or {}).get("thaw_frames", 8))
     if max_frames:
         n_thaw = min(n_thaw, max(1, int(max_frames) // 4))
-    if frames and frames[-1].stage in ("erosion", "planet") and (root / "coarse").exists():
+    baked = vf.list_frames(root, "thaw")
+    if baked and frames and frames[-1].stage in ("erosion", "planet"):
+        # the stage thawed its own sheet (erosion.ice_sheet, erosion.run.thaw): its frames, on the last frame's ground
+        base, n_b = frames[-1], len(baked)
+        if max_frames:
+            baked = _thin(baked, max(1, n_thaw))
+        ground = base.height - _fit(getattr(base, "ice_h", None), base.res) if getattr(base, "ice_h", None) is not None else None
+        for key, p, meta in baked:
+            with np.load(p) as z:
+                ice = _fit(lo(z["ice"].astype(np.float32) / 255.0), base.res)
+                body = _fit(lo(z["ice_h"].astype(np.float32)), base.res) if "ice_h" in z.files else None
+                h = lo(z["height"]) if base.stage == "erosion" else (ground if ground is not None else base.height)
+            c = float(meta.get("cooling_c", 0.0))
+            label = f"thaw · {c:.1f} °C colder than today" if c > 0.05 else "thaw · today's ice"
+            fr = _Frame("thaw", key, label, h if body is None else h + body, **{**base.ch, "ice": ice.astype(np.float32)})
+            fr.ice_h = body
+            frames.append(fr)
+        log(f"[viewer] thaw: {len(baked)} of the stage's {n_b} frames, the ice from {100.0 * float(np.mean(frames[-len(baked)].ch['ice'])):.1f} to {100.0 * float(np.mean(frames[-1].ch['ice'])):.1f} % of the sphere")
+    elif frames and frames[-1].stage in ("erosion", "planet") and (root / "coarse").exists():
         thaw = thaw_frames(root, manifest, frames[-1], n_thaw)
         if thaw:
             frames.extend(thaw)

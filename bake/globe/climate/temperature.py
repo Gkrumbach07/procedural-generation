@@ -47,9 +47,53 @@ def retarget(temperature_c: np.ndarray, from_height_m, to_height_m, cp: ClimateP
     return (np.asarray(temperature_c, dtype=np.float64) + cp.lapse * dh / 1000.0).astype(np.float32)
 
 
+#: the solar constant (W/m2) and the tilt of the axis (degrees), Earth's
+SOLAR_W = 1361.0
+TILT_DEG = 23.44
+
+
+def daily_sun(lat_rad: np.ndarray, decl_rad: float) -> np.ndarray:
+    """The day's mean sunshine at the top of the air (W/m2) at latitude
+    ``lat_rad`` when the sun stands over latitude ``decl_rad``: 0 in the
+    polar night, and more at a summer pole than anywhere."""
+    lat = np.asarray(lat_rad, dtype=np.float64)
+    h0 = np.arccos(np.clip(-np.tan(lat) * math.tan(decl_rad), -1.0, 1.0))        # the half day, as an angle
+    return SOLAR_W / math.pi * (h0 * np.sin(lat) * math.sin(decl_rad) + np.cos(lat) * math.cos(decl_rad) * np.sin(h0))
+
+
+def seasonal_range(grid: Grid, ocean: np.ndarray, cp: ClimateParams) -> np.ndarray:
+    """The year's swing of temperature (C, the warmest month less the
+    coldest) on every extended cell, float32; ``ocean`` is the extended sea
+    mask.
+
+    ``temperature`` is the year's mean, by latitude and height.  The year
+    itself is the sun's: between the solstices the daily sunshine changes
+    by nothing on the equator, 380 W/m2 at 45 degrees and 510 at the polar
+    circle, and the air follows by as much as what is under it lets it --
+    0.02 C per W/m2 over the sea, which stores a summer and gives it back,
+    0.11 in the middle of a continent (``season_sea``, ``season_land``),
+    and in between by the distance from the coast (e-folding
+    ``season_reach_frac`` of the planet's radius, 800 km on Earth).  Earth,
+    for the measure: 2-5 C on the equator, 8-10 C over the sea at 45 degrees
+    and 35-45 in the middle of North America and Asia, 60 at Yakutsk.
+
+    What it is for: ice lives or dies by its summer, not by its year
+    (``erosion/icesheet.py``)."""
+    from .precipitation import coast_distance_m
+
+    lat = np.asarray(grid.latitude(), dtype=np.float64)
+    tilt = math.radians(TILT_DEG)
+    swing = np.abs(daily_sun(lat, tilt) - daily_sun(lat, -tilt))
+    sea, landk = float(cp.season_sea), float(cp.season_land)
+    reach = max(float(cp.season_reach_frac) * grid.R_planet, 1.0)
+    oc = np.asarray(ocean, dtype=bool)
+    k = np.where(oc, sea, sea + (landk - sea) * (1.0 - np.exp(-coast_distance_m(grid, oc).astype(np.float64) / reach)))
+    return (k * swing).astype(np.float32)
+
+
 def evaporation(temperature_c: np.ndarray, cp: ClimateParams) -> np.ndarray:
     """``k_evap·max(T, 0)`` as float32 (same shape as the input)."""
     return (cp.k_evap * np.maximum(np.asarray(temperature_c, dtype=np.float64), 0.0)).astype(np.float32)
 
 
-__all__ = ["temperature", "retarget", "evaporation"]
+__all__ = ["temperature", "retarget", "evaporation", "daily_sun", "seasonal_range", "SOLAR_W", "TILT_DEG"]

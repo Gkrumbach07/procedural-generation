@@ -277,6 +277,9 @@ class ErosionState:
         the ground is not too dry for the snow to last.  With ``ice_age``
         (``erosion.ice_age_c``) the line is read that many degrees colder
         than the climate: the ice of the last glacial maximum."""
+        sheet = getattr(self, "sheet", None)
+        if sheet is not None:
+            return sheet                 # the ice is a body (erosion.ice_sheet, icesheet.py): where its sheet stands
         age = float(self.ice_age)
         if self.temp0 is None or not (self.temp_follow or age != 0.0):
             cold = self.evap <= float(ice_evap)
@@ -1514,6 +1517,13 @@ def step(state: ErosionState, params, iteration_key, log=None, after_refresh=Non
         # the ice line of this iteration's time (erosion.ice_history): before the lakes are
         # refreshed, which take no fill under the ice, and the frame, which draws it
         state.ice_age = glacial.ice_cooling(ep, state.iteration)
+    ice_now = None
+    if getattr(state, "ice_clim", None) is not None and isinstance(params, WorldParams) and \
+            (getattr(state, "sheet", None) is None or state.iteration % max(int(ep.glacial_every), 1) == 0):
+        # the sheet in balance with this iteration's climate, on the ground as it stands (erosion.ice_sheet)
+        from . import icesheet
+
+        ice_now = icesheet.update(state, params)
     sea_every = int(getattr(ep, "sea_mask_every", 0))
     if state.spherical and sea_every > 0 and (getattr(state, "base_at", None) is None or state.iteration % sea_every == 0):
         # before the route: the flood seeds on the sea, and the sea is what
@@ -1569,6 +1579,8 @@ def step(state: ErosionState, params, iteration_key, log=None, after_refresh=Non
     state.iteration += 1
     if st_base is not None:
         st["sea"] = st_base
+    if ice_now is not None:
+        st["ice"] = {**ice_now["stats"], "rounds": ice_now["rounds"], "settled": ice_now["settled"]}
     if st_lake is not None:
         st["lakes"] = st_lake
     st["seconds_route"] = tr

@@ -332,6 +332,18 @@ def colorize(codes: np.ndarray) -> np.ndarray:
     return pal[np.where((c >= 0) & (c < N_BIOMES), c, N_BIOMES)]
 
 
+
+def with_ice(biome: np.ndarray, ice: np.ndarray) -> np.ndarray:
+    """``biome`` with the ice class where ``ice`` stands, and without it
+    where it does not: the classes' own ice is a temperature (colder than
+    -12 C), and a world whose ice is a sheet (``erosion.ice_sheet``) has it
+    where the sheet is -- on a wet coast warmer than that, and not on a dry
+    interior colder.  Ground that loses the class is tundra."""
+    b = np.asarray(biome).copy()
+    b[(b == ICE) & ~np.asarray(ice, bool)] = TUNDRA
+    b[np.asarray(ice, bool)] = ICE
+    return b
+
 __all__ = [
     "BIOMES", "NAMES", "PALETTE", "VEG_FACTOR", "N_BIOMES", "TREE_KIND",
     "TREE_NONE", "TREE_CONIFER", "TREE_BROADLEAF", "TREE_MIXED", "TREE_TROPICAL", "TREE_SAVANNA", "TREE_SHRUB",

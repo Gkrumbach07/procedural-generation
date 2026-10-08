@@ -477,3 +477,35 @@ def test_runtime_advection_256():
     print(f"advection N_c=256 n_advect=200: {dt:.2f}s")
     assert np.isfinite(rain).all()
     assert dt < 20.0, f"200 sweeps took {dt:.1f}s"
+
+
+def test_the_year_swings_with_the_sun_and_the_distance_from_the_sea():
+    """``temperature.seasonal_range`` (the ``temp_range`` field): the warmest
+    month less the coldest.  Nothing on the equator, where the two solstices
+    have the same sun, and most towards the poles; a fifth as much over the
+    sea as deep inland (``season_sea`` / ``season_land``), and on land more
+    the farther from the coast.  Earth: 8-10 C over the sea at 45 degrees,
+    35-45 C in the middle of a continent there."""
+    from globe.climate.temperature import daily_sun, seasonal_range
+
+    tilt = np.radians(23.44)
+    lat = np.radians(np.array([0.0, 45.0, 66.56, 90.0]))
+    s, w = daily_sun(lat, tilt), daily_sun(lat, -tilt)
+    assert s[0] == pytest.approx(w[0]) and w[3] == 0.0 and w[2] == pytest.approx(0.0, abs=1.0)   # no swing on the equator; the polar night
+    assert 370.0 < s[1] - w[1] < 395.0 and s[3] > s[1] > s[0]                                    # 45 degrees: some 380 W/m2; a summer pole has the most sun there is
+    p = _params(32)
+    grid = p.coarse_grid()
+    bed = _island_bedrock(grid)
+    ocean = bed.data < 0.0
+    rng = seasonal_range(grid, ocean, p.climate)
+    latd = np.degrees(np.abs(grid.latitude()))
+    assert rng.shape == ocean.shape and rng.min() >= 0.0
+    sea45 = ocean & (latd > 43.0) & (latd < 47.0)
+    assert 7.0 < np.median(rng[sea45]) < 10.0 and rng[ocean & (latd < 2.0)].max() < 1.0
+    all_land = seasonal_range(grid, np.zeros_like(ocean), dataclasses.replace(p.climate, season_reach_frac=1e-6))
+    assert 39.0 < np.median(all_land[(latd > 43.0) & (latd < 47.0)]) < 45.0                      # the middle of a continent
+    land = ~ocean
+    if land.any():
+        assert (rng[land] >= rng[ocean].min()).all() and rng[land].max() <= all_land.max() + 1e-3
+    fields, info = climate_run.compute(grid, bed, p)
+    assert np.array_equal(fields["temp_range"].data, rng) and "temp_range" in climate_run.OUTPUTS and info["T_range_land_median"] is not None

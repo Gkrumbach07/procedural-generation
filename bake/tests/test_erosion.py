@@ -1407,6 +1407,67 @@ def test_the_ice_follows_the_stages_temperature(scratch):
     assert st.ice_age == pytest.approx(-2.0)
 
 
+def test_an_ice_sheets_balance_is_its_snow_less_its_summers_melt():
+    """``icesheet.balance``: metres of water a year at a surface.  A year
+    that never thaws keeps all its precipitation; one that never freezes
+    melts ``ddf`` for every degree-day; colder and higher are better for the
+    ice, and at one yearly mean a wider seasonal swing is worse (its summers
+    are warmer).  At 4 mm a degree-day the balance is nothing where Ohmura
+    found glaciers' own to be: a summer of +3 C with 1.6-1.9 m of
+    precipitation."""
+    from globe.erosion import icesheet as ice
+
+    one = np.ones(1)
+    c = ice.IceClimate(t0=-20.0 * one, z0=0.0 * one, half=6.0 * one, rain=0.5 * one, lapse=0.0065, ddf=0.004, snow_c=1.0)
+    assert ice.balance(c, 0.0 * one, 0.0)[0] == pytest.approx(0.5)                                # frozen all year
+    c.t0 = 20.0 * one
+    assert ice.balance(c, 0.0 * one, 0.0)[0] == pytest.approx(-0.004 * 365.0 * 20.0)              # thawed all year
+    c.t0 = 0.0 * one
+    b0 = ice.balance(c, 0.0 * one, 0.0)[0]
+    assert ice.balance(c, 0.0 * one, 2.0)[0] > b0 and ice.balance(c, 500.0 * one, 0.0)[0] > b0    # colder; higher
+    assert ice.balance(c, 500.0 * one, 0.0)[0] == pytest.approx(ice.balance(c, 0.0 * one, 3.25)[0])  # 500 m is 3.25 C
+    c.half = 20.0 * one
+    assert ice.balance(c, 0.0 * one, 0.0)[0] < b0                                                 # a continent's year at the same mean
+    # the line where a glacier neither grows nor shrinks: summer (three warm months, 0.9 of the half range) at +3 C
+    c.half, c.t0 = 6.0 * one, (3.0 - 0.9 * 6.0) * one
+    lo, hi = 0.5, 4.0
+    for _ in range(40):
+        c.rain = 0.5 * (lo + hi) * one
+        lo, hi = (0.5 * (lo + hi), hi) if ice.balance(c, 0.0 * one, 0.0)[0] < 0.0 else (lo, 0.5 * (lo + hi))
+    assert 1.5 < 0.5 * (lo + hi) < 2.0
+
+
+def test_an_ice_sheet_stands_on_what_feeds_it_and_keeps_its_height():
+    """``icesheet.settle``: from nothing the sheet grows out from the ground
+    where more snow falls than melts to where its own flow is melted away,
+    thick in the middle and thin at its edge; a colder climate has a bigger
+    one; and thawed back to the first climate it is no smaller than what
+    grew there -- its surface is higher and colder than the ground."""
+    from globe.erosion import icesheet as ice
+
+    grid = WorldParams.tiny_world(0).coarse_grid()
+    I = (slice(None), slice(grid.H, grid.H + grid.N), slice(grid.H, grid.H + grid.N))
+    lat = np.degrees(np.asarray(grid.latitude())[I])
+    sea = lat < 0.0                                                  # a northern continent
+    bed = np.where(sea, -100.0, 50.0)
+    one = np.ones(bed.shape)
+    clim = ice.IceClimate(t0=14.0 - 0.3 * lat, z0=np.maximum(bed, 0.0), half=5.0 * one, rain=1.0 * one, lapse=0.0065, ddf=0.004, snow_c=1.0)
+    area = np.asarray(grid.interior_cell_area, np.float64)
+    a = ice.settle(grid, clim, bed, sea, 0.0, 8.0)
+    m, h = a["mask"], a["thickness"]
+    assert m.any() and not (m & sea).any() and m[lat > 80.0].all() and not m[(lat > 0.0) & (lat < 30.0)].any()
+    bare = ice.balance(clim, np.maximum(bed, 0.0), 0.0) > 0.0
+    assert (m & ~sea & bare).sum() == (bare & ~sea).sum() and m.sum() > (bare & ~sea).sum()   # all the snow line's ground, and the ground its flow reaches
+    assert h[lat > 85.0].min() > np.median(h[m]) > 2.0 * np.percentile(h[m], 5) > 0.0 and h[~m].max() == 0.0   # thick at the pole, thin at the edge
+    assert np.allclose(a["surface"][m], np.maximum(bed, 0.0)[m] + h[m], atol=1e-3)
+    s = ice.stats(grid, m, h, sea)
+    assert 0.0 < s["land_share"] < 1.0 and s["thickness_max_m"] == pytest.approx(float(h.max())) and s["sea_level_m"] > 0.0
+    cold = ice.settle(grid, clim, bed, sea, 6.0, 8.0, mask=m, fed=a["fed"])
+    assert (area * cold["mask"]).sum() > 1.3 * (area * m).sum() and not (m & ~cold["mask"]).any()
+    back = ice.settle(grid, clim, bed, sea, 0.0, 8.0, mask=cold["mask"], fed=cold["fed"])
+    assert (area * back["mask"]).sum() >= (area * m).sum() - 3.0 * area.mean() and (area * back["mask"]).sum() < (area * cold["mask"]).sum()
+
+
 def test_a_lake_keeps_its_rivers_sediment_and_fills_towards_a_plain(scratch):
     """`erosion.lake_fill`: in a lake with room the load its shore cannot take
     is parked on the lake (`lake_load`), never more than the lake's room, and

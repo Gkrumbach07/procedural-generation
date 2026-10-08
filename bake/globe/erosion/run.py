@@ -113,6 +113,10 @@ def save_checkpoint(store: WorldStore, state: ErosionState, params: WorldParams)
         arrays["iso_acc"] = state.iso_acc
     if getattr(state, "ice_prev", None) is not None:  # sticky ice: part of the state
         arrays["ice_prev"] = state.ice_prev.astype(np.uint8)
+    if getattr(state, "sheet", None) is not None:  # the ice sheet as it stands (erosion.ice_sheet): a resume goes on from it
+        arrays["sheet"] = state.sheet.astype(np.uint8)
+        arrays["sheet_h"] = state.sheet_h
+        arrays["sheet_fed"] = state.sheet_fed.astype(np.uint8)
     if state.lake_flag is not None:  # lakes are refreshed every flood_every iterations: part of the state
         arrays["lake_flag"] = state.lake_flag
         arrays["lake_id"] = state.lake_id        # ...and so is the room each has left for its rivers' load
@@ -199,6 +203,10 @@ def load_checkpoint(state: ErosionState, path: Path, meta: dict) -> None:
             state.base_at = None
         state.iso_acc = np.array(z["iso_acc"]) if "iso_acc" in z.files else None
         state.ice_prev = np.array(z["ice_prev"]).astype(bool) if "ice_prev" in z.files else None
+        if getattr(state, "ice_clim", None) is not None and "sheet" in z.files:
+            state.sheet = np.ascontiguousarray(z["sheet"]).astype(bool)
+            state.sheet_h = np.ascontiguousarray(z["sheet_h"])
+            state.sheet_fed = np.ascontiguousarray(z["sheet_fed"]).astype(bool)
         state.lake_flag = np.ascontiguousarray(z["lake_flag"]).astype(np.uint8) if "lake_flag" in z.files else None
         if "lake_id" in z.files:
             state.lake_id = np.ascontiguousarray(z["lake_id"]).astype(np.int32)
@@ -250,7 +258,8 @@ def build_state(store: WorldStore, params: WorldParams, replay: bool = True) -> 
         # ice needs snow: the rain as a depth (the land-mean rain's), for the aridity of cold ground
         af = grid.interior_cell_area / float(grid.cell_size_m) ** 2
         state.ice_snow = (dry, float(getattr(params.hydro, "land_evap", 0.0)), np.ascontiguousarray(FaceField.from_interior(grid, (pr.interior / af).astype(np.float32)).data))
-    if t0 > 0.0 or follow or dry > 0.0 or age > 0.0:
+    sheet = bool(getattr(params.erosion, "ice_sheet", False)) and has_t
+    if t0 > 0.0 or follow or dry > 0.0 or age > 0.0 or sheet:
         state.ice_age = age
         # the climate's temperature itself: for the lakes' evaporation, which does not stop at freezing
         # (hydro.pet_t0), and for a cold that follows the ground (erosion.climate_at_surface)
@@ -263,6 +272,10 @@ def build_state(store: WorldStore, params: WorldParams, replay: bool = True) -> 
         state.temp_follow = follow
         if t0 > 0.0:
             state.pet_law = (float(params.climate.T_eq), t0, insolation(grid.latitude()).astype(np.float32))
+    if bool(getattr(params.erosion, "ice_sheet", False)):
+        from . import icesheet
+
+        icesheet.setup(state, grid, store, params)   # the ice as a body: its climate (the sheet grows at the first iteration)
     if replay:
         start_replay(state, params)
     return state
@@ -280,6 +293,52 @@ def restore_volcanoes(state: ErosionState, cone: FaceField | None) -> dict:
     on = c > 0.0
     return {"volcano_cells": int(on.sum()), "volcano_max_m": float(c.max()) if on.any() else 0.0,
             "volcano_land_cells": int((on & (surf >= 0.0)).sum())}
+
+
+#: the stage's ice (erosion.ice_sheet): its thickness (m) at the last maximum the stage ends on, and today's
+ICE_FIELDS = ("ice_max", "ice_now")
+
+
+def thaw(store: WorldStore, state: ErosionState, params: WorldParams, frame_res: int, log=print) -> dict:
+    """The end of the ice age (``erosion.ice_sheet``).  The stage ends on
+    its last glacial maximum; today is ``erosion.ice_age_c`` warmer, and the
+    sheet that stood at the maximum is thawed back to it in
+    ``render.thaw_frames`` steps on the ground as the stage left it -- half
+    an iteration of time, in which the ground does not change and a quarter
+    of the land comes out from under the ice.  What is left is today's ice:
+    a sheet's height keeps it where none would grow (``icesheet.settle``).
+
+    Writes the fields ``ice_max`` and ``ice_now`` (thickness, metres) and,
+    with ``frame_res``, a frame of each step for the viewer (stage
+    ``thaw``).  The state's sheet -- the last maximum's, settled, as
+    :func:`run` leaves it for its last frame -- is that again afterwards."""
+    from ..viz import frames as vf
+    from . import icesheet
+
+    grid = state.grid
+    age = float(params.erosion.ice_age_c)
+    n = max(int(getattr(params.render, "thaw_frames", 0)), 1)
+    top = (state.sheet.copy(), state.sheet_h.copy(), state.sheet_fed.copy(), float(state.ice_age))
+    bed, sea = icesheet.ground(state)
+    s_max = icesheet.stats(grid, state.sheet[state.interior], state.sheet_h[state.interior], sea)
+    store.save_field(FaceField(grid, np.where(state.sheet, state.sheet_h, 0.0).astype(np.float32), name="ice_max"))
+    rec = vf.FrameRecorder(store.root, "thaw", frame_res) if frame_res > 0 else None
+    if rec is not None:
+        rec.clear()
+    s_now = s_max
+    for k in range(1, n + 1):
+        state.ice_age = age * (1.0 - k / n)
+        res = icesheet.update(state, params, rounds=icesheet.FIRST_ROUNDS)
+        s_now = res["stats"]
+        if rec is not None:
+            vf.erosion_frame(state, rec, k, n, params)
+    store.save_field(FaceField(grid, np.where(state.sheet, state.sheet_h, 0.0).astype(np.float32), name="ice_now"))
+    state.sheet, state.sheet_h, state.sheet_fed, state.ice_age = top
+    drop = s_max["sea_level_m"] - s_now["sea_level_m"]
+    log(f"[erosion] ice: on {100.0 * s_max['land_share']:.1f} % of the land at the last maximum ({s_max['thickness_mean_m']:.0f} m thick on average, "
+        f"the sea {drop:.0f} m lower than today) and {100.0 * s_now['land_share']:.1f} % today ({s_now['thickness_mean_m']:.0f} m, {s_now['sea_level_m']:.0f} m of sea level in it)")
+    return {"ice_max_land_share": s_max["land_share"], "ice_now_land_share": s_now["land_share"], "ice_max_thickness_m": s_max["thickness_mean_m"],
+            "ice_now_thickness_m": s_now["thickness_mean_m"], "ice_now_sea_level_m": s_now["sea_level_m"], "ice_max_sea_drop_m": drop}
 
 
 def write_outputs(store: WorldStore, state: ErosionState) -> None:
@@ -365,6 +424,10 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
                 log(f"[erosion] lakes at {it}: {lk['lake_cells']} cells ({lk['overflowing']} overflowing, {lk['closed']} closed); their rivers left "
                     f"{lk['load_parked'] * u:,.0f} m-cells, {lk['load_laid'] * u:,.0f} laid, {lk['load_stray'] * u:,.0f} where the lake had gone; "
                     f"{lk['load_lakes']} lakes have room for {lk['load_room'] * u:,.0f}")
+        if "ice" in st and (it % 50 == 0 or it + 10 >= n_iter):
+            si = st["ice"]
+            log(f"[erosion] ice at {it}: {state.ice_age:+.1f} C, on {100.0 * si['land_share']:.1f} % of the land, {si['thickness_mean_m']:.0f} m thick on average "
+                f"({si['thickness_max_m']:.0f} at most), {si['sea_level_m']:.0f} m of sea level; {si['rounds']} rounds{'' if si['settled'] else ' (not settled)'}")
         d = st.get("deaths", {})
         log(
             f"[erosion] iter {it + 1}/{n_iter}: {st['particles']} particles, mean {st['steps_mean']:.0f} steps, "
@@ -395,8 +458,14 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
             f"{lk['load_parked'] * state.height_unit_m:,.0f} their rivers left")
     # the last frame: the surface the run ends on, with the lakes as that refresh has just found
     # them (without `erosion.lake_fill` there was none, and its water is the last refresh's)
+    sheeted = getattr(state, "sheet", None) is not None
+    if sheeted:
+        from . import icesheet
+
+        icesheet.update(state, params, rounds=icesheet.FIRST_ROUNDS)      # the last maximum's sheet, settled on the ground the stage ends with
     if frame_every > 0:
         frame(state)
+    ice_info = thaw(store, state, params, min(int(rp.frame_res), grid.N) if frame_every > 0 else 0, log) if sheeted else {}
     # the active volcanic edifices go back on top of what the stage made of the ground under them
     volc = restore_volcanoes(state, active_volcanoes(store, grid))
     if volc:
@@ -435,6 +504,8 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         # 'stack' or 'replay' (docs/uplift-replay.md)
         "uplift_mode": str(ep.uplift_mode),
         **volc,
+        # the ice sheet at the last maximum and today (erosion.ice_sheet; `thaw`)
+        **ice_info,
     }
     if rep is not None:
         # the start was the reference-step crust: the most a cell was lowered

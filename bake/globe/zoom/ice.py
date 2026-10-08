@@ -128,7 +128,7 @@ def ice_ground(fields: dict, temperature, params, age: float | None = None) -> n
     return ice
 
 
-def coarse_ice(fields: dict, temperature, params) -> dict:
+def coarse_ice(fields: dict, temperature, params, sheet=None) -> dict:
     """``ice`` (float32, 0..1) and ``ice_wet`` (u8) on the coarse grid.
 
     ``ice`` is how fully the ice worked a cell: 0 off the glaciated ground
@@ -155,6 +155,9 @@ def coarse_ice(fields: dict, temperature, params) -> dict:
     # `temperature` is then hydro.run.surface_temperature's)
     age = float(getattr(ep, "ice_age_c", 0.0))                # the ice of the last glacial maximum (erosion.ice_age_c)
     ice = ((T - age <= float(ep.ice_evap) / max(float(params.climate.k_evap), 1e-12)) if (follow or age > 0.0) else (evap <= float(ep.ice_evap))) & ~sea
+    if sheet is not None:
+        # the ice was a body (erosion.ice_sheet): the ground its last maximum's sheet stood on (the stage's `ice_max`)
+        ice = np.asarray(sheet, bool) & ~sea
     t0 = float(getattr(hp, "pet_t0", 0.0))
     pet = potential_evaporation(T, grid.latitude(), float(params.climate.T_eq), t0) if t0 > 0.0 else evap
     pet_ice = potential_evaporation(T - age, grid.latitude(), float(params.climate.T_eq), t0) if t0 > 0.0 else evap
@@ -162,7 +165,7 @@ def coarse_ice(fields: dict, temperature, params) -> dict:
     dry = float(getattr(ep, "ice_aridity", 0.0))
     # the rain as a depth, in the land-mean rain's (the balance's own measure, hydro/balance.py)
     rain = np.asarray(FaceField.from_interior(grid, (fields["precip"].interior / (grid.interior_cell_area / float(grid.cell_size_m) ** 2)).astype(np.float32)).data, np.float64)
-    if dry > 0.0:
+    if dry > 0.0 and sheet is None:
         ice &= aridity(pet_ice, rain, land_evap) < dry        # ice needs snow (erosion.ice_aridity), in the climate it grew in
     ramp = float(max(int(ep.glacial_ramp), 0) + 1)
     taper = np.zeros(ice.shape, np.float32)
@@ -209,7 +212,8 @@ def coarse_ice_of(root, params, fields: dict) -> dict:
         surface = fields["height"].data.astype(np.float32) + fields["sediment"].data.astype(np.float32)
         _COARSE.clear()
         if store.has_field("temperature"):
-            _COARSE[key] = coarse_ice(fields, surface_temperature(store, params, surface), params)
+            sheet = store.load_field("ice_max", fields["evap"].grid).data > 0.0 if store.has_field("ice_max") else None
+            _COARSE[key] = coarse_ice(fields, surface_temperature(store, params, surface), params, sheet)
         else:
             # a world with no climate temperature (a stub): the kernel's `evap` is all there is
             from ..field import FaceField

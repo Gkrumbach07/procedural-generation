@@ -568,6 +568,45 @@ def test_an_export_replaces_a_served_viewer_in_one_step(tmp_path, monkeypatch):
     assert sorted(p.name for p in index.parent.iterdir()) == ["data", "index.html", "scout.js", "zooms.js"]   # nothing left of the staging
 
 
+def test_a_stage_with_an_ice_sheet_writes_its_ice_and_its_thaw(tmp_path):
+    """``erosion.ice_sheet``: the stage's ice is a sheet with a thickness.
+    Its frames carry the thickness beside the ground; the stage ends on the
+    last maximum's sheet, thaws it back to today's in ``render.thaw_frames``
+    frames of its own (stage ``thaw``) and writes both as fields -- today's
+    ice within the maximum's, and no more of it in any frame than in the one
+    before.  The viewer draws the ice's surface, not the ground under it, and
+    takes the thaw from the stage."""
+    p = WorldParams.tiny_world(seed=6).with_overrides(
+        erosion={"ice_sheet": True, "ice_age_c": 8.0, "ice_history": True, "glacial_every": 5, "climate_at_surface": True},
+        climate={"T_eq": 6.0}, render={"thaw_frames": 3, "erosion_frame_every": 5})
+    from globe.io.world_store import WorldStore
+
+    store = bake(tmp_path / "w", p, to_stage="erosion", logger=lambda m: None)
+    info = store.manifest["stages"]["erosion"]["info"]
+    grid = p.coarse_grid()
+    top, now = store.load_field("ice_max", grid).interior, store.load_field("ice_now", grid).interior
+    assert (top > 0.0).any() and (now > 0.0).any() and not ((now > 0.0) & ~(top > 0.0)).any() and (now > 0.0).sum() < (top > 0.0).sum()
+    assert info["ice_max_land_share"] > info["ice_now_land_share"] > 0.0 and info["ice_max_sea_drop_m"] > 0.0
+    ero, thaw = vf.list_frames(tmp_path / "w", "erosion"), vf.list_frames(tmp_path / "w", "thaw")
+    assert [k for k, _, _ in thaw] == [1, 2, 3] and [m["cooling_c"] for _, _, m in thaw] == [pytest.approx(5.33, abs=0.01), pytest.approx(2.67, abs=0.01), 0.0]
+    cells = []
+    for _, path, _ in [ero[-1]] + thaw:
+        with np.load(path) as z:
+            assert "ice_h" in z.files and (z["ice_h"][z["ice"] == 0] == 0).all() and z["ice_h"].max() > 0
+            cells.append(int((z["ice"] > 0).sum()))
+    assert cells[0] >= cells[1] >= cells[2] >= cells[3] > 0                               # the maximum, then less in each frame of the thaw
+    with np.load(ero[-1][1]) as z, np.load(thaw[-1][1]) as t:
+        assert np.array_equal(z["height"], t["height"])                                  # the same ground under both
+        bed, body = z["height"].astype(np.float32), z["ice_h"].astype(np.float32)
+    frames, _ = vw.collect_frames(tmp_path / "w", None, log=lambda m: None)
+    assert [f.stage for f in frames][-5:] == ["erosion", "thaw", "thaw", "thaw", "final"]
+    last = frames[-5]
+    assert np.allclose(last.height, bed + body, atol=0.5) and last.label.endswith("ice age, 8.0 °C colder than today")
+    assert frames[-2].label == "thaw · today's ice" and frames[-4].label == "thaw · 5.3 °C colder than today"
+    assert (frames[-4].height >= frames[-2].height - 0.5).all() and (frames[-4].height > frames[-2].height + 1.0).any()   # the ice's surface comes down as it thaws
+    assert frames[-2].ch["ice"].sum() < frames[-4].ch["ice"].sum() < last.ch["ice"].sum()
+
+
 def test_the_ice_of_any_temperature_is_the_glacial_passes_own(tmp_path):
     """``zoom.ice.ice_ground``: the ice at an ice line of any temperature, by
     the rule the planet level's ice has (``coarse_ice``) -- the same ground at
