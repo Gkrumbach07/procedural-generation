@@ -1468,6 +1468,54 @@ def test_an_ice_sheet_stands_on_what_feeds_it_and_keeps_its_height():
     assert (area * back["mask"]).sum() >= (area * m).sum() - 3.0 * area.mean() and (area * back["mask"]).sum() < (area * cold["mask"]).sum()
 
 
+def test_bedded_rock_is_as_hard_as_the_bed_the_cut_has_reached(scratch):
+    """``erosion.strata_amp`` (``erosion/strata.py``): the bedrock is beds,
+    hard and soft in turn by a table drawn once for the world, and the
+    hardness the kernel sees is tectonics' plus the bed's at the depth of
+    rock the cell has lost -- counted from what the erosion took, so the
+    stage's uplift does not move a cell through its beds.  The structure
+    (``strata_warp_m``) is a field of the place, within its amplitude.  Off,
+    the state has no beds and its hardness is tectonics'."""
+    from globe.erosion import maps as emaps
+    from globe.erosion import strata
+
+    tops, sign = strata.bed_table(3, 200.0)
+    t2, s2 = strata.bed_table(3, 200.0)
+    assert np.array_equal(tops, t2) and np.array_equal(sign, s2) and not np.array_equal(tops, strata.bed_table(4, 200.0)[0])
+    th = np.diff(np.concatenate([[0.0], tops]))
+    assert th.min() >= 80.0 and th.max() <= 320.0 and tops[-1] > strata.TABLE_DEPTH_M
+    assert (sign[::2] >= 0.6).all() and (sign[1::2] <= -0.6).all()                       # hard and soft in turn
+    b = strata.bed(np.array([-50.0, 0.0, tops[0] - 1.0, tops[0] + 1.0, tops[1] + 1.0]), tops, sign)
+    assert b[0] == b[1] == b[2] == np.float32(sign[0]) and b[3] == np.float32(sign[1]) and b[4] == np.float32(sign[2])
+    h = strata.hardness(np.array([0.5, 0.5, 0.9, 0.99, 0.1]), np.array([0.0, tops[0] + 1.0, 0.0, 0.0, tops[0] + 1.0]), np.zeros(5), 0.3, tops, sign)
+    assert h[0] == pytest.approx(0.5 + 0.3 * sign[0]) and h[1] == pytest.approx(0.5 + 0.3 * sign[1])
+    assert h[2] == pytest.approx(strata.HARD_TOP) and h[3] == pytest.approx(0.99) and h[4] == 0.0     # capped; never softer than rock can be
+    assert strata.hardness(np.array([0.5]), np.array([0.0]), np.array([tops[0] + 1.0]), 0.3, tops, sign)[0] == h[1]   # the structure is depth too
+
+    p, st = _land_world(scratch, "strata_off")
+    assert getattr(st, "strata", None) is None
+    h0 = st.hardness.copy()
+    emaps.step(st, p, 0)
+    assert np.array_equal(st.hardness, h0)
+    on = p.with_overrides(erosion={"strata_amp": 0.3, "strata_bed_m": 2.0, "strata_warp_m": 5.0, "strata_warp_km": 1.0})
+    sb = erosion_run.build_state(_stub_world(scratch, "strata_on", on), on)
+    amp, tb, sg, phase = sb.strata
+    assert amp == 0.3 and np.array_equal(sb.hard0, sb.hardness) and not sb.eroded.any()
+    assert phase.shape == sb.height.shape and 1.0 < np.abs(phase).max() <= 5.0
+    up0 = sb.height.copy()
+    for it in range(emaps.STRATA_EVERY):
+        emaps.step(sb, on, it)
+    u = sb.height_unit_m
+    cut = sb.eroded[sb.interior] * u
+    assert cut.min() >= -1e-6 and cut.max() > 2.0                                        # rock lost, and somewhere more than a bed of it
+    first = strata.hardness(sb.hard0, np.zeros(sb.height.shape), phase, amp, tb, sg)
+    assert np.array_equal(sb.hardness, first)                                            # read at the start: nothing cut yet
+    emaps.step(sb, on, emaps.STRATA_EVERY)                                               # ...and again five iterations on
+    assert (sb.hardness != first)[sb.interior].mean() > 0.01
+    again = strata.hardness(sb.hard0, cut_all := sb.eroded.astype(np.float64) * u, phase, amp, tb, sg)
+    assert (again != first)[sb.interior].any() and cut_all.shape == up0.shape
+
+
 def test_a_lake_keeps_its_rivers_sediment_and_fills_towards_a_plain(scratch):
     """`erosion.lake_fill`: in a lake with room the load its shore cannot take
     is parked on the lake (`lake_load`), never more than the lake's room, and

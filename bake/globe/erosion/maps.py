@@ -1501,6 +1501,11 @@ def hold_datum(state: ErosionState, land_fraction: float) -> float:
     return q
 
 
+#: iterations between two readings of the beds at the surface (erosion.strata_amp): a cell loses a few
+#: metres of rock an iteration and a bed is a hundred thick
+STRATA_EVERY = 5
+
+
 def step(state: ErosionState, params, iteration_key, log=None, after_refresh=None, **kw) -> dict:
     """One full PLAN 8.2 iteration: particles, thermal erosion, uplift,
     datum hold (:func:`hold_datum`, global pass only), halo exchange.
@@ -1524,6 +1529,12 @@ def step(state: ErosionState, params, iteration_key, log=None, after_refresh=Non
         from . import icesheet
 
         ice_now = icesheet.update(state, params)
+    beds = getattr(state, "strata", None) is not None
+    if beds and state.iteration % STRATA_EVERY == 0:
+        # the beds now at the surface (erosion.strata_amp): the hardness of the rock the cell has been cut down to
+        from . import strata
+
+        strata.refresh(state)
     sea_every = int(getattr(ep, "sea_mask_every", 0))
     if state.spherical and sea_every > 0 and (getattr(state, "base_at", None) is None or state.iteration % sea_every == 0):
         # before the route: the flood seeds on the sea, and the sea is what
@@ -1553,9 +1564,14 @@ def step(state: ErosionState, params, iteration_key, log=None, after_refresh=Non
         if getattr(state, "iso_acc", None) is None:
             state.iso_acc = np.zeros_like(state.height)
         s0 = state.height + state.sediment
+    if beds:
+        b0 = state.height.copy()
     st = run_iteration(state, params, iteration_key, log=log, **kw)
     t1 = time.time()
     thermal_erosion(state, params)
+    if beds:
+        # the rock the particles and the mass wasting took off the bedrock: how deep in its beds the cell now is
+        state.eroded += b0 - state.height
     if iso:
         # only what surface processes moved: uplift and the datum shift are
         # not loads, and must not be compensated
@@ -1568,7 +1584,11 @@ def step(state: ErosionState, params, iteration_key, log=None, after_refresh=Non
             and (state.iteration + 1) >= float(ep.glacial_from) * int(ep.iterations):
         if iso:
             s1 = state.height + state.sediment
+        if beds:
+            b0 = state.height.copy()
         st["glacial"] = glacial.carve(state, params)
+        if beds:
+            state.eroded += b0 - state.height
         if iso:
             state.iso_acc += (state.height + state.sediment) - s1
     if iso and (state.iteration + 1) % max(int(getattr(ep, "isostasy_every", 10)), 1) == 0:

@@ -113,6 +113,8 @@ def save_checkpoint(store: WorldStore, state: ErosionState, params: WorldParams)
         arrays["iso_acc"] = state.iso_acc
     if getattr(state, "ice_prev", None) is not None:  # sticky ice: part of the state
         arrays["ice_prev"] = state.ice_prev.astype(np.uint8)
+    if getattr(state, "strata", None) is not None:  # how deep in its beds each cell is (erosion.strata_amp)
+        arrays["eroded"] = state.eroded
     if getattr(state, "sheet", None) is not None:  # the ice sheet as it stands (erosion.ice_sheet): a resume goes on from it
         arrays["sheet"] = state.sheet.astype(np.uint8)
         arrays["sheet_h"] = state.sheet_h
@@ -203,6 +205,8 @@ def load_checkpoint(state: ErosionState, path: Path, meta: dict) -> None:
             state.base_at = None
         state.iso_acc = np.array(z["iso_acc"]) if "iso_acc" in z.files else None
         state.ice_prev = np.array(z["ice_prev"]).astype(bool) if "ice_prev" in z.files else None
+        if getattr(state, "strata", None) is not None and "eroded" in z.files:
+            state.eroded[...] = z["eroded"]
         if getattr(state, "ice_clim", None) is not None and "sheet" in z.files:
             state.sheet = np.ascontiguousarray(z["sheet"]).astype(bool)
             state.sheet_h = np.ascontiguousarray(z["sheet_h"])
@@ -272,6 +276,10 @@ def build_state(store: WorldStore, params: WorldParams, replay: bool = True) -> 
         state.temp_follow = follow
         if t0 > 0.0:
             state.pet_law = (float(params.climate.T_eq), t0, insolation(grid.latitude()).astype(np.float32))
+    if float(getattr(params.erosion, "strata_amp", 0.0)) > 0.0:
+        from . import strata
+
+        strata.setup(state, grid, params)        # bedded rock: the hardness follows the depth of the cut
     if bool(getattr(params.erosion, "ice_sheet", False)):
         from . import icesheet
 

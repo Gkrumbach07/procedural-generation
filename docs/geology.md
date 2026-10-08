@@ -138,6 +138,46 @@ is of the same kind. The lake share moved both ways with it (1.2 km: 0.85 ->
   does not bleed into the sea floor's, and a rifted margin's taper is no
   wider than the continental cells that carry it.
 
+## Beds: hardness by the depth of the cut (`erosion.strata_amp`, off)
+
+The user asked for layered rock to steer the erosion (2026-10-08). What
+there was: tectonics' hardness has a fabric in map view only
+(`tectonics.strata_amp`: belts along the lines of equal crust age, rock
+standing on end), and the zoom levels have a cover of one hardness over the
+basement. Nothing changes with depth, and 47 % of earth-v32's land is mapped
+sandstone, shale or limestone: rock that lies flat, where a hard bed over a
+soft one is what makes a plateau's edge.
+
+`erosion/strata.py`: the state counts the rock each cell has lost (what the
+particles, the mass wasting and the ice took off the bedrock; not its change
+of height, which uplift, the rebound and the datum move without wearing
+anything), and every five iterations the hardness is tectonics' plus or
+minus `strata_amp` by the bed at that depth -- beds 0.4 to 1.6 of
+`strata_bed_m` (200 m) thick, hard and soft in turn, lying `strata_warp_m`
+(800 m) deeper or shallower over `strata_warp_km` (600 km), so they dip a few
+metres a kilometre and their outcrops curve.
+
+**Measured, and it does not show.**
+
+* At 1.2 km (one window of sedimentary cover re-eroded with flat beds
+  80-260 m thick, hardness 0.82 and 0.25): nothing to see. A planet level
+  cuts its bedrock in its channels only -- median 0 m, 128 m at the 95th
+  percentile, in its 80 iterations. The relief is the coarse stage's.
+* In the coarse stage (earth-v34: earth-v32 with `strata_amp` 0.3): no
+  escarpments, and no terraces either. The stage takes a median 1,200 m of
+  rock off the land (4,300 m at the 90th percentile; 80 % of the land loses
+  more than 100 m), so a cell runs through six 200 m beds and their
+  hardness averages out in time; and where the cut is shallow the ground
+  slopes 3-5 m a kilometre, on which a 200 m bed is 40 km wide -- four cells
+  of a few tens of metres each. Land median 346 -> 359 m, above 2 km 6.2 ->
+  6.5 %, lakes 0.85 -> 0.85 % of land: inside what any re-bake changes.
+
+What it would take: formations a kilometre thick at the coarse grid (a
+contact that lasts most of the stage), and at the zoom levels the beds put
+into the ground the level starts from, as benches where the cover is cut --
+the levels do not erode enough to find them. The rock counted here
+(`eroded`, kept in the checkpoint) is the true exhumation either would need.
+
 ## What it is not
 
 * Not stratigraphy. The sediment thickness and the crust thickness a section
