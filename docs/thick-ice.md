@@ -1,6 +1,6 @@
 # Thick ice: a sheet in balance with its climate
 
-`erosion.ice_sheet` (off until a world baked with it has been reviewed),
+`erosion.ice_sheet` (the default since earth-v35, 2026-10-08; the toy presets keep the line),
 `bake/globe/erosion/icesheet.py`, and the climate's `temp_range`.
 
 ## What was there, and what it could not be
