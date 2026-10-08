@@ -3321,7 +3321,7 @@ secSync();
 // Timeline
 // ---------------------------------------------------------------------------
 const tl = $("tl-canvas"), tlx = tl.getContext("2d");
-const STAGE_COL = { tectonics: "#c9884a", erosion: "#4a9fc9", final: "#7bc96f" };
+const STAGE_COL = { tectonics: "#c9884a", erosion: "#4a9fc9", thaw: "#b9dcea", final: "#7bc96f" };
 function tlX(i) { return NF <= 1 ? tl.width / 2 : 6 + (tl.width - 12) * i / (NF - 1); }
 function drawTimeline() {
   const dpr = window.devicePixelRatio || 1;

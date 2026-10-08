@@ -381,6 +381,10 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
                 log(f"[erosion] quicklook -> {qp}")
             except Exception as e:  # never break a bake on a picture
                 log(f"[erosion] quicklook failed: {e!r}")
+    if bool(getattr(ep, "ice_history", False)) and state.temp0 is not None:
+        from .glacial import ice_cooling
+
+        state.ice_age = ice_cooling(ep, n_iter)                # the stage ends on its last maximum (erosion.ice_history)
     # the lakes lay what the last iterations brought them (a run ends between two lake refreshes)
     lk = settle_lakes(state, params)
     if lk is not None and "load_parked" in lk:

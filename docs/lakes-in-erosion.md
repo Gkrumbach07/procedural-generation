@@ -511,6 +511,80 @@ iteration-750 checkpoint at 8, five glacial passes: closed lows over 5 m on
 the ground only the ice age covers (12.3 % of land) 0.84 -> 4.84 %, on the
 planet 1.05 -> 1.71 % of land. earth-v26 is earth-v25 with it from the start.
 
+### The ice follows a temperature (`erosion.ice_history`, off; the viewer's thaw)
+
+The user, of earth-v32's timeline (2026-10-08): the ice age "pops in
+instantly and then disappears at the end". Both were switches. `ice_age_c`
+is one number from the first glacial pass to the last, so the frames had no
+ice at iteration 590 and the last maximum's whole sheet at 600; the 25
+frames of the planet level's lapse carried no ice at all, so it was gone 25
+frames before the final one; and the final frame's white is another rule
+again (the biome's, under -12 C).
+
+What sets the temperature on Earth, at the stage's scale (800 iterations
+for some 15 My, 19,000 years each):
+
+* **over millions of years, CO2**: volcanoes put it in, the weathering of
+  fresh rock and the burial of carbon take it out, faster where mountains
+  rise; and where the land and the sea's gateways are. Earth has cooled some
+  4 C since the Miocene: ice on Antarctica 34 My ago, on the north 2.7 My ago;
+* **within an ice age, the orbit**: tilt (41,000 years), precession (23,000)
+  and eccentricity (100,000) move the northern summer's sun by a tenth, and a
+  cool summer keeps its snow. The ice's own albedo and the CO2 the cold sea
+  takes up make 6 C of it worldwide, far more over the ice;
+* **as a sawtooth**: 90,000 years of growth and 10,000 of thaw. The last
+  maximum was 21,000 years ago, ice on a quarter of the land for a tenth now.
+
+So a cycle is five iterations and its thaw half of one: the stage cannot
+carry the cycles, only their envelope, and the ice's end *is* a cut at this
+step. Its beginning is not.
+
+`erosion.ice_history` (`glacial.ice_cooling`): the ice line is read
+`ice_warm_c` (4) warmer than the climate at the first iteration, the
+climate's own at `glacial_from`, and `ice_age_c` colder from `ice_full` (0.9)
+on, straight between -- the cold end of the cycle at each time. `maps.step`
+gives the state its iteration's line before the lakes are refreshed (a lake
+takes no fill under the ice of its own time) and the frame is taken; the
+carve still starts at `glacial_from`, and the ground at the last maximum's
+margin is carved by the passes after `ice_full` and no earlier. Off, every
+number is as it was.
+
+The thaw is the viewer's (`viewer.thaw_frames`, `render.thaw_frames` 8, on
+for every export): the lapse's frames keep the ice the stage ended with, and
+between the last of them and the final frame the ice line is a step warmer
+in each of eight frames of the same ground, from `ice_age_c` down to the
+climate's own, by the glacial pass's rule (`zoom.ice.ice_ground`). The
+ground does not change in a thaw at this scale; a quarter of the land comes
+out from under the ice.
+
+**The ice is too wide since the storm rules** (`climate.storm_front` and the
+rest, the default from earth-v32). On earth-v32's last surface the rule has
+ice on 18.7 % of the land at today's line and 35.5 % at 8 C colder, where
+earth-v25 had 12.0 and 24.1 and Earth has 10 and about 25: the rain the
+rules brought to 60 degrees passes the snow test nearly everywhere (cold
+alone 21.4 % of land, with `ice_aridity` 1.5 still 18.7). At `ice_aridity`
+0.7 the same surface has 11.7 and 24.8 %.
+
+**earth-v33, measured** (earth-v32 baked again from erosion with
+`ice_history` and `ice_aridity` 0.7; earth-v32 beside it):
+
+| | earth-v32 | earth-v33 |
+|---|---|---|
+| ice on the frames, % of land: iteration 0 / 590 / 600 / 660 / 720 / 800 | 0 / 0 / 36 / 36 / 36 / 35 | 9.7 / 10.9 / 11.2 / 17.0 / 24.2 / 23.8 |
+| most the ice grows between two frames | 36 points | 1.7 points |
+| coarse lakes, % of land (refined grid) | 0.83 (0.70) | 0.96 (0.76) |
+| lakes over 100 / 1,000 / 10,000 km2 | 1,043 / 216 / 15 | 1,094 / 231 / 15 |
+| lake cover of ground only the ice age covers | 1.87 % | 1.80 % |
+| land above 2 km / 3 km | 6.2 / 1.0 % | 6.1 / 1.0 % |
+
+The ice barely moves through the warm three quarters of the stage (9.7 to
+11.2 %): the line cools 4 C while the erosion takes the high cold ground
+down, and the two cancel. The lake numbers are inside what any changed
+input does to a bake (docs: earth-v26 against earth-v27); the lake country
+is kept. One sheet of water five metres deep on a coastal plain at +8 m is
+129,000 km2 on the coarse grid, where earth-v32 had 21,000 in the same
+basin; on the refined grid the largest lake is 33,000 (49,000).
+
 ## 8. The ice's small lakes (`zoom/ice.py`)
 
 What the planet's lakes are made by, on earth-v24's coarse grid (share of

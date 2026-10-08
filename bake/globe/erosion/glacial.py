@@ -55,6 +55,40 @@ import numpy as np
 from . import particle as pk
 
 
+def ice_cooling(ep, iteration) -> float:
+    """How many degrees colder than the climate the ice line is read at an
+    iteration of the stage (negative: warmer) -- ``ErosionState.ice_age``.
+
+    Without ``erosion.ice_history`` it is ``ice_age_c`` throughout: the last
+    glacial maximum's ice, there in full from the first pass.  With it, the
+    stage has a temperature history and the ice follows that: ``ice_warm_c``
+    warmer than the climate at the first iteration, the climate's own at
+    ``glacial_from``, ``ice_age_c`` colder from ``ice_full`` on, and straight
+    between the three.  The stage stands for some 15 My, 19,000 years an
+    iteration at the defaults: on Earth that is the cooling from the Miocene
+    (about 4 C warmer than now) to the first northern ice sheets 2.7 My ago
+    -- falling CO2, as rising mountains weather faster and the sea buries
+    the carbon -- and then the ice ages, whose maxima deepened until the
+    100,000-year cycles of the last 0.9 My.  Those cycles are the orbit's
+    (tilt and precession set the northern summer's sun, the ice's own
+    albedo and the sea's CO2 make 6 C of it), five iterations long with a
+    thaw of half an iteration: below the stage's step.  So the line is the
+    cold end of the cycle at each time, its envelope, and the stage ends on
+    the last maximum.  The thaw to today is the viewer's to show
+    (``viz.viewer`` -- the ground does not change in it)."""
+    age = float(getattr(ep, "ice_age_c", 0.0))
+    if not bool(getattr(ep, "ice_history", False)):
+        return age
+    u = min(max(float(iteration) / max(int(ep.iterations), 1), 0.0), 1.0)
+    on = min(max(float(ep.glacial_from), 0.0), 1.0)
+    full = min(max(float(getattr(ep, "ice_full", 1.0)), on), 1.0)
+    if u < on:
+        return -float(getattr(ep, "ice_warm_c", 0.0)) * (1.0 - u / on)
+    if u >= full:
+        return age
+    return age * (u - on) / (full - on)
+
+
 def ice_mask(state, ice_evap: float = 0.0) -> np.ndarray:
     """Extended-array bool: active land cold enough to hold ice.
 
@@ -213,4 +247,4 @@ def carve(state, params) -> dict:
     return stats
 
 
-__all__ = ["ice_mask", "carve"]
+__all__ = ["ice_cooling", "ice_mask", "carve"]

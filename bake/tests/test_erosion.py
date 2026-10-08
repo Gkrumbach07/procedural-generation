@@ -1359,6 +1359,54 @@ def test_the_cold_follows_the_ground(scratch):
     assert np.array_equal(st.cold(0.0), cold & (rain > 1.0)) and (st.cold(0.0) & cold).any()
 
 
+def test_the_ice_follows_the_stages_temperature(scratch):
+    """``erosion.ice_history`` (``glacial.ice_cooling``): the ice line is read
+    warmer than the climate at the stage's start, the climate's own at
+    ``glacial_from`` and the last maximum's from ``ice_full`` on, and never
+    warms on the way; off, it is the last maximum's throughout.  ``step``
+    gives the state its iteration's line before the lakes and the frame read
+    it, so the ice grows with the cold instead of arriving whole -- and a
+    line warmer than the climate is read off the temperature too."""
+    from types import SimpleNamespace
+
+    from globe.erosion import glacial
+    from globe.erosion import maps as emaps
+
+    ep = SimpleNamespace(iterations=800, glacial_from=0.75, ice_age_c=8.0, ice_history=False, ice_warm_c=4.0, ice_full=0.9)
+    assert [glacial.ice_cooling(ep, it) for it in (0, 300, 600, 800)] == [8.0] * 4          # off: one switch
+    ep.ice_history = True
+    c = [glacial.ice_cooling(ep, it) for it in range(801)]
+    assert c[0] == -4.0 and c[300] == pytest.approx(-2.0) and c[600] == pytest.approx(0.0)  # the warm start cools to today's
+    assert c[660] == pytest.approx(4.0) and c[720] == c[800] == 8.0                         # ...and on to the last maximum
+    assert (np.diff(c) >= 0.0).all() and max(np.diff(c)) < 0.07                             # no step in it: under 0.07 C an iteration
+    ep.ice_full = 0.75                                                                      # no ramp: the old step, after a warm start
+    assert glacial.ice_cooling(ep, 599) < 0.0 and glacial.ice_cooling(ep, 600) == 8.0
+
+    p, st = _land_world(scratch, "ice_history")
+    u = st.height_unit_m
+    z = (st.surface() * u).astype(np.float32)
+    st.temp0 = (6.0 - 6.5 * np.maximum(z, 0.0) / 1000.0).astype(np.float32)                 # 6 C at the sea, freezing at 920 m
+    st.temp_z, st.temp_lapse, st.temp_k, st.temp_follow = z.copy(), 6.5, 1.0 / 28.0, True
+    land = (st.mask == pk.MASK_ACTIVE) & (st.surface() > 0.0)
+    area = []
+    for age in (-4.0, 0.0, 4.0, 8.0):
+        st.ice_age = age
+        area.append(int((glacial.ice_mask(st, 0.0) & land).sum()))
+    assert area[0] < area[1] < area[2] < area[3] and area[3] == int(land.sum())             # 8 C colder: all of it
+    st.ice_age = -4.0
+    assert np.array_equal(st.cold(0.0), st.temperature() + 4.0 <= 0.0)                      # warmer than the climate: its own line
+    # the step sets the line of its iteration (and leaves it alone without the history)
+    n = int(p.erosion.iterations)
+    on = p.with_overrides(erosion={"ice_history": True, "ice_age_c": 8.0, "ice_warm_c": 4.0, "glacial_from": 0.5, "ice_full": 0.75})
+    st.ice_age = 99.0
+    st.iteration = 0
+    emaps.step(st, p, 0)
+    assert st.ice_age == 99.0
+    st.iteration = n // 4
+    emaps.step(st, on, n // 4)
+    assert st.ice_age == pytest.approx(-2.0)
+
+
 def test_a_lake_keeps_its_rivers_sediment_and_fills_towards_a_plain(scratch):
     """`erosion.lake_fill`: in a lake with room the load its shore cannot take
     is parked on the lake (`lake_load`), never more than the lake's room, and

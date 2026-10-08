@@ -101,7 +101,7 @@ class ErosionState:
     temp_k: float = 1.0  # climate.k_evap: `evap` = temp_k max(T, 0), so `evap <= e` is `T <= e / temp_k`
     pet_law: tuple | None = None  # (T_eq, t0, sun (F, NE, NE)): the lakes' evaporation by hydro.pet_t0 (hydro.balance.potential_evaporation), read off `temperature()`
     ice_snow: tuple | None = None  # (aridity limit, land_evap, rain depth (F, NE, NE)): ice needs snow (erosion.ice_aridity; hydro.balance.aridity)
-    ice_age: float = 0.0  # C the ice line is read colder than the climate (erosion.ice_age_c): the last glacial maximum's ice
+    ice_age: float = 0.0  # C the ice line is read colder than the climate (erosion.ice_age_c): the last glacial maximum's ice -- or, with erosion.ice_history, that of the iteration's own time (glacial.ice_cooling; negative while the stage is warmer than the climate)
     lake_load: np.ndarray = field(default=None, repr=False)  # float64 sediment per cell (cell units) that particles brought into a lake and its shore had no room for (particle.trace_particles, `erosion.lake_fill`): parked on the lake cell entered until `settle_lake_loads` lays it over the lake's floor
     lake_id: np.ndarray = field(default=None, repr=False)  # int32 per cell: the lake of `lake_room` a cell belongs to, -1 where a load cannot be parked
     lake_room: np.ndarray = field(default=None, repr=False)  # float64 per lake: the room it has left for its rivers' load (cell units), counted down by particle.apply_changes
@@ -278,7 +278,7 @@ class ErosionState:
         (``erosion.ice_age_c``) the line is read that many degrees colder
         than the climate: the ice of the last glacial maximum."""
         age = float(self.ice_age)
-        if self.temp0 is None or not (self.temp_follow or age > 0.0):
+        if self.temp0 is None or not (self.temp_follow or age != 0.0):
             cold = self.evap <= float(ice_evap)
         else:
             cold = (self.temperature() - age) <= float(ice_evap) / max(float(self.temp_k), 1e-12)
@@ -1510,6 +1510,10 @@ def step(state: ErosionState, params, iteration_key, log=None, after_refresh=Non
     there, erosion.run).  It must only read."""
     ep = _eparams(params)
     t0 = time.time()
+    if state.spherical and bool(getattr(ep, "ice_history", False)) and state.temp0 is not None:
+        # the ice line of this iteration's time (erosion.ice_history): before the lakes are
+        # refreshed, which take no fill under the ice, and the frame, which draws it
+        state.ice_age = glacial.ice_cooling(ep, state.iteration)
     sea_every = int(getattr(ep, "sea_mask_every", 0))
     if state.spherical and sea_every > 0 and (getattr(state, "base_at", None) is None or state.iteration % sea_every == 0):
         # before the route: the flood seeds on the sea, and the sea is what

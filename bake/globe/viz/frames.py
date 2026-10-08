@@ -183,7 +183,11 @@ def erosion_frame(state, rec: FrameRecorder, iteration: int, total: int, params)
     The ice is the glacial pass's own (``glacial.carve``): the cold ground
     above the sea, and with ``erosion.glacial_sticky`` what the last pass
     carved under.  It is zero until the pass starts, ``erosion.glacial_from``
-    of the way through the run; the sidecar says ``glacial`` from then on."""
+    of the way through the run; the sidecar says ``glacial`` from then on.
+    With ``erosion.ice_history`` the ice line has a temperature of its own
+    at every iteration (``glacial.ice_cooling``) and the ice is on every
+    frame, as much as that time's cold holds; the sidecar's ``cooling_c`` is
+    how far under the climate the line was read (negative: over it)."""
     from ..erosion import glacial
 
     ep, hp = params.erosion, params.hydro
@@ -194,8 +198,9 @@ def erosion_frame(state, rec: FrameRecorder, iteration: int, total: int, params)
     lake[lake <= max(float(hp.lake_min_depth), float(getattr(hp, "marsh_depth", 0.0)))] = 0.0
     iced = bool(state.spherical) and int(ep.glacial_every) > 0 and float(ep.glacial_rate) > 0.0 \
         and int(iteration) >= float(ep.glacial_from) * int(total)
+    history = bool(state.spherical) and bool(getattr(ep, "ice_history", False)) and getattr(state, "temp0", None) is not None
     ice = np.zeros(surf.shape, np.float32)
-    if iced:
+    if iced or history:
         on = glacial.ice_mask(state, float(ep.ice_evap))
         prev = getattr(state, "ice_prev", None) if bool(getattr(ep, "glacial_sticky", False)) else None
         if prev is not None:
@@ -205,4 +210,5 @@ def erosion_frame(state, rec: FrameRecorder, iteration: int, total: int, params)
                           "discharge": downsample(state.discharge[I], rec.res, "max").astype(np.float16),
                           "lake": downsample(lake, rec.res).astype(np.float16),
                           "ice": np.round(255.0 * downsample(ice, rec.res)).astype(np.uint8)},
-              iteration=int(iteration), of=int(total), units="m", **({"glacial": True} if iced else {}))
+              iteration=int(iteration), of=int(total), units="m", **({"glacial": True} if iced else {}),
+              **({"cooling_c": round(float(state.ice_age), 2)} if history else {}))

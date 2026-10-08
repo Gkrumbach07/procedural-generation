@@ -95,6 +95,39 @@ def grain(p: np.ndarray, radius_m: float, cell_m: float, seed: int) -> np.ndarra
     return _grain_kernel(q, f0, grain_octaves(cell_m), GRAIN_GAIN, int(seed) + ICE_KEY).reshape(np.asarray(p).shape[:-1])
 
 
+def ice_ground(fields: dict, temperature, params, age: float | None = None) -> np.ndarray:
+    """Where the climate holds ice on the coarse grid (extended bool), by the
+    rule erosion's glacial pass has (``ErosionState.cold``): at or under the
+    ice line -- read ``age`` degrees colder than the climate, the last
+    maximum's ``erosion.ice_age_c`` when None -- with the snow to last there
+    (``erosion.ice_aridity``, in the climate that cold), and not sea.
+
+    ``age`` is what makes this a function of a temperature and not of one
+    time: 0 is today's ice, and the values between are the thaw the viewer
+    shows after the stage's last frame (``viz.viewer.thaw_ice``)."""
+    from ..field import FaceField
+    from ..hydro.balance import aridity, potential_evaporation
+
+    grid = fields["evap"].grid
+    ep, hp = params.erosion, params.hydro
+    T = np.asarray(temperature.data, np.float64)
+    follow = bool(getattr(ep, "climate_at_surface", False))
+    last = float(getattr(ep, "ice_age_c", 0.0))
+    age = last if age is None else float(age)
+    sea = fields["basin_id"].data < 0
+    if follow or last > 0.0:
+        ice = (T - age <= float(ep.ice_evap) / max(float(params.climate.k_evap), 1e-12)) & ~sea
+    else:
+        ice = (np.asarray(fields["evap"].data, np.float32) <= float(ep.ice_evap)) & ~sea
+    dry = float(getattr(ep, "ice_aridity", 0.0))
+    if dry > 0.0:
+        t0 = float(getattr(hp, "pet_t0", 0.0))
+        pet = potential_evaporation(T - age, grid.latitude(), float(params.climate.T_eq), t0) if t0 > 0.0 else np.asarray(fields["evap"].data, np.float32)
+        rain = np.asarray(FaceField.from_interior(grid, (fields["precip"].interior / (grid.interior_cell_area / float(grid.cell_size_m) ** 2)).astype(np.float32)).data, np.float64)
+        ice &= aridity(pet, rain, float(getattr(hp, "land_evap", 0.0))) < dry
+    return ice
+
+
 def coarse_ice(fields: dict, temperature, params) -> dict:
     """``ice`` (float32, 0..1) and ``ice_wet`` (u8) on the coarse grid.
 
@@ -331,5 +364,5 @@ def face_cut(root, params, grid, fields: dict, face: int, R: int, surface: np.nd
     return cut, wet
 
 
-__all__ = ["SCOUR_M", "VALLEY_M", "VALLEY_KM", "GRAIN_KM", "GRAIN_GAIN", "LAKE_COUNTRY_SHARE", "LAKE_REACH", "grain", "grain_octaves", "coarse_ice", "coarse_ice_of", "beside_lakes", "keep_rims", "ice_flux", "scour", "lower",
+__all__ = ["SCOUR_M", "VALLEY_M", "VALLEY_KM", "GRAIN_KM", "GRAIN_GAIN", "LAKE_COUNTRY_SHARE", "LAKE_REACH", "grain", "grain_octaves", "ice_ground", "coarse_ice", "coarse_ice_of", "beside_lakes", "keep_rims", "ice_flux", "scour", "lower",
            "window_cut", "rows_cut", "face_cut"]

@@ -485,6 +485,118 @@ def test_erosion_frames_with_water_get_a_shoreline_texture_and_an_ice_layer(tmp_
     assert "ice" not in vw.channel_specs(frames[-1], None, frames[:-1])
 
 
+def test_the_ice_thaws_before_the_final_frame(tmp_path, monkeypatch):
+    """The erosion ends on the last glacial maximum and the final frame is
+    today: between them the viewer puts the thaw (``viewer.thaw_frames``,
+    ``render.thaw_frames``), the last frame's ground and water with the ice
+    line a step warmer in each, down to the climate's own.  The ice in them
+    is the glacial pass's rule on the ground the world ended with
+    (``thaw_ice``) and never more than the last frame had.  A world with no
+    climate to ask has no thaw, and an erosion frame's label says what its
+    ice line was read at where the run had a temperature history."""
+    N = _frames_world(tmp_path / "wet", water=True)
+    frames, _ = vw.collect_frames(tmp_path / "wet", None, log=lambda m: None)
+    assert [f.stage for f in frames] == ["erosion", "erosion", "final"]              # no ice age in its parameters: no thaw
+    man = tmp_path / "wet" / "manifest.json"
+    m = json.loads(man.read_text())
+    m["params"].update(erosion={"ice_age_c": 8.0}, render={"thaw_frames": 4})
+    man.write_text(json.dumps(m))
+    frames, _ = vw.collect_frames(tmp_path / "wet", None, log=lambda m: None)
+    assert [f.stage for f in frames] == ["erosion", "erosion", "final"]              # ...nor without a climate temperature
+    asked = []
+
+    def fake(root, manifest, coolings):
+        asked.extend(coolings)
+        out = []
+        for c in coolings:
+            ice = np.zeros((6, N, N), np.float32)
+            ice[1, :, :int(round(c))] = 1.0                                           # a column of face 1 a degree
+            out.append(ice)
+        return out
+
+    monkeypatch.setattr(vw, "thaw_ice", fake)
+    frames, _ = vw.collect_frames(tmp_path / "wet", None, log=lambda m: None)
+    assert [f.stage for f in frames] == ["erosion", "erosion", "thaw", "thaw", "thaw", "thaw", "final"]
+    assert asked == [6.0, 4.0, 2.0, 0.0]
+    base, thaw = frames[1], frames[2:6]
+    assert [f.label for f in thaw] == ["thaw · 6.0 °C colder than today", "thaw · 4.0 °C colder than today",
+                                       "thaw · 2.0 °C colder than today", "thaw · today's ice"]
+    ice = [f.ch["ice"][1, 0] for f in thaw]
+    assert ice[0][3] == 1.0 and ice[0][4] == pytest.approx(128 / 255) and ice[0][5] == 0.0    # 6 columns asked: no more than the last frame had
+    assert ice[1][3] == 1.0 and ice[1][4] == 0.0 and ice[2][1] == 1.0 and ice[2][2] == 0.0
+    assert not thaw[3].ch["ice"].any()                                                # this world has no ice today
+    for f in thaw:
+        assert f.height is base.height and f.ch["lake_depth"] is base.ch["lake_depth"] and f.ch["ocean"] is base.ch["ocean"]
+    specs = vw.channel_specs(frames[-1], None, frames[:-1])
+    images, meta = vw.encode_frame(thaw[1], specs)
+    assert meta["stage"] == "thaw" and meta["layers"]["ice"] == [1, 0] and len(images) == 2
+    meta_x, out = _viewer_frames(vw.export_viewer(tmp_path / "wet", log=lambda m: None))
+    assert [f["stage"] for f, _ in out] == ["erosion", "erosion", "thaw", "thaw", "thaw", "thaw", "final"]
+    assert '"thaw"' not in vw.TEMPLATE.read_text() and "thaw:" in vw.TEMPLATE.read_text()     # the page knows the stage only by its colour
+    # the labels of a run with a temperature history
+    assert vw.ice_label({}) == "" and vw.ice_label({"glacial": True}) == " · ice age"
+    assert vw.ice_label({"cooling_c": -3.25}) == " · 3.2 °C warmer than today" or vw.ice_label({"cooling_c": -3.25}) == " · 3.3 °C warmer than today"
+    assert vw.ice_label({"cooling_c": 0.0}) == " · as cold as today"
+    assert vw.ice_label({"cooling_c": 8.0, "glacial": True}) == " · ice age, 8.0 °C colder than today"
+    # a share on another frame's cells
+    a = np.zeros((6, 4, 4), np.float32)
+    a[0, :2, :2] = 1.0
+    assert vw._fit(a, 4) is a and vw._fit(a, 2)[0].tolist() == [[1.0, 0.0], [0.0, 0.0]] and vw._fit(a, 8)[0, :4, :4].all() and vw._fit(a, 8)[0].sum() == 16.0
+
+
+def test_an_export_replaces_a_served_viewer_in_one_step(tmp_path, monkeypatch):
+    """An export over a viewer that is being served: while the new frames are
+    written the old export is still there, whole, and the new one takes its
+    place at the end -- not the data deleted first and the frame list written
+    last, with a page loaded in between left blank."""
+    _frames_world(tmp_path / "w", water=True)
+    index = vw.export_viewer(tmp_path / "w", log=lambda m: None)
+    data = index.parent / "data"
+    (data / "stale.js").write_text("of the export before")
+    before = (data / "meta.js").read_text()
+    seen = []
+    encode = vw.encode_frame
+
+    def spy(fr, specs):
+        seen.append((data / "stale.js").exists() and (data / "meta.js").read_text() == before and (data / "f0000.js").exists())
+        return encode(fr, specs)
+
+    monkeypatch.setattr(vw, "encode_frame", spy)
+    vw.export_viewer(tmp_path / "w", log=lambda m: None)
+    assert len(seen) == 3 and all(seen)
+    assert not (data / "stale.js").exists() and (data / "meta.js").exists() and (data / "f0002.js").exists()
+    assert sorted(p.name for p in index.parent.iterdir()) == ["data", "index.html", "scout.js", "zooms.js"]   # nothing left of the staging
+
+
+def test_the_ice_of_any_temperature_is_the_glacial_passes_own(tmp_path):
+    """``zoom.ice.ice_ground``: the ice at an ice line of any temperature, by
+    the rule the planet level's ice has (``coarse_ice``) -- the same ground at
+    the last maximum's line, less of it at a warmer one, none of it sea."""
+    from globe.config import WorldParams
+    from globe.hydro.run import surface_temperature
+    from globe.io.world_store import WorldStore
+    from globe.zoom import ice as zice
+
+    p = WorldParams.tiny_world(seed=6).with_overrides(erosion={"ice_age_c": 8.0, "climate_at_surface": True, "ice_aridity": 1.5},
+                                                      hydro={"pet_t0": 17.8})
+    bake(tmp_path / "w", p, to_stage="watersheds", logger=lambda m: None)
+    store = WorldStore(tmp_path / "w")
+    grid = p.coarse_grid()
+    fields = {n: store.load_field(n, grid) for n in ("evap", "precip", "basin_id", "water_surface", "height", "sediment")}
+    T = surface_temperature(store, p)
+    last = zice.ice_ground(fields, T, p)
+    assert np.array_equal(last, zice.coarse_ice(fields, T, p)["ice"].data > 0.0)
+    assert np.array_equal(last, zice.ice_ground(fields, T, p, age=8.0))
+    sea = fields["basin_id"].data < 0
+    prev = None
+    for age in (-10.0, 0.0, 8.0, 40.0, 80.0):
+        ice = zice.ice_ground(fields, T, p, age=age)
+        assert not (ice & sea).any()
+        assert prev is None or not (prev & ~ice).any()                                # colder: no ice lost
+        prev = ice
+    assert prev.any() and not zice.ice_ground(fields, T, p, age=-80.0).any()
+
+
 def test_resumed_erosion_drops_frames_past_the_resume_point(tmp_path):
     p = WorldParams.tiny_world(seed=6)
     bake(tmp_path / "w", p, to_stage="erosion", logger=lambda m: None)

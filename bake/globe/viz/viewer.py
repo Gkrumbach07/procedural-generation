@@ -535,6 +535,87 @@ def _thin(items: list, n: int) -> list:
     return [items[i] for i in sorted({round(k * (len(items) - 1) / (n - 1)) for k in range(n)})]
 
 
+def ice_label(meta: dict) -> str:
+    """What an erosion frame's label says of its ice: the temperature its ice
+    line was read at where the run had a history of it (``erosion.ice_history``,
+    the sidecar's ``cooling_c``), else that the glacial pass is on."""
+    c = meta.get("cooling_c")
+    if c is None:
+        return " · ice age" if meta.get("glacial") else ""
+    c = float(c)
+    if c <= -0.05:
+        return f" · {-c:.1f} °C warmer than today"
+    if c < 0.05:
+        return " · as cold as today"
+    return f" · ice age, {c:.1f} °C colder than today"
+
+
+def _fit(a: np.ndarray, res: int) -> np.ndarray:
+    """A ``(6, n, n)`` share on ``res`` cells a face: block means down, cells repeated up."""
+    n = a.shape[1]
+    if n == res:
+        return a
+    if n > res and n % res == 0:
+        return vf.downsample(a, res)
+    idx = (np.arange(res) * n) // res
+    return a[:, idx][:, :, idx]
+
+
+def thaw_ice(root: Path, manifest: dict, coolings) -> list[np.ndarray] | None:
+    """The ice on the ground the world ended with, the ice line read each of
+    ``coolings`` degrees colder than the climate: ``(6, N, N)`` float32, 1
+    under ice.  The rule is the glacial pass's own (``zoom.ice.ice_ground``),
+    so the first of a thaw is the last maximum's ice and 0 is today's.  None
+    where the world has no climate temperature, or no hydro to say what is
+    sea."""
+    from ..config import WorldParams
+    from ..field import FaceField
+    from ..hydro.run import surface_temperature
+    from ..io.world_store import WorldStore
+    from ..zoom import ice as zice
+
+    store = WorldStore(root)
+    need = ("temperature", "evap", "precip", "basin_id", "height", "sediment")
+    if not all(store.has_field(n) for n in need):
+        return None
+    params = WorldParams.from_dict(manifest["params"])
+    grid = params.coarse_grid()
+    fields = {n: store.load_field(n, grid) for n in ("evap", "precip", "basin_id")}
+    T = surface_temperature(store, params)
+    return [np.ascontiguousarray(FaceField(grid, zice.ice_ground(fields, T, params, age=float(c)).astype(np.float32)).interior) for c in coolings]
+
+
+def thaw_frames(root: Path, manifest: dict, base: "_Frame", n: int) -> list:
+    """``n`` frames after ``base`` -- the timeline's last before the final
+    one, which has the last maximum's ice -- in which that ice goes back to
+    today's: the ground and the water are ``base``'s, the ice line is a step
+    warmer in each, from ``erosion.ice_age_c`` colder than the climate down
+    to the climate's own.
+
+    The stage ends on the glacial maximum because Earth's lake country is
+    ground the ice left ten thousand years ago; the final frame is today.
+    Between the two the ground does not change at this scale -- a thaw is
+    half an erosion iteration -- but a quarter of the land comes out from
+    under the ice, and drawn as one cut from the last frame to the final one
+    that was the whole ice sheet vanishing at once.  The ice never grows in
+    a thaw: no more of a cell than ``base`` has."""
+    age = float((manifest.get("params", {}).get("erosion", {}) or {}).get("ice_age_c", 0.0))
+    top = base.ch.get("ice")
+    if n <= 0 or age <= 0.0 or top is None or not np.any(top):
+        return []
+    cs = [age * (1.0 - k / n) for k in range(1, n + 1)]
+    ices = thaw_ice(root, manifest, cs)
+    if ices is None:
+        return []
+    out = []
+    for k, (c, ice) in enumerate(zip(cs, ices), 1):
+        label = f"thaw · {c:.1f} °C colder than today" if c > 0.05 else "thaw · today's ice"
+        fr = _Frame("thaw", k, label, base.height, **{**base.ch, "ice": np.minimum(_fit(ice, base.res), top).astype(np.float32)})
+        fr.river_scale = base.river_scale
+        out.append(fr)
+    return out
+
+
 def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int | None = None,
                    max_frames: int | None = None, refined: bool = False, planet: str | None = None) -> tuple[list[_Frame], dict]:
     manifest = json.loads((root / "manifest.json").read_text())
@@ -570,7 +651,7 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
             h = lo(z["height"])
             water = timeline_water(h, lo(z["lake"].astype(np.float32)) if "lake" in z.files else None, lake_min)
             ice = lo(z["ice"].astype(np.float32) / 255.0) if "ice" in z.files and water else None
-            frames.append(_Frame("erosion", key, f"erosion · iteration {key} / {meta.get('of', '?')}" + (" · ice age" if meta.get("glacial") else ""),
+            frames.append(_Frame("erosion", key, f"erosion · iteration {key} / {meta.get('of', '?')}" + ice_label(meta),
                                  h, discharge=lo(z["discharge"], "max"), ice=ice, **water))
     if not any(f.ch["ice"].any() for f in frames if "ice" in f.ch):
         # a run with no ice in it (the glacial pass off, or no cold ground) has no ice layer
@@ -594,6 +675,24 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
                                      discharge=lapse["discharge"][k].astype(np.float32),
                                      **timeline_water(h, lapse["lake"][k].astype(np.float32) if "lake" in lapse else None, lake_min)))
             log(f"[viewer] planet time lapse: {len(its)} frames of {frames[-1].res}^2 a face at {at}")
+            # ...under the ice the stage ended with: the level works the same ground at a finer
+            # cell and has no time of its own, so the last maximum's ice is still on it (without
+            # this the ice was gone at the lapse's first frame, 25 frames before the final one)
+            ice_last = next((f.ch.get("ice") for f in reversed(frames) if f.stage == "erosion"), None)
+            if ice_last is not None:
+                for f in frames:
+                    if f.stage == "planet" and "ocean" in f.ch:
+                        f.ch["ice"] = _fit(ice_last, f.res)
+                        f.label += " · ice age"
+    # and the thaw: the last maximum's ice going back to today's, before the final frame
+    n_thaw = int((manifest.get("params", {}).get("render", {}) or {}).get("thaw_frames", 8))
+    if max_frames:
+        n_thaw = min(n_thaw, max(1, int(max_frames) // 4))
+    if frames and frames[-1].stage in ("erosion", "planet") and (root / "coarse").exists():
+        thaw = thaw_frames(root, manifest, frames[-1], n_thaw)
+        if thaw:
+            frames.extend(thaw)
+            log(f"[viewer] thaw: {len(thaw)} frames, the ice from {100.0 * float(np.mean(thaw[0].ch['ice'])):.1f} to {100.0 * float(np.mean(thaw[-1].ch['ice'])):.1f} % of the sphere")
 
     # the final state, from the coarse fields -- or the refined grid with
     # ``refined`` (render.viewer_refined) -- at (up to) full resolution
@@ -1077,8 +1176,14 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
     ocean_bottom = min(_pctl(final.height[final.height < 0], 1.0, -4000.0), -200.0)
     default_exag = relief_exaggeration(final.height, float(manifest.get("cell_size_m", 1.0)) * int(manifest.get("N_c", final.res)) / final.res)
 
-    shutil.rmtree(out / "data", ignore_errors=True)
-    (out / "data").mkdir(parents=True, exist_ok=True)
+    # Everything is written beside the viewer and put in its place at the end, in one step.  An
+    # export over a viewer that is being served used to delete its data first and write the
+    # frame list last, ten minutes later on an Earth world: a page loaded in between had the old
+    # list and the new frames, or no list at all, and stayed blank
+    out.mkdir(parents=True, exist_ok=True)
+    stage = out / ".staging"
+    shutil.rmtree(stage, ignore_errors=True)
+    (stage / "data").mkdir(parents=True)
     metas, scripts, sizes = [], [], 0
     for i, fr in enumerate(frames):
         images, meta = encode_frame(fr, specs)
@@ -1087,7 +1192,7 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
         meta["file"] = f"data/f{i:04d}.js"
         if len(images) > 1:
             meta["tex"] = [{"res": fr.res, "pad": PAD} for _ in images]
-        (out / meta["file"]).write_text(payload)
+        (stage / meta["file"]).write_text(payload)
         if single:
             scripts.append(payload)
         metas.append(meta)
@@ -1101,7 +1206,7 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
     if lines is not None:
         rivers_js, rivers_info = river_lines_script(lines, specs)
         rivers_info["file"] = "data/rivers.js"
-        (out / "data" / "rivers.js").write_text(rivers_js)
+        (stage / "data" / "rivers.js").write_text(rivers_js)
         sizes += len(rivers_js)
         log(f"[viewer] river lines ({river_source}): {rivers_info['lines']:,} lines, {rivers_info['vertices']:,} vertices, {len(rivers_js) / 1e6:.1f} MB")
 
@@ -1120,7 +1225,7 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
                 f"the viewer has no close-up layer")
         else:
             td = time.time()
-            detail_info = dt.export_tiles(out, src, final.res, LAKE_DEPTH_RANGE_M, log)
+            detail_info = dt.export_tiles(stage, src, final.res, LAKE_DEPTH_RANGE_M, log)
             if detail_info:
                 log(f"[viewer] detail tiles: {', '.join(f'L{lv['L']} {lv['res']}² {lv['tiles']:,}' for lv in detail_info['levels'])} in {time.time() - td:.0f}s")
 
@@ -1143,7 +1248,15 @@ def export_viewer(world_dir, out=None, *, formats: str = "", final_res: int | No
         "detail": detail_info,
     }
     meta_js = "GLOBE_VIEWER.setMeta(%s);\n" % json.dumps(meta, separators=(",", ":"))
-    (out / "data" / "meta.js").write_text(meta_js)
+    (stage / "data" / "meta.js").write_text(meta_js)
+    for name in ("data", "tiles"):
+        if (stage / name).exists():
+            shutil.rmtree(out / (name + ".old"), ignore_errors=True)
+            if (out / name).exists():
+                (out / name).rename(out / (name + ".old"))
+            (stage / name).rename(out / name)
+            shutil.rmtree(out / (name + ".old"), ignore_errors=True)
+    shutil.rmtree(stage, ignore_errors=True)
     html = TEMPLATE.read_text()
     extra = '\n<script src="data/rivers.js"></script>' if rivers_js else ""
     (out / "index.html").write_text(html.replace(PLACEHOLDER, '<script src="data/meta.js"></script>' + extra + '\n<script src="zooms.js"></script>\n<script src="scout.js"></script>'))
