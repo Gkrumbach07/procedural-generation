@@ -774,16 +774,19 @@ float byteJet(sampler2D t, vec3 geo, int ch, vec3 p, out vec2 g, out vec3 h){   
 // in texels (exact near the line, which is the only place it is used).  peak is the
 // discharge on the line, and curv that curvature: twice the channel's height over its banks
 // for a channel one texel wide, once for two, nothing on a flat -- which tells a channel
-// from the ripple on water wider than that
-void riverRidge(float v, vec2 g, vec3 h, out float peak, out float dist, out float curv){
+// from the ripple on water wider than that.  climb is the slope along the line itself: next
+// to nothing on a channel, which carries the same water from one texel to the next, and steep
+// on a spur that only runs up another channel's side
+void riverRidge(float v, vec2 g, vec3 h, out float peak, out float dist, out float curv, out float climb){
   float tr = h.x + h.z, det = h.x * h.z - h.y * h.y;
   float l1 = 0.5 * tr - sqrt(max(0.25 * tr * tr - det, 0.0));
-  peak = v; dist = 1e3; curv = max(-l1, 0.0);
+  peak = v; dist = 1e3; curv = max(-l1, 0.0); climb = 0.0;
   if (l1 > -1e-3) return;                                  // a slope, a flat or a hollow
   vec2 e = abs(h.y) > 1e-5 ? normalize(vec2(l1 - h.z, h.y)) : (h.x < h.z ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
   float ge = dot(g, e);
   dist = -ge / l1;
   peak = v - 0.5 * ge * ge / l1;
+  climb = abs(dot(g, vec2(-e.y, e.x)));
 }
 // the classes round the pixel, set once per pixel in main (setClasses).  The class texels are
 // big -- a planet texel is kilometres, a zoom level's up to 76 m -- and a class edge along
@@ -1421,13 +1424,20 @@ void main(){
       // A routed flow (the final frame's: the water the lakes are filled by) is a path one
       // cell wide by construction, smoothed for this: every channel of it is a line, over
       // ground that is 0, and none of it a band
-      float peak, dist, curv;
-      riverRidge(b, rg, rh, peak, dist, curv);
+      float peak, dist, curv, climb;
+      riverRidge(b, rg, rh, peak, dist, curv, climb);
       float ridge = routed ? smoothstep(0.04, 0.12, curv / max(peak, 6.0)) : smoothstep(0.25, 0.45, curv / max(peak - (rmin - rspan), 6.0));
       float tl = clamp((peak - rmin) / max(rspan, 1.0), 0.0, 1.0);
       // (a routed river's strength is its flow from a creek's to the trunks': 1.2 to 5.2 pixels, most of it near the top)
       float halfw = (routed ? mix(0.6, 2.6, tl * tl) : mix(0.7, 1.7, tl)) * tpp, aa = 0.6 * tpp;
       float line = (1.0 - smoothstep(halfw - aa, halfw + aa, abs(dist))) * smoothstep(0.0, 0.3, tl) * ridge;
+      // A routed path is not straight at the scale of its cells: it steps aside for one and
+      // back, and each such kink, smoothed, is a short spur on the channel's side -- drawn, a
+      // blob or a comma beside the river (earth-v32: 10 to 17 % of the lit pixels of a view).
+      // A spur climbs the side it sits on, half the channel's height in a texel or more; a
+      // channel's own line does not (under 0.15 of it on nine pixels in ten), and a tributary
+      // only in its last texel before the river it joins, where the river's line covers it
+      if (routed) line *= 1.0 - smoothstep(0.3, 0.5, climb / max(peak, 6.0));
       float fill = routed ? 0.0 : smoothstep(0.45, 0.75, clamp((b - rmin) / max(rspan, 1.0), 0.0, 1.0)) * (1.0 - ridge);
       w = mix(max(line, fill), w, smoothstep(0.5, 1.0, tpp));
     }

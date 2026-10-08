@@ -189,6 +189,21 @@ The final frame now draws the routing that fills the lakes:
 * **in what colour**: the satellite's river teal was already its lakes' at a
   few metres; on the other layers a river is now the lakes' own blue.
 
+* **and not its kinks**: a routed path is not straight at the scale of its
+  cells -- it steps aside for one and back -- and each kink, smoothed, is a
+  short spur on the channel's side that the ridge rule drew as a blob or a
+  comma beside the river (the user's screenshot at -16.2, 11.0 on earth-v32's
+  1.2 km tiles; replayed in numpy on the level's flow, 10 % of the lit pixels
+  there and 17 % at 55, 128 were more than 0.9 cell from any channel cell).
+  Pruning channel heads does nothing for it: the cells are on the path, not
+  stubs of it. What tells a spur from a channel is the slope *along* its own
+  line: a spur climbs the side it sits on (0.72 of its height a texel, the
+  median), a channel carries the same water from one texel to the next (0.05;
+  under 0.15 on nine pixels in ten). A line that climbs more than 0.3 to 0.5
+  of its height a texel is not drawn (`riverRidge`'s `climb`): 1.4 and 0.9 %
+  stray pixels left at the two places, and the tributaries there still reach
+  their rivers.
+
 Earth-v32, refined frame (`scratch` shots, 2026-10-07): a river into the
 head of each valley lake and out of its foot, lake chains strung on one
 line, trunks visibly heavier than their tributaries.
