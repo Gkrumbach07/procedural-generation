@@ -511,7 +511,7 @@ iteration-750 checkpoint at 8, five glacial passes: closed lows over 5 m on
 the ground only the ice age covers (12.3 % of land) 0.84 -> 4.84 %, on the
 planet 1.05 -> 1.71 % of land. earth-v26 is earth-v25 with it from the start.
 
-### The ice follows a temperature (`erosion.ice_history`, off; the viewer's thaw)
+### The ice follows a temperature (`erosion.ice_history`; the viewer's thaw)
 
 The user, of earth-v32's timeline (2026-10-08): the ice age "pops in
 instantly and then disappears at the end". Both were switches. `ice_age_c`
@@ -547,7 +547,7 @@ gives the state its iteration's line before the lakes are refreshed (a lake
 takes no fill under the ice of its own time) and the frame is taken; the
 carve still starts at `glacial_from`, and the ground at the last maximum's
 margin is carved by the passes after `ice_full` and no earlier. Off, every
-number is as it was.
+number is as it was before it.
 
 The thaw is the viewer's (`viewer.thaw_frames`, `render.thaw_frames` 8, on
 for every export): the lapse's frames keep the ice the stage ended with, and
@@ -584,6 +584,10 @@ input does to a bake (docs: earth-v26 against earth-v27); the lake country
 is kept. One sheet of water five metres deep on a coastal plain at +8 m is
 129,000 km2 on the coarse grid, where earth-v32 had 21,000 in the same
 basin; on the refined grid the largest lake is 33,000 (49,000).
+
+Both are the defaults since (the user's review of earth-v33, 2026-10-08):
+`ice_history` on and `ice_aridity` 0.7. The toy presets keep neither
+(`config.TOY_ICE`).
 
 ## 8. The ice's small lakes (`zoom/ice.py`)
 
