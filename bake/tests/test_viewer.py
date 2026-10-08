@@ -507,34 +507,47 @@ def test_the_river_lines_slope_and_curvature_are_the_splines_own():
 
 def test_a_routed_river_is_a_smooth_ridge_as_high_as_it_is_strong():
     """``detail.river_strength``: a routed flow's channel is a path one cell
-    wide, and the final frame draws it as the line on a ridge -- so the
-    channel's cells are smoothed into one, as high in the middle as the
-    channel is strong (the top of the river bytes at full strength,
-    ``RIVER_BASE`` of it at the threshold), falling away on both sides and
-    gone within ``RIVER_REACH`` cells, and flow below the threshold is no
-    river at all.  A path two cells wide (the coarse routing on the refined
-    frame) comes out as high when told its width."""
+    wide, and the final frame draws it as the line on a ridge -- so the path
+    is laid down as one, as high on its line as the channel is strong (the
+    top of the river bytes at full strength, ``RIVER_BASE`` of it at the
+    threshold), falling away on both sides and gone within ``RIVER_REACH``
+    cells, and flow below the threshold is no river at all.  The ridge is
+    narrow: two channels three cells apart are two ridges with ground between
+    them, which a blur wide enough to round a path's steps made one.  And its
+    steps are rounded along it: a path stepping aside and back is a line that
+    barely does."""
     from globe.viz import detail as dt
 
     n = 64
+    down = np.arange(n, dtype=np.float32)[:, None]            # a river carries more the farther down it is
     q = np.full((n, n), 0.5, np.float32)
-    q[:, 16] = 1000.0                         # trunk: full strength
-    q[:, 40] = 10.5                           # creek: just past the threshold
-    q[:, 56] = 5.0                            # below it
-    sc = dt.strength_scale(1.0, 1000.0, 10.0, 1000.0)
+    q[:, 16:17] = 1000.0 + down                               # trunk: full strength
+    q[:, 40:41] = 10.5 + 0.001 * down                         # creek: just past the threshold
+    q[:, 56:57] = 5.0                                         # below it
+    q[:, 30:31] = 1000.0 + down                               # two more trunks, three cells apart
+    q[:, 33:34] = 1000.0 + down
+    sc = dt.strength_scale(1.0, 4000.0, 10.0, 1000.0)
     byte = lambda x: dt.log_byte(np.asarray(x), sc["lo"], sc["hi"]).astype(int)  # noqa: E731
     top = dt.RIVER_MIN_BYTE + dt.RIVER_SPAN_BYTE
     assert byte([sc["river_min"]])[0] == dt.RIVER_MIN_BYTE and byte([sc["river_full"]])[0] == top and sc["lines"]
     row = byte(dt.river_strength(q, sc)[n // 2])
-    assert abs(row[16] - top) <= 1
+    assert abs(row[16] - top) <= 2
     assert abs(row[40] - dt.RIVER_BASE * top) <= 4
-    assert row[16] > row[15] > row[14] > row[13] > 0 and row[16] > row[17] > row[18] > 0     # a ridge, smooth on both sides
+    assert row[16] > row[15] > row[14] > 0 and row[16] > row[17] > row[18] > 0               # a ridge, smooth on both sides
     assert row[16 + dt.RIVER_REACH + 1] == 0 and row[16 - dt.RIVER_REACH - 1] == 0
-    assert (row[52:61] == 0).all() and row[28] == 0
+    assert (row[52:61] == 0).all() and row[23] == 0
+    assert row[30] >= top - 12 and row[33] >= top - 12 and max(row[31], row[32]) < 0.7 * top    # two ridges, not one
+    # a path that steps a cell aside and back: its line moves a third of a cell, not a whole one
     q2 = np.full((n, n), 0.5, np.float32)
-    q2[:, 16:18] = 1000.0
-    row2 = byte(dt.river_strength(q2, sc, width=2.0)[n // 2])
-    assert top - 12 <= row2[16] == row2[17] <= top
+    col = np.full(n, 16)
+    col[30] = 17
+    q2[np.arange(n), col] = 1000.0 + down[:, 0]
+    f2 = byte(dt.river_strength(q2, sc)).astype(np.float64) ** 4
+    crest = lambda r: float((f2[r, 12:22] * np.arange(12, 22)).sum() / f2[r, 12:22].sum())  # noqa: E731
+    assert abs(crest(20) - 16.0) < 0.05 and 0.1 < crest(30) - 16.0 < 0.5
+    # on a finer frame the same path, at the frame's cells
+    f3 = byte(dt.river_strength(q, sc, 2))
+    assert f3.shape == (2 * n, 2 * n) and f3[n, 32] == f3[n, 33] >= 0.75 * top and f3[n, 30] < f3[n, 31] < f3[n, 32]
 
 
 def test_the_final_frames_rivers_are_the_water_that_fills_the_lakes(tmp_path):
@@ -552,11 +565,12 @@ def test_the_final_frames_rivers_are_the_water_that_fills_the_lakes(tmp_path):
     (tmp_path / "coarse").mkdir()
     fa = np.full((6, N, N), 1.0, np.float32)
     fd = np.zeros((6, N, N), np.uint8)
-    fa[0, :, 8] = 4000.0                      # a trunk down face 0...
-    fa[0, 4, :8] = 60.0                       # ...a tributary of it, over the threshold's share but under the threshold
+    down = np.arange(N, dtype=np.float32)
+    fa[0, :, 8] = 4000.0 + down               # a trunk down face 0...
+    fa[0, 4, :8] = 60.0 + down[:8]            # ...a tributary of it, over the threshold's share but under the threshold
     fa[0, 12, 9:] = 20.0                      # ...and a trickle under both
     fd[1] = 255                               # face 1 is sea
-    fa[1, :, 5] = 4000.0
+    fa[1, :, 5] = 4000.0 + down
     for f in range(6):
         np.save(tmp_path / "coarse" / f"flow_acc.f{f}.npy", fa[f])
         np.save(tmp_path / "coarse" / f"flow_dir.f{f}.npy", fd[f])
@@ -566,11 +580,11 @@ def test_the_final_frames_rivers_are_the_water_that_fills_the_lakes(tmp_path):
     assert river.shape == (6, n, n) and scale["lines"] and scale["q_min"] == pytest.approx(vw.HYDRO_RIVER_SHARE * 400.0)
     b = dt.log_byte(river, scale["lo"], scale["hi"]).astype(int)
     top = dt.RIVER_MIN_BYTE + dt.RIVER_SPAN_BYTE
-    row = b[0, 20]                            # across the trunk, away from the tributary: fine cells 16 and 17 are its path
-    assert row[16] == row[17] >= top - 12 and row[16] > row[15] > row[14] > 0 and row[17] > row[18] > row[19] > 0
-    assert row[16 - dt.RIVER_REACH - 2] == 0 and row[17 + dt.RIVER_REACH + 2] == 0
+    row = b[0, 21]                            # across the trunk, away from the tributary: its line runs between fine cells 16 and 17
+    assert row[16] == row[17] >= 0.75 * top and row[16] > row[15] > row[14] and row[17] > row[18] > row[19]
+    assert row[16 - 2 * dt.RIVER_REACH - 1] == 0 and row[17 + 2 * dt.RIVER_REACH + 1] == 0
     trib = b[0, 8:10, 6]                      # the tributary: a river, weaker than the trunk
-    assert dt.RIVER_BASE * top * 0.8 < trib.max() < row[16]
+    assert dt.RIVER_BASE * top * 0.6 < trib.max() < row[16]
     assert b[0, 24:26, 26].max() == 0         # the trickle is none
     assert b[1].max() == 0                    # nor is anything in the sea
     assert vw.hydro_rivers(tmp_path, {"stages": {}}, n) == (None, None)

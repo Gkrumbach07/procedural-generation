@@ -47,13 +47,20 @@ WATER_LAND, WATER_LAKE, WATER_OCEAN = 0, 1, 2
 #: a hairline web), at full strength by the second
 RIVER_MIN_PCT, RIVER_FULL_PCT = 98.5, 99.97
 #: ...and drawn as lines (:func:`river_strength`): a channel cell is worth
-#: ``RIVER_BASE`` at the threshold to 1 at full strength, spread by a Gaussian
-#: of ``RIVER_SIGMA`` cells -- a routed path steps cell to cell, and the line
-#: the viewer finds on a staircase's ridge is a row of hooks until its corners
-#: are rounded (0.8 leaves them, 1.3 does not) -- which reaches ``RIVER_REACH``
-#: cells; the weakest channel is byte ``RIVER_MIN_BYTE`` + a quarter of
+#: ``RIVER_BASE`` at the threshold to 1 at full strength, and its path is
+#: laid down as a ridge ``RIVER_SIGMA`` cells wide, after each cell of it has
+#: been moved towards its neighbours along the path ``RIVER_PASSES`` times.
+#: A routed path steps cell to cell, and the line the viewer finds on a
+#: staircase's ridge is a row of hooks until its corners are rounded.  Rounded
+#: by a blur wide enough to do it (1.3 cells), two channels within two or
+#: three cells of each other are one ridge between them: a creek beside its
+#: river, or coming in to it at a shallow angle, lost its line cells short of
+#: the junction (earth-v32 at 1.2 km: a third of a view's channel cells had no
+#: line).  Rounded along the path, the ridge can be as narrow as the cells
+#: allow.  ``RIVER_REACH`` is how far a cell's ridge reaches, moved and
+#: spread; the weakest channel is byte ``RIVER_MIN_BYTE`` + a quarter of
 #: ``RIVER_SPAN_BYTE`` of the river channel, the strongest the top of it
-RIVER_BASE, RIVER_SIGMA, RIVER_REACH = 0.4, 1.3, 5
+RIVER_BASE, RIVER_SIGMA, RIVER_PASSES, RIVER_REACH = 0.4, 0.8, 2, 6
 RIVER_MIN_BYTE, RIVER_SPAN_BYTE = 56, 170
 #: a zoom window's rivers are widened up to this many cells instead (:func:`widen_rivers`)
 RIVER_RADIUS = 3
@@ -177,29 +184,91 @@ def channel_value(q: np.ndarray, scale: dict) -> np.ndarray:
     return np.where(q >= qmin, RIVER_BASE + (1.0 - RIVER_BASE) * s, 0.0)
 
 
-def smooth_channels(v: np.ndarray, scale: dict, sigma: float = RIVER_SIGMA, width: float = 1.0) -> np.ndarray:
-    """:func:`channel_value` spread by a Gaussian of ``sigma`` cells and
-    brought back up so the middle of a channel ``width`` cells wide is worth
-    what its cells were, as flow on ``scale`` (float32): a smooth ridge along
-    every channel, its height the channel's strength, for the viewer to find
-    the line of (viewer.html ``riverRidge``).  Borders are held (``nearest``):
-    hand it the cells beyond the rows wanted (``RIVER_REACH``)."""
-    gain = 1.0 / math.erf(0.5 * float(width) / (float(sigma) * math.sqrt(2.0)))
-    b = np.minimum(ndimage.gaussian_filter(np.asarray(v, np.float64), float(sigma), mode="nearest") * gain, 1.0)
+_D8 = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
+
+
+def path_ridges(q: np.ndarray, v: np.ndarray, R: int = 1, sigma: float = RIVER_SIGMA, passes: int = RIVER_PASSES) -> np.ndarray:
+    """The channels of the flow ``q`` as ridges, ``R`` times finer than its
+    cells (float64, 0..1): ``v`` is each cell's strength, 0 off the channels
+    (:func:`channel_value`).
+
+    Every channel cell is a point of its path, joined to the channel cell
+    beside it that carries the least more water (downstream) and the one that
+    carries the most less (up the main stem).  The points are moved towards
+    those neighbours ``passes`` times -- a quarter of the way to each -- which
+    takes the steps out of the path *along* it; and every stretch from a
+    point to the next downstream is laid down as a Gaussian ridge ``sigma``
+    fine cells wide, as high on its line as the stretch is strong.  Smoothing
+    across the path instead (a blur) has to be wide to round the steps, and
+    then cannot tell two channels two cells apart.
+
+    Hand it ``RIVER_REACH`` cells beyond the rows wanted: a point is moved by
+    what lies up to ``passes`` cells along its path, and its ridge reaches
+    ``3 sigma``."""
+    q = np.asarray(q, np.float64)
+    v = np.asarray(v, np.float64)
+    n0, n1 = q.shape
+    R = int(R)
+    out = np.zeros((n0 * R, n1 * R), np.float64)
+    ii, jj = np.nonzero(v > 0.0)
+    K = ii.size
+    if K == 0:
+        return out
+    idx = np.full(q.shape, -1, np.int64)
+    idx[ii, jj] = np.arange(K)
+    qc = q[ii, jj]
+    nxt, prv = np.arange(K), np.arange(K)
+    more, less = np.full(K, np.inf), np.full(K, -np.inf)
+    for a, b in _D8:
+        i2, j2 = np.clip(ii + a, 0, n0 - 1), np.clip(jj + b, 0, n1 - 1)
+        k2 = np.where((i2 == ii + a) & (j2 == jj + b), idx[i2, j2], -1)
+        q2 = q[i2, j2]
+        down = (k2 >= 0) & (q2 > qc) & (q2 < more)
+        nxt[down], more[down] = k2[down], q2[down]
+        up = (k2 >= 0) & (q2 < qc) & (q2 > less)
+        prv[up], less[up] = k2[up], q2[up]
+    P = np.stack([ii, jj], axis=1).astype(np.float64)
+    for _ in range(int(passes)):
+        P = 0.25 * P[prv] + 0.5 * P + 0.25 * P[nxt]
+    seg = P[nxt] - P
+    L = np.hypot(seg[:, 0], seg[:, 1])
+    vs = v[ii, jj]
+    vn = vs[nxt]
+    norm = 1.0 / (float(sigma) * math.sqrt(2.0 * math.pi))   # a long straight path of strength 1 is 1 on its line
+    rad = int(math.ceil(3.0 * float(sigma)))
+    shape = (n0 * R, n1 * R)
+    for k in range(R):                                       # a stretch is R samples, about one a fine cell
+        t = (k + 0.5) / R
+        X = (P + t * seg) * R + 0.5 * (R - 1)                # fine cells, centres at integers
+        w = ((1.0 - t) * vs + t * vn) * (L * R / R) * norm
+        if k == 0:                                           # a path's last cell (the sea, a lake, the rows' edge): a point of its own
+            end = L == 0.0
+            w = np.where(end, vs * norm, w)
+            X = np.where(end[:, None], P * R + 0.5 * (R - 1), X)
+        c0 = np.round(X).astype(np.int64)
+        for a in range(-rad, rad + 1):
+            for b in range(-rad, rad + 1):
+                y, x = c0[:, 0] + a, c0[:, 1] + b
+                ok = (w > 0.0) & (y >= 0) & (y < shape[0]) & (x >= 0) & (x < shape[1])
+                g = w * np.exp(-((y - X[:, 0]) ** 2 + (x - X[:, 1]) ** 2) / (2.0 * float(sigma) ** 2))
+                np.add.at(out, (y[ok], x[ok]), g[ok])
+    return np.minimum(out, 1.0)
+
+
+def river_strength(q: np.ndarray, scale: dict, R: int = 1) -> np.ndarray:
+    """The river channel of the flow ``q``, ``R`` times finer than its cells
+    (float32, as flow on ``scale``): a routed river is a path one cell wide
+    and the same water that fills the lakes -- it runs into each at its shore
+    and out at its spill -- so it is drawn as a line and not as the cells it
+    crosses.  Each channel's path as a smooth ridge as high as the channel is
+    strong (:func:`channel_value`, :func:`path_ridges`), for the viewer to
+    find the line of (viewer.html ``riverRidge``): a strongest river's line
+    is byte ``RIVER_MIN_BYTE + RIVER_SPAN_BYTE`` of ``scale``, a weakest
+    ``RIVER_BASE`` of that, the land between byte 0."""
+    b = path_ridges(q, channel_value(q, scale), R)
     lo, hi = float(scale["lo"]), float(scale["hi"])
     top = (RIVER_MIN_BYTE + RIVER_SPAN_BYTE) / 255.0
     return (lo * (hi / lo) ** (b * top)).astype(np.float32)
-
-
-def river_strength(q: np.ndarray, scale: dict, sigma: float = RIVER_SIGMA, width: float = 1.0) -> np.ndarray:
-    """The river channel of the flow ``q``: a routed river is a path one cell
-    wide and the same water that fills the lakes -- it runs into each at its
-    shore and out at its spill -- so it is drawn as a line and not as the
-    cells it crosses.  Each channel cell's strength, smoothed
-    (:func:`channel_value`, :func:`smooth_channels`); a strongest river's
-    middle is byte ``RIVER_MIN_BYTE + RIVER_SPAN_BYTE`` of ``scale``, a
-    weakest ``RIVER_BASE`` of that, the land between byte 0."""
-    return smooth_channels(channel_value(q, scale), scale, sigma, width)
 
 
 def widen_rivers(q: np.ndarray, scale: dict, radius: int = RIVER_RADIUS) -> np.ndarray:
@@ -423,6 +492,6 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
     return meta
 
 
-__all__ = ["TILE", "RIVER_MIN_PCT", "RIVER_FULL_PCT", "RIVER_BASE", "RIVER_SIGMA", "RIVER_REACH", "RIVER_MIN_BYTE", "RIVER_SPAN_BYTE", "SED_LO_M", "SED_HI_M", "log_byte", "RefinedSource", "PlanetSource", "river_field", "river_scale",
-           "strength_scale", "channel_value", "smooth_channels", "river_strength", "widen_rivers", "RIVER_RADIUS", "reduce_face", "face_lake_depth", "face_smooth_mask", "height_grid",
+__all__ = ["TILE", "RIVER_MIN_PCT", "RIVER_FULL_PCT", "RIVER_BASE", "RIVER_SIGMA", "RIVER_PASSES", "RIVER_REACH", "RIVER_MIN_BYTE", "RIVER_SPAN_BYTE", "SED_LO_M", "SED_HI_M", "log_byte", "RefinedSource", "PlanetSource", "river_field", "river_scale",
+           "strength_scale", "channel_value", "path_ridges", "river_strength", "widen_rivers", "RIVER_RADIUS", "reduce_face", "face_lake_depth", "face_smooth_mask", "height_grid",
            "encode_height_on", "tile_image", "levels_for", "export_tiles"]

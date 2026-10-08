@@ -1430,7 +1430,8 @@ void main(){
       float tl = clamp((peak - rmin) / max(rspan, 1.0), 0.0, 1.0);
       // (a routed river's strength is its flow from a creek's to the trunks': 1.2 to 5.2 pixels, most of it near the top)
       float halfw = (routed ? mix(0.6, 2.6, tl * tl) : mix(0.7, 1.7, tl)) * tpp, aa = 0.6 * tpp;
-      float line = (1.0 - smoothstep(halfw - aa, halfw + aa, abs(dist))) * smoothstep(0.0, 0.3, tl) * ridge;
+      // (the erosion's stream map eases its faint paths in; a routed creek is a river or it is not, and is drawn whole)
+      float line = (1.0 - smoothstep(halfw - aa, halfw + aa, abs(dist))) * smoothstep(0.0, routed ? 0.06 : 0.3, tl) * ridge;
       // A routed path is not straight at the scale of its cells: it steps aside for one and
       // back, and each such kink, smoothed, is a short spur on the channel's side -- drawn, a
       // blob or a comma beside the river (earth-v32: 10 to 17 % of the lit pixels of a view).

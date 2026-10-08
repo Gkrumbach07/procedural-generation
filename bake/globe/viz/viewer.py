@@ -355,9 +355,9 @@ def hydro_rivers(root: Path, manifest: dict, n: int) -> tuple[np.ndarray | None,
     through every lake at its level and out at its spill -- the water the
     lakes are filled by.  Drawn from the first, a river passes beside a lake
     or stops short of one; from the second it runs into the shore and out
-    again.  The routing is the coarse grid's: on a finer frame each path is
-    ``n / N_c`` cells wide before it is smoothed, across the cube's edges
-    too (the faces are padded with their neighbours first)."""
+    again.  The routing is the coarse grid's: on a finer frame its paths are
+    laid down at the frame's resolution, across the cube's edges too (the
+    faces are padded with their neighbours first)."""
     from . import detail as dt
 
     fa, fd = _load_faces(root, "flow_acc"), _load_faces(root, "flow_dir")
@@ -373,12 +373,9 @@ def hydro_rivers(root: Path, manifest: dict, n: int) -> tuple[np.ndarray | None,
     lo = max(_pctl(ql, 50, 1.0), 1e-9)
     scale = dt.strength_scale(lo, float(ql.max()), q_min, _pctl(top, 99.5, q_min * 40.0))
     R = max(1, int(n) // fa.shape[1])
-    v = dt.channel_value(np.where(land, fa, 0.0), scale)
-    if R > 1:
-        v = np.repeat(np.repeat(v, R, axis=1), R, axis=2)
     pad = dt.RIVER_REACH
-    vp = pad_faces(v, pad)
-    out = np.stack([dt.smooth_channels(vp[f], scale, width=R)[pad:-pad, pad:-pad] for f in range(6)])
+    qp = pad_faces(np.where(land, fa, 0.0).astype(np.float32), pad)
+    out = np.stack([dt.river_strength(qp[f], scale, R)[pad * R:-pad * R, pad * R:-pad * R] for f in range(6)])
     return out, scale
 
 

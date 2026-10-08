@@ -180,12 +180,28 @@ The final frame now draws the routing that fills the lakes:
   discharge, on a scale read off the last erosion frame.
 * **as what**: a routed river is a path one cell wide, so it is handed to the
   page as a channel to find the line of (`detail.river_strength`): each
-  channel cell worth 0.4 at the threshold to 1 at full strength, spread by a
-  Gaussian of 1.3 cells and brought back up so a channel's middle is its
-  strength. The spread is what rounds a D8 path's corners: at 0.8 cells the
-  ridge of a staircase draws as a row of hooks. The frame says so
+  channel cell worth 0.4 at the threshold to 1 at full strength, and its path
+  laid down as a ridge that high (`detail.path_ridges`). The frame says so
   (`river_lines`), and the page then draws every channel as a line, 1.2 to
   5.2 pixels by its strength, and none as a band.
+* **rounded along the path, not across it**: a D8 path is a staircase, and
+  the line on a staircase's ridge is a row of hooks. The first version
+  rounded it with a blur -- a Gaussian of 1.3 cells; 0.8 leaves the hooks --
+  and a blur that wide cannot tell two channels two or three cells apart:
+  they are one ridge, somewhere between them. So a creek running beside its
+  river, or coming in to it at a shallow angle, lost its line cells short of
+  the junction, and the page showed faint creeks that joined nothing (the
+  user's screenshots, 2026-10-08; replayed on earth-v32's 1.2 km flow, a
+  third of one view's channel cells had no line on them and a line ran
+  between two parallel creeks where neither was). Now each channel cell is a
+  point of its path -- joined to the neighbour carrying the least more water
+  and the one carrying the most less -- the points are moved a quarter of the
+  way to each neighbour, twice, and each stretch between them is laid down
+  as a Gaussian ridge 0.8 cells wide. The steps are gone along the path and
+  the ridge is as narrow as the cells allow: the same view, 66 -> 84 % of
+  channel cells with a line and both creeks drawn down to the river. A routed
+  creek is also drawn whole now where the erosion's faint paths were eased
+  in: it is a river or it is not.
 * **in what colour**: the satellite's river teal was already its lakes' at a
   few metres; on the other layers a river is now the lakes' own blue.
 
