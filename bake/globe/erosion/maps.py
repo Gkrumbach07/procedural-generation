@@ -1443,7 +1443,7 @@ def held_land_fraction(state: ErosionState, params: WorldParams) -> float:
     return float(params.world.land_fraction)
 
 
-def hold_datum(state: ErosionState, land_fraction: float) -> float:
+def hold_datum(state: ErosionState, land_fraction: float, level: float = 0.0) -> float:
     """Hold the planetary datum: shift ``height`` (a rigid global shift, no
     mass moves between cells) so that exactly ``round(land_fraction * M)``
     of the ``M`` interior cells have ``height + sediment >= 0``.  This is
@@ -1474,6 +1474,12 @@ def hold_datum(state: ErosionState, land_fraction: float) -> float:
 
     Global (``spherical``) pass only: a refinement window is one basin,
     not a planet, and has no land fraction of its own.
+
+    ``level`` (cell units): the height the held coast stands at, 0 when the
+    sea is where it is today.  While the ice has the sea's water
+    (``erosion.ice_sea_share``, ``ErosionState.sea_drop``) today's coast is
+    held that far *above* the stage's sea: the land fraction is today's at
+    today's level, and the shelf below it is dry ground for the rivers.
     """
     inter = state.interior
     surf = (state.height[inter] + state.sediment[inter]).ravel()
@@ -1486,6 +1492,7 @@ def hold_datum(state: ErosionState, land_fraction: float) -> float:
     else:
         k = M - n_land  # index of the lowest land cell in sorted order
         q = float(np.partition(surf, k)[k])
+    q -= float(level)
     if q != 0.0:
         state.height -= q
         if state.route is not None:  # the cached routing surface must stay registered with the terrain
@@ -1529,6 +1536,7 @@ def step(state: ErosionState, params, iteration_key, log=None, after_refresh=Non
         from . import icesheet
 
         ice_now = icesheet.update(state, params)
+        icesheet.sea_fall(state, params, ice_now["stats"]["sea_level_m"])
     beds = getattr(state, "strata", None) is not None
     if beds and state.iteration % STRATA_EVERY == 0:
         # the beds now at the surface (erosion.strata_amp): the hardness of the rock the cell has been cut down to
@@ -1594,7 +1602,7 @@ def step(state: ErosionState, params, iteration_key, log=None, after_refresh=Non
     if iso and (state.iteration + 1) % max(int(getattr(ep, "isostasy_every", 10)), 1) == 0:
         st["isostasy"] = apply_isostasy(state, params)
     if state.spherical and isinstance(params, WorldParams):
-        st["datum_shift"] = hold_datum(state, held_land_fraction(state, params))
+        st["datum_shift"] = hold_datum(state, held_land_fraction(state, params), float(getattr(state, "sea_drop", 0.0)))
     state.exchange_halos()
     state.iteration += 1
     if st_base is not None:

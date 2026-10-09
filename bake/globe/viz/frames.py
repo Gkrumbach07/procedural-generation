@@ -216,4 +216,5 @@ def erosion_frame(state, rec: FrameRecorder, iteration: int, total: int, params)
                           "lake": downsample(lake, rec.res).astype(np.float16),
                           "ice": np.round(255.0 * downsample(ice, rec.res)).astype(np.uint8), **body},
               iteration=int(iteration), of=int(total), units="m", **({"glacial": True} if iced else {}),
-              **({"cooling_c": round(float(state.ice_age), 2)} if history else {}))
+              **({"cooling_c": round(float(state.ice_age), 2)} if history else {}),
+              **({"sea_m": round(-float(state.sea_drop) * unit, 1)} if float(getattr(state, "sea_drop", 0.0)) > 0.0 else {}))

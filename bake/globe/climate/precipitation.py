@@ -200,7 +200,7 @@ def moisture_reach_m(grid: Grid, cp: ClimateParams) -> float:
     return float(cp.moisture_reach_frac) * grid.R_planet
 
 
-def step_length_m(grid: Grid, wind: FaceField, cp: ClimateParams) -> np.ndarray:
+def step_length_m(grid: Grid, wind: FaceField, cp: ClimateParams, lat: np.ndarray | None = None) -> np.ndarray:
     """Metres of air a cell's weather works through in one sweep (extended
     float64): the distance the mean wind carries it, floored in a calm.
 
@@ -216,7 +216,7 @@ def step_length_m(grid: Grid, wind: FaceField, cp: ClimateParams) -> np.ndarray:
     if k > 0.0:
         from .wind import storm_belt
 
-        floor += (1.0 - float(cp.calm_floor)) * k * storm_belt(grid.latitude(), cp)
+        floor += (1.0 - float(cp.calm_floor)) * k * storm_belt(grid.latitude() if lat is None else lat, cp)
     speed_m = wind.vec_norm().data.astype(np.float64)
     return np.maximum(speed_m, floor * abs(float(cp.wind_speed)) * grid.cell_size_m) * float(cp.dt)
 
@@ -227,7 +227,7 @@ def eddy_reach_m(grid: Grid, cp: ClimateParams) -> float:
     return max(float(getattr(cp, "eddy_reach_frac", 0.0)), 0.0) * grid.R_planet
 
 
-def eddy_resupply(grid: Grid, wind: FaceField, cp: ClimateParams) -> np.ndarray:
+def eddy_resupply(grid: Grid, wind: FaceField, cp: ClimateParams, lat: np.ndarray | None = None) -> np.ndarray:
     """Per-cell share of the way to the sea's supply that one sweep takes the
     air (extended float32): ``1 - exp(-step_m / L_eddy)``, a length like the
     rain-out's, so it is the same picture at any cell size, times the
@@ -238,10 +238,10 @@ def eddy_resupply(grid: Grid, wind: FaceField, cp: ClimateParams) -> np.ndarray:
         return np.zeros((6, grid.NE, grid.NE), np.float32)
     from .wind import storminess
 
-    return ((1.0 - np.exp(-step_length_m(grid, wind, cp) / L)) * storminess(grid.latitude(), cp)).astype(np.float32)
+    return ((1.0 - np.exp(-step_length_m(grid, wind, cp, lat) / L)) * storminess(grid.latitude() if lat is None else lat, cp)).astype(np.float32)
 
 
-def cold_air(grid: Grid, cp: ClimateParams) -> np.ndarray:
+def cold_air(grid: Grid, cp: ClimateParams, lat: np.ndarray | None = None) -> np.ndarray:
     """The share of the sea's moisture the air holds, by latitude (extended
     float64, 0..1): 1 down to freezing at sea level, and below it
     ``exp(cold_air_k x T)`` -- the saturation pressure's 6.7 % a degree.
@@ -249,16 +249,16 @@ def cold_air(grid: Grid, cp: ClimateParams) -> np.ndarray:
     k = max(float(getattr(cp, "cold_air_k", 0.0)), 0.0)
     if k <= 0.0:
         return np.ones((6, grid.NE, grid.NE))
-    t_sea = float(cp.T_eq) - float(cp.k_lat) * (np.abs(grid.latitude()) / (0.5 * math.pi)) ** 1.5
+    t_sea = float(cp.T_eq) - float(cp.k_lat) * (np.abs(grid.latitude() if lat is None else lat) / (0.5 * math.pi)) ** 1.5
     return np.exp(k * np.minimum(t_sea, 0.0))
 
 
-def rainout_fraction(grid: Grid, surface: FaceField, wind: FaceField, cp: ClimateParams) -> np.ndarray:
+def rainout_fraction(grid: Grid, surface: FaceField, wind: FaceField, cp: ClimateParams, lat: np.ndarray | None = None) -> np.ndarray:
     """Per-cell fraction of the arriving moisture that rains out in one
     sweep (extended float32 array, see the module docstring)."""
     L = moisture_reach_m(grid, cp)
     dt = float(cp.dt)
-    step_m = step_length_m(grid, wind, cp)
+    step_m = step_length_m(grid, wind, cp, lat)
     rise = orographic_rise(surface, wind, int(cp.rise_smooth)).astype(np.float64) * dt
     f_base = 1.0 - np.exp(-step_m / L)
     f_oro = float(cp.k_oro) * (1.0 - np.exp(-rise / max(float(cp.oro_height_m), 1e-6)))
@@ -271,7 +271,8 @@ def max_sweeps(grid: Grid, cp: ClimateParams) -> int:
     return max(1, int(math.ceil(float(cp.n_advect_max_factor) * grid.N / per)))
 
 
-def advect_precip(grid: Grid, surface: FaceField, wind: FaceField, cp: ClimateParams, n_advect: int | None = None, log=None, info: dict | None = None) -> tuple[np.ndarray, np.ndarray]:
+def advect_precip(grid: Grid, surface: FaceField, wind: FaceField, cp: ClimateParams, n_advect: int | None = None, log=None, info: dict | None = None,
+                  lat: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Run the moisture advection.  ``surface`` (metres, halos exchanged;
     ocean = ``surface < 0``) and ``wind`` (contravariant cells/step, halos
     exchanged).  ``n_advect``: sweep count; ``None`` = ``cp.n_advect``;
@@ -284,15 +285,15 @@ def advect_precip(grid: Grid, surface: FaceField, wind: FaceField, cp: ClimatePa
     H, N = grid.H, grid.N
     sl = (slice(None), slice(H, H + N), slice(H, H + N))
     ocean = np.ascontiguousarray(surface.data < 0.0)
-    frac = np.ascontiguousarray(rainout_fraction(grid, surface, wind, cp))
+    frac = np.ascontiguousarray(rainout_fraction(grid, surface, wind, cp, lat))        # (`lat`: a season's latitude for the circulation's belts, wind.season_latitude)
     w = np.ascontiguousarray(wind.data.astype(np.float32))
     dist = coast_distance_m(grid, ocean)
-    cap = np.ascontiguousarray((float(cp.m_ocean) * cold_air(grid, cp)).astype(np.float32))
+    cap = np.ascontiguousarray((float(cp.m_ocean) * cold_air(grid, cp, lat)).astype(np.float32))
     m0 = cap * np.exp(-dist / moisture_reach_m(grid, cp))
     m = FaceField(grid, np.where(ocean, cap, m0).astype(np.float32), name="moisture")
     m_out = m.zeros_like()
     rain = np.zeros((6, grid.NE, grid.NE), dtype=np.float32)
-    resupply = np.ascontiguousarray(eddy_resupply(grid, wind, cp))
+    resupply = np.ascontiguousarray(eddy_resupply(grid, wind, cp, lat))
     # what the weather can bring a cell: the nearest sea's supply, less what air loses getting up
     # to it -- the same exp(-climb / oro_height_m) the wind's own climb rains out.  Left at the
     # sea-level figure, the resupply watered every plateau as it would a plain (earth-v30: the
@@ -383,6 +384,75 @@ def finalise_precip(grid: Grid, rain: np.ndarray, land: np.ndarray, cp: ClimateP
     return vol.astype(np.float32)
 
 
+def seasonal_precipitation(grid: Grid, surface: FaceField, cp: ClimateParams, temp_range: np.ndarray, log=None) -> tuple[FaceField, FaceField, dict]:
+    """The year's precipitation as its seasons' (``climate.seasons``):
+    ``(precip, summer, info)``.
+
+    Four sweeps' worth -- a northern summer, a southern, and an equinox
+    counted twice -- each on its own wind (``wind.seasonal_wind``: the
+    circulation moved with the sun, and the monsoon) with the belts of the
+    stage read at the season's latitude: the storm front, the storms'
+    resupply, the cold air's ceiling, and the latitude prior's wet and dry
+    bands.  Each season's rain is smoothed and scaled as the yearly stage's
+    (the equinox's land mean is the scale of all three, so a wet season is a
+    wet season), and the year is their mean, brought to ``precip_mean`` over
+    the land as :func:`finalise_precip` does.
+
+    ``summer`` is the share of the two solstices' rain that falls in the
+    cell's own summer (0..1, float32): near 1 under a monsoon, under a half
+    where the winter's storms bring the rain (a Mediterranean coast).
+
+    What it changes, measured on earth-v35's bedrock: summer rain on two
+    fifths of the land and winter rain at 20-40 degrees; the land's mean
+    rain by latitude nearer Earth's at 20-40 degrees (0.71, 0.72 of the
+    land's mean; Earth 0.73, 0.73); and less dry land -- 7.5 % under a
+    quarter of the mean against 13.2 -- because a belt that moves leaves
+    less ground under it all year.  docs/thick-ice.md, "Seasons"."""
+    from .wind import season_latitude, seasonal_wind, smooth_field, wind_field
+
+    H, N = grid.H, grid.N
+    sl = (slice(None), slice(H, H + N), slice(H, H + N))
+    land_e = surface.data >= 0.0
+    land_i = land_e[sl]
+    sel = land_i if land_i.any() else np.ones_like(land_i)
+    passes = int(cp.precip_smooth) + rain_drift_passes(grid, cp)
+    lat0 = np.asarray(grid.latitude(), np.float64)
+    parts, ainfo = {}, {}
+    for sign in (0.0, 1.0, -1.0):
+        lat = season_latitude(grid, cp, sign)
+        wind = wind_field(grid, surface, cp) if sign == 0.0 else seasonal_wind(grid, surface, cp, sign, temp_range)
+        info: dict = {}
+        rain, _ = advect_precip(grid, surface, wind, cp, log=log, info=info, lat=None if sign == 0.0 else lat)
+        r = np.asarray(rain, np.float64)
+        if passes > 0:
+            rf = FaceField(grid, r.astype(np.float32), name="rain")
+            rf.exchange_halos(linear=True)
+            r = smooth_field(rf, passes).data.astype(np.float64)
+        if sign == 0.0:
+            scale = r[sl][sel].mean()
+            ainfo = info
+        parts[sign] = (r / scale if scale > 0 else r, lat)
+    seasons = {sg: (r + np.where(land_e, float(cp.precip_floor), 0.0)) * latitude_prior(lat, cp) for sg, (r, lat) in parts.items()}
+    year = 0.25 * (seasons[1.0] + seasons[-1.0] + 2.0 * seasons[0.0])
+    vol = year * grid.cell_area.astype(np.float64) / grid.cell_size_m**2
+    mean_land = vol[sl][sel].mean()
+    if mean_land > 0:
+        vol *= float(cp.precip_mean) / mean_land
+    f = FaceField(grid, vol.astype(np.float32), name="precip")
+    f.exchange_halos(linear=True)
+    north = seasons[1.0] / np.maximum(seasons[1.0] + seasons[-1.0], 1e-12)
+    summer = FaceField(grid, np.where(lat0 >= 0.0, north, 1.0 - north).astype(np.float32), name="precip_summer")
+    pl = f.interior[land_i] if land_i.any() else np.zeros(1, np.float32)
+    sm = summer.interior[land_i] if land_i.any() else np.zeros(1, np.float32)
+    info = {
+        "n_sweeps": int(ainfo.get("n_sweeps", 0)), "advect_converged": ainfo.get("converged"), "moisture_reach_m": moisture_reach_m(grid, cp),
+        "precip_land_mean": float(pl.mean()), "precip_land_median": float(np.median(pl)), "precip_land_max": float(pl.max()),
+        "land_dry_fraction": float((pl < 0.1 * cp.precip_mean).mean()), "moisture_land_mean": 0.0,
+        "summer_wet_land": float((sm > 2.0 / 3.0).mean()), "winter_wet_land": float((sm < 1.0 / 3.0).mean()),
+    }
+    return f, summer, info
+
+
 def precipitation(grid: Grid, surface: FaceField, wind: FaceField, cp: ClimateParams, log=None) -> tuple[FaceField, dict]:
     """Full precipitation stage: returns the ``precip`` FaceField (halos
     exchanged) and an info dict."""
@@ -408,4 +478,4 @@ def precipitation(grid: Grid, surface: FaceField, wind: FaceField, cp: ClimatePa
     return f, info
 
 
-__all__ = ["advect_precip", "coast_distance_m", "orographic_rise", "rainout_fraction", "step_length_m", "eddy_reach_m", "eddy_resupply", "cold_air", "moisture_reach_m", "max_sweeps", "latitude_prior", "rain_drift_passes", "finalise_precip", "precipitation"]
+__all__ = ["seasonal_precipitation", "advect_precip", "coast_distance_m", "orographic_rise", "rainout_fraction", "step_length_m", "eddy_reach_m", "eddy_resupply", "cold_air", "moisture_reach_m", "max_sweeps", "latitude_prior", "rain_drift_passes", "finalise_precip", "precipitation"]

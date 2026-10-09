@@ -544,11 +544,12 @@ def ice_label(meta: dict) -> str:
     if c is None:
         return " · ice age" if meta.get("glacial") else ""
     c = float(c)
+    sea = f", the sea {-float(meta['sea_m']):.0f} m lower" if float(meta.get("sea_m", 0.0)) < -0.5 else ""   # erosion.ice_sea_share
     if c <= -0.05:
         return f" · {-c:.1f} °C warmer than today"
     if c < 0.05:
-        return " · as cold as today"
-    return f" · ice age, {c:.1f} °C colder than today"
+        return " · as cold as today" + sea
+    return f" · ice age, {c:.1f} °C colder than today" + sea
 
 
 def _fit(a: np.ndarray, res: int) -> np.ndarray:
@@ -711,7 +712,15 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
                 h = lo(z["height"]) if base.stage == "erosion" else (ground if ground is not None else base.height)
             c = float(meta.get("cooling_c", 0.0))
             label = f"thaw · {c:.1f} °C colder than today" if c > 0.05 else "thaw · today's ice"
-            fr = _Frame("thaw", key, label, h if body is None else h + body, **{**base.ch, "ice": ice.astype(np.float32)})
+            if float(meta.get("sea_m", 0.0)) < -0.5:
+                label += f", the sea {-float(meta['sea_m']):.0f} m lower"
+            ch = base.ch
+            if base.stage == "erosion":
+                # its own water: the sea comes back as the ice melts (erosion.ice_sea_share)
+                with np.load(p) as z:
+                    own = timeline_water(h, lo(z["lake"].astype(np.float32)) if "lake" in z.files else None, lake_min)
+                    ch = {**base.ch, **own, "discharge": lo(z["discharge"], "max")} if own else base.ch
+            fr = _Frame("thaw", key, label, h if body is None else h + body, **{**ch, "ice": ice.astype(np.float32)})
             fr.ice_h = body
             frames.append(fr)
         log(f"[viewer] thaw: {len(baked)} of the stage's {n_b} frames, the ice from {100.0 * float(np.mean(frames[-len(baked)].ch['ice'])):.1f} to {100.0 * float(np.mean(frames[-1].ch['ice'])):.1f} % of the sphere")

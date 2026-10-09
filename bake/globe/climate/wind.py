@@ -227,11 +227,14 @@ def storminess(lat_rad: np.ndarray, cp: ClimateParams) -> np.ndarray:
     return np.maximum(extratropics, 1.0 / np.cosh(lat / w) ** 2)
 
 
-def circulation_wind3(grid: Grid, cp: ClimateParams) -> np.ndarray:
+def circulation_wind3(grid: Grid, cp: ClimateParams, lat: np.ndarray | None = None) -> np.ndarray:
     """Undeflected wind as 3-D tangent vectors (radians per step) on every
-    extended cell: ``wind_speed`` cells at band centres."""
+    extended cell: ``wind_speed`` cells at band centres.  ``lat``: the
+    latitude the circulation's bands are read at (radians, extended), where
+    it is not the cells' own -- a season's, the cells moved with the sun
+    (:func:`seasonal_wind3`)."""
     east, north, cos_lat = geographic_frame(grid)
-    zonal, merid = circulation_profile(grid.latitude(), cp)
+    zonal, merid = circulation_profile(grid.latitude() if lat is None else lat, cp)
     taper = _smoothstep(cos_lat / math.sin(math.radians(max(cp.pole_taper_deg, 1e-3))))
     speed_rad = cp.wind_speed / cells_per_radian(grid)
     amp = speed_rad * taper
@@ -264,6 +267,55 @@ def deflect_wind3(grid: Grid, w3: np.ndarray, surface: FaceField, cp: ClimatePar
     return np.where((gmag > 0)[..., None], out, w3)
 
 
+#: how far the turn of the planet swings a season's inflow off the straight line into a heated
+#: continent (degrees; to the right in the north, the left in the south, nothing on the equator)
+MONSOON_TURN_DEG = 30.0
+
+
+def season_latitude(grid: Grid, cp: ClimateParams, sign: float) -> np.ndarray:
+    """The latitude a season's circulation is read at (radians, extended):
+    the cells' own less ``sign x season_shift_deg`` -- ``sign`` +1 the
+    northern summer, -1 the southern, 0 an equinox.  The three cells follow
+    the sun: the belt where the trades meet stands some 7 degrees into the
+    summer hemisphere, and the dry belts and the storm tracks with it."""
+    return np.asarray(grid.latitude(), np.float64) - float(sign) * math.radians(float(cp.season_shift_deg))
+
+
+def seasonal_wind3(grid: Grid, cp: ClimateParams, sign: float, temp_range: np.ndarray) -> np.ndarray:
+    """A season's undeflected wind (3-D tangent, radians per step): the
+    circulation at the season's latitude (:func:`season_latitude`) plus the
+    monsoon -- air flows into the continent the season has heated and out of
+    the one it has cooled, up the gradient of the season's temperature
+    anomaly (half ``temp_range``, C, positive in the summer hemisphere,
+    smoothed over ``monsoon_smooth_frac`` of the radius), ``monsoon`` of the
+    band wind for every C per 1000 km, never more than the band wind, turned
+    :data:`MONSOON_TURN_DEG` by the planet's spin."""
+    w3 = circulation_wind3(grid, cp, season_latitude(grid, cp, sign))
+    k = float(getattr(cp, "monsoon", 0.0))
+    if k <= 0.0 or sign == 0:
+        return w3
+    lat = np.asarray(grid.latitude(), np.float64)
+    a = FaceField(grid, (float(sign) * 0.5 * np.asarray(temp_range, np.float64) * np.sign(lat)).astype(np.float32), name="season")
+    a.exchange_halos(linear=True)
+    sigma = float(cp.monsoon_smooth_frac) * grid.R_planet / grid.cell_size_m
+    a = smooth_field(a, min(max(int(round(2.0 * sigma * sigma)), 1), 400))
+    g3 = cells_to_tangent3(grid, a.gradient().data) * grid.R_planet * 1.0e6          # C per 1000 km
+    speed = cp.wind_speed / cells_per_radian(grid)
+    m3 = k * speed * g3
+    turn = math.radians(MONSOON_TURN_DEG) * np.tanh(np.degrees(lat) / 10.0)
+    m3 = m3 * np.cos(turn)[..., None] - _cross(grid.centers, m3) * np.sin(turn)[..., None]
+    m3 *= np.minimum(1.0, abs(speed) / np.maximum(np.linalg.norm(m3, axis=-1), 1e-30))[..., None]
+    return w3 + m3
+
+
+def seasonal_wind(grid: Grid, surface: FaceField, cp: ClimateParams, sign: float, temp_range: np.ndarray, name: str = "wind") -> FaceField:
+    """:func:`wind_field` of a season (:func:`seasonal_wind3`, deflected)."""
+    w3 = deflect_wind3(grid, seasonal_wind3(grid, cp, sign, temp_range), surface, cp)
+    f = FaceField(grid, tangent3_to_cells(grid, w3).astype(np.float32), is_vector=True, name=name)
+    f.exchange_halos()
+    return f
+
+
 def wind_field(grid: Grid, surface: FaceField, cp: ClimateParams, name: str = "wind") -> FaceField:
     """The stage's wind: circulation + deflection, as a contravariant vector
     ``FaceField`` (cells per advection step) with halos exchanged."""
@@ -287,4 +339,8 @@ __all__ = [
     "circulation_wind3",
     "deflect_wind3",
     "wind_field",
+    "season_latitude",
+    "seasonal_wind3",
+    "seasonal_wind",
+    "MONSOON_TURN_DEG",
 ]

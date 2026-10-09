@@ -509,3 +509,37 @@ def test_the_year_swings_with_the_sun_and_the_distance_from_the_sea():
         assert (rng[land] >= rng[ocean].min()).all() and rng[land].max() <= all_land.max() + 1e-3
     fields, info = climate_run.compute(grid, bed, p)
     assert np.array_equal(fields["temp_range"].data, rng) and "temp_range" in climate_run.OUTPUTS and info["T_range_land_median"] is not None
+
+
+def test_the_years_rain_is_its_seasons():
+    """``climate.seasons`` (``precipitation.seasonal_precipitation``): a
+    summer, a winter and an equinox twice, each on its own wind with the
+    circulation's belts moved with the sun.  With no shift and no monsoon the
+    seasons are the year, and the stage's rain is what one sweep gave; with
+    them the rain is another field of the same land mean, and
+    ``precip_summer`` says which half of the year a cell's rain falls in."""
+    from globe.climate.wind import season_latitude, seasonal_wind
+
+    p = _params(32)
+    grid = p.coarse_grid()
+    bed = _island_bedrock(grid)
+    land = bed.interior >= 0.0
+    year, _ = climate_run.compute(grid, bed, p)
+    assert "precip_summer" not in year
+    cp = dataclasses.replace(p.climate, seasons=True)
+    lat = np.asarray(grid.latitude())
+    assert np.allclose(season_latitude(grid, cp, 1.0), lat - np.radians(7.0)) and np.array_equal(season_latitude(grid, cp, 0.0), lat)
+    same = dataclasses.replace(cp, season_shift_deg=0.0, monsoon=0.0)
+    f0, _ = climate_run.compute(grid, bed, dataclasses.replace(p, climate=same))
+    assert np.allclose(f0["precip"].interior, year["precip"].interior, rtol=2e-4, atol=1e-6)        # no seasons in it: the yearly stage's rain
+    assert np.allclose(f0["precip_summer"].interior[land], 0.5, atol=1e-4)
+    f1, info = climate_run.compute(grid, bed, dataclasses.replace(p, climate=cp))
+    pr, sm = f1["precip"].interior, f1["precip_summer"].interior
+    assert pr[land].mean() == pytest.approx(p.climate.precip_mean, rel=1e-5) and pr.min() >= 0.0
+    assert sm.min() >= 0.0 and sm.max() <= 1.0 and sm[land].std() > 0.02
+    assert not np.allclose(pr[land], year["precip"].interior[land], rtol=0.05)                       # the seasons move the rain
+    assert np.array_equal(f1["wind"].data, year["wind"].data) and np.array_equal(f1["temperature"].data, year["temperature"].data)
+    assert 0.0 <= info["summer_wet_land"] <= 1.0 and "winter_wet_land" in info
+    # the monsoon: a season's wind is not the equinox's, and no faster than a band wind allows twice over
+    w = seasonal_wind(grid, bed, cp, 1.0, f1["temp_range"].data)
+    assert not np.allclose(w.data, year["wind"].data) and np.isfinite(w.data).all()

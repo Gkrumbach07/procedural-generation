@@ -57,7 +57,7 @@ import numpy as np
 from ..config import WorldParams
 from ..field import FaceField
 from ..io.world_store import WorldStore
-from .maps import ErosionState, datum_land_fraction, fill_basins, settle_lakes, start_replay, step, uplift_cap
+from .maps import ErosionState, datum_land_fraction, fill_basins, held_land_fraction, hold_datum, settle_lakes, start_replay, step, uplift_cap
 from .particle import KERNEL_VERSION, MASK_ACTIVE
 
 OUTPUTS = ["height", "sediment", "discharge", "momentum"]
@@ -119,6 +119,7 @@ def save_checkpoint(store: WorldStore, state: ErosionState, params: WorldParams)
         arrays["sheet"] = state.sheet.astype(np.uint8)
         arrays["sheet_h"] = state.sheet_h
         arrays["sheet_fed"] = state.sheet_fed.astype(np.uint8)
+        arrays["sea_fall"] = np.array([float(state.sea_drop), np.nan if state.sea_ref is None else float(state.sea_ref)])
     if state.lake_flag is not None:  # lakes are refreshed every flood_every iterations: part of the state
         arrays["lake_flag"] = state.lake_flag
         arrays["lake_id"] = state.lake_id        # ...and so is the room each has left for its rivers' load
@@ -211,6 +212,9 @@ def load_checkpoint(state: ErosionState, path: Path, meta: dict) -> None:
             state.sheet = np.ascontiguousarray(z["sheet"]).astype(bool)
             state.sheet_h = np.ascontiguousarray(z["sheet_h"])
             state.sheet_fed = np.ascontiguousarray(z["sheet_fed"]).astype(bool)
+            if "sea_fall" in z.files:
+                state.sea_drop = float(z["sea_fall"][0])
+                state.sea_ref = None if np.isnan(z["sea_fall"][1]) else float(z["sea_fall"][1])
         state.lake_flag = np.ascontiguousarray(z["lake_flag"]).astype(np.uint8) if "lake_flag" in z.files else None
         if "lake_id" in z.files:
             state.lake_id = np.ascontiguousarray(z["lake_id"]).astype(np.int32)
@@ -327,6 +331,7 @@ def thaw(store: WorldStore, state: ErosionState, params: WorldParams, frame_res:
     age = float(params.erosion.ice_age_c)
     n = max(int(getattr(params.render, "thaw_frames", 0)), 1)
     top = (state.sheet.copy(), state.sheet_h.copy(), state.sheet_fed.copy(), float(state.ice_age))
+    low = float(getattr(state, "sea_drop", 0.0)) * float(state.height_unit_m)
     bed, sea = icesheet.ground(state)
     s_max = icesheet.stats(grid, state.sheet[state.interior], state.sheet_h[state.interior], sea)
     store.save_field(FaceField(grid, np.where(state.sheet, state.sheet_h, 0.0).astype(np.float32), name="ice_max"))
@@ -338,6 +343,13 @@ def thaw(store: WorldStore, state: ErosionState, params: WorldParams, frame_res:
         state.ice_age = age * (1.0 - k / n)
         res = icesheet.update(state, params, rounds=icesheet.FIRST_ROUNDS)
         s_now = res["stats"]
+        if float(getattr(state, "sea_drop", 0.0)) != 0.0 or float(getattr(params.erosion, "ice_sea_share", 0.0)) > 0.0:
+            # the sea comes back with the melt (erosion.ice_sea_share), to today's level at the last step:
+            # over the shelf the rivers crossed, and up the valleys they cut to the lower coast
+            icesheet.sea_fall(state, params, s_now["sea_level_m"])
+            if k == n:
+                state.sea_drop = 0.0
+            hold_datum(state, held_land_fraction(state, params), float(state.sea_drop))
         if rec is not None:
             vf.erosion_frame(state, rec, k, n, params)
     store.save_field(FaceField(grid, np.where(state.sheet, state.sheet_h, 0.0).astype(np.float32), name="ice_now"))
@@ -346,7 +358,9 @@ def thaw(store: WorldStore, state: ErosionState, params: WorldParams, frame_res:
     log(f"[erosion] ice: on {100.0 * s_max['land_share']:.1f} % of the land at the last maximum ({s_max['thickness_mean_m']:.0f} m thick on average, "
         f"the sea {drop:.0f} m lower than today) and {100.0 * s_now['land_share']:.1f} % today ({s_now['thickness_mean_m']:.0f} m, {s_now['sea_level_m']:.0f} m of sea level in it)")
     return {"ice_max_land_share": s_max["land_share"], "ice_now_land_share": s_now["land_share"], "ice_max_thickness_m": s_max["thickness_mean_m"],
-            "ice_now_thickness_m": s_now["thickness_mean_m"], "ice_now_sea_level_m": s_now["sea_level_m"], "ice_max_sea_drop_m": drop}
+            "ice_now_thickness_m": s_now["thickness_mean_m"], "ice_now_sea_level_m": s_now["sea_level_m"], "ice_max_sea_drop_m": drop,
+            # how far under today's the stage's sea stood at its end (erosion.ice_sea_share; 0 = it did not move)
+            "ice_sea_lowstand_m": low}
 
 
 def write_outputs(store: WorldStore, state: ErosionState) -> None:
@@ -435,7 +449,8 @@ def run(store: WorldStore, params: WorldParams, log=print) -> dict:
         if "ice" in st and (it % 50 == 0 or it + 10 >= n_iter):
             si = st["ice"]
             log(f"[erosion] ice at {it}: {state.ice_age:+.1f} C, on {100.0 * si['land_share']:.1f} % of the land, {si['thickness_mean_m']:.0f} m thick on average "
-                f"({si['thickness_max_m']:.0f} at most), {si['sea_level_m']:.0f} m of sea level; {si['rounds']} rounds{'' if si['settled'] else ' (not settled)'}")
+                f"({si['thickness_max_m']:.0f} at most), {si['sea_level_m']:.0f} m of sea level; {si['rounds']} rounds{'' if si['settled'] else ' (not settled)'}"
+                + (f"; the sea {float(state.sea_drop) * state.height_unit_m:.0f} m under today's" if float(getattr(state, "sea_drop", 0.0)) > 0.0 else ""))
         d = st.get("deaths", {})
         log(
             f"[erosion] iter {it + 1}/{n_iter}: {st['particles']} particles, mean {st['steps_mean']:.0f} steps, "

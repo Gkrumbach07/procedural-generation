@@ -95,10 +95,50 @@ quarter of 60-70 (Earth: about 15 %), none below 50.
   on. `derive` gives the ice class to `ice_now` and takes it from ground that
   is only cold (`biomes.with_ice`).
 
+## The sea falls with the ice (`erosion.ice_sea_share`, off)
+
+Past today's climate the sea is lower by a share of the extra ice's water
+(`icesheet.sea_fall`): `maps.hold_datum` holds today's coast that far above
+the stage's sea, so the land fraction is today's at today's level and the
+shelf under it is dry ground the rivers cross. The reference is the sheet as
+it stood when the stage's climate was today's (iteration 600 at the
+defaults); before that the sea is not moved. The share: 1 is the last
+maximum's lowstand held through the whole ice age, 0.5 the mean of cycles
+half frozen and half thawed. The stage's thaw brings the sea back step by
+step (its frames say how far under today's it stands), and the stage's
+output is at today's sea: what the rivers cut below it is drowned.
+
+## Seasonal rain (`climate.seasons`, off)
+
+`precipitation.seasonal_precipitation`: a northern summer, a southern and an
+equinox twice, each swept on its own wind -- the circulation's belts moved
+`season_shift_deg` (7) with the sun, and a `monsoon` flow into the continent
+the season has heated -- with the storm front, the cold air's ceiling and
+the latitude prior's bands read at the season's latitude. `precip` is their
+mean; `precip_summer` is the share of the solstices' rain that falls in a
+cell's own summer.
+
+On earth-v35's bedrock, the land's mean rain by 10 degrees of latitude from
+the equator (the land's mean = 1) and the land under a quarter of the mean:
+
+| | 0-10 | 10-20 | 20-30 | 30-40 | 40-50 | 50-60 | 60-70 | dry land |
+|---|---|---|---|---|---|---|---|---|
+| Earth, roughly | 2.5 | 1.5 | 0.73 | 0.73 | 0.8 | 0.73 | 0.55 | 15 % or so |
+| one yearly climate | 1.68 | 1.02 | 0.57 | 0.74 | 0.97 | 0.78 | 0.90 | 13.2 % |
+| seasons, the dry band as it is (0.5, 8 degrees wide) | 1.46 | 1.11 | 0.71 | 0.72 | 0.98 | 0.85 | 0.88 | 7.5 % |
+| seasons, band 0.85 x 10 | 1.56 | 0.96 | 0.40 | 0.52 | 1.00 | 0.99 | 1.06 | 10.7 % |
+| seasons, band 0.9 x 12 | 1.55 | 0.88 | 0.32 | 0.45 | 0.98 | 1.06 | 1.19 | 12.1 % |
+
+The seasons bring the 20-40 degree means to Earth's and halve the dry land:
+a belt that moves keeps less ground under it all year. Making the belt
+stronger buys the dry land back by drying the whole latitude, which Earth
+does not do -- its deserts are the west sides and the far interiors of that
+latitude, and its east sides are wet. That is the next thing the climate
+lacks (ocean currents, and a moisture reach that lets an interior dry out),
+not a stronger band.
+
 ## Not yet
 
-* the sea does not fall with the ice (the volume is known: logged and in the
-  stage's info);
 * the crust does not sag under the ice or rebound after it;
 * the carve is still the glacial pass's own rate, not the ice's flux;
 * the final frame's ground is the ground: today's cap is its biome's white,

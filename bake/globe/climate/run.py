@@ -17,7 +17,7 @@ import time
 import numpy as np
 
 from ..field import FaceField
-from .precipitation import precipitation
+from .precipitation import precipitation, seasonal_precipitation
 from .temperature import evaporation, seasonal_range, temperature
 from .wind import cells_to_tangent3, geographic_frame, wind_field
 
@@ -30,13 +30,19 @@ def compute(grid, bedrock: FaceField, params, log=None) -> tuple[dict[str, FaceF
     cp = params.climate
     t0 = time.time()
     T = FaceField(grid, temperature(grid, bedrock.data, cp), name="temperature")
-    wind = wind_field(grid, bedrock, cp)
-    t1 = time.time()
-    precip, pinfo = precipitation(grid, bedrock, wind, cp, log=log)
-    t2 = time.time()
-    evap = FaceField(grid, evaporation(T.data, cp), name="evap")
     # the year's swing about that mean (temperature.seasonal_range): the summers the ice answers to
     rng = FaceField(grid, seasonal_range(grid, bedrock.data < 0.0, cp), name="temp_range")
+    wind = wind_field(grid, bedrock, cp)
+    t1 = time.time()
+    extra = {}
+    if bool(getattr(cp, "seasons", False)):
+        # the year's rain as its seasons' (precipitation.seasonal_precipitation); `wind` stays the equinox's
+        precip, summer, pinfo = seasonal_precipitation(grid, bedrock, cp, rng.data, log=log)
+        extra["precip_summer"] = summer
+    else:
+        precip, pinfo = precipitation(grid, bedrock, wind, cp, log=log)
+    t2 = time.time()
+    evap = FaceField(grid, evaporation(T.data, cp), name="evap")
     li = bedrock.interior >= 0.0
     info = {
         "seconds_wind": round(t1 - t0, 3),
@@ -48,7 +54,7 @@ def compute(grid, bedrock: FaceField, params, log=None) -> tuple[dict[str, FaceF
         "wind_speed_median_cells": float(np.median(wind.vec_norm().interior) / grid.cell_size_m),
         **pinfo,
     }
-    return {"temperature": T, "wind": wind, "precip": precip, "evap": evap, "temp_range": rng}, info
+    return {"temperature": T, "wind": wind, "precip": precip, "evap": evap, "temp_range": rng, **extra}, info
 
 
 def run(store, params, log=print) -> dict:
@@ -57,6 +63,8 @@ def run(store, params, log=print) -> dict:
     fields, info = compute(grid, bedrock, params, log=log)
     for name in OUTPUTS:
         store.save_field(fields[name])
+    if "precip_summer" in fields:              # (climate.seasons)
+        store.save_field(fields["precip_summer"])
     if log is not None:
         log(
             f"[climate] T {info['T_min']:.1f}..{info['T_max']:.1f} °C; precip land mean {info['precip_land_mean']:.3f} "

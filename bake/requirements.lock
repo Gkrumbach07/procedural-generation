@@ -1,0 +1,14 @@
+# The bake's Python environment, pinned (the versions of the work machine's .venv, 2026-10-09).
+# Jobs on the homelab cluster build theirs from this file (docs/DEVELOPING.md, "Running on the cluster").
+numpy==2.5.3
+numba==0.67.0
+llvmlite==0.49.0
+scipy==1.18.1
+pillow==12.3.0
+PyYAML==6.0.3
+tqdm==4.70.1
+pytest==9.1.1
+iniconfig==2.3.0
+packaging==26.3
+pluggy==1.6.0
+Pygments==2.21.0

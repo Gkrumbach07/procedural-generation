@@ -268,6 +268,8 @@ def setup(state, grid, store, params) -> None:
     state.sheet_h = None
     state.sheet_fed = None
     state.sheet_at = None
+    state.sea_drop = 0.0             # how far today's sea stands above the stage's (cell units; sea_fall)
+    state.sea_ref = None             # the ice as a depth of sea (m) when the stage's climate was today's
 
 
 def ground(state) -> tuple[np.ndarray, np.ndarray]:
@@ -308,5 +310,36 @@ def update(state, params, rounds: int | None = None, cool: float | None = None, 
     return res
 
 
-__all__ = ["BED_SMOOTH_FRAC", "ICE_DENSITY", "FIRST_ROUNDS", "IceClimate", "balance", "smooth_bed", "geometry", "settle", "stats", "climate_of",
+def sea_fall(state, params, sea_level_m: float) -> float:
+    """The sea falls as the ice takes its water (``erosion.ice_sea_share``):
+    sets ``state.sea_drop`` (cell units), how far today's sea stands above
+    the stage's, from the sheet's volume as a depth of sea ``sea_level_m``,
+    and returns it in metres.
+
+    The reference is the sheet as it stood when the stage's climate was
+    today's (``ice_age`` 0: its volume then is ``state.sea_ref``); before
+    that the sea is not moved.  Past it the sea is lower by the share of the
+    extra ice: 1 is the last maximum's 120 m all through the ice age, and the
+    0.5 of the parameter's comment the mean of cycles that spend as long
+    thawed as frozen -- the sheet the stage carries is the cold end of each
+    (``glacial.ice_cooling``), the sea it cuts its coasts against is not.
+
+    Nothing is shifted here: :func:`maps.hold_datum` holds today's coast at
+    ``sea_drop`` above the stage's sea from the next iteration on, so the
+    shelf comes out of the water as the ice grows and the rivers cross it."""
+    share = float(getattr(params.erosion, "ice_sea_share", 0.0))
+    if share <= 0.0:
+        state.sea_drop = 0.0
+        return 0.0
+    if float(state.ice_age) < 0.0 or getattr(state, "sea_ref", None) is None:
+        if float(state.ice_age) >= 0.0:
+            state.sea_ref = float(sea_level_m)
+        state.sea_drop = 0.0
+        return 0.0
+    drop = share * max(float(sea_level_m) - float(state.sea_ref), 0.0)
+    state.sea_drop = drop / float(state.height_unit_m)
+    return drop
+
+
+__all__ = ["sea_fall", "BED_SMOOTH_FRAC", "ICE_DENSITY", "FIRST_ROUNDS", "IceClimate", "balance", "smooth_bed", "geometry", "settle", "stats", "climate_of",
            "setup", "ground", "update"]

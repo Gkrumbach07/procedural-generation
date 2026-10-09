@@ -607,6 +607,39 @@ def test_a_stage_with_an_ice_sheet_writes_its_ice_and_its_thaw(tmp_path):
     assert frames[-2].ch["ice"].sum() < frames[-4].ch["ice"].sum() < last.ch["ice"].sum()
 
 
+def test_the_sea_falls_with_the_ice_and_comes_back_with_the_thaw(tmp_path):
+    """``erosion.ice_sea_share``: past today's climate the sea is lower by
+    the extra ice's water, so the stage's last frame has more land than the
+    world ends with; the thaw brings it back step by step, and the stage's
+    output is at today's sea -- the land fraction it was given."""
+    from globe.io.world_store import WorldStore
+
+    over = {"ice_sheet": True, "ice_age_c": 8.0, "ice_history": True, "glacial_every": 2, "glacial_from": 0.4, "ice_full": 0.6, "climate_at_surface": True}
+    base = WorldParams.tiny_world(seed=6).with_overrides(climate={"T_eq": 6.0}, render={"thaw_frames": 3, "erosion_frame_every": 5})
+    flat = bake(tmp_path / "flat", base.with_overrides(erosion=over), to_stage="erosion", logger=lambda m: None)
+    assert flat.manifest["stages"]["erosion"]["info"]["ice_sea_lowstand_m"] == 0.0
+    store = bake(tmp_path / "w", base.with_overrides(erosion={**over, "ice_sea_share": 1.0}), to_stage="erosion", logger=lambda m: None)
+    info = store.manifest["stages"]["erosion"]["info"]
+    assert info["ice_sea_lowstand_m"] > 1.0
+    ero, thaw = vf.list_frames(tmp_path / "w", "erosion"), vf.list_frames(tmp_path / "w", "thaw")
+    assert ero[0][2].get("sea_m") is None and ero[-1][2]["sea_m"] == pytest.approx(-info["ice_sea_lowstand_m"], abs=0.06)
+    assert thaw[-1][2].get("sea_m") is None                                              # today: the sea is back
+    land = []
+    for _, path, _ in [ero[-1]] + thaw:
+        with np.load(path) as z:
+            land.append(float((z["height"].astype(np.float32) >= 0.0).mean()))
+    assert land[0] > land[-1] and land[0] >= land[1] >= land[2] >= land[3]                # the shelf goes under again
+    grid = base.coarse_grid()
+    surf = store.load_field("height", grid).interior + store.load_field("sediment", grid).interior
+    assert float((surf >= 0.0).mean()) == pytest.approx(info["land_fraction"], abs=1e-9)
+    assert abs(float((surf >= 0.0).mean()) - land[-1]) < 0.02
+    frames, _ = vw.collect_frames(tmp_path / "w", None, log=lambda m: None)
+    last = [f for f in frames if f.stage == "erosion"][-1]
+    assert "the sea" in last.label and last.label.endswith("m lower")
+    th = [f for f in frames if f.stage == "thaw"]
+    assert th[-1].ch["ocean"].mean() > last.ch["ocean"].mean()                            # more sea in the thaw's last frame than at the lowstand
+
+
 def test_the_ice_of_any_temperature_is_the_glacial_passes_own(tmp_path):
     """``zoom.ice.ice_ground``: the ice at an ice line of any temperature, by
     the rule the planet level's ice has (``coarse_ice``) -- the same ground at
