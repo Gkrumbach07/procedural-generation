@@ -625,6 +625,37 @@ def test_a_stage_with_an_ice_sheet_writes_its_ice_and_its_thaw(tmp_path):
     assert frames[-2].ch["ice"].sum() < frames[-4].ch["ice"].sum() < last.ch["ice"].sum()
 
 
+def test_the_ice_carves_by_its_own_flow(tmp_path):
+    """``erosion.ice_carve_flux``: the glacial pass lowers the bed by the
+    ice passing over it (``ErosionState.sheet_flux``), so a pass carves
+    under the sheet and nowhere else, most where most ice passes, and the
+    result is another ground than the rivers' discharge under the ice makes."""
+    from globe.erosion import glacial
+    from globe.erosion import run as erun
+    from globe.io.world_store import WorldStore
+
+    over = {"ice_sheet": True, "ice_age_c": 8.0, "ice_history": True, "glacial_every": 2, "glacial_from": 0.4, "ice_full": 0.6, "climate_at_surface": True, "glacial_rate": 6.0}
+    base = WorldParams.tiny_world(seed=6).with_overrides(climate={"T_eq": 6.0}, render={"thaw_frames": 2, "erosion_frame_every": 5})
+    p = base.with_overrides(erosion={**over, "ice_carve_flux": True})
+    store = bake(tmp_path / "w", p, to_stage="erosion", logger=lambda m: None)
+    st = erun.build_state(store, p)
+    ck = erun.find_checkpoint(store, p)
+    erun.load_checkpoint(st, *ck)
+    assert st.sheet_flux is not None and st.sheet_flux.shape == st.height.shape and st.sheet_flux.min() >= 0.0
+    assert (st.sheet_flux[~st.sheet] == 0.0).all() and st.sheet_flux[st.sheet].max() > 0.0
+    h0 = st.height.copy()
+    out = glacial.carve(st, p)
+    cut = (h0 - st.height)[st.interior]
+    under = st.sheet[st.interior]
+    assert out["carved"] > 0.0 and (cut[~under] == 0.0).all() and cut.min() >= 0.0
+    f = st.sheet_flux[st.interior]
+    big, small = cut[under & (f > np.percentile(f[under], 80))], cut[under & (f < np.percentile(f[under], 20))]
+    assert big.mean() > small.mean()
+    other = bake(tmp_path / "v", base.with_overrides(erosion=over), to_stage="erosion", logger=lambda m: None)
+    grid = base.coarse_grid()
+    assert not np.array_equal(store.load_field("height", grid).interior, other.load_field("height", grid).interior)
+
+
 def test_the_sea_falls_with_the_ice_and_comes_back_with_the_thaw(tmp_path):
     """``erosion.ice_sea_share``: past today's climate the sea is lower by
     the extra ice's water, so the stage's last frame has more land than the

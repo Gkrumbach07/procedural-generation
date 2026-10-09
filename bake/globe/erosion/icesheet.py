@@ -315,6 +315,10 @@ def update(state, params, rounds: int | None = None, cool: float | None = None, 
     state.sheet_h = np.ascontiguousarray(FaceField.from_interior(grid, res["thickness"]).data)
     state.sheet_fed = res["fed"]
     state.sheet_at = int(state.iteration)
+    # the ice passing through each cell, as water a year per metre of the cell's width (m2/yr): what the
+    # glacial pass can carve by (erosion.ice_carve_flux)
+    flux = np.where(res["mask"], np.maximum(res["flux"], 0.0), 0.0) / float(grid.cell_size_m)
+    state.sheet_flux = np.ascontiguousarray(np.where(state.sheet, np.maximum(FaceField.from_interior(grid, flux.astype(np.float32)).data, 0.0), 0.0))
     res["stats"] = stats(grid, res["mask"], res["thickness"], sea)
     return res
 

@@ -119,6 +119,8 @@ def save_checkpoint(store: WorldStore, state: ErosionState, params: WorldParams)
         arrays["sheet"] = state.sheet.astype(np.uint8)
         arrays["sheet_h"] = state.sheet_h
         arrays["sheet_fed"] = state.sheet_fed.astype(np.uint8)
+        if getattr(state, "sheet_flux", None) is not None:
+            arrays["sheet_flux"] = state.sheet_flux
         arrays["sea_fall"] = np.array([float(state.sea_drop), np.nan if state.sea_ref is None else float(state.sea_ref)])
     if state.lake_flag is not None:  # lakes are refreshed every flood_every iterations: part of the state
         arrays["lake_flag"] = state.lake_flag
@@ -212,6 +214,7 @@ def load_checkpoint(state: ErosionState, path: Path, meta: dict) -> None:
             state.sheet = np.ascontiguousarray(z["sheet"]).astype(bool)
             state.sheet_h = np.ascontiguousarray(z["sheet_h"])
             state.sheet_fed = np.ascontiguousarray(z["sheet_fed"]).astype(bool)
+            state.sheet_flux = np.ascontiguousarray(z["sheet_flux"]) if "sheet_flux" in z.files else None
             if "sea_fall" in z.files:
                 state.sea_drop = float(z["sea_fall"][0])
                 state.sea_ref = None if np.isnan(z["sea_fall"][1]) else float(z["sea_fall"][1])

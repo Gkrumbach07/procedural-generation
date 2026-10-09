@@ -55,6 +55,11 @@ import numpy as np
 from . import particle as pk
 
 
+#: the ice flux (m2 of water a year per metre of width) at which the pass carves ``glacial_rate`` a pass
+#: (erosion.ice_carve_flux): a sheet a kilometre thick moving a hundred metres a year
+ICE_FLUX_REF = 1.0e5
+
+
 def ice_cooling(ep, iteration) -> float:
     """How many degrees colder than the climate the ice line is read at an
     iteration of the stage (negative: warmer) -- ``ErosionState.ice_age``.
@@ -195,10 +200,18 @@ def carve(state, params) -> dict:
     if sticky:
         state.ice_prev = ice.copy()
 
-    sat = max(float(ep.disc_saturation), 1e-9)
-    q = np.maximum(state.discharge, 0.0) / sat
-    taper = ice_depth(state, ice, int(ep.glacial_ramp))
-    dz = rate * np.sqrt(q) * (1.0 - 0.5 * state.hardness) * taper
+    flux = getattr(state, "sheet_flux", None) if bool(getattr(ep, "ice_carve_flux", False)) else None
+    if flux is not None:
+        # By the ice's own flow (erosion.ice_carve_flux, icesheet.update): a glacier wears its bed by sliding,
+        # and it slides as it carries ice -- nothing under the divide, where the sheet is frozen to a bed it
+        # does not move over; most where the flow gathers on its way out; nothing again at the margin, where
+        # there is no ice left to carry.  That last is the rock lip the ramp below was put in to imitate
+        dz = rate * np.sqrt(np.maximum(flux, 0.0) / ICE_FLUX_REF) * (1.0 - 0.5 * state.hardness)
+    else:
+        sat = max(float(ep.disc_saturation), 1e-9)
+        q = np.maximum(state.discharge, 0.0) / sat
+        taper = ice_depth(state, ice, int(ep.glacial_ramp))
+        dz = rate * np.sqrt(q) * (1.0 - 0.5 * state.hardness) * taper
     np.clip(dz, 0.0, cap, out=dz)
     dz = np.where(ice, dz, 0.0)
     # never carve a cell below its own base level: a fjord is as deep as this
