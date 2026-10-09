@@ -441,7 +441,10 @@ def seasonal_precipitation(grid: Grid, surface: FaceField, cp: ClimateParams, te
     f = FaceField(grid, vol.astype(np.float32), name="precip")
     f.exchange_halos(linear=True)
     north = seasons[1.0] / np.maximum(seasons[1.0] + seasons[-1.0], 1e-12)
-    summer = FaceField(grid, np.where(lat0 >= 0.0, north, 1.0 - north).astype(np.float32), name="precip_summer")
+    # whose summer: the north's north of the equator, the south's south of it, and neither on it --
+    # eased across 5 degrees, or the field has a ruled line round the planet where its meaning flips
+    w = 0.5 + 0.5 * np.tanh(np.degrees(lat0) / 5.0)
+    summer = FaceField(grid, (w * north + (1.0 - w) * (1.0 - north)).astype(np.float32), name="precip_summer")
     pl = f.interior[land_i] if land_i.any() else np.zeros(1, np.float32)
     sm = summer.interior[land_i] if land_i.any() else np.zeros(1, np.float32)
     info = {
