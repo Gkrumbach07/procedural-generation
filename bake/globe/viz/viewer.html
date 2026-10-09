@@ -409,6 +409,7 @@ uniform float uTreeSpacing;    // metres between tree sites at this zoom (0 = no
 uniform float uClimCell;       // atlas texels per coarse cell: the temperature and rain blocks
 uniform vec2 uTempRange;       // temperature byte -> degC (lo, hi), for the satellite layer
 uniform vec2 uPrecipRange;     // precip byte -> x land mean (log lo, hi)
+uniform float uSeason;         // > 0: the climate texture's alpha is the year's swing of temperature, 0..1 of this many degrees
 uniform sampler2D uOT;         // Strahler order (final frame only): colours the river overlay
 uniform vec3 uOGeo;
 uniform int uOCh, uHasOrder;
@@ -877,28 +878,34 @@ float standScale(vec2 pq){
 // temperature and rain bytes (0..1) of the satellite layer at p.  They are the coarse grid's,
 // a block of uClimCell texels per coarse cell, and bilinear over those blocks leaves every
 // coarse cell's edge in the tree and snow lines; a cubic B-spline over the blocks' means is smooth
-vec2 climateAt(vec3 p){
+vec3 climateAt(vec3 p){
   vec2 xy = atlasXY(p, uLGeo);
   float cell = max(uClimCell, 1.0);
   ivec2 lo, hi; tileOf(xy, uLGeo, lo, hi);      // the blocks stay in this face (see tileOf)
   vec2 g = (xy - 0.5 * (cell - 1.0)) / cell;
   vec2 g0 = floor(g); vec2 f = g - g0;
   vec4 wx = bspline(f.x), wy = bspline(f.y);
-  vec2 acc = vec2(0.0);
+  vec3 acc = vec3(0.0);
   for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++) {
     vec2 c = (g0 + vec2(float(i - 1), float(j - 1))) * cell + 0.5 * (cell - 1.0);   // the block's centre
     vec2 c0 = floor(c); vec2 fr = c - c0;
     ivec2 a = clamp(ivec2(c0), lo, hi), a1 = clamp(ivec2(c0 + 1.0), lo, hi);
     vec4 t = mix(mix(texelFetch(uLT, a, 0), texelFetch(uLT, ivec2(a1.x, a.y), 0), fr.x),
                  mix(texelFetch(uLT, ivec2(a.x, a1.y), 0), texelFetch(uLT, a1, 0), fr.x), fr.y);
-    acc += wx[i] * wy[j] * t.rg;
+    acc += wx[i] * wy[j] * t.rga;                // (alpha: the year's swing, where the frame has it -- uSeason)
   }
   return acc;
 }
 vec3 satColor(float b, float h, vec3 p, float slopeDeg, float cellM, float simCover, out float forest, out float Tloc){
-  vec2 clim = climateAt(p);
+  vec3 clim = climateAt(p);
   float tb = clim.x, pb = clim.y;
   float T = uTempRange.x + tb * (uTempRange.y - uTempRange.x);
+  // The lines below are the summer's, not the year's: trees, tundra and snow answer to the warm
+  // months.  They were set for a year that swings SEASON_REF degrees, so a place whose year swings
+  // more is drawn as one that much warmer by half the difference (a continent's interior at -9 C
+  // with a 60 C year is forest; a sea coast at +4 C with a 10 C year is bare)
+  const float SEASON_REF = 25.0;
+  if (uSeason > 0.0) T += 0.5 * (clim.z * uSeason - SEASON_REF);
   // the climate is the coarse grid's, at its height: 6.5 C per km of the ground here above it
   Tloc = T - 0.0065 * (h - heightIn(uT0a, uGeoA, uHA, p));
   float lw = log(uPrecipRange.x) + pb * (log(uPrecipRange.y) - log(uPrecipRange.x));   // ln(precip / land mean)
@@ -2429,6 +2436,7 @@ function draw() {
   gl.uniform1i(U.uLight, LIGHT ? 1 : 0);
   const tch = CHANNELS.temperature || {}, pch = CHANNELS.precip || {};
   gl.uniform2f(U.uTempRange, tch.lo ?? -45, tch.hi ?? 35); gl.uniform2f(U.uPrecipRange, pch.lo ?? 0.02, pch.hi ?? 5);
+  gl.uniform1f(U.uSeason, (FA.layers || {}).temp_range && CHANNELS.temp_range ? CHANNELS.temp_range.hi : 0);
   const L = (FA.layers || {})[state.layer];
   if (state.layer !== "elevation" && L) {
     const ch = CHANNELS[state.layer];

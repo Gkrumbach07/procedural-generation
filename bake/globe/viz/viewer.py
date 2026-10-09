@@ -160,7 +160,10 @@ def webp_b64(img: np.ndarray) -> str:
     from PIL import Image
 
     buf = io.BytesIO()
-    Image.fromarray(np.ascontiguousarray(img), "RGB").save(buf, "WEBP", lossless=True, quality=70, method=4)
+    if img.shape[2] == 4:      # a fourth channel rides in the alpha (the page reads its images unpremultiplied); `exact` keeps the colours under a zero
+        Image.fromarray(np.ascontiguousarray(img), "RGBA").save(buf, "WEBP", lossless=True, quality=70, method=4, exact=True)
+    else:
+        Image.fromarray(np.ascontiguousarray(img), "RGB").save(buf, "WEBP", lossless=True, quality=70, method=4)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
@@ -820,6 +823,7 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
         order=ds(up(order_raster(root, N)), "max"),
         basin=ds(None if basin is None else (basin.astype(np.int64) + 1).clip(0), "nearest"),
         temperature=ds(up(_load_faces(root, "temperature"))),
+        temp_range=ds(up(_load_faces(root, "temp_range"))),
         precip=ds(up(_load_faces(root, "precip"))),
         biome=ds(biome, "nearest"),
         plate=ds(up(plate), "nearest"),
@@ -941,6 +945,10 @@ def channel_specs(final: _Frame, river_threshold: float | None = None, timeline=
         specs["crust_thickness"] = {"label": "Crust thickness", "kind": "linear", "lo": 0.0, "hi": CRUST_THICKNESS_KM, "unit": "km", "cmap": "viridis"}
     if "water" in final.ch:
         specs["water"] = {"label": "Water", "kind": "category", "cmap": "plates", "names": ["land", "lake", "ocean"]}
+    if "temp_range" in final.ch:
+        # the year's swing (the climate's `temp_range`), for the satellite view: its tundra, its forest and its
+        # snow are the summer's.  Read by the shader from the climate texture's alpha, not offered as a layer
+        specs["temp_range"] = {"label": "Seasonal range", "kind": "linear", "lo": 0.0, "hi": SEASON_RANGE_C, "unit": "°C", "cmap": "viridis", "hidden": True}
     if have("ice"):
         # the share of a frame cell the glacial pass has under ice: a layer of the erosion frames,
         # and what the elevation view whitens their ground by
@@ -983,12 +991,14 @@ def _byte(name: str, a: np.ndarray, specs: dict, ch: dict | None = None) -> np.n
 
 # textures beyond texture 0 on the final frame: (R, G, B) channel names
 # (short tuples are padded with zero channels)
-FINAL_TEXTURES = (("temperature", "precip", "biome"), ("plate", "sediment", "crust"), ("water", "order", "basin"),
+FINAL_TEXTURES = (("temperature", "precip", "biome", "temp_range"), ("plate", "sediment", "crust"), ("water", "order", "basin"),
                   ("flow", "lake_depth", "ocean"), ("rock", "basement", "crust_thickness"))
 #: ...and on a timeline frame that recorded its water: the shoreline texture, lake depth and
 #: ocean in the channels the page's shore path reads them from on the final frame (G, B), with
 #: the ice where the final frame has its flow
 TIMELINE_TEXTURES = (("ice", "lake_depth", "ocean"),)
+#: top of the seasonal-range byte (C): Yakutsk's year swings 60
+SEASON_RANGE_C = 64.0
 #: top of the crust-thickness byte (km): Earth's thickest crust is ~75 km, under Tibet
 CRUST_THICKNESS_KM = 80.0
 
@@ -1015,6 +1025,8 @@ def encode_frame(fr: _Frame, specs: dict) -> tuple[list[np.ndarray], dict]:
         if not present:
             continue
         chans = [pad_faces(_byte(n, fr.ch[n], specs, fr.ch)) if n in present else zero for n in names]
+        if len(names) == 4 and names[3] not in present:
+            chans = chans[:3]                 # the fourth channel is the image's alpha: there only when it carries something
         chans += [zero] * (3 - len(chans))
         k = len(images)
         images.append(atlas(chans))
