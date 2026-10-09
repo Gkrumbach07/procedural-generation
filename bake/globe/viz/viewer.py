@@ -709,6 +709,10 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
             with np.load(p) as z:
                 ice = _fit(lo(z["ice"].astype(np.float32) / 255.0), base.res)
                 body = _fit(lo(z["ice_h"].astype(np.float32)), base.res) if "ice_h" in z.files else None
+                if body is not None:
+                    # frames baked before the thaw recorded the sheet itself carry the last maximum's
+                    # white on ground the ice has left: no ice where it has no thickness
+                    ice = np.where(body > 0.5, ice, 0.0)
                 h = lo(z["height"]) if base.stage == "erosion" else (ground if ground is not None else base.height)
             c = float(meta.get("cooling_c", 0.0))
             label = f"thaw · {c:.1f} °C colder than today" if c > 0.05 else "thaw · today's ice"

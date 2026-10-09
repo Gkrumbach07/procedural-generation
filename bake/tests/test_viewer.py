@@ -595,6 +595,7 @@ def test_a_stage_with_an_ice_sheet_writes_its_ice_and_its_thaw(tmp_path):
             assert "ice_h" in z.files and (z["ice_h"][z["ice"] == 0] == 0).all() and z["ice_h"].max() > 0
             cells.append(int((z["ice"] > 0).sum()))
     assert cells[0] >= cells[1] >= cells[2] >= cells[3] > 0                               # the maximum, then less in each frame of the thaw
+    assert cells[3] == int((vf.downsample((now > 0.0).astype(np.float32), 32) > 0).sum())   # ...down to today's sheet, and no more (not what the last pass carved under)
     with np.load(ero[-1][1]) as z, np.load(thaw[-1][1]) as t:
         assert np.array_equal(z["height"], t["height"])                                  # the same ground under both
         bed, body = z["height"].astype(np.float32), z["ice_h"].astype(np.float32)

@@ -203,10 +203,17 @@ def erosion_frame(state, rec: FrameRecorder, iteration: int, total: int, params)
     history = bool(state.spherical) and bool(getattr(ep, "ice_history", False)) and getattr(state, "temp0", None) is not None
     ice = np.zeros(surf.shape, np.float32)
     if iced or history:
-        on = glacial.ice_mask(state, float(ep.ice_evap))
-        prev = getattr(state, "ice_prev", None) if bool(getattr(ep, "glacial_sticky", False)) else None
-        if prev is not None:
-            on = on | prev
+        sheet = getattr(state, "sheet", None)
+        if sheet is not None:
+            # the ice is a body (erosion.ice_sheet): where its sheet stands now, on a bed below the sea too --
+            # not what the last glacial pass carved under, which a thawing sheet has left (the thaw's frames
+            # kept the last maximum's white over ground the ice was gone from)
+            on = sheet
+        else:
+            on = glacial.ice_mask(state, float(ep.ice_evap))
+            prev = getattr(state, "ice_prev", None) if bool(getattr(ep, "glacial_sticky", False)) else None
+            if prev is not None:
+                on = on | prev
         ice = on[I].astype(np.float32)
     # the ice as a body (erosion.ice_sheet): its thickness, for the viewer to stand on the ground
     thick = getattr(state, "sheet_h", None) if (iced or history) else None
