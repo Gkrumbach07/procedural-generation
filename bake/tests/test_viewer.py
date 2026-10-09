@@ -601,6 +601,23 @@ def test_a_stage_with_an_ice_sheet_writes_its_ice_and_its_thaw(tmp_path):
         bed, body = z["height"].astype(np.float32), z["ice_h"].astype(np.float32)
     frames, _ = vw.collect_frames(tmp_path / "w", None, log=lambda m: None)
     assert [f.stage for f in frames][-5:] == ["erosion", "thaw", "thaw", "thaw", "final"]
+    # the final frame stands under today's ice too, and so do the detail tiles' rows
+    from globe.viz import detail as dt
+
+    final = frames[-1]
+    ground = store.load_field("height", grid).interior + store.load_field("sediment", grid).interior
+    icep = vw.ice_padded(tmp_path / "w")
+    sheet = icep[:, vw.PAD:-vw.PAD, vw.PAD:-vw.PAD]                                        # the sheet as the viewer draws it: lightly smoothed
+    assert (sheet[now == 0.0] == 0.0).all() and 0.5 < float(sheet.sum()) / float(now.sum()) <= 1.001     # (a sheet a few cells wide loses its edge to it)
+    iced = (sheet >= dt.ICE_MIN_M) & (final.ch["water"] != vw.WATER_OCEAN)
+    assert iced.any() and np.allclose(final.height[iced], (ground + sheet)[iced], atol=0.05) and np.allclose(final.height[now == 0.0], ground[now == 0.0], atol=0.05)
+    assert not (final.ch["water"][iced] == vw.WATER_LAKE).any()
+    now = sheet
+    assert np.allclose(dt.ice_rows(icep, 2, 3, 9, grid.N), now[2, 3:9], atol=1e-4)                     # at its own resolution: itself
+    fine_rows = dt.ice_rows(icep, 2, 0, 4 * grid.N, 4 * grid.N)
+    assert fine_rows.shape == (4 * grid.N, 4 * grid.N) and fine_rows.min() >= 0.0 and fine_rows.max() <= sheet.max() + 1e-3
+    src = dt.IcedSource(dt.RefinedSource(ground.astype(np.float32), None, np.zeros(ground.shape, np.uint8)), icep)
+    assert src.res == grid.N and np.allclose(src.rows(2, 0, grid.N)["surf"], np.where(now[2] >= dt.ICE_MIN_M, ground[2] + now[2], ground[2]), atol=0.05)
     last = frames[-5]
     assert np.allclose(last.height, bed + body, atol=0.5) and last.label.endswith("ice age, 8.0 °C colder than today")
     assert frames[-2].label == "thaw · today's ice" and frames[-4].label == "thaw · 5.3 °C colder than today"

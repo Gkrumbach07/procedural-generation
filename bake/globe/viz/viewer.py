@@ -792,6 +792,19 @@ def collect_frames(root: Path, final_res: int | None, log=print, frame_res: int 
         routed, routed_scale = hydro_rivers(root, manifest, Nsrc)
         if routed is not None:
             discharge, river_scale = routed, routed_scale
+    # today's ice, where the stage left a sheet (erosion.ice_sheet, `ice_now`): the frame's ground is the
+    # ice's surface, as the timeline's frames' is -- without it the domes of the thaw's last frame
+    # were bare white ground in the next
+    icep = ice_padded(root) if h is not None else None
+    if icep is not None:
+        from . import detail as dt
+
+        level = ws is not None                     # (a world hydro has not run on has no water surface)
+        surf, ws, water = np.array(surf, np.float32), np.array(ws if level else surf, np.float32), np.array(water)
+        for f in range(6):
+            d = dt.under_ice({"surf": surf[f], "ws": ws[f], "water": water[f]}, dt.ice_rows(icep, f, 0, Nsrc, Nsrc, PAD))
+            surf[f], ws[f], water[f] = d["surf"], d["ws"], d["water"]
+        ws = ws if level else None
     ldepth = lake_depth(surf, ws, water)
     fine_rock = fine.get("rock") if fine is not None else None
     fine_base = fine.get("basement") if fine is not None else None
@@ -1158,9 +1171,36 @@ def river_lines_script(lines: dict, specs: dict) -> tuple[str, dict]:
 # --------------------------------------------------------------------------
 # export
 # --------------------------------------------------------------------------
+def ice_padded(root: Path) -> np.ndarray | None:
+    """Today's ice (the stage's ``ice_now``, metres) with a cell of its
+    neighbours round each face, for ``detail.ice_rows`` -- lightly smoothed:
+    a sheet baked before its surface was (``icesheet.SURFACE_SMOOTH``) has
+    the distance transform's straight facets in it.  None without a sheet."""
+    ice = _load_faces(root, "ice_now")
+    if ice is None or not np.any(ice):
+        return None
+    a = pad_faces(np.asarray(ice, np.float32))
+    for _ in range(3):
+        b = a.copy()
+        b[:, 1:-1, 1:-1] = (4.0 * a[:, 1:-1, 1:-1] + 2.0 * (a[:, :-2, 1:-1] + a[:, 2:, 1:-1] + a[:, 1:-1, :-2] + a[:, 1:-1, 2:])
+                            + a[:, :-2, :-2] + a[:, :-2, 2:] + a[:, 2:, :-2] + a[:, 2:, 2:]) / 16.0
+        a = pad_faces(np.where(np.asarray(ice) > 0.0, b[:, PAD:-PAD, PAD:-PAD], 0.0).astype(np.float32))
+    return a
+
+
 def detail_source(root: Path, manifest: dict, refined: bool, planet: str | None):
     """The final frame's full-resolution source for detail tiles
-    (:mod:`globe.viz.detail`), or None."""
+    (:mod:`globe.viz.detail`), or None -- under today's ice where the world
+    has a sheet of it (``detail.IcedSource``), as the final frame is."""
+    from . import detail as dt
+
+    src = _bare_source(root, manifest, refined, planet)
+    icep = ice_padded(root) if src is not None else None
+    return src if icep is None else dt.IcedSource(src, icep, PAD)
+
+
+def _bare_source(root: Path, manifest: dict, refined: bool, planet: str | None):
+    """:func:`detail_source` without the ice."""
     from . import detail as dt
 
     h = _load_faces(root, "height")

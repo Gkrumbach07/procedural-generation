@@ -57,6 +57,8 @@ from ..hydro.d8 import cid_fij, neighbor_cid
 #: the ground under a sheet is read smoothed over this share of the planet's radius (a Gaussian's
 #: sigma): 50 km on Earth
 BED_SMOOTH_FRAC = 0.00785
+#: binomial passes over the ice's rise above its bed (:func:`geometry`)
+SURFACE_SMOOTH = 3
 #: a year of days
 YEAR_DAYS = 365.0
 #: ice against water, by weight
@@ -154,7 +156,14 @@ def geometry(grid, mask: np.ndarray, bed: np.ndarray, bed_s: np.ndarray, h0: flo
     m = FaceField.from_interior(grid, np.asarray(mask, np.float32))
     m.exchange_halos()
     d = coast_distance_m(grid, m.data < 0.5, max_rounds=48)[I].astype(np.float64) - 0.5 * float(grid.cell_size_m)
-    z = np.where(mask, np.maximum(bed, bed_s + np.sqrt(2.0 * float(h0) * np.maximum(d, 0.0))), bed)
+    # the distance is a chamfer's, faceted along the grid's lines and ridged at a cube edge: on a dome
+    # two kilometres high the facets are straight stripes in the light.  Two passes take them out
+    from ..climate.wind import smooth_field
+
+    rise = FaceField.from_interior(grid, np.sqrt(2.0 * float(h0) * np.maximum(d, 0.0)).astype(np.float32))
+    rise.exchange_halos(linear=True)
+    rise = smooth_field(rise, SURFACE_SMOOTH).interior.astype(np.float64)
+    z = np.where(mask, np.maximum(bed, bed_s + rise), bed)
     return z, z - bed
 
 

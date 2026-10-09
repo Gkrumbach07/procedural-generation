@@ -104,6 +104,54 @@ class RefinedSource:
         return d
 
 
+#: ice thinner than this (m) is not drawn as ice: the feathered edge of the interpolated sheet
+ICE_MIN_M = 1.0
+
+
+def ice_rows(icep: np.ndarray, f: int, r0: int, r1: int, res: int, pad: int = 1) -> np.ndarray:
+    """Today's ice (m) on rows ``[r0, r1)`` of face ``f`` at ``res`` cells a
+    face, from the coarse thickness with a cell of its neighbours round each
+    face (``icep``, ``viewer.pad_faces`` of the stage's ``ice_now``): read
+    bilinearly, so the sheet's surface is one smooth dome at any resolution
+    and not its coarse cells' steps.  float32 ``(r1 - r0, res)``."""
+    n = icep.shape[1] - 2 * pad
+    x = (np.arange(r0, r1) + 0.5) * n / res - 0.5 + pad
+    y = (np.arange(res) + 0.5) * n / res - 0.5 + pad
+    x0, y0 = np.floor(x).astype(np.int64), np.floor(y).astype(np.int64)
+    fx, fy = (x - x0)[:, None].astype(np.float32), (y - y0)[None, :].astype(np.float32)
+    a = np.asarray(icep[f], np.float32)
+    top = a[x0][:, y0] * (1.0 - fy) + a[x0][:, y0 + 1] * fy
+    bot = a[x0 + 1][:, y0] * (1.0 - fy) + a[x0 + 1][:, y0 + 1] * fy
+    return top * (1.0 - fx) + bot * fx
+
+
+def under_ice(d: dict, body: np.ndarray) -> dict:
+    """A source's rows with today's ice on them (``erosion.ice_sheet``, the
+    stage's ``ice_now``): the ground the viewer draws is the ice's surface
+    where the sheet stands -- on land; the sea keeps its own -- and a lake
+    under it is not drawn (it is under two kilometres of ice)."""
+    body = np.where(np.asarray(d["water"]) == WATER_OCEAN, 0.0, body).astype(np.float32)
+    on = body >= ICE_MIN_M
+    if not on.any():
+        return d
+    surf = np.asarray(d["surf"], np.float32) + np.where(on, body, 0.0)
+    return {**d, "surf": surf, "ws": np.where(on, surf, np.asarray(d["ws"], np.float32)), "water": np.where(on, 0, np.asarray(d["water"])).astype(np.asarray(d["water"]).dtype)}
+
+
+class IcedSource:
+    """A detail source under today's ice: another source's rows with the
+    sheet's thickness on the ground (:func:`under_ice`)."""
+
+    def __init__(self, src, icep: np.ndarray, pad: int = 1):
+        self.src, self.icep, self.pad = src, icep, pad
+
+    def __getattr__(self, name):
+        return getattr(self.src, name)
+
+    def rows(self, f: int, r0: int, r1: int) -> dict:
+        return under_ice(self.src.rows(f, r0, r1), ice_rows(self.icep, f, r0, r1, int(self.src.res), self.pad))
+
+
 class PlanetSource:
     """A planet zoom level's faces (``L{R}.f{k}.*.npy``), water by derive's
     rules as :func:`viewer._planet_final` draws them.  Its rivers are the
@@ -574,6 +622,6 @@ def export_tiles(out: Path, src, base_res: int, lake_range: float, log=print) ->
     return meta
 
 
-__all__ = ["TILE", "RIVER_MIN_PCT", "RIVER_FULL_PCT", "RIVER_BASE", "RIVER_SIGMA", "RIVER_PASSES", "RIVER_REACH", "RIVER_MIN_BYTE", "RIVER_SPAN_BYTE", "SED_LO_M", "SED_HI_M", "log_byte", "RefinedSource", "PlanetSource", "river_field", "river_scale",
+__all__ = ["ICE_MIN_M", "ice_rows", "under_ice", "IcedSource", "TILE", "RIVER_MIN_PCT", "RIVER_FULL_PCT", "RIVER_BASE", "RIVER_SIGMA", "RIVER_PASSES", "RIVER_REACH", "RIVER_MIN_BYTE", "RIVER_SPAN_BYTE", "SED_LO_M", "SED_HI_M", "log_byte", "RefinedSource", "PlanetSource", "river_field", "river_scale",
            "strength_scale", "channel_value", "path_ridges", "river_strength", "widen_rivers", "RIVER_RADIUS", "dry_side", "smooth_shore", "lake_byte", "SHORE_DRY_M", "SHORE_RINGS", "SHORE_SIGMA", "SHORE_CORE_M", "SHORE_KEEP", "reduce_face", "face_lake_depth", "face_smooth_mask", "height_grid",
            "encode_height_on", "tile_image", "levels_for", "export_tiles"]
