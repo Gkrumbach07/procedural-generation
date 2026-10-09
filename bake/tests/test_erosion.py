@@ -1791,3 +1791,25 @@ def test_lateral_erosion_cuts_the_bank_on_the_outside_of_a_bend():
     assert lat0 == 0 and entries0 > 100
     assert lat1 > 0.01 * entries1, (lat1, entries1)        # a real share of the steps cut a bank
     assert not np.array_equal(h0, h1)                       # and it moves ground
+
+
+def test_the_biomes_read_the_seasons():
+    """``biomes.whittaker_seasons``: the tree line is the warmest month's and
+    the taiga a short summer's, whatever the yearly mean -- a continent's
+    interior at -9 C with a 60 C year is forest and a sea coast at +4 C with
+    a 10 C year is bare; a dry temperate land is steppe under a continent's
+    year and scrub under winter rain; a rainforest's rain is the whole
+    year's.  With no swing it is the yearly table's above the cold end."""
+    from globe.derive import biomes as bm
+
+    one = lambda *v: np.array(v, np.float32)   # noqa: E731
+    assert bm.whittaker(one(-9.0), one(40.0))[0] == bm.TUNDRA and bm.whittaker_seasons(one(-9.0), one(40.0), one(60.0))[0] == bm.BOREAL_FOREST
+    assert bm.whittaker(one(4.0), one(80.0))[0] == bm.BOREAL_FOREST and bm.whittaker_seasons(one(4.0), one(80.0), one(10.0))[0] == bm.TUNDRA
+    assert bm.whittaker_seasons(one(-20.0), one(80.0), one(30.0))[0] == bm.ICE                        # no month above freezing
+    assert bm.whittaker_seasons(one(14.0), one(40.0), one(30.0))[0] == bm.TEMPERATE_GRASSLAND and bm.whittaker_seasons(one(14.0), one(40.0), one(12.0))[0] == bm.SHRUBLAND
+    assert bm.whittaker_seasons(one(15.0), one(80.0), one(12.0), one(0.2))[0] == bm.SHRUBLAND and bm.whittaker_seasons(one(15.0), one(80.0), one(12.0), one(0.5))[0] == bm.TEMPERATE_FOREST
+    assert bm.whittaker_seasons(one(26.0), one(260.0), one(3.0), one(0.9))[0] == bm.TROPICAL_SEASONAL_FOREST and bm.whittaker_seasons(one(26.0), one(260.0), one(3.0), one(0.5))[0] == bm.TROPICAL_RAINFOREST
+    T = np.linspace(12.0, 30.0, 40).astype(np.float32)
+    P = np.linspace(5.0, 300.0, 40).astype(np.float32)
+    TT, PP = np.meshgrid(T, P)
+    assert np.array_equal(bm.whittaker_seasons(TT, PP, np.full(TT.shape, 1.0, np.float32)), bm.whittaker(TT, PP))

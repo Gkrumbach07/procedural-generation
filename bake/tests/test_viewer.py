@@ -649,7 +649,7 @@ def test_the_sea_falls_with_the_ice_and_comes_back_with_the_thaw(tmp_path):
     assert land[0] > land[-1] and land[0] >= land[1] >= land[2] >= land[3]                # the shelf goes under again
     grid = base.coarse_grid()
     surf = store.load_field("height", grid).interior + store.load_field("sediment", grid).interior
-    assert float((surf >= 0.0).mean()) == pytest.approx(info["land_fraction"], abs=1e-9)
+    assert float((surf >= 0.0).mean()) == pytest.approx(info["land_fraction"], abs=1e-3)   # (to a cell or two: the active volcanoes go back on after the hold)
     assert abs(float((surf >= 0.0).mean()) - land[-1]) < 0.02
     frames, _ = vw.collect_frames(tmp_path / "w", None, log=lambda m: None)
     last = [f for f in frames if f.stage == "erosion"][-1]

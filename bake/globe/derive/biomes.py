@@ -191,6 +191,70 @@ def whittaker(T: np.ndarray, P_cm: np.ndarray) -> np.ndarray:
     return np.select(conds, codes, default=TEMPERATE_FOREST).astype(np.uint8)
 
 
+#: a place is in the trees' short summer -- boreal -- while under this share of its year is over 10 C
+#: (four months), and past the tree line while its warmest month is not (Koeppen's lines)
+BOREAL_YEAR = 1.0 / 3.0
+GROW_C = 10.0
+#: a temperate dry land is steppe and not scrub where the year swings more than this (C)
+STEPPE_RANGE_C = 25.0
+#: rain that falls this much in one half of the year is seasonal: under a third in the summer is a
+#: Mediterranean coast's, over three quarters a monsoon's
+WINTER_RAIN, MONSOON_RAIN = 1.0 / 3.0, 0.75
+
+
+def whittaker_seasons(T: np.ndarray, P_cm: np.ndarray, temp_range: np.ndarray, summer: np.ndarray | None = None) -> np.ndarray:
+    """:func:`whittaker` with the year in it: ``temp_range`` (C, the warmest
+    month less the coldest, the climate's field) and, where the climate's
+    rain has seasons, ``summer`` (the share of it that falls in the cell's
+    own summer).
+
+    The yearly mean puts the tree line and the taiga in the wrong places.
+    Trees need a summer, not a mild year: Yakutsk averages -9 C and stands in
+    forest, because its July is +19; the Aleutians average +4 and are bare,
+    because theirs is +10.  So the cold end is the warmest month's (ice under
+    0 C, tundra under 10) and the boreal forest is where under four months
+    are over 10 C, whatever the mean.  A dry temperate land with a
+    continent's year is steppe; with the rain in its winter it is scrub
+    (a Mediterranean coast); and a tropical forest whose rain comes in one
+    season is the seasonal forest, not the rainforest."""
+    T = np.asarray(T, dtype=np.float32)
+    P = np.asarray(P_cm, dtype=np.float32)
+    half = 0.5 * np.maximum(np.asarray(temp_range, dtype=np.float32), 0.5)
+    warm = T + half
+    over = np.arccos(np.clip((GROW_C - T) / half, -1.0, 1.0)) / np.float32(np.pi)      # the share of the year over 10 C
+    boreal = over < BOREAL_YEAR
+    tropical = T >= 20.0
+    temperate = ~boreal & ~tropical
+    if summer is None:
+        wet_winter = even = np.zeros(T.shape, bool)
+        one_season = np.zeros(T.shape, bool)
+    else:
+        sm = np.asarray(summer, dtype=np.float32)
+        wet_winter, one_season = sm < WINTER_RAIN, (sm > MONSOON_RAIN) | (sm < 1.0 - MONSOON_RAIN)
+    conds = [
+        warm < 0.0,
+        warm < GROW_C,
+        boreal & (P < 20.0),
+        boreal,
+        temperate & (P < 25.0),
+        temperate & wet_winter & (P < 100.0) & (T >= 10.0),
+        temperate & (P < 60.0) & ((T < 13.0) | (2.0 * half > STEPPE_RANGE_C)),
+        temperate & (P < 60.0),
+        temperate & (P < 180.0),
+        temperate,
+        tropical & (P < 30.0),
+        tropical & (P < 100.0),
+        tropical & ((P < 220.0) | one_season),
+        tropical,
+    ]
+    codes = [
+        ICE, TUNDRA, TUNDRA, BOREAL_FOREST,
+        DESERT, SHRUBLAND, TEMPERATE_GRASSLAND, SHRUBLAND, TEMPERATE_FOREST, TEMPERATE_RAINFOREST,
+        DESERT, SAVANNA, TROPICAL_SEASONAL_FOREST, TROPICAL_RAINFOREST,
+    ]
+    return np.select(conds, codes, default=TEMPERATE_FOREST).astype(np.uint8)
+
+
 def apply_overrides(base: np.ndarray, ocean, lake, wetland, cliff, alpine, riparian) -> np.ndarray:
     """Stamp the override biomes onto ``base`` (uint8) in precedence order
     (later wins): riparian < alpine < cliff < wetland < lake < ocean.  Any
@@ -229,7 +293,8 @@ def effective_alpine_min(surface_land: np.ndarray, dp) -> float:
     return float(dp.alpine_min_relief_frac) * float(np.quantile(s, 0.999))
 
 
-def classify(T, P_cm, surface, slope, lake, river_near, lake_near, dp, cliff_slope: float | None = None, alpine_min: float | None = None, ocean=None) -> np.ndarray:
+def classify(T, P_cm, surface, slope, lake, river_near, lake_near, dp, cliff_slope: float | None = None, alpine_min: float | None = None, ocean=None,
+             temp_range=None, summer=None) -> np.ndarray:
     """Full biome classification of one array (coarse ``(6, N, N)`` or one
     fine face ``(Nf, Nf)``): Whittaker base plus the overrides of the module
     table.  ``dp`` is ``params.derive``; ``cliff_slope`` overrides
@@ -250,7 +315,9 @@ def classify(T, P_cm, surface, slope, lake, river_near, lake_near, dp, cliff_slo
     lake = np.asarray(lake, dtype=bool)
     wetland = np.asarray(lake_near, dtype=bool) & ~lake
     riparian = np.asarray(river_near, dtype=bool)
-    return apply_overrides(whittaker(T, P_cm), ocean, lake, wetland, cliff, alpine, riparian)
+    # (`temp_range`, `summer`: the climate's seasons, where derive.biome_seasons has them -- whittaker_seasons)
+    base = whittaker(T, P_cm) if temp_range is None else whittaker_seasons(T, P_cm, temp_range, summer)
+    return apply_overrides(base, ocean, lake, wetland, cliff, alpine, riparian)
 
 
 # --------------------------------------------------------------------------

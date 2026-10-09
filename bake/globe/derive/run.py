@@ -209,7 +209,12 @@ def run(store, params, log=print) -> dict:
     marsh_c = (store.load_field("marsh", grid).interior > 0) if store.has_field("marsh") else None
     if marsh_c is not None:
         lake_near_c = lake_near_c | marsh_c
-    biome_c = biomes.classify(T_c, Pcm_c, surface_c, slope_c, lake_c, river_near_c, lake_near_c, dp, cliff_slope, alpine_min, ocean=ocean_c)
+    # the year's swing and the season of the rain, where the climate has them (derive.biome_seasons)
+    seasons = bool(getattr(dp, "biome_seasons", False))
+    rng_field = store.load_field("temp_range", grid) if seasons and store.has_field("temp_range") else None
+    sum_field = store.load_field("precip_summer", grid) if rng_field is not None and store.has_field("precip_summer") else None
+    biome_c = biomes.classify(T_c, Pcm_c, surface_c, slope_c, lake_c, river_near_c, lake_near_c, dp, cliff_slope, alpine_min, ocean=ocean_c,
+                              temp_range=None if rng_field is None else rng_field.interior, summer=None if sum_field is None else sum_field.interior)
     # today's ice where the stage left a sheet of it (erosion.ice_sheet, the `ice_now` field): the ice class is
     # the ice, not the ground colder than -12 C (which a dry cold interior is without any)
     ice_c = (store.load_field("ice_now", grid).interior > 0.0) if store.has_field("ice_now") else None
@@ -391,7 +396,9 @@ def run(store, params, log=print) -> dict:
             lake_near_f = lake_near_f | np.repeat(np.repeat(marsh_c[f], R, axis=0), R, axis=1)
         if marsh_f is not None:
             lake_near_f = lake_near_f | marsh_f
-        biome_f = biomes.classify(T_f, Pcm_f, surface_f, slope_f, lake_f, river_near_f, lake_near_f, dp, cliff_slope, alpine_min, ocean=ocean_f)
+        biome_f = biomes.classify(T_f, Pcm_f, surface_f, slope_f, lake_f, river_near_f, lake_near_f, dp, cliff_slope, alpine_min, ocean=ocean_f,
+                                  temp_range=None if rng_field is None else upsample_face(rng_field, f, R, order=1),
+                                  summer=None if sum_field is None else upsample_face(sum_field, f, R, order=1))
         if ice_c is not None:
             biome_f = biomes.with_ice(biome_f, np.repeat(np.repeat(ice_c[f], R, axis=0), R, axis=1) & ~ocean_f & ~lake_f)
         if gfx is not None:

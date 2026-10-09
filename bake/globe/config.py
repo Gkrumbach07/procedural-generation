@@ -649,6 +649,7 @@ class DeriveParams:
     river and thinned to centrelines (the earlier path, kept for
     comparison)."""
 
+    biome_seasons: bool = True  # the biomes read the climate's seasons (biomes.whittaker_seasons): the tree line and the tundra by the warmest month (the climate's `temp_range`), the boreal forest where under four months are over 10 C, steppe where a dry land has a continent's year, and -- where the rain has seasons (`climate.seasons`, `precip_summer`) -- scrub under winter rain and the seasonal forest under a monsoon.  Off, or on a world baked before the field: the yearly mean's Whittaker table
     river_source: str = "graph"  # 'graph': rivers are graph/drainage.json's reaches traced through the fine grid, split at the lakes, width in metres from the reach's mean discharge (falls back to 'discharge' when the graph has no edges, e.g. stub hydro or a tiny world with no catchment over hydro.river_threshold); 'discharge': threshold the fine discharge and skeletonise (docs/earth-v3-review.md section 2: hair-thin rivers unrelated to the hydro flood, no respect for lakes)
     river_width_m_a: float = 30.0  # graph source: width_m = max(river_width_min_m, a * (Q / Q_ref)^river_width_b) with Q_ref = hydro's river_threshold_volume, so a reach at the channel threshold is a metres, not one fine cell. Leopold & Maddock's w ~ Q^0.5
     river_width_min_m: float = 30.0  # graph source: a first-order stream is tens of metres, not a cell; drawn into fine/river_mask as at least the centreline cell whatever the cell size (4.9 km at Earth)

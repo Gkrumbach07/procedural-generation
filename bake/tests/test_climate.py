@@ -508,7 +508,14 @@ def test_the_year_swings_with_the_sun_and_the_distance_from_the_sea():
     if land.any():
         assert (rng[land] >= rng[ocean].min()).all() and rng[land].max() <= all_land.max() + 1e-3
     fields, info = climate_run.compute(grid, bed, p)
-    assert np.array_equal(fields["temp_range"].data, rng) and "temp_range" in climate_run.OUTPUTS and info["T_range_land_median"] is not None
+    got, want = fields["temp_range"].interior, rng[:, grid.H:-grid.H, grid.H:-grid.H]            # (the stage's sea is the open ocean, its halo its own)
+    assert np.mean(np.abs(got - want) < 0.5) > 0.95 and "temp_range" in climate_run.OUTPUTS and info["T_range_land_median"] is not None
+    # a basin under the waterline inside the land is not the sea: the year swings there as on the land round it
+    pit = bed.data.copy()
+    f, i, j = np.unravel_index(np.argmax(bed.interior), bed.interior.shape)
+    pit[f, grid.H + i - 1:grid.H + i + 2, grid.H + j - 1:grid.H + j + 2] = -50.0
+    holed, _ = climate_run.compute(grid, FaceField(grid, pit, name="bedrock"), p)
+    assert holed["temp_range"].interior[f, i, j] == pytest.approx(fields["temp_range"].interior[f, i, j], rel=1e-5)
 
 
 def test_the_years_rain_is_its_seasons():

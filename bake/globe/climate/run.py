@@ -31,7 +31,12 @@ def compute(grid, bedrock: FaceField, params, log=None) -> tuple[dict[str, FaceF
     t0 = time.time()
     T = FaceField(grid, temperature(grid, bedrock.data, cp), name="temperature")
     # the year's swing about that mean (temperature.seasonal_range): the summers the ice answers to
-    rng = FaceField(grid, seasonal_range(grid, bedrock.data < 0.0, cp), name="temp_range")
+    # (the sea that steadies it is the open ocean: a basin under the waterline inside a continent is not --
+    # read as sea it was a round patch of cool summers, and of tundra, in the middle of the land)
+    from ..hydro.run import open_ocean
+
+    sea = FaceField.from_interior(grid, open_ocean(bedrock.interior, grid, float(params.hydro.ocean_min_fraction)).astype(np.float32)).data > 0.5
+    rng = FaceField(grid, seasonal_range(grid, sea, cp), name="temp_range")
     wind = wind_field(grid, bedrock, cp)
     t1 = time.time()
     extra = {}
